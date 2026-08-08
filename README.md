@@ -38,21 +38,27 @@ scripts/run_bootstrap.sh data/flc_filtered.parquet
 ```
 
 This runs prepare → measure → train_baseline → fit_dispersion →
-estimate_prior → backtest, then stops at the human gates:
+estimate_prior → backtest, then stops at the human gates. (The script
+retrains the baseline every time — to iterate on one step, run that step's
+module directly. Agents: read `AGENTS.md` before touching the pipeline.)
 
 1. **Calibration gate (blocking, §9.3)** — `reports/backtest.json` carries
-   `fidelity_episode_sold_ratio` and the measurement-10 level/slope
-   decomposition. Only the *level* component may be corrected multiplicatively;
-   a slope deficit means the prior understates elasticity and must be
-   re-estimated, never papered over. To apply the level remedy:
+   `fidelity_episode_sold_ratio` (read on the **calib+test window**, the
+   launch-adjacent regime the level factors are fit on; per-window ratios in
+   `fidelity.by_window` expose demand-regime drift) and the measurement-10
+   level/slope decomposition. Only the *level* component may be corrected
+   multiplicatively; a slope deficit means the prior misstates elasticity and
+   must be re-estimated, never papered over. To apply the level remedy:
 
    ```bash
    python3 -m bootstrap.train_baseline --input data/prepared.parquet --fit-calibration
    # set baseline_model.apply_level_calibration: true in config.yaml, then
+   # re-run backtest WITHOUT retraining the baseline:
    python3 -m backtest --input data/prepared.parquet --out reports/backtest_calibrated.json
    ```
 
-   and record the fidelity ratio before and after.
+   and record the fidelity ratio before and after — the comparison is valid
+   only if `baseline_model_version` matches across the two reports.
 2. **Prior acceptance gate (blocking, §9.5)** — `artifacts/prior.json` records
    orientation/boundary/std checks. Rejection falls back per config and is an
    acceptable outcome.
