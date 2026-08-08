@@ -1,100 +1,45 @@
-"""
-Phase 0 — historical measurement suite.
+"""bootstrap.measure -- phase 0 historical measurement suite.
 
-Implements section 8 of the Perishable Markdown MVP PRD. Produces every value
-marked MEASURED in config.yaml, plus the three reassessment gates in section 8.1.
+Implements section 8 of the Perishable Markdown MVP PRD (Appendix A). Produces
+every value marked MEASURED in config.yaml, plus the three reassessment gates
+in section 8.1.
 
 Run against real filtered FLC data. Outputs a JSON report and a human-readable
 summary. No causal assumption about price response is made anywhere here.
 
 Usage:
-    python3 phase0_measure.py --input data/flc_filtered.parquet \
+    python3 -m bootstrap.measure --input data/flc_filtered.parquet \
         --out reports/phase0.json
 
 Measurements 1-8 run standalone. Measurement 9 (controller replay) requires the
-fitted baseline model and is run separately once bootstrap.train_baseline exists;
-it is stubbed here with the inputs it will need.
+fitted baseline model and runs through the backtest module once
+bootstrap.train_baseline exists. Measurement 10 runs here when a
+`predicted_units` column is supplied (backtest attaches it), and is skipped
+otherwise.
+
+The two corrections from review of the first run (PRD section 8) are in place:
+deff uses mean FORCED hours, and episodes_reaching_zero_inventory checks the
+last hour only.
 """
 
 import argparse
 import json
+
 import numpy as np
 import pandas as pd
 
-# Mirrors config.yaml -- keep in sync, do not diverge.
-EXCLUSION_START = "2026-04-25"
-EXCLUSION_END = "2026-06-03"
-TIER_STEP = 0.025
-MIN_FEASIBLE_TIERS = 2
-REFERENCE_DISCOUNT = {"MEAT": 0.25, "SIDE DISH": 0.25, "_default": 0.30}
+from common.config import load_config
+from bootstrap.prepare_data import load_and_filter
 
 PCTS = [10, 25, 50, 75, 90]
 
 
-# ---------------------------------------------------------------- load / filter
-
-def load_and_filter(path):
-    """PRD section 9.1 mapping + 9.2 filter chain. Returns (df, waterfall)."""
-    df = pd.read_parquet(path)
-    df = df.rename(columns={
-        "hour": "hour_of_day",
-        "skuseq": "sku_id",
-        "inventory": "starting_inventory",
-        "discount": "total_discount",
-        "normal_asp": "original_price",
-        "final_price": "applied_price",
-        "cogs_wo_vat": "cost",
-        "flc_window": "hours_remaining",
-    })
-
-    # discount is PERCENT in source -> fraction, exactly once
-    df["total_discount"] = df["total_discount"] / 100.0
-
-    df["episode_id"] = (df.sku_id.astype(str) + "|" + df.fc.astype(str)
-                        + "|" + df.date.astype(str))
-
-    wf = [("raw", len(df), df.episode_id.nunique())]
-
-    def step(d, label):
-        wf.append((label, len(d), d.episode_id.nunique()))
-        return d
-
-    d = df[df.date.astype(str).lt(EXCLUSION_START)
-           | df.date.astype(str).gt(EXCLUSION_END)]
-    d = step(d, "exclusion_window_removed")
-
-    d = d[d.category.notna() & d.subcategory.notna()]
-    d = step(d, "null_category_dropped")
-
-    d["original_price"] = (d.groupby("episode_id")["original_price"]
-                           .transform(lambda s: s.replace(0, np.nan).ffill().bfill()))
-    d = d[d.original_price.notna() & (d.original_price > 0)]
-    d = step(d, "zero_base_price_dropped")
-
-    bad = d.groupby("episode_id")["hours_remaining"].min().lt(0)
-    d = d[~d.episode_id.isin(bad[bad].index)]
-    d = step(d, "negative_window_dropped")
-
-    below = (d.applied_price > 0) & (d.applied_price < d.cost)
-    bad = d.loc[below, "episode_id"].unique()
-    d = d[~d.episode_id.isin(bad)]
-    d = step(d, "below_cost_dropped")
-
-    bad = d.loc[d.units_sold > d.starting_inventory, "episode_id"].unique()
-    d = d[~d.episode_id.isin(bad)]
-    d = step(d, "units_gt_inventory_dropped")
-
-    d = d.copy()
-    d["d_ref"] = d.category.map(REFERENCE_DISCOUNT).fillna(REFERENCE_DISCOUNT["_default"])
-    d["d_max"] = 1.0 - d.cost / d.original_price
-    d["offered_price"] = d.original_price * (1 - d.total_discount)
-    return d.reset_index(drop=True), wf
-
-
 # ------------------------------------------------------------------ measurement
 
-def m1_cost_ratio(d):
+def m1_cost_ratio(d, cfg):
     """Cost ratio and feasible ceiling. Decides exploration viability."""
+    tier_step = cfg["pricing"]["tier_step"]
+    min_tiers = cfg["exploration"]["min_feasible_tiers"]
     ep = d.groupby("episode_id").agg(
         category=("category", "first"),
         cost=("cost", "first"),
@@ -102,7 +47,7 @@ def m1_cost_ratio(d):
         d_max=("d_max", "first"),
     )
     ep["cost_ratio"] = ep.cost / ep.original_price
-    ep["n_feasible"] = np.floor(ep.d_max.clip(lower=0) / TIER_STEP).astype(int) + 1
+    ep["n_feasible"] = np.floor(ep.d_max.clip(lower=0) / tier_step).astype(int) + 1
 
     def block(g):
         return {
@@ -113,7 +58,7 @@ def m1_cost_ratio(d):
                           for p in PCTS},
             "share_d_max_below_0.15": round(float((g.d_max < 0.15).mean()), 4),
             "share_non_explorable": round(
-                float((g.n_feasible < MIN_FEASIBLE_TIERS).mean()), 4),
+                float((g.n_feasible < min_tiers).mean()), 4),
         }
 
     return {
@@ -152,7 +97,7 @@ def m3_intra_episode_correlation(d):
 
     Baseline here is a within-(category, hour) mean, which is a proxy for the
     fitted model. Re-run against fitted mu_ref residuals once the baseline
-    model exists -- that value is authoritative.
+    model exists (bootstrap.fit_dispersion does) -- that value is authoritative.
     """
     d = d.copy()
     d["base"] = d.groupby(["category", "hour_of_day"])["units_sold"].transform("mean")
@@ -171,13 +116,15 @@ def m3_intra_episode_correlation(d):
     changed = d.groupby("episode_id")["total_discount"].nunique() > 1
     hours_changed = hours[changed[changed].index]
 
+    h_forced = float(hours_changed.mean()) if len(hours_changed) else float(hours.mean())
     return {
         "rho": round(rho, 4),
         "rho_method": "variance_decomposition_on_category_hour_residuals",
         "mean_hours_per_episode": round(float(hours.mean()), 3),
-        "mean_hours_per_episode_with_price_change": round(float(hours_changed.mean()), 3)
-            if len(hours_changed) else None,
-        "implied_deff_at_mean_hours": round(1 + (float(hours.mean()) - 1) * rho, 3),
+        "mean_forced_hours_per_episode": round(h_forced, 3),
+        # deff uses FORCED hours -- these are the correlated observations that
+        # actually enter the likelihood. Using all-episode hours understates it.
+        "implied_deff": round(1 + (h_forced - 1) * rho, 3),
         "note": "re-run against fitted mu_ref residuals; that value is authoritative",
     }
 
@@ -205,8 +152,10 @@ def m4_demand_density(d):
 def m5_censoring(d):
     d = d.copy()
     d["censored"] = d.units_sold >= d.starting_inventory
-    ep_zero = d.groupby("episode_id").apply(
-        lambda g: bool((g.ending_inventory <= 0).any()), include_groups=False)
+    # end-of-episode inventory only. Checking .any() across all hours returns a
+    # spurious 1.0 because inventory dips to zero transiently before restock.
+    last = d.sort_values("hour_of_day").groupby("episode_id").tail(1)
+    ep_zero = (last.ending_inventory <= 0)
     return {
         "overall_censored_hour_rate": round(float(d.censored.mean()), 4),
         "episodes_reaching_zero_inventory": round(float(ep_zero.mean()), 4),
@@ -308,6 +257,48 @@ def m8_entry_hour(d):
     }
 
 
+def m10_fidelity_decomposition(d, cfg, pred_col="predicted_units"):
+    """Measurement 10 -- separates LEVEL bias from SLOPE bias in the baseline.
+
+    Requires a fitted baseline: `d` must carry a column of predicted units at
+    the ACTUAL historical price (i.e. mu_ref scaled by the prior elasticity).
+    Run this after bootstrap.train_baseline; it is skipped otherwise.
+
+    Level bias  -> ratio at the reference anchor, where elasticity scaling ~1
+    Slope bias  -> how the ratio changes as discount moves away from d_ref
+    """
+    if pred_col not in d.columns:
+        return "NOT RUN -- requires fitted baseline predictions"
+
+    tier_step = cfg["pricing"]["tier_step"]
+    d = d.copy()
+    d["gap"] = d.total_discount - d.d_ref
+
+    def ratio(g):
+        pred = g[pred_col].sum()
+        return round(float(g.units_sold.sum() / pred), 4) if pred > 0 else None
+
+    at_anchor = d[d.gap.abs() <= tier_step / 2]
+
+    # ratio by distance from the anchor, in tier-width bins
+    bins = np.arange(-0.20, 0.225, 0.05)
+    d["gap_bin"] = pd.cut(d.gap, bins)
+    by_gap = {str(k): ratio(g) for k, g in d.groupby("gap_bin", observed=True)}
+
+    return {
+        "overall_sold_ratio": ratio(d),
+        "level_bias_at_anchor": ratio(at_anchor),
+        "rows_at_anchor": int(len(at_anchor)),
+        "slope_ratio_by_discount_gap": by_gap,
+        "by_category": {k: ratio(g) for k, g in d.groupby("category")},
+        "interpretation": (
+            "level_bias_at_anchor well below 1 with a flat slope -> mu_ref level "
+            "error, multiplicative recalibration permitted. Ratio near 1 at the "
+            "anchor degrading with gap -> epsilon understated; do NOT recalibrate "
+            "the level, widen the search bound and re-estimate."),
+    }
+
+
 # ---------------------------------------------------------------------- reassess
 
 def gates(res):
@@ -339,25 +330,17 @@ def config_values(res):
     return {
         "dispersion.rho": res["m3_intra_episode_correlation"]["rho"],
         "dispersion.mean_forced_hours_per_episode":
-            res["m3_intra_episode_correlation"]["mean_hours_per_episode_with_price_change"],
+            res["m3_intra_episode_correlation"]["mean_forced_hours_per_episode"],
+        "dispersion.implied_deff": res["m3_intra_episode_correlation"]["implied_deff"],
         "ab_test.il_pct_ratio_se_clustered": res["m6_il_pct"]["il_pct_ratio_se_clustered"],
         "exploration.tau_initial": None,  # measurement 9, needs fitted baseline
         "posterior.prior.per_category": None,  # section 9.5, needs fitted baseline
     }
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True)
-    ap.add_argument("--out", default="reports/phase0.json")
-    args = ap.parse_args()
-
-    d, waterfall = load_and_filter(args.input)
-
+def run_all(d, cfg):
     res = {
-        "data_quality_waterfall": [
-            {"step": s, "rows": r, "episodes": e} for s, r, e in waterfall],
-        "m1_cost_ratio": m1_cost_ratio(d),
+        "m1_cost_ratio": m1_cost_ratio(d, cfg),
         "m2_same_hour_variation": m2_same_hour_variation(d),
         "m3_intra_episode_correlation": m3_intra_episode_correlation(d),
         "m4_demand_density": m4_demand_density(d),
@@ -365,10 +348,27 @@ def main():
         "m6_il_pct": m6_il_pct(d),
         "m7_learning_rate": m7_learning_rate(d),
         "m8_entry_hour": m8_entry_hour(d),
-        "m9_controller_replay": "NOT RUN — requires fitted baseline model",
+        "m9_controller_replay": "NOT RUN -- requires fitted baseline model (backtest)",
+        "m10_fidelity_decomposition": m10_fidelity_decomposition(d, cfg),
     }
     res["reassessment_gates"] = gates(res)
     res["config_values_measured"] = config_values(res)
+    return res
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--input", required=True)
+    ap.add_argument("--out", default="reports/phase0.json")
+    ap.add_argument("--config", default="config.yaml")
+    args = ap.parse_args()
+
+    cfg = load_config(args.config)
+    d, waterfall = load_and_filter(args.input, cfg)
+
+    res = {"data_quality_waterfall": [
+        {"step": s, "rows": r, "episodes": e} for s, r, e in waterfall]}
+    res.update(run_all(d, cfg))
 
     import os
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
@@ -391,7 +391,7 @@ def main():
     print(f"[m2] cells std < 0.5pp   : {m2['share_cells_std_below_0.5pp']:.1%}")
     print(f"[m3] rho                 : {m3['rho']}")
     print(f"[m3] mean hours/episode  : {m3['mean_hours_per_episode']}")
-    print(f"[m3] implied deff        : {m3['implied_deff_at_mean_hours']}")
+    print(f"[m3] implied deff        : {m3['implied_deff']}")
     print(f"[m6] IL% aggregate       : {m6['il_pct_aggregate']:.4%}")
     print(f"[m6] IL% clustered SE    : {m6['il_pct_ratio_se_clustered']}")
     print(f"[m6] zero-denom episodes : {m6['share_episodes_zero_denominator']:.1%}")

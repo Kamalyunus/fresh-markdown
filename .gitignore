@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+reports/
+artifacts/
+events_store/

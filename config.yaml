@@ -1,0 +1,119 @@
+# Perishable Markdown MVP -- single tuning surface (PRD section 7).
+#
+# Every threshold, constant, window, and rate in the system lives here.
+# Code reads config; code contains no numeric literals for anything tunable.
+#
+# MEASURED      produced by phase 0 (section 8); the system refuses to start
+#               while any runtime-required MEASURED value is null.
+# SET           business or design choice.
+# SET BY OWNER  blocking decision; null until the PRD owner supplies it.
+
+meta:
+  config_version: "1.0.0"
+  mvp_window_start: "2026-09-01"      # SET  baseline frozen from here
+  mvp_window_end:   "2026-12-01"      # SET  drift risk grows beyond this
+
+data:
+  source_table: "sb_scm.fresh_flc_detail"
+  exclusion_window:                    # SET  known demand-issue period
+    start: "2026-04-25"
+    end:   "2026-06-03"
+  split:                               # SET  baseline fitting only
+    train_start: "2026-03-01"
+    train_end:   "2026-07-13"
+    calib_start: "2026-07-14"
+    calib_end:   "2026-07-27"
+    test_start:  "2026-07-28"
+    test_end:    "2026-08-03"
+  episode_key: ["sku_id", "fc", "date"]
+
+baseline_model:
+  objective: "tweedie"                 # SET
+  tweedie_variance_power: 1.3          # SET
+  learning_rate: 0.05                  # SET
+  num_boost_round: 400                 # SET
+  num_leaves: 63                       # SET
+  min_data_in_leaf: 50                 # SET
+  freeze_at_launch: true               # SET  no retraining in MVP window
+  model_path: "artifacts/baseline_model.txt"
+  feature_schema_path: "artifacts/feature_schema.json"
+  calibration_gate_band: [0.95, 1.05]  # SET  fidelity_episode_sold_ratio must land here
+  calibration_min_anchor_rows: 200     # SET  anchor basis needs this many rows
+  calibration_factor_path: "artifacts/calibration.json"   # per-category level correction
+  apply_level_calibration: null        # DECIDE after section 9.3 diagnostic; null blocks start
+
+reference_discount:                    # SET  category anchors
+  MEAT: 0.25
+  SIDE_DISH: 0.25
+  _default: 0.30
+
+dispersion:
+  fallback_order: ["subcategory", "category", "global"]
+  clamp_percentile: 0.90               # SET  clamp high converged r
+  min_rows_per_group: 200              # SET  below this: fall back one level
+  r_search_bounds: [0.05, 50.0]        # SET  MLE search range for r
+  r_lookup_path: "artifacts/r_lookup.json"
+  rho_path: "artifacts/rho.json"
+  rho: 0.3553                          # MEASURED  phase 0
+  mean_forced_hours_per_episode: 9.278 # MEASURED  phase 0 -> deff = 3.941
+
+posterior:
+  cell_level: "category"               # SET  MVP learns at category only
+  min_episodes_per_week_for_cell: 250  # SET  below this -> read the global cell
+  epsilon_min: -4.00                   # SET  grid bound
+  epsilon_max: -0.05                   # SET  sign constraint
+  grid_size: 801                       # SET
+  min_std: 0.05                        # SET  floor on posterior std
+  path: "artifacts/posterior.json"
+  prior:
+    source: "bracket"                  # SET  "bracket" | "fallback"
+    fallback_mean: -1.00               # SET  used if bracket rejected
+    fallback_std: 0.60                 # SET
+    std_floor: 0.40                    # SET  floor on bracket-derived std
+    search_bounds: [-4.00, -0.05]      # SET  must equal [epsilon_min, epsilon_max]
+    search_grid_size: 159              # SET  bracket search resolution
+    max_rows_per_category: 150000      # SET  row cap per category in the bracket fit
+    reject_boundary_solutions: true    # SET  a bound-pinned estimate is not an estimate
+    path: "artifacts/prior.json"
+    per_category: null                 # MEASURED  re-run section 9.5 after bound fix
+
+pricing:
+  tier_step: 0.025                     # SET  discount grid granularity
+  entry_window: 0.10                   # SET  entry arms within d_ref +/- this
+  negbin_max_k: 25                     # SET  demand truncation
+  demand_floor: 0.01                   # SET
+
+exploration:
+  budget_share_of_il: 0.01             # SET  1% of markdown IL
+  tau_initial: null                    # MEASURED  currency quantile from replay, section 12.3
+  tau_adjust_clip: [0.5, 2.0]          # SET  max daily multiplicative change
+  tau_spend_guard: 1.0                 # SET  divide-by-zero guard on realised cost, currency
+  budget_scale_ref_std: 0.40           # SET  budget scales with std / this
+  budget_scale_floor: 0.25             # SET  never below 25% of budget
+  min_feasible_tiers: 2                # SET  below this: non-explorable
+
+learning:
+  information_increment: 12.0          # SET  effective info per update
+  max_mean_step: 0.15                  # SET  bound per update cycle
+  max_std_shrink: 0.25                 # SET  bound per update cycle
+  use_exploitation_outcomes: false     # SET  do not change in MVP
+
+events:
+  store_dir: "events_store"            # SET  decision/outcome event log location
+
+monitoring:
+  stop_conditions:
+    duplicate_or_unmatched_rate: 0.01  # SET
+    price_mismatch_rate: 0.01          # SET
+    exploration_cost_vs_budget: 2.0    # SET
+    scrap_deterioration_pct: null      # SET BY OWNER -- blocks section 15.4
+    margin_deterioration_pct: null     # SET BY OWNER -- blocks section 15.4
+  alert_posterior_std_flat_days: 21    # SET  learning-loop health
+
+ab_test:
+  unit: "sku_fc"                       # SET
+  allocation: 0.50                     # SET
+  primary_metric: "il_pct"             # SET
+  min_detectable_effect_pct: null      # SET BY OWNER
+  il_pct_ratio_se_clustered: 0.000383  # MEASURED  phase 0; 84,792 SKU x FC units
+  duration_days: null                  # DERIVED   from the two above
