@@ -190,6 +190,28 @@ def test_decision_loop_and_exactly_once_update(workspace):
     assert not report2["cells"]
 
 
+def test_fit_calibration_cli(workspace):
+    _chdir(workspace)
+    env = {**os.environ, "PYTHONPATH": REPO}
+    r = subprocess.run(
+        [sys.executable, "-m", "bootstrap.train_baseline",
+         "--input", "data/prepared.parquet", "--fit-calibration"],
+        cwd=workspace, env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    with open("artifacts/calibration.json") as f:
+        calib = json.load(f)
+    factors = calib["factor_by_category"]
+    assert factors and all(v > 0 for v in factors.values())
+    # the trained model must still be loadable with factors applied
+    from common.config import load_config
+    from bootstrap.train_baseline import BaselineModel
+    cfg = load_config("config.yaml")
+    cfg["baseline_model"]["apply_level_calibration"] = True
+    d = pd.read_parquet("data/prepared.parquet").head(50)
+    mu = BaselineModel(cfg).predict_mu_ref(d)
+    assert (mu >= cfg["pricing"]["demand_floor"]).all()
+
+
 def test_duplicate_and_malformed_events_quarantined(workspace):
     _chdir(workspace)
     from common.config import load_config
