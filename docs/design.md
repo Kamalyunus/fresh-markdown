@@ -137,7 +137,236 @@ DECISION PATH (per hourly decision interval)
 | `pipeline/shadow.py` | §19 | Phase-1 harness: full decision path against live data, no prices applied; exit-gate report. |
 | `backtest/` | §17 | Calibration-gate fidelity (calib+test window), policy deltas, `tau_initial` derivation. |
 
-### 3.2 Event contracts and exactly-once learning
+### 3.2 Component deep-dive — what each part does, and why it is built that way
+
+#### `config.yaml` + `common/config.py` — the single tuning surface
+
+Every threshold, window, rate, and bound in the system lives in one YAML
+file; code contains no numeric literals for anything tunable, and adding a
+tunable to code without adding it to config is defined as a review failure
+(§6.1). **Why:** pricing systems die by configuration drift — a constant
+tuned in one module, a copy of it stale in another, and a post-incident
+review that cannot reconstruct what the system was actually running. One
+file also gives a clean review surface for the operator and a strict-mode
+loader that *refuses to start* while any MEASURED or owner value is null —
+the system cannot silently run on a guessed parameter. Values are labelled
+by provenance (`MEASURED` from phase-0, `SET` design choices, `SET BY
+OWNER` business decisions), so responsibility for every number is explicit.
+
+#### `bootstrap/prepare_data.py` — schema mapping and filter chain
+
+Applies the source-to-PRD column mapping exactly once, converts the discount
+column from percent to fraction exactly once, builds episodes as contiguous
+selling hours from (SKU, FC, date), and runs the seven-step §9.2 filter
+chain, emitting a row/episode waterfall after every step. **Why the
+paranoia:** the three source-schema traps (§9.1) all fail silently. A missed
+percent→fraction conversion produces discounts of 25.0 instead of 0.25 and
+no error anywhere downstream. `final_price` is a *realised* price that is 0
+on zero-sale rows — reconstructing offered price from it silently drops
+every zero-sale hour, which is precisely the population carrying the signal
+at shallow discounts (~78% of rows). And the source has no episode ID, so
+the construction rule is persisted in the split manifest — production and
+evaluation must derive identical boundaries or every episode-level metric
+diverges unauditably. The waterfall exists because a filter chain that
+cannot show what it dropped, in order, is a filter chain nobody can review.
+
+#### `bootstrap/measure.py` — phase-0 measurement
+
+Produces every MEASURED config value and the §8.1 reassessment gates before
+implementation proceeds. **Why a measurement phase at all:** the design has
+quantities that must be *measured, not chosen* — dispersion, correlation,
+identifying variation, A/B variance — and guessing any of them produces a
+system that is confidently wrong in a specific, predictable way (e.g. a
+guessed `rho` of 0 declares learning converged 4× early). The gates exist
+because three results would change the *design* rather than parameterise it,
+and that decision belongs to a human before the build continues.
+
+#### `bootstrap/train_baseline.py` — the frozen reference-demand model
+
+LightGBM with a Tweedie objective predicts `units_sold` per hour;
+at inference every price feature is overwritten to the category reference
+discount `d_ref`. **Why Tweedie:** hourly perishable demand is a zero-heavy
+count (~78% zeros) with a continuous-looking positive tail; Tweedie handles
+the point mass at zero natively where squared error under-predicts and pure
+Poisson under-disperses. **Why overwrite the price features:** this is the
+load-bearing trick of the whole design. The model trains on confounded data
+and would happily learn the legacy price-hour artifact — but its price
+gradient is *never queried*: it only ever answers "what is demand at the
+reference discount in this context". Price response enters exclusively
+through the learned elasticity scalar. **Why inventory, cost, and stockout
+are banned as features:** inventory belongs in the DP state and the
+censoring logic; as a feature it would let the model learn "low stock
+predicts low sales", which is the censoring artifact, not demand. **Why
+frozen:** if the model retrains while the posterior learns, posterior
+movement is unattributable — it could be learning or drift. Freezing buys
+attribution at the cost of drift risk, which is why the drift ratio is
+monitored daily (risk register #2). The level-calibration factor is *fitted*
+unconditionally but *applied* only behind a config decision, because the
+§9.3 diagnostic proved the correction is right for level errors and actively
+harmful for slope errors — fitting and applying are different decisions with
+different owners.
+
+#### `bootstrap/fit_dispersion.py` — frozen variance structure
+
+Fits the negative-binomial dispersion `r` per subcategory by censored
+maximum likelihood on the calibration window, with a fallback chain
+(subcategory → category → global) and a clamp on high converged values; and
+re-fits `rho`, the intra-episode residual correlation, against fitted-model
+residuals. **Why NB:** observed hourly demand has variance well above its
+mean (bursty shoppers, basket effects); a Poisson likelihood would make the
+learning update wildly overconfident. **Why `r` by subcategory but `rho`
+global:** dispersion genuinely differs by product type and there is enough
+calibration data per subcategory to support it; correlation structure is
+estimated from far less signal, and a noisy per-category `rho` would inject
+noise directly into the evidence-deflation factor. **Why legacy data is
+legitimate here** when it is banned for elasticity: `r` and `rho` measure
+variance and correlation *around the mean*, not price response — the policy
+confound moves the mean, not these second-moment structures.
+
+#### `bootstrap/estimate_prior.py` — the elasticity bracket
+
+Two deliberately-biased estimates per category, both by censored NB
+likelihood over the full sign-constrained grid, using **entry-hour rows
+only**: `epsilon_naive` (no hour control — absorbs the evening lift into
+price, biased too elastic) and `epsilon_controlled` (hour effects profiled
+out — removes most price variation with the confound, biased toward zero).
+Known and *opposite* bias directions make the pair a bracket; the prior mean
+is the midpoint, the std is half the width floored at 0.40. **Why a bracket
+instead of one best estimate:** any single estimator on this data has a bias
+of unknown magnitude but known direction; two estimators with opposite known
+directions bound the truth without pretending to point-identify it. **Why
+entry rows only:** discovered on real data — under the ramp, a deep-discount
+row exists *because* earlier hours didn't sell, so within-episode rows are
+adversely selected and drag every estimate to the zero boundary. **Why
+boundary solutions are rejected outright:** an optimiser pinned at a search
+bound is reporting the bound, not the data — the phase-0 run's −1.5 bound
+manufactured five fake estimates this way. **Why rejection is a designed
+outcome:** with bounded update steps, a confidently-wrong prior costs at
+least seven update cycles to walk back, across every cell at once; a weak
+honest prior costs only patience. The fallback (−1.0 ± 0.6) is deliberately
+under-confident.
+
+#### `pricing/demand.py` + `pricing/dp.py` — the decision core
+
+Demand at any discount is `mu_ref × ((1−d)/(1−d_ref))^ε` — one frozen
+context-specific level, one learned category-level exponent. The DP solves
+the finite-horizon problem exactly over (anchor, integer inventory, hours
+remaining) with the absolute-IL reward and terminal scrap value. **Why
+constant-elasticity form:** it is the simplest demand model in which "the
+one thing we learn" is a single interpretable parameter with a conjugate-ish
+grid posterior; anything richer multiplies learning time (§2.3). **Why exact
+DP rather than a heuristic or approximation:** the state space is tiny
+(≤ ~20 tiers × ≤ 30 units × ≤ 12 hours), so exhaustive evaluation costs
+milliseconds — an approximation would add error and remove the ability to
+read `Q(p)` for every tier, which exploration depends on. **Why the cost
+floor lives in the action set:** a feasible set constructed as
+`{k·tier_step ≤ 1 − cost/price}` makes a below-cost price *unrepresentable*
+rather than checked-for — safety by construction survives every future code
+path, including exploration, without anyone remembering to re-validate.
+**Why monotonicity is in the transition:** price-never-rises is a business
+constraint (customer trust); encoding it as "actions ≥ anchor" makes
+violations impossible rather than caught. The NB pmf is truncated at 25
+units with tail mass folded into the last bucket and the tail emitted as a
+diagnostic — bounded compute with a visible error term.
+
+#### `pricing/explore.py` — budgeted randomization
+
+Selection over the DP's own Q-values: every non-optimal tier whose expected
+IL sacrifice is within `tau` is affordable; one is drawn uniformly. **Why
+uniform:** uniformity over the affordable set is the randomisation that
+makes outcomes causal evidence — any smarter, state-dependent choice
+reintroduces the endogeneity that poisoned the historical data. **Why a
+currency budget instead of an exploration probability:** ε-greedy-style
+schedules spend an un-costed, invisible amount; here the spend is a P&L line
+item (1% of markdown IL) the business explicitly approved, in the unit it
+governs, and `tau` self-calibrates daily so realised spend tracks it. The
+theory that makes budget-only rationing sound: information about ε and IL
+cost both scale as `mu·(log price ratio)²`, so information per won is
+roughly constant — there is no clever targeting to do, only a budget to
+respect. **Why no Thompson sampling:** redundant with a budgeted mechanism,
+and persisting a sampled ε across hourly calls was a known defect source in
+a predecessor system (§4.2).
+
+#### `pricing/posterior.py` — learning state
+
+One Normal summary per cell (mean, std, counts, information, version), plus
+the processed-outcome ledger, in one atomically-written file. **Why a Normal
+summary rather than a stored grid:** the grid exists only inside the update
+computation; persisting moments keeps storage trivial, makes the bounded
+step well-defined, and means the pricing path reads two floats. **Why
+~10 category cells and a pooled global cell:** learning time scales linearly
+with cell count; category level is ~10 cells against 100+ subcategories, and
+low-volume categories would otherwise report a stale prior forever. Cells
+are assigned once at launch so cell membership is never a moving part during
+the window. **Why the ledger lives inside the posterior file:** exactly-once
+requires "revision applied" and "outcomes consumed" to commit together; two
+files cannot be renamed atomically, one can.
+
+#### `inference/decide.py` + `events/store.py` — the contract with production
+
+Validation checks nine state invariants and **rejects the state rather than
+returning any price** — a pricing system's worst failure is not "no answer",
+it is a confidently wrong answer applied to real inventory. The decision
+event carries ~30 fields including the exact `reference_mu`, posterior
+moments, artifact versions, and config version the decision used. **Why so
+heavy:** learning replays evidence from events, never from recomputation — a
+feature-pipeline change must not be able to silently rewrite historical
+evidence (§13.1) — and any decision must be reproducible from its event
+alone. The store is append-only JSONL with fsync durability, duplicate
+detection, and a quarantine: malformed events are kept with their validation
+failures attached, because an event logger that silently drops what it
+cannot parse hides exactly the anomalies monitoring exists to surface.
+
+#### `pipeline/update.py` — gated learning
+
+Consumes exploration outcomes only, evaluates the censored NB likelihood on
+the ε grid, adds the current posterior as prior, deflates evidence by
+deff ≈ 4.07, and applies a bounded step behind a human `--apply`. **Why
+censoring matters:** a stockout hour observed "sold 2 of 2" is evidence
+demand was *at least* 2, not exactly 2 — treating it as exact
+systematically understates elasticity at deep discounts, where stockouts
+concentrate. **Why exploitation outcomes are discarded:** exploitation
+prices are chosen *by* the posterior; learning from them is the model
+feeding its own beliefs back to itself. It wastes most outcomes — accepted
+for the MVP, with off-policy correction queued for phase 2. **Why bounded
+steps + a daily human gate:** bounded steps make each update small enough
+that a bad batch cannot destroy the posterior, which is what makes daily
+updating safe at all; the operator gate caps learning at one reviewed step
+per day until an evidence record justifies automating it (§14.2 — the
+automation criteria are deliberately set *from observed behaviour*, not
+guessed now).
+
+#### `pipeline/monitor.py` + `pipeline/shadow.py` — observability and rehearsal
+
+Monitoring is organised as three families answering three questions —
+business (is IL improving), learning (is the posterior moving, and how
+fast), safety (is the event pipeline healthy) — because a learning system
+whose dashboard only shows business outcomes discovers a dead learning loop
+weeks late via a flat IL curve; `posterior_std_flat_days` alerts in 21 days
+instead. Stop conditions suspend *exploration only* — exploitation pricing
+continues — so guardrails can be tight without ever taking pricing offline.
+The shadow harness runs the full production decide path against live data
+with no prices applied, using reality's state (actual inventory, legacy
+price as anchor); its outcomes are stamped ineligible for learning because
+the recommended price was never in force. **Why rehearse this way:** shadow
+proves the event pipeline, the validation surface, and the safety
+invariants on production data at zero pricing risk, and produces the
+would-be exploration statistics that answer the learning-throughput
+question (risk #1) *before* any price is applied.
+
+#### `backtest/` + `bootstrap/derive_thresholds.py` — evaluation discipline
+
+Replay has exactly three jobs — the calibration gate, `tau_initial`, and DP
+sanity — and its output is *never* evidence the policy works: a replay whose
+demand model under-predicts will always flatter a price-holding policy,
+because the volume it forgoes is volume the model never believed in (§17.1
+— the phase-0 run demonstrated this concretely). The thresholds tool exists
+because the three owner decisions were the last numbers in the system that
+could have been set by gut feel: it measures A/B power empirically on
+actual-duration blocks of history and guardrail noise floors at 3σ, so even
+the business judgments are anchored to measured evidence.
+
+### 3.3 Event contracts and exactly-once learning
 
 Every decision emits an event carrying the complete pricing context —
 including the `reference_mu` the decision used, so learning never recomputes
