@@ -60,16 +60,12 @@ def _attach_predictions(d, cfg, model, prior, r_lookup):
     return d
 
 
-def fidelity(d, cfg, model, prior, r_lookup):
-    """Section 17.3 fidelity block: how well the model reproduces what actually
-    happened, at actual historical prices."""
-    d = _attach_predictions(d, cfg, model, prior, r_lookup)
+def _fidelity_metrics(d, cfg):
     err = d.predicted_units - d.units_sold
     nz = d[d.units_sold > 0]
-    sold_ratio = float(d.units_sold.sum() / d.predicted_units.sum())
-
-    block = {
-        "fidelity_episode_sold_ratio": round(sold_ratio, 4),
+    return {
+        "fidelity_episode_sold_ratio": round(
+            float(d.units_sold.sum() / d.predicted_units.sum()), 4),
         "fidelity_hourly_mae": round(float(err.abs().mean()), 4),
         "fidelity_hourly_rmse": round(float(np.sqrt((err ** 2).mean())), 4),
         "fidelity_hourly_bias": round(float(err.mean()), 4),
@@ -83,8 +79,40 @@ def fidelity(d, cfg, model, prior, r_lookup):
         "by_category": {
             k: round(float(g.units_sold.sum() / g.predicted_units.sum()), 4)
             for k, g in d.groupby("category") if g.predicted_units.sum() > 0},
-        "measurement_10": m10_fidelity_decomposition(d, cfg),
     }
+
+
+def fidelity(d, cfg, model, prior, r_lookup):
+    """Section 17.3 fidelity block: how well the model reproduces what actually
+    happened, at actual historical prices.
+
+    The calibration GATE is read on the calibration + test windows: that is
+    the launch-adjacent regime, and it is the window the section 9.3 level
+    factors are fit on -- correction and evaluation must share a regime. The
+    all-history ratio is reported as a diagnostic; it is dominated by
+    in-sample training rows and, when the demand level drifts between the
+    training period and launch, it cannot be fixed by any static level factor.
+    """
+    from bootstrap.prepare_data import split_frames
+
+    d = _attach_predictions(d, cfg, model, prior, r_lookup)
+    splits = split_frames(d, cfg)
+    gate_d = pd.concat([splits["calib"], splits["test"]])
+    gate_window = "calib+test"
+    if not len(gate_d) or gate_d.predicted_units.sum() <= 0:
+        gate_d, gate_window = d, "all (calib/test windows empty)"
+
+    block = _fidelity_metrics(gate_d, cfg)
+    sold_ratio = block["fidelity_episode_sold_ratio"]
+    block["gate_window"] = gate_window
+    block["by_window"] = {
+        name: {"rows": int(len(g)),
+               "sold_ratio": round(float(g.units_sold.sum()
+                                         / g.predicted_units.sum()), 4)
+               if g.predicted_units.sum() > 0 else None}
+        for name, g in [("train", splits["train"]), ("calib", splits["calib"]),
+                        ("test", splits["test"]), ("all", d)]}
+    block["measurement_10"] = m10_fidelity_decomposition(gate_d, cfg)
     band = cfg["baseline_model"]["calibration_gate_band"]
     block["calibration_gate_band"] = band
     block["calibration_gate"] = ("PASS" if band[0] <= sold_ratio <= band[1]
