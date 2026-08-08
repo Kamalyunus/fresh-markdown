@@ -16,6 +16,13 @@ Both estimates search the FULL posterior support [epsilon_min, epsilon_max];
 a bound tighter than epsilon_min is a defect (the phase-0 run pinned five
 categories at a -1.5 bound). Boundary solutions are rejected outright.
 
+Both estimates use ENTRY-HOUR rows only. Identifying variation is same-hour
+cross-episode, never adjacent-hour within-episode (section 9.5): under the
+legacy ramp a row at a deep discount exists precisely because earlier hours
+did not sell, so within-episode rows carry a survivorship confound that
+biases the estimate toward zero. Entry rows carry the cross-episode
+variation (different start hours, cost-floor truncation) without it.
+
 Acceptance rests on orientation and sufficiency, not correctness. On any
 failed check the category (or the whole prior) falls back per config, and the
 rejection is recorded -- rejection is an acceptable outcome.
@@ -104,8 +111,12 @@ def estimate_prior(d, cfg, seed=0):
         lambda x: pd.Timestamp(x).to_period("W")).nunique(), 1)
     episodes_per_week = (train.groupby("category")["episode_id"].nunique() / weeks)
 
+    # entry rows only -- same-hour cross-episode identifying variation (9.5)
+    entry = (train.sort_values(["episode_id", "hour_of_day"])
+             .groupby("episode_id").head(1))
+
     per_category, failures = {}, []
-    for cat, g in train.groupby("category"):
+    for cat, g in entry.groupby("category"):
         if len(g) > pc["max_rows_per_category"]:
             keep = rng.choice(len(g), pc["max_rows_per_category"], replace=False)
             g = g.iloc[np.sort(keep)]
@@ -147,6 +158,7 @@ def estimate_prior(d, cfg, seed=0):
     return {
         "source": source,
         "requested_source": pc["source"],
+        "identifying_rows": "entry-hour only (same-hour cross-episode, PRD 9.5)",
         "search_bounds": [lo, hi],
         "grid_step": float(step),
         "per_category": per_category,
