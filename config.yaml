@@ -100,8 +100,12 @@ learning:
 
 events:
   store_dir: "events_store"            # SET  decision/outcome event log location
+  shadow_store_dir: "events_store_shadow"  # SET  shadow-phase events kept separate
 
 monitoring:
+  shadow_gate:                         # SET  section 19 phase-1 exit gate
+    min_event_completeness: 0.99
+    min_matched_decision_rate: 0.99
   stop_conditions:
     duplicate_or_unmatched_rate: 0.01  # SET
     price_mismatch_rate: 0.01          # SET

@@ -67,19 +67,21 @@ module directly. Agents: read `AGENTS.md` before touching the pipeline.)
    `il_pct_ratio_se_clustered`); the owner sets the SET BY OWNER keys.
    `common.config.load_config(strict=True)` refuses to start until then.
 
-Then initialise the posterior and enter shadow (§19):
+Then initialise the posterior and run the shadow phase (§19 — decisions
+logged, no prices applied):
 
-```python
-from common.config import load_config
-from pricing.posterior import PosteriorStore
-import json
-
-cfg = load_config(strict=True)
-prior = json.load(open(cfg["posterior"]["prior"]["path"]))
-PosteriorStore.initialise(cfg, prior["per_category"], prior["episodes_per_week"])
+```bash
+python3 -m bootstrap.init_posterior
+python3 -m pipeline.shadow --input data/prepared.parquet --out reports/shadow.json
 ```
 
-Daily production loop: `inference.decide` per decision interval, then
+The shadow report carries the §19 exit gate (event completeness, matched
+rate, zero cost-floor violations) plus would-be exploration spend,
+recommended-vs-legacy discount deltas, and the frozen-baseline drift ratio.
+Architecture and rationale live in [`docs/design.md`](docs/design.md).
+
+Daily production loop after the shadow gate passes: `inference.decide` per
+decision interval, then
 
 ```bash
 python3 -m pipeline.update             # monitor only

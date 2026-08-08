@@ -31,13 +31,34 @@ step                                          writes                            
 6. backtest --input prepared --out <json>     reports/backtest*.json                  prepared + baseline + prior + r_lookup
 7. bootstrap.train_baseline --fit-calibration artifacts/calibration.json              prepared + baseline
    (only when the calibration gate fails on a level error)
+8. bootstrap.init_posterior                   artifacts/posterior.json                prior.json
+   (once at launch; refuses overwrite without --force -- posterior is
+   production learning state)
+9. pipeline.shadow --input prepared           reports/shadow.json,                    prepared + all artifacts
+                                              events_store_shadow/
 ```
 
 `scripts/run_bootstrap.sh <raw>` runs 1–6 in order. **It retrains the baseline
 every time.** To iterate on one step, run that step's module directly — do not
 re-run the whole script.
 
-Production loop (after gates clear and the posterior is initialised):
+Shadow phase (§19 — after gates clear, before any price is applied):
+
+```bash
+python3 -m bootstrap.init_posterior
+python3 -m pipeline.shadow --input data/prepared.parquet --out reports/shadow.json
+```
+
+Shadow needs `apply_level_calibration` and `tau_initial` non-null. Its exit
+gate: event completeness and matched rate above `monitoring.shadow_gate`
+thresholds and ZERO cost-floor violations. Shadow outcomes carry
+`execution_status="shadow_not_applied"` and are structurally ineligible for
+`pipeline.update` — the recommended price was never in force, so they are not
+learning evidence. Watch `realised_vs_predicted_sold_ratio_at_legacy_price`
+in the report: it is the production continuation of the calibration gate and
+the first place frozen-baseline drift shows.
+
+Production loop (after the shadow gate passes):
 
 ```bash
 python3 -m pipeline.update             # monitor only, always safe

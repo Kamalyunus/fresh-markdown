@@ -1,0 +1,283 @@
+"""pipeline.shadow -- section 19 phase-1 harness: decisions logged, NO prices
+applied.
+
+Runs the full production decision path (validate -> DP -> explore -> decision
+event) against observed FLC data while the legacy policy keeps pricing.
+Outcomes are built from what actually happened under legacy prices and are
+stamped execution_status="shadow_not_applied", which makes them ineligible for
+pipeline.update (the recommended price was never in force, so they are not
+evidence about it).
+
+Exit gate (section 19): event completeness above min_event_completeness,
+matched decision rate above min_matched_decision_rate, and ZERO cost-floor
+violations, before any price is applied.
+
+State construction: inventory and the monotonicity anchor come from reality --
+the anchor entering hour t is the legacy discount applied at t-1 (entry has no
+anchor). The recommendation answers "what would we have done from the real
+state", not "what would our price path have been".
+
+Usage:
+    python3 -m pipeline.shadow --input data/prepared.parquet \
+        --out reports/shadow.json [--date-start D --date-end D] \
+        [--max-episodes N] [--seed N]
+"""
+
+import argparse
+import json
+import os
+
+import numpy as np
+import pandas as pd
+from scipy.stats import nbinom
+
+from common.config import load_config, ConfigError
+from bootstrap.train_baseline import BaselineModel
+from bootstrap.fit_dispersion import lookup_r
+from events.store import EventStore
+from inference.decide import decide, StateRejected
+from pricing.posterior import PosteriorStore
+
+SHADOW_STATUS = "shadow_not_applied"
+
+
+def _require_shadow_config(cfg):
+    missing = []
+    if cfg["baseline_model"]["apply_level_calibration"] is None:
+        missing.append("baseline_model.apply_level_calibration (section 9.3 decision)")
+    if cfg["exploration"]["tau_initial"] is None:
+        missing.append("exploration.tau_initial (from a PASSING backtest)")
+    if missing:
+        raise ConfigError("shadow phase blocked by null config: " + "; ".join(missing))
+
+
+def _censored_expected_units(mu, r, q, max_k):
+    """Vectorised E[min(D, q)] for the drift ratio, chunked."""
+    out = np.empty(len(mu))
+    k = np.arange(max_k + 1)
+    for start in range(0, len(mu), 100000):
+        sl = slice(start, min(start + 100000, len(mu)))
+        p = (r[sl] / (r[sl] + mu[sl]))[:, None]
+        pmf = nbinom.pmf(k[None, :], r[sl][:, None], p)
+        pmf[:, -1] += np.clip(1.0 - pmf.sum(axis=1), 0.0, None)
+        out[sl] = np.sum(pmf * np.minimum(k[None, :], q[sl][:, None]), axis=1)
+    return out
+
+
+def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=0):
+    _require_shadow_config(cfg)
+    model = BaselineModel(cfg)
+    posterior = PosteriorStore(cfg)
+    with open(cfg["dispersion"]["r_lookup_path"]) as f:
+        r_lookup = json.load(f)
+    store = EventStore(cfg, root=events_root or cfg["events"]["shadow_store_dir"])
+    rng = np.random.default_rng(seed)
+    tau = float(cfg["exploration"]["tau_initial"])
+
+    d = d.sort_values(["episode_id", "hour_of_day"]).copy()
+    d["mu_ref_hat"] = model.predict_mu_ref(d)
+    d["r_val"] = [lookup_r(r_lookup, s, c)
+                  for s, c in zip(d.subcategory, d.category)]
+
+    groups = list(d.groupby("episode_id", sort=False))
+    if max_episodes and len(groups) > max_episodes:
+        idx = rng.choice(len(groups), max_episodes, replace=False)
+        groups = [groups[i] for i in sorted(idx)]
+
+    rejected = {}
+    n_dec = n_out = cost_floor_violations = differs = 0
+    rec_disc = leg_disc = would_be_cost = 0.0
+    n_forced = empty_affordable = 0
+    latencies = []
+    drift = {"mu": [], "r": [], "q": [], "sold": []}
+
+    for eid, g in groups:
+        mu_path = list(g.mu_ref_hat.to_numpy())
+        anchor = None
+        for t in range(len(g)):
+            row = g.iloc[t]
+            q = int(row.starting_inventory)
+            if q <= 0:                      # restock gap: no decision this hour
+                anchor = float(row.total_discount)
+                continue
+            state = {
+                "episode_id": eid, "sku_id": int(row.sku_id), "fc": row.fc,
+                "category": row.category, "subcategory": row.subcategory,
+                "hour_of_day": int(row.hour_of_day),
+                "hours_remaining": len(g) - t, "q": q,
+                "original_price": float(row.original_price),
+                "cost": float(row.cost), "r": float(row.r_val),
+                "mu_ref_path": mu_path[t:], "current_discount": anchor,
+            }
+            try:
+                evt = decide(state, posterior, store, cfg, rng, tau, model.version)
+            except StateRejected as e:
+                rejected[str(e)] = rejected.get(str(e), 0) + 1
+                anchor = float(row.total_discount)
+                continue
+
+            n_dec += 1
+            latencies.append(evt["solver_latency_s"])
+            if evt["applied_price"] < evt["cost"] - 1e-6:
+                cost_floor_violations += 1
+            if evt["is_exploration"]:
+                n_forced += 1
+                would_be_cost += evt["exploration_cost"]
+            if evt["affordable_set_size"] == 0:
+                empty_affordable += 1
+            legacy_d = float(row.total_discount)
+            rec_disc += evt["applied_discount"]
+            leg_disc += legacy_d
+            if abs(evt["applied_discount"] - legacy_d) > 1e-9:
+                differs += 1
+
+            # outcome = what actually happened under the LEGACY price
+            sold = int(row.units_sold)
+            ending = int(row.ending_inventory)
+            outcome = {
+                "event": "outcome",
+                "outcome_id": f"shadow-{evt['decision_id']}",
+                "decision_id": evt["decision_id"],
+                "units_sold": sold, "starting_inventory": q,
+                "ending_inventory": ending,
+                "applied_price": float(row.original_price * (1 - legacy_d)),
+                "is_stockout": sold >= q,
+                "execution_status": SHADOW_STATUS,
+                "finalized_at": pd.Timestamp.now("UTC").isoformat(),
+            }
+            if ending != q - sold:
+                outcome["adjustment_reason"] = "intraday_restock"
+            if store.emit_outcome(outcome):
+                n_out += 1
+
+            # drift check at the legacy price (the price the outcome saw)
+            eps = evt["epsilon_posterior_mean"]
+            ratio = (1 - legacy_d) / (1 - evt["reference_discount"])
+            drift["mu"].append(max(mu_path[t] * ratio ** eps,
+                                   cfg["pricing"]["demand_floor"]))
+            drift["r"].append(float(row.r_val))
+            drift["q"].append(q)
+            drift["sold"].append(sold)
+
+            anchor = legacy_d                 # reality's price is the next anchor
+
+    if n_dec == 0:
+        raise RuntimeError("no decisions produced -- empty input or all states rejected")
+
+    predicted = _censored_expected_units(
+        np.array(drift["mu"]), np.array(drift["r"]),
+        np.array(drift["q"], dtype=float), cfg["pricing"]["negbin_max_k"])
+    drift_ratio = (float(np.sum(drift["sold"]) / predicted.sum())
+                   if predicted.sum() > 0 else None)
+
+    completeness = n_out / n_dec
+    matched = n_out / n_dec        # 1:1 by construction; gaps = quarantined/dupes
+    sg = cfg["monitoring"]["shadow_gate"]
+    gate = {
+        "event_completeness": {
+            "value": round(completeness, 4),
+            "threshold": sg["min_event_completeness"],
+            "pass": completeness >= sg["min_event_completeness"]},
+        "matched_decision_rate": {
+            "value": round(matched, 4),
+            "threshold": sg["min_matched_decision_rate"],
+            "pass": matched >= sg["min_matched_decision_rate"]},
+        "cost_floor_violations": {
+            "value": cost_floor_violations,
+            "threshold": 0,
+            "pass": cost_floor_violations == 0},
+    }
+    gate["verdict"] = ("PASS -- proceed to exploit-only pilot (section 19)"
+                       if all(g["pass"] for g in gate.values()
+                              if isinstance(g, dict))
+                       else "FAIL -- do not apply prices")
+
+    return {
+        "artifact_versions": {
+            "baseline_model_version": model.version,
+            "posterior_versions": {c: r["version"]
+                                   for c, r in posterior.state["cells"].items()},
+            "config_version": cfg["meta"]["config_version"],
+        },
+        "window": {"date_min": str(d.date.min()), "date_max": str(d.date.max()),
+                   "episodes": len(groups)},
+        "decision_count": n_dec,
+        "outcome_count": n_out,
+        "state_rejected_count": int(sum(rejected.values())),
+        "rejected_reasons": rejected,
+        "duplicate_counts": store.duplicate_counts,
+        "quarantined_event_count": len(store.load_quarantine()),
+        "shadow_gate": gate,
+        "exploration_would_be": {
+            "forced_rate": round(n_forced / n_dec, 4),
+            "would_be_cost_total": round(would_be_cost, 1),
+            "affordable_set_empty_rate": round(empty_affordable / n_dec, 4),
+            "tau": tau,
+            "note": "no price was applied; costs are the expected IL the "
+                    "recommendations would have spent",
+        },
+        "recommendation_vs_legacy": {
+            "mean_recommended_discount": round(rec_disc / n_dec, 4),
+            "mean_legacy_discount": round(leg_disc / n_dec, 4),
+            "share_hours_differing": round(differs / n_dec, 4),
+        },
+        "realised_vs_predicted_sold_ratio_at_legacy_price": round(drift_ratio, 4)
+            if drift_ratio else None,
+        "solver_latency_p95_s": round(float(np.percentile(latencies, 95)), 4),
+        "note": ("Shadow outcomes carry execution_status="
+                 f"'{SHADOW_STATUS}' and are ineligible for pipeline.update: "
+                 "the recommended price was never in force. The drift ratio is "
+                 "the production continuation of the section 9.3 gate."),
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="pipeline.shadow")
+    ap.add_argument("--input", required=True)
+    ap.add_argument("--out", default="reports/shadow.json")
+    ap.add_argument("--config", default="config.yaml")
+    ap.add_argument("--date-start", default=None)
+    ap.add_argument("--date-end", default=None)
+    ap.add_argument("--events-dir", default=None)
+    ap.add_argument("--max-episodes", type=int, default=0,
+                    help="0 = all episodes")
+    ap.add_argument("--seed", type=int, default=0)
+    args = ap.parse_args()
+
+    cfg = load_config(args.config)
+    d = pd.read_parquet(args.input)
+    ds = d.date.astype(str)
+    if args.date_start:
+        d = d[ds.ge(args.date_start)]
+        ds = d.date.astype(str)
+    if args.date_end:
+        d = d[ds.le(args.date_end)]
+
+    report = run_shadow(d, cfg, events_root=args.events_dir,
+                        seed=args.seed, max_episodes=args.max_episodes)
+
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    with open(args.out, "w") as f:
+        json.dump(report, f, indent=2, default=str)
+
+    g = report["shadow_gate"]
+    print(f"decisions          : {report['decision_count']:,} "
+          f"({report['state_rejected_count']} states rejected)")
+    print(f"event completeness : {g['event_completeness']['value']:.4f} "
+          f"-> {'PASS' if g['event_completeness']['pass'] else 'FAIL'}")
+    print(f"matched rate       : {g['matched_decision_rate']['value']:.4f} "
+          f"-> {'PASS' if g['matched_decision_rate']['pass'] else 'FAIL'}")
+    print(f"cost-floor viol.   : {g['cost_floor_violations']['value']} "
+          f"-> {'PASS' if g['cost_floor_violations']['pass'] else 'FAIL'}")
+    rv = report["recommendation_vs_legacy"]
+    print(f"mean discount      : recommended {rv['mean_recommended_discount']:.3f} "
+          f"vs legacy {rv['mean_legacy_discount']:.3f} "
+          f"(differs {rv['share_hours_differing']:.1%} of hours)")
+    print(f"drift ratio        : "
+          f"{report['realised_vs_predicted_sold_ratio_at_legacy_price']}")
+    print(g["verdict"])
+    print(f"wrote {args.out}")
+
+
+if __name__ == "__main__":
+    main()

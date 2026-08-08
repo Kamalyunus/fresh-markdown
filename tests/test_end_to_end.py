@@ -235,6 +235,46 @@ def test_duplicate_and_malformed_events_quarantined(workspace):
     assert len(events.load_quarantine()) == before + 1
 
 
+def test_shadow_phase_harness(workspace):
+    _chdir(workspace)
+    env = {**os.environ, "PYTHONPATH": REPO}
+
+    # shadow needs the section 9.3 decision and a tau; supply them in config
+    with open("config.yaml") as f:
+        cfg_raw = yaml.safe_load(f)
+    cfg_raw["baseline_model"]["apply_level_calibration"] = False
+    cfg_raw["exploration"]["tau_initial"] = 500.0
+    with open("config.yaml", "w") as f:
+        f.write(yaml.safe_dump(cfg_raw))
+
+    def run(*args):
+        r = subprocess.run([sys.executable, *args], cwd=workspace, env=env,
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout + r.stderr
+        return r.stdout
+
+    run("-m", "bootstrap.init_posterior", "--force")
+    run("-m", "pipeline.shadow", "--input", "data/prepared.parquet",
+        "--out", "reports/shadow.json", "--max-episodes", "60")
+
+    with open("reports/shadow.json") as f:
+        report = json.load(f)
+    gate = report["shadow_gate"]
+    # decisions logged, no prices applied: completeness 1:1, zero cost-floor
+    assert gate["cost_floor_violations"]["value"] == 0
+    assert gate["event_completeness"]["value"] == 1.0
+    assert gate["matched_decision_rate"]["pass"]
+    assert report["decision_count"] > 50
+
+    # shadow outcomes are NOT learning evidence: update must consume nothing
+    from common.config import load_config
+    from pipeline.update import run as update_run
+    cfg = load_config("config.yaml")
+    report2 = update_run(cfg, apply=False,
+                         events_root=cfg["events"]["shadow_store_dir"])
+    assert not report2["cells"]
+
+
 def test_state_rejected_not_priced(workspace):
     _chdir(workspace)
     from common.config import load_config
