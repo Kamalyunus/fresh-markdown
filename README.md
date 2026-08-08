@@ -42,9 +42,17 @@ estimate_prior → backtest, then stops at the human gates:
 
 1. **Calibration gate (blocking, §9.3)** — `reports/backtest.json` carries
    `fidelity_episode_sold_ratio` and the measurement-10 level/slope
-   decomposition. Only the *level* component may be corrected multiplicatively
-   (`baseline_model.apply_level_calibration`); a slope deficit means the prior
-   understates elasticity and must be re-estimated, never papered over.
+   decomposition. Only the *level* component may be corrected multiplicatively;
+   a slope deficit means the prior understates elasticity and must be
+   re-estimated, never papered over. To apply the level remedy:
+
+   ```bash
+   python3 -m bootstrap.train_baseline --input data/prepared.parquet --fit-calibration
+   # set baseline_model.apply_level_calibration: true in config.yaml, then
+   python3 -m backtest --input data/prepared.parquet --out reports/backtest_calibrated.json
+   ```
+
+   and record the fidelity ratio before and after.
 2. **Prior acceptance gate (blocking, §9.5)** — `artifacts/prior.json` records
    orientation/boundary/std checks. Rejection falls back per config and is an
    acceptable outcome.

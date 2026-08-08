@@ -18,6 +18,8 @@ level/slope diagnostic -- fitting it is unconditional, applying it is not.
 
 Usage:
     python3 -m bootstrap.train_baseline --input data/prepared.parquet
+    python3 -m bootstrap.train_baseline --input data/prepared.parquet \
+        --fit-calibration        # fit level factors from an existing baseline
 """
 
 import argparse
@@ -178,10 +180,28 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--config", default="config.yaml")
+    ap.add_argument("--fit-calibration", action="store_true",
+                    help="fit the section 9.3 per-category level-calibration "
+                         "factors from the already-trained baseline and the "
+                         "section 9.5 prior, instead of training")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     d = pd.read_parquet(args.input)
+
+    if args.fit_calibration:
+        with open(cfg["posterior"]["prior"]["path"]) as f:
+            prior = json.load(f)
+        means = {c: v["mean"] for c, v in prior["per_category"].items()}
+        factors = fit_level_calibration(d, cfg, means)
+        for cat, factor in sorted(factors.items()):
+            print(f"  {cat:24s} {factor:.4f}")
+        print(f"wrote {cfg['baseline_model']['calibration_factor_path']}")
+        print("next: set baseline_model.apply_level_calibration: true in "
+              "config.yaml, re-run backtest, and record the fidelity ratio "
+              "before and after (PRD section 9.3)")
+        return
+
     schema = train(d, cfg)
     print(f"trained {schema['model_version']} on {schema['train_rows']:,} rows")
     print(f"wrote {cfg['baseline_model']['model_path']} and "
