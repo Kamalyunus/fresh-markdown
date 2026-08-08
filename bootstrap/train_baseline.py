@@ -133,12 +133,19 @@ def train(d, cfg):
     return schema
 
 
-def fit_level_calibration(d, cfg, prior_mean_by_category):
+def fit_level_calibration(d, cfg):
     """Per-category multiplicative factor on the calibration window.
 
-    Fit at the reference anchor where the elasticity multiplier is ~1, so the
-    factor captures LEVEL error in mu_ref alone; fall back to all calibration
-    rows (elasticity-adjusted) when a category has no anchor rows.
+    Fit ONLY at the reference anchor, where the elasticity multiplier is ~1,
+    so the factor captures LEVEL error in mu_ref alone. A category without
+    enough anchor rows is left uncorrected (factor 1.0) rather than fit
+    through an elasticity-dependent basis: any basis that scales predictions
+    by the prior elasticity lets slope error leak into the level factor,
+    which is exactly the contamination PRD section 9.3 forbids.
+
+    Factors are >= 1 wherever the baseline under-predicts at the anchor;
+    a factor below 1 means the model OVER-predicts there and is worth a
+    manual look before applying.
     """
     model = BaselineModel(cfg)
     calib = split_frames(d, cfg)["calib"].copy()
@@ -152,26 +159,29 @@ def fit_level_calibration(d, cfg, prior_mean_by_category):
     calib["mu_ref_hat"] = model.predict_mu_ref(calib)
     cfg["baseline_model"]["apply_level_calibration"] = saved
 
-    eps = calib["category"].map(
-        lambda c: prior_mean_by_category.get(str(c), np.nan)).astype(float)
-    ratio_term = ((1 - calib.total_discount) / (1 - calib.d_ref)) ** eps
-    calib["mu_actual_hat"] = calib["mu_ref_hat"] * ratio_term.fillna(1.0)
-
     min_anchor = cfg["baseline_model"]["calibration_min_anchor_rows"]
-    factors = {}
+    factors, detail = {}, {}
     for cat, g in calib.groupby("category"):
         anchor = g[(g.total_discount - g.d_ref).abs() <= tier_step / 2]
-        use_anchor = len(anchor) >= min_anchor and anchor["mu_ref_hat"].sum() > 0
-        basis = anchor if use_anchor else g
-        pred = basis["mu_ref_hat"].sum() if use_anchor else basis["mu_actual_hat"].sum()
-        if pred > 0:
-            factors[str(cat)] = round(float(basis["units_sold"].sum() / pred), 4)
+        pred = float(anchor["mu_ref_hat"].sum())
+        fitted = len(anchor) >= min_anchor and pred > 0
+        factor = float(anchor["units_sold"].sum() / pred) if fitted else 1.0
+        factors[str(cat)] = round(factor, 4)
+        detail[str(cat)] = {
+            "basis": "anchor" if fitted else "uncorrected",
+            "anchor_rows": int(len(anchor)),
+            "calib_rows": int(len(g)),
+            "anchor_sold": int(anchor["units_sold"].sum()),
+            "anchor_predicted": round(pred, 1),
+        }
 
     path = cfg["baseline_model"]["calibration_factor_path"]
     with open(path, "w") as f:
         json.dump({"factor_by_category": factors,
+                   "detail_by_category": detail,
                    "fit_window": cfg["data"]["split"],
-                   "basis": "anchor rows where available, else all calib rows"},
+                   "basis": "anchor rows only; categories below "
+                            "calibration_min_anchor_rows left at 1.0"},
                   f, indent=2)
     return factors
 
@@ -190,16 +200,22 @@ def main():
     d = pd.read_parquet(args.input)
 
     if args.fit_calibration:
-        with open(cfg["posterior"]["prior"]["path"]) as f:
-            prior = json.load(f)
-        means = {c: v["mean"] for c, v in prior["per_category"].items()}
-        factors = fit_level_calibration(d, cfg, means)
+        factors = fit_level_calibration(d, cfg)
+        with open(cfg["baseline_model"]["calibration_factor_path"]) as f:
+            detail = json.load(f)["detail_by_category"]
         for cat, factor in sorted(factors.items()):
-            print(f"  {cat:24s} {factor:.4f}")
+            info = detail[cat]
+            print(f"  {cat:24s} {factor:.4f}  "
+                  f"({info['basis']}, {info['anchor_rows']:,} anchor rows)")
+        uncorrected = [c for c, v in detail.items() if v["basis"] == "uncorrected"]
+        if uncorrected:
+            print(f"left uncorrected (below "
+                  f"{cfg['baseline_model']['calibration_min_anchor_rows']} "
+                  f"anchor rows): {', '.join(sorted(uncorrected))}")
         print(f"wrote {cfg['baseline_model']['calibration_factor_path']}")
         print("next: set baseline_model.apply_level_calibration: true in "
-              "config.yaml, re-run backtest, and record the fidelity ratio "
-              "before and after (PRD section 9.3)")
+              "config.yaml, re-run backtest WITHOUT retraining the baseline, "
+              "and record the fidelity ratio before and after (PRD 9.3)")
         return
 
     schema = train(d, cfg)
