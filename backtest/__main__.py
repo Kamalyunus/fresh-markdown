@@ -1,0 +1,65 @@
+import argparse
+import json
+import os
+
+import pandas as pd
+
+from common.config import load_config
+from bootstrap.train_baseline import BaselineModel
+from backtest.replay import fidelity, policy_replay, derive_tau_initial
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="backtest")
+    ap.add_argument("--input", required=True)
+    ap.add_argument("--out", default="reports/backtest.json")
+    ap.add_argument("--config", default="config.yaml")
+    ap.add_argument("--policy-episodes", type=int, default=2000)
+    ap.add_argument("--seed", type=int, default=0)
+    args = ap.parse_args()
+
+    cfg = load_config(args.config)
+    d = pd.read_parquet(args.input)
+    model = BaselineModel(cfg)
+    with open(cfg["posterior"]["prior"]["path"]) as f:
+        prior = json.load(f)
+    with open(cfg["dispersion"]["r_lookup_path"]) as f:
+        r_lookup = json.load(f)
+
+    fid, d_pred = fidelity(d, cfg, model, prior, r_lookup)
+    pol, ep, spreads = policy_replay(d_pred, cfg,
+                                     max_episodes=args.policy_episodes,
+                                     seed=args.seed)
+    tau = derive_tau_initial(spreads, ep, cfg)
+
+    out = {
+        "artifact_versions": {
+            "baseline_model_version": model.version,
+            "prior_source": prior["source"],
+            "config_version": cfg["meta"]["config_version"],
+        },
+        # two blocks, reported separately and never summed (PRD 17.3)
+        "fidelity": fid,
+        "policy_deltas": pol,
+        "tau_initial_derivation": tau,
+    }
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    with open(args.out, "w") as f:
+        json.dump(out, f, indent=2, default=str)
+
+    print(f"fidelity_episode_sold_ratio : {fid['fidelity_episode_sold_ratio']}"
+          f"  -> {fid['calibration_gate']}")
+    print(f"actual IL {pol['actual_il']:,.0f} (IL% {pol['actual_il_pct']})  "
+          f"dp IL {pol['dp_il']:,.0f} (IL% {pol['dp_il_pct']})")
+    print(f"pct_dp_deepened             : {pol['pct_dp_deepened']:.1%}")
+    if tau:
+        print(f"tau_initial (currency)      : {tau['tau_initial']}  "
+              f"(q{tau['cost_distribution_quantile']:.2f} of Q-spread; "
+              f"daily spend {tau['implied_daily_spend']:,.0f} "
+              f"vs budget {tau['daily_budget']:,.0f})")
+        print("paste into config.yaml: exploration.tau_initial")
+    print(f"wrote {args.out}")
+
+
+if __name__ == "__main__":
+    main()
