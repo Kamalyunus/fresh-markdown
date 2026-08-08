@@ -105,7 +105,79 @@ def load_and_filter(path, cfg=None):
     d["d_ref"] = d.category.map(lambda c: reference_discount(cfg, c))
     d["d_max"] = 1.0 - d.cost / d.original_price
     d["offered_price"] = d.original_price * (1 - d.total_discount)
+    d = add_ref_rate_features(d, cfg)
     return d.reset_index(drop=True), wf
+
+
+def add_ref_rate_features(d, cfg):
+    """Point-in-time, price-standardised demand-rate features.
+
+    Both are built ONLY from anchor hours -- stocked hours priced within
+    ref_rate_anchor_band of the category reference discount -- so they measure
+    "how fast does this SKU sell at reference conditions" regardless of which
+    policy produced the price. Both are lagged strictly before the episode's
+    date: an episode never sees its own day. Censored hours are included,
+    capped, matching the censoring the training target itself carries.
+
+      sku_ref_sales_rate_30d      trailing [t-W, t-1] anchor-hour rate at
+                                  SKU x FC, falling back to SKU pooled across
+                                  FCs, else NaN (LightGBM-native missing)
+      prior_episode_ref_sales_rate  anchor-hour rate of the most recent
+                                  previous episode of the same SKU x FC;
+                                  NaN if that episode had no anchor hours
+
+    Within-episode lag features (last-hour sales) are deliberately absent:
+    they are mediators of the episode's own price path and would corrupt the
+    learned elasticity (see docs/design.md).
+    """
+    band = cfg["baseline_model"]["ref_rate_anchor_band"]
+    window = cfg["baseline_model"]["ref_rate_window_days"]
+
+    d = d.copy()
+    anchor = ((d.total_discount - d.d_ref).abs() <= band + 1e-9) \
+        & (d.starting_inventory >= 1)
+    day = (pd.DataFrame({
+        "sku_id": d.sku_id, "fc": d.fc, "date": pd.to_datetime(d.date),
+        "a_sold": d.units_sold.where(anchor, 0),
+        "a_hours": anchor.astype(int)})
+        .groupby(["sku_id", "fc", "date"], as_index=False).sum())
+
+    def trailing_rate(frame, keys):
+        """Trailing [t-W, t-1] anchor rate per key group; rolling includes the
+        current day, so the day's own totals are subtracted back out."""
+        g = frame.sort_values(keys + ["date"]).set_index("date")
+        grouped = g.groupby(keys)
+        sold = grouped.a_sold.rolling(f"{window}D").sum() - g.a_sold.to_numpy()
+        hours = grouped.a_hours.rolling(f"{window}D").sum() - g.a_hours.to_numpy()
+        rate = (sold / hours.replace(0, np.nan)).rename("rate")
+        return rate.reset_index()
+
+    # SKU x FC grain, with a SKU-pooled fallback for sparse combinations;
+    # the fallback is aggregated to SKU-day first so no same-day cross-FC
+    # sales can enter its trailing window
+    day = day.merge(trailing_rate(day, ["sku_id", "fc"])
+                    .rename(columns={"rate": "rate_sku_fc"}),
+                    on=["sku_id", "fc", "date"], how="left")
+    sku_day = (day.groupby(["sku_id", "date"], as_index=False)
+               [["a_sold", "a_hours"]].sum())
+    day = day.merge(trailing_rate(sku_day, ["sku_id"])
+                    .rename(columns={"rate": "rate_sku"}),
+                    on=["sku_id", "date"], how="left")
+    day["sku_ref_sales_rate_30d"] = day.rate_sku_fc.fillna(day.rate_sku)
+
+    day = day.sort_values(["sku_id", "fc", "date"])
+    ep_rate = day.a_sold / day.a_hours.replace(0, np.nan)
+    day["prior_episode_ref_sales_rate"] = (
+        ep_rate.groupby([day.sku_id, day.fc]).shift(1))
+
+    day["date"] = day.date.astype(str)
+    feats = day[["sku_id", "fc", "date",
+                 "sku_ref_sales_rate_30d", "prior_episode_ref_sales_rate"]]
+    d["_date_str"] = d.date.astype(str)
+    d = (d.merge(feats.rename(columns={"date": "_date_str"}),
+                 on=["sku_id", "fc", "_date_str"], how="left")
+         .drop(columns=["_date_str"]))
+    return d
 
 
 def split_frames(d, cfg):

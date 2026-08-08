@@ -130,6 +130,16 @@ python3 -m pipeline.monitor
     `data/prepared.parquet` (only `bootstrap.measure` and
     `bootstrap.prepare_data` accept raw).
 
+12. **The baseline's SKU rate features are computed in `prepare_data`**
+    (`sku_ref_sales_rate_30d`, `prior_episode_ref_sales_rate`: anchor-hour
+    only, point-in-time, SKU-pooled fallback). A prepared parquet from
+    before this feature set will fail prediction with a clear error —
+    re-run `prepare_data` before retraining. Never add within-episode lag
+    sales, `hours_remaining`, or extra price features to the model: lags
+    are mediators of the episode's own price path and corrupt the learned
+    elasticity; hours-remaining is planner state; one overwritten price
+    feature is the auditable maximum (see design doc 5.4).
+
 ## Reading a backtest report
 
 - `fidelity.fidelity_episode_sold_ratio` = actual ÷ predicted on the gate

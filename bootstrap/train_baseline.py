@@ -34,17 +34,30 @@ from common.config import load_config, reference_discount
 from bootstrap.prepare_data import split_frames
 
 # Feature order is authoritative in feature_schema.json; this list only seeds
-# the first fit. `total_discount` is the single price feature and is the one
-# overwritten to d_ref at inference.
+# the first fit. `total_discount` is the SINGLE price feature and is the one
+# overwritten to d_ref at inference -- one overwrite point is auditable,
+# several are a standing leak risk.
+#
+# Deliberately absent (see docs/design.md for the full argument):
+#   hours_remaining        planner state, not customer-visible demand context
+#   last-hour lag sales    mediators of the episode's own price path -- they
+#                          absorb price response and corrupt the learned
+#                          elasticity, and at median inventory ~2 they are
+#                          mostly a censoring indicator
+#   inventory / stockout   belong to the DP state and the censoring logic
 FEATURES = ["category", "subcategory", "fc", "hour_of_day", "dow",
-            "hours_remaining", "total_discount"]
+            "day_of_month", "original_price",
+            "sku_ref_sales_rate_30d", "prior_episode_ref_sales_rate",
+            "total_discount"]
 CATEGORICAL = ["category", "subcategory", "fc"]
 PRICE_FEATURES = ["total_discount"]
 
 
 def add_derived(d):
     d = d.copy()
-    d["dow"] = pd.to_datetime(d.date).dt.dayofweek
+    dates = pd.to_datetime(d.date)
+    d["dow"] = dates.dt.dayofweek
+    d["day_of_month"] = dates.dt.day
     return d
 
 
@@ -64,6 +77,13 @@ class BaselineModel:
         self.version = self.schema["model_version"]
 
     def _matrix(self, d):
+        missing = [f for f in self.schema["features"]
+                   if f not in d.columns and f not in ("dow", "day_of_month")]
+        if missing:
+            raise KeyError(
+                f"frame is missing feature columns {missing} -- re-run "
+                "bootstrap.prepare_data (the feature set includes "
+                "point-in-time rate features it computes)")
         X = pd.DataFrame(index=d.index)
         for feat in self.schema["features"]:
             if feat in self.schema["categorical"]:

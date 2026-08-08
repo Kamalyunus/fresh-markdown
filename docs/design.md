@@ -253,29 +253,83 @@ absorbed silently.
 ### 5.4 Baseline demand model — frozen, and blind to price
 
 A gradient-boosted tree model (LightGBM) with a Tweedie objective predicts
-units sold per hour from context: category, subcategory, FC, hour of day,
-day of week, hours remaining — and a single price feature that is
-**overwritten to the category reference discount at every inference call**.
-**Why Tweedie:** hourly perishable demand is a zero-heavy count (~78%
-zeros) with a positive tail; Tweedie's point mass at zero fits this shape
-where squared-error under-predicts and Poisson under-disperses. **Why the
-price-feature overwrite is the load-bearing trick:** the model trains on
-confounded history and would happily learn the price-hour artifact — but
-its price gradient is *never queried*. It answers only "what is demand at
-the reference discount in this context"; price response enters exclusively
-through the learned elasticity scalar. **Why inventory, cost, and stockout
-indicators are banned as features:** inventory belongs in the planner state
-and the censoring logic — as a model feature it teaches "low stock predicts
-low sales", which is the censoring artifact, not demand. **Why frozen for
-the whole MVP window:** if the model retrains while the posterior learns,
-posterior movement cannot be attributed — it could be learning or drift.
-Freezing buys attribution and costs drift risk, which is accepted,
-monitored daily (section 5.11), and bounded by the window end date. A
-per-category multiplicative correction factor is *fitted* unconditionally on
-the calibration weeks but *applied* only behind an explicit config decision,
-because the diagnostic in section 9.2 shows the correction is right for
-level errors and actively harmful for slope errors — fitting and applying
-are different decisions with different owners.
+units sold per hour. Features: category, subcategory, FC, hour of day, day
+of week, day of month, base price, two point-in-time SKU demand rates
+(below) — and a **single** price feature that is **overwritten to the
+category reference discount at every inference call**. **Why Tweedie:**
+hourly perishable demand is a zero-heavy count (~78% zeros) with a positive
+tail; Tweedie's point mass at zero fits this shape where squared-error
+under-predicts and Poisson under-disperses. **Why the price-feature
+overwrite is the load-bearing trick:** the model trains on confounded
+history and would happily learn the price-hour artifact — but its price
+gradient is *never queried*. It answers only "what is demand at the
+reference discount in this context"; price response enters exclusively
+through the learned elasticity scalar. One price feature means one
+overwrite point, which is auditable; the legacy model's four
+(depth, entry, incremental, discount×hour) were four places for the
+confound to leak. **Why frozen for the whole MVP window:** if the model
+retrains while the posterior learns, posterior movement cannot be
+attributed — it could be learning or drift. Freezing buys attribution and
+costs drift risk, which is accepted, monitored daily (section 5.11), and
+bounded by the window end date. A per-category multiplicative correction
+factor is *fitted* unconditionally on the calibration weeks but *applied*
+only behind an explicit config decision, because the diagnostic in section
+9.2 shows the correction is right for level errors and actively harmful for
+slope errors — fitting and applying are different decisions with different
+owners.
+
+**The SKU demand-rate features.** The model's largest historical error was
+level bias, and its most plausible cause is that category/subcategory/FC
+alone cannot express per-SKU velocity (a few SKUs move far faster than
+their category mean). Two features supply it, both **price-standardised**
+— built only from *anchor hours*, stocked hours priced within one tier of
+the reference discount, so they measure "how fast does this SKU sell at
+reference conditions" regardless of which policy produced the price — and
+both **point-in-time**, lagged strictly before the episode's date:
+
+- `sku_ref_sales_rate_30d` — trailing [t−30, t−1] anchor-hour sales rate at
+  **SKU × FC** grain (the episode grain; store traffic differs by FC), with
+  a SKU-pooled fallback for sparse combinations (aggregated to SKU-day
+  first, so no same-day cross-FC sales enter the window) and native-missing
+  (NaN) when even that is empty — "no data" is never conflated with
+  "doesn't sell".
+- `prior_episode_ref_sales_rate` — the anchor-hour rate of the same
+  SKU × FC's most recent previous episode: the recency signal on top of the
+  30-day level signal. NaN if that episode had no anchor hours — purity
+  over coverage.
+
+Censored hours are included capped, matching the censoring the training
+target itself carries. The residual caveat is a slow cross-day feedback
+loop (in production these rates are computed from sales under our own
+pricing); the anchor restriction is what keeps it tame.
+
+**What is deliberately NOT a feature — and why.**
+
+- *Hours remaining* is planner state, not demand context: the customer sees
+  the shelf and the price, not our countdown. The DP keeps the horizon; the
+  demand model does not (it is nearly collinear with hour-of-day anyway).
+- *Within-episode lag sales* (`last_1hr`, `last_3hr`) were the legacy
+  model's momentum features, and their exclusion is a priced trade, not an
+  oversight. They are **post-treatment mediators** of the episode's own
+  price path: a deeper price at hour t raises sales at t, which raises the
+  lag feature at t+1, which raises the prediction — so part of the price
+  effect is routed *through* the feature and the learned elasticity is no
+  longer the price response. No inference-time overwrite fixes this,
+  because training already attributed price response to the lag. (At median
+  inventory ~2 they are also mostly a censoring indicator.) The
+  cross-episode rates above are different in kind — yesterday's sales
+  cannot be caused by today's price, and their anchor-restricted
+  construction removes the pricing-level contamination; no such
+  construction exists for within-episode lags, because under a ramping
+  policy mid-episode hours are never at reference. Genuine momentum
+  ("customers are discovering this item now") has a principled vehicle in
+  phase 2: observe within-episode sales, divide out the price effect using
+  the current elasticity, and update a **price-free multiplicative
+  episode-level demand factor** applied symmetrically at every candidate
+  price — momentum without corrupting the counterfactual.
+- *Inventory, cost, stockout indicators* belong to the planner state and
+  the censoring logic; as features they teach "low stock predicts low
+  sales", which is the censoring artifact, not demand.
 
 ### 5.5 Dispersion and correlation — frozen variance structure
 

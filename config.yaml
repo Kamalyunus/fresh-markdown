@@ -30,6 +30,8 @@ data:
 baseline_model:
   objective: "tweedie"                 # SET
   tweedie_variance_power: 1.3          # SET
+  ref_rate_window_days: 30             # SET  trailing window for sku_ref_sales_rate
+  ref_rate_anchor_band: 0.025          # SET  |d - d_ref| band defining anchor hours
   learning_rate: 0.05                  # SET
   num_boost_round: 400                 # SET
   num_leaves: 63                       # SET
