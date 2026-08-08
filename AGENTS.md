@@ -31,6 +31,9 @@ step                                          writes                            
 6. backtest --input prepared --out <json>     reports/backtest*.json                  prepared + baseline + prior + r_lookup
 7. bootstrap.train_baseline --fit-calibration artifacts/calibration.json              prepared + baseline
    (only when the calibration gate fails on a level error)
+7b. bootstrap.derive_thresholds --input prep. reports/thresholds.json                 prepared
+   (evidence for the three SET BY OWNER values: empirical A/B duration vs
+   MDE, and 3-sigma noise floors for the scrap/margin guardrails)
 8. bootstrap.init_posterior                   artifacts/posterior.json                prior.json
    (once at launch; refuses overwrite without --force -- posterior is
    production learning state)

@@ -103,6 +103,7 @@ events:
   shadow_store_dir: "events_store_shadow"  # SET  shadow-phase events kept separate
 
 monitoring:
+  guardrail_noise_window_days: 28      # SET  trailing baseline for threshold calibration
   shadow_gate:                         # SET  section 19 phase-1 exit gate
     min_event_completeness: 0.99
     min_matched_decision_rate: 0.99
@@ -118,6 +119,10 @@ ab_test:
   unit: "sku_fc"                       # SET
   allocation: 0.50                     # SET
   primary_metric: "il_pct"             # SET
-  min_detectable_effect_pct: null      # SET BY OWNER
+  power: 0.80                          # SET  for duration derivation
+  alpha: 0.05                          # SET  two-sided
+  candidate_durations_weeks: [2, 3, 4, 5, 6, 8, 10, 12]  # SET  windows tested
+  min_episodes_per_block: 100          # SET  blocks below this are skipped
+  min_detectable_effect_pct: null      # SET BY OWNER  relative on IL%
   il_pct_ratio_se_clustered: 0.000383  # MEASURED  phase 0; 84,792 SKU x FC units
-  duration_days: null                  # DERIVED   from the two above
+  duration_days: null                  # DERIVED   bootstrap.derive_thresholds

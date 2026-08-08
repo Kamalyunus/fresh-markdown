@@ -275,6 +275,27 @@ def test_shadow_phase_harness(workspace):
     assert not report2["cells"]
 
 
+def test_derive_thresholds_cli(workspace):
+    _chdir(workspace)
+    env = {**os.environ, "PYTHONPATH": REPO}
+    r = subprocess.run(
+        [sys.executable, "-m", "bootstrap.derive_thresholds",
+         "--input", "data/prepared.parquet", "--mde", "0.075",
+         "--out", "reports/thresholds.json"],
+        cwd=workspace, env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    with open("reports/thresholds.json") as f:
+        report = json.load(f)
+    ab = report["ab_duration"]
+    assert ab["by_duration"], "no candidate duration produced an SE"
+    for row in ab["by_duration"].values():
+        assert row["se_pooled"] > 0
+        # difference SE must exceed the pooled SE (arm split loses precision)
+        assert row["se_arm_difference"] > row["se_pooled"]
+    assert "scrap_rate" in report["guardrail_noise"]
+    assert "margin_rate" in report["guardrail_noise"]
+
+
 def test_state_rejected_not_priced(workspace):
     _chdir(workspace)
     from common.config import load_config
