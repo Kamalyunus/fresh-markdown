@@ -24,6 +24,7 @@ import pandas as pd
 from scipy.stats import nbinom
 
 from common.config import load_config
+from bootstrap.prepare_data import split_frames
 from bootstrap.train_baseline import BaselineModel
 from bootstrap.fit_dispersion import lookup_r
 from bootstrap.measure import m10_fidelity_decomposition
@@ -93,8 +94,6 @@ def fidelity(d, cfg, model, prior, r_lookup):
     in-sample training rows and, when the demand level drifts between the
     training period and launch, it cannot be fixed by any static level factor.
     """
-    from bootstrap.prepare_data import split_frames
-
     d = _attach_predictions(d, cfg, model, prior, r_lookup)
     splits = split_frames(d, cfg)
     gate_d = pd.concat([splits["calib"], splits["test"]])

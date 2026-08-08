@@ -29,13 +29,18 @@ python3 -m backtest --input data/prepared.parquet --out reports/backtest.json
 cat <<'EOF'
 
 Bootstrap complete. Before any price is applied (PRD sections 1a, 19):
-  1. Review reports/backtest.json: the calibration gate (fidelity) is
-     BLOCKING; resolve baseline_model.apply_level_calibration from the
-     level/slope decomposition.
+  1. Review reports/backtest.json: the calibration gate (fidelity, read on
+     the calib+test window) is BLOCKING; resolve
+     baseline_model.apply_level_calibration from the level/slope
+     decomposition. The remedy, if needed:
+       python3 -m bootstrap.train_baseline --input data/prepared.parquet --fit-calibration
   2. Review artifacts/prior.json: the prior-acceptance gate is BLOCKING;
      a fallback source is an acceptable outcome and is already recorded.
   3. Paste MEASURED values into config.yaml (rho, forced hours, tau_initial,
-     il_pct_ratio_se_clustered) and have the owner set the SET BY OWNER keys.
-  4. Initialise the posterior from the prior (pricing.posterior
-     PosteriorStore.initialise) and proceed to the shadow phase.
+     il_pct_ratio_se_clustered). For the SET BY OWNER keys, produce the
+     evidence with:
+       python3 -m bootstrap.derive_thresholds --input data/prepared.parquet --mde 0.075
+  4. Initialise the posterior and run the shadow phase:
+       python3 -m bootstrap.init_posterior
+       python3 -m pipeline.shadow --input data/prepared.parquet --out reports/shadow.json
 EOF

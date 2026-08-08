@@ -18,7 +18,9 @@ randomized exploration.
 | `bootstrap/measure.py` | §8, App. A | Phase-0 measurement suite (m1–m8, m10) and reassessment gates. |
 | `bootstrap/train_baseline.py` | §9.3 | Frozen LightGBM/Tweedie `mu_ref`; price features overwritten to `d_ref` at inference; level-calibration factor fit. |
 | `bootstrap/fit_dispersion.py` | §9.4 | Frozen NB `r` by subcategory (censored MLE, fallback, clamp) and global `rho` vs fitted residuals. |
-| `bootstrap/estimate_prior.py` | §9.5 | Bracket procedure (naive vs hour-controlled) over the full search bound, acceptance checks, fallback on rejection. |
+| `bootstrap/estimate_prior.py` | §9.5 | Bracket procedure (naive vs hour-controlled) on entry rows over the full search bound, acceptance checks, fallback on rejection. |
+| `bootstrap/init_posterior.py` | §10 | One-time posterior initialisation from the prior artifact; refuses overwrite without `--force`. |
+| `bootstrap/derive_thresholds.py` | §8, §15.4, §18 | Evidence for the owner decisions: empirical A/B duration vs MDE, 3σ guardrail noise floors. |
 | `pricing/demand.py` | §9.3, §11.3 | `mu(d) = mu_ref × ((1−d)/(1−d_ref))^ε`, truncated NB pmf. |
 | `pricing/dp.py` | §11 | Monotone DP over feasible tiers; absolute-IL reward; entry arms. |
 | `pricing/explore.py` | §12 | Affordable-set uniform selection under currency `tau`; budget and `tau` calibration. |
@@ -27,6 +29,7 @@ randomized exploration.
 | `events/store.py` | §16 | JSONL event log: dedup, quarantine for malformed events, replay. |
 | `pipeline/update.py` | §13–14 | Censored NB grid update, deff deflation, bounded step, operator gate (`--apply`). |
 | `pipeline/monitor.py` | §15 | Business (IL% ratio-of-sums with denominators), learning, safety series; stop conditions. |
+| `pipeline/shadow.py` | §19 | Phase-1 harness: full decision path against live data, no prices applied; exit-gate report. |
 | `backtest/` | §17 | Fidelity gate, policy deltas, `Q(p*) − Q(p)` spread and `tau_initial` derivation. |
 | `tools/make_dummy_flc.py` | — | Synthetic FLC generator (legacy + randomized policies, known ground-truth elasticity). |
 

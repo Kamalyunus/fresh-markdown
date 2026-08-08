@@ -52,6 +52,9 @@ def fit_r(k, mu, censored, bounds):
 def fit_dispersion(d, cfg):
     dc = cfg["dispersion"]
     calib = split_frames(d, cfg)["calib"].copy()
+    # rows with no stock carry no demand information and would be mis-scored
+    # as "demand >= 1" by the censored likelihood
+    calib = calib[calib.starting_inventory >= 1]
     if not len(calib):
         raise RuntimeError("calibration window contains no rows")
 

@@ -4,4 +4,4 @@ __pycache__/
 data/
 reports/
 artifacts/
-events_store/
+events_store*/

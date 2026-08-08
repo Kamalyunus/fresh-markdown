@@ -111,9 +111,11 @@ def estimate_prior(d, cfg, seed=0):
         lambda x: pd.Timestamp(x).to_period("W")).nunique(), 1)
     episodes_per_week = (train.groupby("category")["episode_id"].nunique() / weeks)
 
-    # entry rows only -- same-hour cross-episode identifying variation (9.5)
+    # entry rows only -- same-hour cross-episode identifying variation (9.5);
+    # zero-stock rows carry no demand information for the censored likelihood
     entry = (train.sort_values(["episode_id", "hour_of_day"])
              .groupby("episode_id").head(1))
+    entry = entry[entry.starting_inventory >= 1]
 
     per_category, failures = {}, []
     for cat, g in entry.groupby("category"):

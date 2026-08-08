@@ -17,9 +17,10 @@ import os
 import numpy as np
 import pandas as pd
 
-from common.config import load_config
+from common.config import load_config, deff
 from events.store import EventStore
 from pricing.posterior import PosteriorStore
+from pricing import explore
 
 
 def _arm(sku_id, fc, allocation):
@@ -98,9 +99,14 @@ def learning_metrics(decisions, posterior, cfg):
             if forced else None,
         "realised_exploration_cost": round(realised_cost, 1),
         "tau_current": decisions[-1]["tau_current"] if decisions else None,
-        "deff_applied": round(
-            1 + (cfg["dispersion"]["mean_forced_hours_per_episode"] - 1)
-            * cfg["dispersion"]["rho"], 3),
+        "deff_applied": round(deff(cfg), 3),
+        # std only moves when an update commits, so "std flat for N days" is
+        # exactly "no committed update in N days" (section 15.2 alert)
+        "posterior_std_flat_alert": sorted(
+            c for c, r in cells.items()
+            if (pd.Timestamp.now("UTC")
+                - pd.Timestamp(r["updated_at"])).days
+            >= cfg["monitoring"]["alert_posterior_std_flat_days"]),
         "realised_vs_predicted_sold_ratio": None,  # filled by safety_metrics
     }
 
@@ -144,7 +150,7 @@ def safety_metrics(store, decisions, outcomes):
     }
 
 
-def stop_conditions(safety, learning, cfg):
+def stop_conditions(safety, learning, business, cfg):
     """Section 15.4. Suspension stops forced exploration only; exploitation
     pricing continues. Owner-null thresholds cannot fire and are reported as
     blocked."""
@@ -158,6 +164,20 @@ def stop_conditions(safety, learning, cfg):
     fired["price_mismatch"] = (safety["applied_vs_recommended_price_mismatch"]
                                > sc["price_mismatch_rate"])
     fired["missing_stockout_field"] = (safety["missing_stockout_field_rate"] or 0) > 0
+
+    # realised exploration cost vs budget over the event window; the budget
+    # uses realised markdown IL as the projection and the widest cell std
+    il_abs = (business.get("il_pct_aggregate") or {}).get("il_absolute")
+    cells = learning["posterior_by_cell"]
+    if il_abs and cells:
+        widest_std = max(rec["std"] for rec in cells.values())
+        budget = explore.budget_today(il_abs, widest_std, cfg)
+        fired["exploration_cost_vs_budget"] = (
+            learning["realised_exploration_cost"]
+            > sc["exploration_cost_vs_budget"] * budget) if budget > 0 else False
+    else:
+        fired["exploration_cost_vs_budget"] = False
+
     for key in ("scrap_deterioration_pct", "margin_deterioration_pct"):
         if sc[key] is None:
             fired[key] = f"BLOCKED -- {key} is null (SET BY OWNER)"
@@ -182,12 +202,13 @@ def main():
     learning["realised_vs_predicted_sold_ratio"] = \
         safety["realised_vs_predicted_sold_ratio"]
 
+    business = business_metrics(decisions, outcomes, cfg)
     report = {
-        "business": business_metrics(decisions, outcomes, cfg),
+        "business": business,
         "learning": learning,
         "safety": safety,
     }
-    report["stop_conditions"] = stop_conditions(safety, learning, cfg)
+    report["stop_conditions"] = stop_conditions(safety, learning, business, cfg)
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as f:
