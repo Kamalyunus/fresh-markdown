@@ -138,14 +138,27 @@ def run(cfg, apply=False, events_root=None, posterior_path=None):
         raw_mean, raw_std, eff_info, diag = grid_update(pairs, rec, cfg)
         new_mean, new_std, clipped = bounded_step(
             rec["mean"], rec["std"], raw_mean, raw_std, cfg)
-        pending = rec["information_since_update"] + eff_info
-        trigger = pending >= cfg["learning"]["information_increment"]
+        # `pairs` is every eligible outcome not yet consumed by a revision, so
+        # it already spans however many days it took to accumulate -- eff_info
+        # is the whole batch's information, not one day's. No running counter:
+        # adding to one while re-reading the same outcomes would double count.
+        trigger = eff_info >= cfg["learning"]["information_increment"]
+        oldest = min((o.get("finalized_at") for _, o, _ in pairs
+                      if o.get("finalized_at")), default=None)
+        age_days = None
+        if oldest is not None:
+            age_days = round((pd.Timestamp.now("UTC")
+                              - pd.Timestamp(oldest)).total_seconds() / 86400, 2)
 
         report["cells"][cell] = {
             "forced_outcomes": len(pairs),
             "effective_information": round(eff_info, 3),
-            "information_pending": round(pending, 3),
+            "information_pending": round(eff_info, 3),
+            "information_required": cfg["learning"]["information_increment"],
             "update_triggered": trigger,
+            # a batch that keeps growing without triggering is the learning
+            # loop stalling; this surfaces it before the 21-day flat alert
+            "batch_oldest_outcome_age_days": age_days,
             "mean_before": rec["mean"], "std_before": rec["std"],
             "raw_mean": round(raw_mean, 4), "raw_std": round(raw_std, 4),
             "proposed_mean": round(new_mean, 4), "proposed_std": round(new_std, 4),

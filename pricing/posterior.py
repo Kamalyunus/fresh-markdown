@@ -104,17 +104,26 @@ class PosteriorStore:
     def commit_update(self, cell, new_mean, new_std, n_new_obs,
                       effective_information, outcome_ids, applied):
         """Atomically persist a posterior revision together with the outcome
-        IDs it consumed (section 13.5: both commit or neither)."""
+        IDs it consumed (section 13.5: both commit or neither).
+
+        An outcome is marked processed ONLY when a revision actually consumes
+        it. A sub-threshold batch is left entirely unconsumed so tomorrow's
+        run re-collects it and evaluates the likelihood over the whole
+        accumulated batch. Marking it processed while declining to update
+        would bank a scalar and throw the data away -- the posterior would
+        later step on the strength of an information count it no longer had
+        the observations to justify, and on a pilot small enough that no
+        single day clears the threshold it would discard every outcome
+        forever while the mean never moved.
+        """
         rec = self.state["cells"][cell]
-        if applied:
-            rec["mean"], rec["std"] = float(new_mean), float(new_std)
-            rec["version"] += 1
-            rec["accumulated_information"] += rec["information_since_update"] \
-                + effective_information
-            rec["information_since_update"] = 0.0
-            rec["updated_at"] = pd.Timestamp.now("UTC").isoformat()
-        else:
-            rec["information_since_update"] += effective_information
+        if not applied:
+            return                       # nothing consumed, nothing persisted
+        rec["mean"], rec["std"] = float(new_mean), float(new_std)
+        rec["version"] += 1
+        rec["accumulated_information"] += effective_information
+        rec["information_since_update"] = 0.0
+        rec["updated_at"] = pd.Timestamp.now("UTC").isoformat()
         rec["n_obs"] += n_new_obs
         self.state["processed_outcome_ids"].extend(outcome_ids)
         self._atomic_write(self.path, self.state)

@@ -198,9 +198,27 @@ def test_decision_loop_and_exactly_once_update(workspace):
             <= cfg["learning"]["max_mean_step"] + 1e-9
         assert c["proposed_std"] >= cfg["posterior"]["min_std"]
 
-    # exactly-once: a second apply consumes nothing (PRD 13.5)
-    report2 = update_run(cfg, apply=True)
-    assert not report2["cells"]
+    # a SUB-THRESHOLD batch must be banked, not burned. Under the old
+    # semantics the outcomes were marked processed even when no revision
+    # committed, so the evidence was destroyed and the posterior later stepped
+    # on an information count it no longer had the observations to justify.
+    cells = report["cells"]
+    if not any(c["update_triggered"] for c in cells.values()):
+        before = {k: (v["forced_outcomes"], v["effective_information"])
+                  for k, v in cells.items()}
+        again = update_run(cfg, apply=True)["cells"]
+        assert {k: (v["forced_outcomes"], v["effective_information"])
+                for k, v in again.items()} == before
+        for c in again.values():
+            assert c["batch_oldest_outcome_age_days"] is not None
+
+    # exactly-once, on a batch that DOES commit: lower the bar so the same
+    # evidence triggers, then confirm a second apply consumes nothing
+    cfg["learning"]["information_increment"] = 1e-9
+    triggered = update_run(cfg, apply=True)
+    assert triggered["applied"]
+    assert all(c["update_triggered"] for c in triggered["cells"].values())
+    assert not update_run(cfg, apply=True)["cells"]
 
     # the section 15.4 guardrails must be computed from these events, not
     # merely declared in config: with both thresholds null they report BLOCKED,

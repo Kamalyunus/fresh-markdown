@@ -617,6 +617,19 @@ normalises, and takes moments. Mechanics and rationale:
   `artifacts/rho.json`; strict start-up refuses to run when `config.yaml`
   disagrees with that artifact, because a paste left over from a previous
   retrain mis-weights every posterior step in the window.
+- **Evidence is banked until it is spent.** A day's exploration rarely
+  reaches the information increment on its own. The batch is therefore every
+  eligible outcome *not yet consumed by a revision*, so it accumulates across
+  days and the likelihood is always evaluated over the whole of it. Outcomes
+  are marked processed only when a revision actually commits — never when the
+  update declines to fire. (The earlier implementation marked them either
+  way, which banked a scalar and discarded the observations: the posterior
+  would later step on the strength of an information count it no longer had
+  the data to justify, and on a pilot small enough that no single day cleared
+  the threshold it would have destroyed every outcome while the mean never
+  moved.) `pipeline.update` reports `batch_oldest_outcome_age_days` so a batch
+  that keeps growing without firing is visible long before the 21-day
+  flat-posterior alert.
 - **Bounded steps, human-gated.** An update applies when accumulated
   effective information crosses a threshold; each step moves the mean at
   most 0.15 and shrinks the std at most 25% (floored), with any clipped
