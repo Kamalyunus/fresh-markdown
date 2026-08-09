@@ -39,6 +39,7 @@ step                                          writes                            
    production learning state)
 9. pipeline.shadow --input prepared           reports/shadow.json,                    prepared + all artifacts
                                               events_store_shadow/
+10. tools.make_charts                         reports/charts/*.png                    every report written above
 ```
 
 `scripts/run_bootstrap.sh <raw>` runs 1–6 in order. **It retrains the baseline
@@ -393,6 +394,25 @@ with `hours_remaining`.
 
 **Any figure measured before this change is void** — IL baseline, clearance,
 rho/deff, guardrail noise floors, replay IL. Re-run the full bootstrap.
+
+## Charts
+
+```bash
+python3 -m tools.make_charts        # -> reports/charts/*.png
+```
+
+One chart per component, every one generated from a report artifact — never
+hand-drawn, so a chart that disagrees with the pipeline cannot exist. Missing
+reports are skipped with a note rather than failing, so it is safe to run at
+any stage. `docs/design.md` embeds several of them by relative path, so
+**re-run this after any bootstrap or the document shows the previous run's
+pictures beside the current run's numbers.** Process diagrams (architecture,
+episode construction, gate sequence) are Mermaid inside the design doc and
+need no regeneration.
+
+`reports/` is gitignored, so the PNGs are build output, not tracked files.
+Anything that must survive — a chart in the deck — gets pasted in
+deliberately.
 
 ## Refreshing the numbers in the docs and deck
 

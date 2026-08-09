@@ -33,6 +33,8 @@ randomized exploration.
 | `pipeline/shadow.py` | §19 | Phase-1 harness: full decision path against live data, no prices applied; exit-gate report. |
 | `backtest/` | §17 | Fidelity gate, policy deltas, `Q(p*) − Q(p)` spread and `tau_initial` derivation. |
 | `tools/make_dummy_flc.py` | — | Synthetic FLC generator (legacy + randomized policies, known ground-truth elasticity). |
+| `tools/make_charts.py` | — | One diagnostic chart per component, generated from the report artifacts into `reports/charts/`. |
+| `tools/deck_numbers.py` | — | Every figure the design doc and deck quote, in one pasteable block, tagged with the slide that carries it. |
 
 ## Running the bootstrap (PRD §1a order)
 

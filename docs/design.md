@@ -524,6 +524,8 @@ should be said out loud before the pilot:
   between the threshold and the elasticity in use, so the distance left to
   travel is visible every run.
 
+![deepening threshold](../reports/charts/06_deepening_threshold.png)
+
 One reassurance about the evidence side, since enter-and-hold sounds like it
 should starve the learner. It does the opposite. `pipeline.update` accumulates
 `mu × (log price ratio)²` with the ratio taken against the **reference**
@@ -535,6 +537,32 @@ the reference would yield ≈ 0.001. The enter-and-hold regime is a
 high-information regime, not a desert; on the launch prior, moving the mean
 from 1.0 to 1.9 needs roughly 8,600 exploration outcomes. `shadow` reports
 the realised figure as `learning_yield_would_be` before any price is applied.
+
+```mermaid
+flowchart LR
+  subgraph FROZEN["FROZEN at launch"]
+    M["baseline mu_ref<br/>(price-blind)"]
+    R["dispersion r<br/>+ correlation rho"]
+    P["elasticity prior<br/>(bracket or fallback)"]
+  end
+  subgraph HOURLY["HOURLY decision path"]
+    V["validate state<br/>reject, never guess"] --> T["feasible tiers<br/>from cost floor"]
+    T --> D["exact DP<br/>Q(p) per tier"]
+    D --> X["exploit argmax<br/>or explore affordable"]
+    X --> E["decision event"]
+  end
+  subgraph DAILY["DAILY learning loop"]
+    O["outcome events"] --> L["censored NB likelihood<br/>exploration outcomes only"]
+    L --> DF["divide by deff"]
+    DF --> B["bounded step<br/>+ human gate"]
+    B --> PO["posterior epsilon"]
+  end
+  M --> D
+  R --> D
+  P --> PO
+  PO --> D
+  E --> O
+```
 
 The planner solves the finite-horizon problem exactly:
 
@@ -738,6 +766,8 @@ scrap penalty forward and made it discount harder than warranted; and scrap
 was read as zero, which mispriced the very trade-off it was optimising. Both
 now corrected.
 
+![IL and clearance, like-for-like](../reports/charts/05_policy_il_and_clearance.png)
+
 Two consequences are pre-committed here rather than improvised in the pilot:
 the exploit-only pilot reports clearance and scrap alongside IL from day one,
 and a scrap-guardrail breach driven by *this* mechanism is a business
@@ -842,6 +872,10 @@ where it belongs: the **elasticity bracket now fails everywhere** (section
 vanished** (section 5.7), the **A/B became cheap** (section 12), and the
 **scrap guardrail lost its yardstick** (section 12).
 
+![calibration gate by window](../reports/charts/03_calibration_gate.png)
+
+![weekly sold-ratio series](../reports/charts/04_weekly_fidelity.png)
+
 ## 9. Evaluation gates
 
 ### 9.1 Why gates instead of judgment
@@ -922,6 +956,21 @@ condition, not permission to apply prices in phase 1.
 
 ## 10. Launch plan
 
+```mermaid
+flowchart LR
+  A["phase 0<br/>measure"] --> B{"reassessment<br/>gates"}
+  B --> C["train + freeze<br/>artifacts"]
+  C --> D{"calibration gate<br/>level at anchor"}
+  D -- fail --> C2["fit level factors<br/>re-gate, no retrain"] --> D
+  D -- pass --> E{"prior acceptance<br/>gate"}
+  E --> F["shadow<br/>no prices applied"]
+  F --> G{"shadow gate<br/>completeness, cost floor"}
+  G -- pass --> H["exploit-only pilot"]
+  H --> I["learning pilot<br/>exploration on"]
+  I --> J["A/B"] --> K["scale"]
+```
+
+
 | Phase | What happens | Exit gate | Status |
 | --- | --- | --- | --- |
 | 0. Measurement | historical measurement, config populated | gates reviewed | **Done** |
@@ -959,6 +1008,10 @@ launch and honoured — no early reads.
 
 The second row is the case this design makes most likely, and it must not be
 resolved ad hoc by whoever reads the dashboard.
+
+![A/B duration vs detectable effect](../reports/charts/08_ab_duration.png)
+
+![guardrail noise floors](../reports/charts/09_guardrail_noise.png)
 
 ## 12. Open owner decisions — recommendations and tooling
 
@@ -1061,6 +1114,15 @@ count disagrees with its clock. Crossing midnight is a one-hour step like any
 other — which is the entire point. `episode_id` is now keyed by the window's
 first hour, not by a calendar date.
 
+```mermaid
+flowchart TD
+  S["rows for one SKU x FC,<br/>ordered by timestamp"] --> Q{"timestamp advances<br/>exactly 1 hour?"}
+  Q -- no --> N["NEW episode"]
+  Q -- yes --> C{"hours_remaining<br/>ticks down exactly 1?"}
+  C -- no --> N
+  C -- yes --> K["same episode<br/>(midnight is just another hour)"]
+```
+
 A precondition had to be enforced first. Two rows sharing a
 `(sku, fc, date, hour)` timestamp make two runs start at the same instant,
 which collides them into one `episode_id` and produces an "episode" whose
@@ -1139,6 +1201,8 @@ replenishment breaks the single-inventory-pool assumption the DP's state
 transition rests on, and the demand those extra units meet is not the demand
 the episode's price path was chosen for. The check runs after re-segmentation,
 because across a data gap the inventory jump would read as a restock.
+
+![episode endings](../reports/charts/02_episode_endings.png)
 
 ### An episode is not as long as its window
 
@@ -1235,6 +1299,14 @@ currently discarded as exploitation.
 
 ## Appendix A — operational quick reference
 
+Charts are generated from the reports, never drawn by hand — re-run
+`tools.make_charts` after a bootstrap and every picture in this document
+moves with the numbers. A chart that disagrees with the pipeline cannot
+exist. Beyond those embedded above, the run also produces the exploration
+threshold against the Q-spread (07), the learning-yield calendar floor (10),
+the shadow gate against its thresholds (11) and the elasticity bracket by
+category (12), all under `reports/charts/`.
+
 ```bash
 # bootstrap, in order (retrains the model — see AGENTS.md before iterating)
 scripts/run_bootstrap.sh data/flc_filtered.parquet
@@ -1252,6 +1324,9 @@ python3 -m pipeline.shadow --input data/prepared.parquet --out reports/shadow.js
 python3 -m pipeline.update             # monitor only
 python3 -m pipeline.update --apply     # human-gated bounded update
 python3 -m pipeline.monitor
+
+# regenerate every chart in this document from the current reports
+python3 -m tools.make_charts
 ```
 
 Artifacts are versioned and stamped on every decision event, so any decision

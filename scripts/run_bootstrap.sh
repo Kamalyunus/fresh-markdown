@@ -26,6 +26,11 @@ python3 -m bootstrap.estimate_prior --input data/prepared.parquet
 echo "== steps 4b/5: backtest -- calibration gate + tau_initial ======="
 python3 -m backtest --input data/prepared.parquet --out reports/backtest.json
 
+echo "== charts: tools.make_charts ===================================="
+# generated from the reports above, so the pictures can never disagree with
+# the numbers. Non-fatal: a missing report is skipped, not an error.
+python3 -m tools.make_charts || echo "  (charts skipped)"
+
 cat <<'EOF'
 
 Bootstrap complete. Before any price is applied (PRD sections 1a, 19):
