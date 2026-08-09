@@ -161,6 +161,30 @@ def test_config_strict_refuses_null_measured(tmp_path):
         load_config(strict=True)
 
 
+def test_guardrail_fires_only_after_persistence():
+    """The owner thresholds must actually be evaluated -- and must not fire on
+    a single day over, which is what the noise floor makes routine."""
+    from pipeline.monitor import evaluate_guardrail
+
+    block = {"basis": "control_arm", "latest": 0.30,
+             "by_day": {"2026-09-01": 0.05, "2026-09-02": 0.30}}
+
+    one_day = evaluate_guardrail(block, threshold=0.20, persistence_days=2)
+    assert not one_day["fired"] and one_day["consecutive_days_over"] == 1
+
+    block["by_day"]["2026-09-03"] = 0.25
+    two_days = evaluate_guardrail(block, threshold=0.20, persistence_days=2)
+    assert two_days["fired"] and two_days["consecutive_days_over"] == 2
+
+    # a day back under the threshold breaks the streak
+    block["by_day"]["2026-09-04"] = 0.01
+    assert not evaluate_guardrail(block, 0.20, 2)["fired"]
+
+    # a null threshold is blocked, never silently passing
+    blocked = evaluate_guardrail(block, None, 2)
+    assert not blocked["fired"] and "BLOCKED" in blocked["status"]
+
+
 def test_shadow_sample_size_defaults_to_config():
     """--max-episodes unset must read the config sample, not fall back to
     'every episode' -- the whole point is that a full sweep is too slow."""

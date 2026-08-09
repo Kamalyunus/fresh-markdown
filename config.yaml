@@ -194,18 +194,26 @@ monitoring:
     duplicate_or_unmatched_rate: 0.01  # SET
     price_mismatch_rate: 0.01          # SET
     exploration_cost_vs_budget: 2.0    # SET
+    persistence_days: 2                # SET  a deterioration stop condition
+      # fires only after this many CONSECUTIVE days over threshold. This is
+      # what lets a threshold sit just above its measured noise floor without
+      # false-firing: one day past a 3-sigma floor happens about once a year
+      # per guardrail, two in a row essentially never. Load-bearing, not
+      # decoration -- the scrap threshold clears its floor by ~6%.
     scrap_deterioration_pct: null      # SET BY OWNER -- blocks section 15.4.
       # Raw measured 3-sigma floor: 9.1386 -- these are RELATIVE deviations,
       # so that is 914%, not 9.14%. A few low-volume days dominate the daily
       # ratio series; no usable threshold sits above a floor larger than the
       # level itself. derive_thresholds now reports a MAD-based robust floor
-      # and flags the series as outlier-dominated. Recommended 0.20, PROVISIONAL
-      # until validated against the robust floor on a re-run.
+      # and flags the series as outlier-dominated. Robust floor MEASURED on
+      # production: 0.189. Recommended 0.20 -- it clears the robust floor by
+      # only ~6%, so persistence_days is what makes it safe, not headroom.
     margin_deterioration_pct: null     # SET BY OWNER -- blocks section 15.4.
-      # Measured 3-sigma daily noise floor: 0.1336 (13.36%) -- this one is
-      # well behaved. Recommended 0.15 with a 2-day persistence rule. Anything
-      # at or under ~0.13 sits INSIDE the noise band and will false-fire,
-      # silently suspending exploration.
+      # Measured 3-sigma daily noise floor: 0.1358 (13.58%) -- this one is
+      # well behaved. Recommended 0.15, which clears it by ~10%; the
+      # persistence rule covers the rest. Anything at or under ~0.135 sits
+      # INSIDE the noise band and will false-fire, silently suspending
+      # exploration.
   alert_posterior_std_flat_days: 21    # SET  learning-loop health
 
 ab_test:

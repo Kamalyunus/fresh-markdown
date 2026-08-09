@@ -58,6 +58,8 @@ def main():
     ap.add_argument("--thresholds", default="reports/thresholds.json")
     ap.add_argument("--rho", default="artifacts/rho.json",
                     help="authoritative rho/deff (fitted-residual basis)")
+    ap.add_argument("--prior", default="artifacts/prior.json",
+                    help="per-category elasticity prior acceptance")
     args = ap.parse_args()
 
     bt, sh = load(args.backtest), load(args.shadow)
@@ -160,6 +162,19 @@ def main():
             f"({g(r, 'blocks_measured')} blocks)"
             + ("  <-- meets target" if g(r, "meets_target") is True else ""),
             "15")
+
+    section("ELASTICITY PRIOR -- slides 4, 11, 12; design 8, 9.3")
+    # the deck claims "MEAT brackets cleanly, 14/16 fall back". That claim is
+    # only true of a specific run -- print the breakdown so it is checked
+    # rather than carried forward.
+    pj = load(args.prior)
+    per_cat = g(pj, "per_category", default={}) or {}
+    accepted = {c: v for c, v in per_cat.items()
+                if isinstance(v, dict) and v.get("source") == "bracket"}
+    row("categories with a prior", len(per_cat), "4, 11, 12")
+    row("bracket ACCEPTED", f"{len(accepted)} {sorted(accepted) or ''}", "4, 11, 12")
+    row("fell back to wide prior", len(per_cat) - len(accepted), "4, 11, 12")
+    row("global prior source", g(pj, "source", default=g(pj, "prior_source")))
 
     section("VERSIONS -- design appendix")
     for k, v in (g(bt, "artifact_versions", default={}) or {}).items():

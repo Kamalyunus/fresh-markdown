@@ -11,8 +11,8 @@ This system prices perishable FLC (fresh-limited-clearance) inventory through
 its final selling window, replacing a legacy policy that ramps discounts
 deterministically ~1 percentage point per hour on the clock. It minimises
 **Inventory Loss (IL)** — discount given away on units sold, plus scrap cost
-on units unsold at expiry — currently running at **~34.6% of full-price sales
-value** in the markdown cohort.
+on units unsold at expiry — currently running at **35.6% of full-price sales
+value** across the markdown cohort (356,114 episodes).
 
 The central technical fact shaping the design: **price elasticity cannot be
 estimated from our own history.** The legacy ramp makes price collinear with
@@ -694,6 +694,7 @@ the design — each caught by a gate or diagnostic doing its job:
 | DP vs legacy (like-for-like, same demand model) | **−12.0% IL**, at **−3.25pp clearance** — the IL win is partly bought with scrap (see below) |
 | Guardrail 3σ daily noise floors | realised margin **13.36%**; scrap **914%** — outlier-dominated, see section 12 |
 | Hourly MAE (gate window) | 0.4053 on the shipped calibrated artifact (0.373 uncalibrated — calibration trades per-hour error for aggregate level) |
+| Actual IL% (full cohort, 356,114 episodes) | **35.58%** |
 | Actual IL% (replay sample of 2,000 episodes) | 34.64% (IL ≈ ₩14.7M) |
 | Correlation `rho` / forced hours / implied deff | 0.3183 / 9.134 / **3.589** (was 4.07; fitted-residual basis, `artifacts/rho.json`) |
 | IL% clustered SE (full ~18-week window) | 0.002383 |
@@ -854,24 +855,37 @@ control arm (or trailing 28 days), as a ratio of sums. Scrap is ~7% of IL at
 exploration cannot move scrap anywhere near 20%, while the failure mode this
 guards against (price-holding miscalibration) breached the equivalent of
 this threshold 5–10× over in replay — caught in a day. The measured 3σ daily
-noise of the scrap series came back at **9.1386 — that is 914% relative, not
-9.14%**, because a handful of low-volume days dominate the ratio series. No
-usable threshold sits above a floor larger than the level itself, so that
-number cannot be the basis for the decision. The tool now reports a
+noise of the raw scrap series came back at **9.1386 — 914% relative**,
+because a handful of low-volume days dominate the ratio. No usable threshold
+sits above a floor larger than the level itself, so the tool now reports a
 MAD-based robust floor alongside the raw one and flags the series as
-outlier-dominated; **set 20% against the robust floor, and treat the
-recommendation as provisional until that re-run confirms it.**
+outlier-dominated. The **robust floor is 18.9%**, and that is the number the
+decision rests on: 20% clears it by roughly 6%, not the comfortable multiple
+scrap first appeared to offer. That is acceptable *only* because of the
+persistence rule — see below.
 
 **Margin-deterioration stop threshold — recommend 15% relative** vs control,
-with a 2-day persistence rule. Markdown-cohort margins are thin (cost ratio
-~0.66, mean discount ~31%) and the daily realised-margin series is
-correspondingly noisy: the measured 3σ daily noise is **13.36%**, an order of
-magnitude above scrap's. Any threshold at or below ~13% is *inside* the noise
-band and would false-fire on ordinary days — silently suspending exploration,
-which is the product. 15% clears the floor with a small margin; the
-persistence rule, not a tighter number, is what buys sensitivity back. If the
-owner wants a tighter trigger than 15%, it must be paired with a longer
-persistence window (3+ consecutive days), never adopted alone.
+with the same 2-day persistence rule. Markdown-cohort margins are thin (cost
+ratio ~0.66, mean discount ~31%) and the daily realised-margin series is
+correspondingly noisy: the measured 3σ daily noise is **13.58%**. Any
+threshold at or below ~13.5% is *inside* the noise band and would false-fire
+on ordinary days — silently suspending exploration, which is the product. 15%
+clears the floor by ~10%; the persistence rule, not a tighter number, is what
+buys sensitivity back. If the owner wants a tighter trigger than 15%, it must
+be paired with a longer persistence window (3+ consecutive days), never
+adopted alone.
+
+**Both thresholds sit close to their floors, which makes the persistence rule
+load-bearing rather than decorative.**
+`monitoring.stop_conditions.persistence_days` (default 2) means a condition
+fires only after that many *consecutive* days over threshold. A single day
+past a 3σ floor is expected roughly once a year per guardrail; two in a row
+essentially never. `pipeline.monitor` computes the daily scrap and
+realised-margin series on exactly the definitions the noise floors were
+measured on, compares treatment against the control arm (falling back to a
+trailing 28-day mean before the A/B), and reports the consecutive-day streak
+beside each verdict. Until this build the two thresholds had no evaluation
+path at all — setting them would have changed nothing.
 
 Calibration principle for both guardrails: a false fire is cheap (it
 suspends exploration only; pricing continues), but a threshold that fires

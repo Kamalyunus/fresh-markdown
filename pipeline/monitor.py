@@ -78,6 +78,129 @@ def business_metrics(decisions, outcomes, cfg):
     }
 
 
+def guardrail_series(decisions, outcomes, cfg):
+    """Daily scrap and realised-margin rates, and the relative deterioration
+    the section 15.4 stop conditions are written against.
+
+    Metric definitions match bootstrap.derive_thresholds._daily_series exactly
+    -- the noise floors the owner sets thresholds from are measured on those
+    definitions, so a monitor computing anything else would be grading against
+    the wrong yardstick.
+
+    Comparison basis is the control arm when both arms carry a day's data
+    (the A/B design), and the trailing guardrail_noise_window_days mean of the
+    same series otherwise (before the A/B, and for any day one arm is empty).
+    """
+    dec = {d["decision_id"]: d for d in decisions}
+    rows = []
+    for o in outcomes:
+        d = dec.get(o["decision_id"])
+        if not d or "timestamp" not in d:
+            continue
+        rows.append({
+            "date": pd.Timestamp(d["timestamp"]).date(),
+            "episode_id": d["episode_id"],
+            "arm": _arm(d["sku_id"], d["fc"], cfg["ab_test"]["allocation"]),
+            "hours_remaining": d["hours_remaining"],
+            "cost": d["cost"],
+            "start_inv": o["starting_inventory"],
+            "end_inv": o["ending_inventory"],
+            "sold": o["units_sold"],
+            "revenue": o["applied_price"] * o["units_sold"],
+            "margin": (o["applied_price"] - d["cost"]) * o["units_sold"],
+        })
+    if not rows:
+        return {"note": "no finalized outcomes with timestamps yet"}
+    df = pd.DataFrame(rows)
+
+    # episode grain first: scrap is an end-of-episode quantity, so summing
+    # hourly ending_inventory would count the same unsold unit every hour
+    ep = df.sort_values("hours_remaining", ascending=False).groupby(
+        "episode_id").agg(date=("date", "first"), arm=("arm", "first"),
+                          start_inv=("start_inv", "first"),
+                          end_inv=("end_inv", "last"),
+                          revenue=("revenue", "sum"),
+                          margin=("margin", "sum"))
+
+    def daily(frame):
+        day = frame.groupby("date").agg(
+            start_inv=("start_inv", "sum"), end_inv=("end_inv", "sum"),
+            revenue=("revenue", "sum"), margin=("margin", "sum")).sort_index()
+        return pd.DataFrame({
+            "scrap_rate": day.end_inv.clip(lower=0) / day.start_inv,
+            "margin_rate": day.margin / day.revenue.replace(0, np.nan),
+        })
+
+    overall = daily(ep)
+    by_arm = {arm: daily(g) for arm, g in ep.groupby("arm")}
+    window = cfg["monitoring"]["guardrail_noise_window_days"]
+
+    def deterioration(metric, worse_when_higher):
+        """Relative deterioration per day, positive = worse than baseline."""
+        treat = by_arm.get("treatment")
+        ctrl = by_arm.get("control")
+        if treat is not None and ctrl is not None:
+            t, c = treat[metric], ctrl[metric]
+            common = t.index.intersection(c.index)
+            t, c, basis = t.loc[common], c.loc[common], "control_arm"
+        else:
+            t = overall[metric]
+            c = t.rolling(window, min_periods=window).mean().shift(1)
+            basis = f"trailing_{window}d_mean"
+        rel = (t / c - 1) if worse_when_higher else (1 - t / c)
+        return rel.replace([np.inf, -np.inf], np.nan).dropna(), basis
+
+    out = {"days_observed": int(len(overall)),
+           "daily_scrap_rate": {str(k): round(float(v), 6)
+                                for k, v in overall.scrap_rate.items()},
+           "daily_margin_rate": {str(k): round(float(v), 6)
+                                 for k, v in overall.margin_rate.dropna().items()}}
+    for metric, worse_high, key in (("scrap_rate", True, "scrap"),
+                                    ("margin_rate", False, "margin")):
+        rel, basis = deterioration(metric, worse_high)
+        out[f"{key}_deterioration"] = {
+            "basis": basis,
+            "by_day": {str(k): round(float(v), 4) for k, v in rel.items()},
+            "latest": round(float(rel.iloc[-1]), 4) if len(rel) else None,
+        }
+    return out
+
+
+def evaluate_guardrail(block, threshold, persistence_days):
+    """A stop condition fires only after `persistence_days` CONSECUTIVE days
+    over threshold.
+
+    Persistence is how the design buys sensitivity without dipping below the
+    measured noise floor: a single day above a 3-sigma floor is expected
+    roughly once a year per guardrail, two in a row essentially never. It is
+    load-bearing, not decoration -- the scrap threshold sits ~6% above its
+    floor, so without this rule it would be a coin flip on the tail.
+    """
+    if threshold is None:
+        return {"fired": False, "status": "BLOCKED -- threshold is null (SET BY OWNER)"}
+    by_day = block.get("by_day") or {}
+    if not by_day:
+        return {"fired": False, "status": "no comparable days yet"}
+    days = sorted(by_day)
+    streak = 0
+    for day in reversed(days):
+        if by_day[day] > threshold:
+            streak += 1
+        else:
+            break
+    return {
+        "fired": streak >= persistence_days,
+        "consecutive_days_over": streak,
+        "persistence_days": persistence_days,
+        "threshold": threshold,
+        "latest": block.get("latest"),
+        "basis": block.get("basis"),
+        "status": (f"FIRED -- over {threshold} for {streak} consecutive days"
+                   if streak >= persistence_days else
+                   f"{streak}/{persistence_days} consecutive days over threshold"),
+    }
+
+
 def learning_metrics(decisions, posterior, cfg):
     cells = posterior.state["cells"]
     forced = [d for d in decisions if d["is_exploration"]]
@@ -150,7 +273,7 @@ def safety_metrics(store, decisions, outcomes):
     }
 
 
-def stop_conditions(safety, learning, business, cfg):
+def stop_conditions(safety, learning, business, guardrail, cfg):
     """Section 15.4. Suspension stops forced exploration only; exploitation
     pricing continues. Owner-null thresholds cannot fire and are reported as
     blocked."""
@@ -178,10 +301,18 @@ def stop_conditions(safety, learning, business, cfg):
     else:
         fired["exploration_cost_vs_budget"] = False
 
-    for key in ("scrap_deterioration_pct", "margin_deterioration_pct"):
-        if sc[key] is None:
-            fired[key] = f"BLOCKED -- {key} is null (SET BY OWNER)"
+    # the two owner thresholds, evaluated against the daily deterioration
+    # series with the persistence rule the design commits to
+    guardrails = {}
+    for key, block_key in (("scrap_deterioration_pct", "scrap_deterioration"),
+                           ("margin_deterioration_pct", "margin_deterioration")):
+        block = (guardrail or {}).get(block_key) or {}
+        result = evaluate_guardrail(block, sc[key], sc["persistence_days"])
+        guardrails[key] = result
+        fired[key] = result["fired"] if sc[key] is not None else result["status"]
+
     return {"fired": fired,
+            "guardrails": guardrails,
             "suspend_exploration": any(v is True for v in fired.values())}
 
 
@@ -203,12 +334,15 @@ def main():
         safety["realised_vs_predicted_sold_ratio"]
 
     business = business_metrics(decisions, outcomes, cfg)
+    guardrail = guardrail_series(decisions, outcomes, cfg)
     report = {
         "business": business,
+        "guardrails": guardrail,
         "learning": learning,
         "safety": safety,
     }
-    report["stop_conditions"] = stop_conditions(safety, learning, business, cfg)
+    report["stop_conditions"] = stop_conditions(
+        safety, learning, business, guardrail, cfg)
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as f:

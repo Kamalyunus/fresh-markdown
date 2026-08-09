@@ -202,6 +202,31 @@ def test_decision_loop_and_exactly_once_update(workspace):
     report2 = update_run(cfg, apply=True)
     assert not report2["cells"]
 
+    # the section 15.4 guardrails must be computed from these events, not
+    # merely declared in config: with both thresholds null they report BLOCKED,
+    # and once set they evaluate a real deterioration series
+    from pipeline.monitor import (guardrail_series, stop_conditions,
+                                  business_metrics, learning_metrics,
+                                  safety_metrics)
+    decisions, outcomes = events.load_decisions(), events.load_outcomes()
+    guard = guardrail_series(decisions, outcomes, cfg)
+    assert guard["days_observed"] >= 1
+    assert set(guard["scrap_deterioration"]) >= {"basis", "by_day", "latest"}
+
+    args = (safety_metrics(events, decisions, outcomes),
+            learning_metrics(decisions, store, cfg),
+            business_metrics(decisions, outcomes, cfg), guard)
+    blocked = stop_conditions(*args, cfg)
+    assert "BLOCKED" in blocked["fired"]["scrap_deterioration_pct"]
+    assert "BLOCKED" in blocked["fired"]["margin_deterioration_pct"]
+
+    cfg["monitoring"]["stop_conditions"]["scrap_deterioration_pct"] = 0.20
+    cfg["monitoring"]["stop_conditions"]["margin_deterioration_pct"] = 0.15
+    live = stop_conditions(*args, cfg)
+    for key in ("scrap_deterioration_pct", "margin_deterioration_pct"):
+        assert live["fired"][key] in (True, False)     # evaluated, not skipped
+        assert live["guardrails"][key]["threshold"] is not None
+
 
 def test_fit_calibration_cli(workspace):
     _chdir(workspace)
