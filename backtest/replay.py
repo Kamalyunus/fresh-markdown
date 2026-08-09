@@ -119,9 +119,25 @@ def fidelity(d, cfg, model, prior, r_lookup):
         str(w): round(float(g.units_sold.sum() / g.predicted_units.sum()), 4)
         for w, g in d.groupby(week) if g.predicted_units.sum() > 0}
     block["measurement_10"] = m10_fidelity_decomposition(gate_d, cfg)
+
+    # gate metric: the pooled ratio judges the model at actual prices (and so
+    # embeds the elasticity prior); level_at_anchor judges only the frozen
+    # artifact's own responsibility -- the level at reference price
+    metric = cfg["baseline_model"]["calibration_gate_metric"]
+    m10 = block["measurement_10"]
+    anchor_val = (m10.get("level_bias_at_anchor")
+                  if isinstance(m10, dict) else None)
+    if metric == "level_at_anchor" and anchor_val:
+        gate_value, gate_metric = anchor_val, "level_bias_at_anchor"
+    else:
+        gate_value, gate_metric = sold_ratio, "pooled_ratio"
+        if metric == "level_at_anchor":
+            gate_metric += " (no anchor rows -- fell back from level_at_anchor)"
     band = cfg["baseline_model"]["calibration_gate_band"]
     block["calibration_gate_band"] = band
-    block["calibration_gate"] = ("PASS" if band[0] <= sold_ratio <= band[1]
+    block["calibration_gate_metric"] = gate_metric
+    block["calibration_gate_value"] = gate_value
+    block["calibration_gate"] = ("PASS" if band[0] <= gate_value <= band[1]
                                  else "FAIL -- blocking (PRD section 9.3)")
     return block, d
 

@@ -173,7 +173,10 @@ backtest fidelity gate FAIL
 │  the gate band, the gate is measuring week-scale demand volatility, not
 │  model quality — no retrain or calibration can pass it. Escalate to the
 │  owner: longer gate window, wider band, or gating on
-│  level_bias_at_anchor instead of the pooled ratio.
+│  level_bias_at_anchor instead of the pooled ratio
+│  (baseline_model.calibration_gate_metric — the coherent choice when the
+│  anchor is in band but the pooled ratio is dominated by slope, since the
+│  pooled ratio then measures the unidentifiable prior, not the model).
 ├─ by_window shows train ≉ calib/test  → regime drift: consider later
 │  train_start, retrain, re-run (new comparison baseline)
 ├─ level_bias_at_anchor far from 1, flat slope

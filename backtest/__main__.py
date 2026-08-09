@@ -47,7 +47,9 @@ def main():
     with open(args.out, "w") as f:
         json.dump(out, f, indent=2, default=str)
 
-    print(f"fidelity_episode_sold_ratio : {fid['fidelity_episode_sold_ratio']}"
+    print(f"fidelity_episode_sold_ratio : {fid['fidelity_episode_sold_ratio']}")
+    print(f"gate ({fid['calibration_gate_metric']}) : "
+          f"{fid['calibration_gate_value']} vs {fid['calibration_gate_band']}"
           f"  -> {fid['calibration_gate']}")
     print(f"actual IL {pol['actual_il']:,.0f} (IL% {pol['actual_il_pct']})  "
           f"dp IL {pol['dp_il']:,.0f} (IL% {pol['dp_il_pct']})")
