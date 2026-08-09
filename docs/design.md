@@ -52,9 +52,12 @@ to answer it before any price is applied.
 ### 2.1 The problem
 
 Each perishable SKU at each fulfilment centre gets one final selling window —
-one **episode**: a (SKU, FC, date) run of contiguous selling hours, typically
-10:00–20:00, with small starting inventory (median ≈ 2 units). Each hour, a
-discount is chosen; whatever is unsold at window end is scrapped at cost.
+one **episode**: a run of contiguous selling hours for one SKU × FC, with
+small starting inventory (median ≈ 2 units). Windows are **not** a single
+trading day — they routinely run past midnight, and 36-hour windows are
+common, which is why an episode is keyed by the source's own window counter
+rather than by calendar date (section 12a). Each hour, a discount is chosen;
+whatever is unsold when the window closes is scrapped at cost.
 Price too shallow and scrap dominates; too deep and margin is given away on
 units that would have sold anyway. The legacy policy ignores demand entirely:
 enter at a fixed reference discount, deepen ~1pp/hour to a cap.
@@ -255,13 +258,32 @@ decision), so responsibility for every number is explicit.
 
 Applies the source-to-canonical column mapping exactly once, converts the
 discount column from percent to fraction exactly once, builds episodes as
-contiguous selling hours, and runs a fixed seven-step filter chain —
-(1) drop the known bad-data window, (2) drop null category/subcategory,
-(3) recover zero base prices by fill-within-episode and drop episodes with
-none, (4) drop episodes with negative remaining-window values, (5) drop
-episodes ever priced below cost, (6) drop episodes with units sold exceeding
-inventory, (7) preserve intraday restocks — emitting a row/episode waterfall
-after every step. **Why the paranoia:** the three source-schema traps all
+contiguous windows, and runs a fixed filter chain, emitting a row/episode
+waterfall after every step. **Almost every filter drops the whole episode
+rather than the offending row** — a hole punched mid-window re-segments into
+a spurious short episode, which loses more than the episode does.
+
+| Step | Drops |
+| --- | --- |
+| `duplicate_hour_rows_dropped` | both copies of any repeated (SKU, FC, hour) — no principled way to choose, and they collide two runs into one episode id |
+| `exclusion_window_removed` | any episode with *any* hour in the known bad-data window |
+| `discount_out_of_range_dropped` | discount outside [0,1] — the percent→fraction conversion applied twice or not at all |
+| `negative_quantities_dropped` | negative inventory, sales or cost |
+| `null_category_dropped` | no category/subcategory — no reference discount, no dispersion cell |
+| `zero_base_price_dropped` | `original_price` still absent after fill-within-episode |
+| `negative_window_dropped` | any `hours_remaining < 0` |
+| `window_too_long_dropped` | window above `data.max_window_hours` (48) — the counter carries very large values from upstream data issues |
+| `below_cost_dropped` | any hour whose **offered** price is under cost — tested on `original_price × (1 − discount)`, never `applied_price`, which the source zeroes on zero-sale rows |
+| `non_priceable_dropped` | `cost >= original_price`, so `d_max <= 0` and no tier is feasible |
+| `units_gt_inventory_dropped` | sales exceeding inventory on hand |
+| `contiguous_episodes_built` | *(not a filter)* re-segmentation — earlier drops can split a window, so episode count may RISE here |
+| `restocked_episodes_dropped` | an hour opening with more stock than the previous hour left behind |
+
+`contiguous_episodes_built` runs between the row-level and episode-level
+passes and is **not** a filter: episode count can *rise* there, because
+earlier drops split windows that were contiguous in the raw extract. The
+waterfall in `artifacts/split_manifest.json` records rows and episodes after
+every step, in this order. **Why the paranoia:** the three source-schema traps all
 fail *silently*. A missed percent conversion produces discounts of 25.0
 instead of 0.25 with no error anywhere downstream. The realised-price column
 is 0 on zero-sale rows — reconstructing offered price from it silently
@@ -778,6 +800,16 @@ the design — each caught by a gate or diagnostic doing its job:
 
 ## 8. Measured results (production data, 2026-08-09, feature-set v2)
 
+> **These figures predate the data-definition corrections in section 12a**
+> (episodes keyed by window rather than date, scrap taken from the true
+> leftover rather than the written-off `ending_inventory`, restocked episodes
+> dropped, the DP horizon taken from the window). Every episode-terminal
+> number below is expected to move on the next bootstrap — the IL baseline
+> upward, since scrap was previously read as zero, and `deff` upward, since
+> whole windows are longer and more correlated than the fragments they were
+> measured on. Refresh with `tools.deck_numbers` before quoting any of them.
+
+
 | Quantity | Value |
 | --- | --- |
 | Weekly sold-ratio series | every week > 1: range 1.06–1.54, mean ≈ 1.30, σ ≈ ±8% |
@@ -785,7 +817,7 @@ the design — each caught by a gate or diagnostic doing its job:
 | Calibration gate | **PASS** — `level_bias_at_anchor` 1.0395 inside the owner band [0.90, 1.10] (post-calibration fidelity 1.0055) |
 | Shadow gate | **PASS** — 66,484 decisions, completeness 1.0000, matched 1.0000, cost-floor violations 0, drift ratio 0.9745, solver p95 24ms |
 | DP vs legacy (like-for-like, same demand model) | **−12.0% IL**, at **−3.25pp clearance** — the IL win is partly bought with scrap (see below) |
-| Guardrail 3σ daily noise floors | realised margin **13.36%**; scrap **914%** — outlier-dominated, see section 12 |
+| Guardrail 3σ daily noise floors | realised margin **13.58%**; scrap raw 914% (outlier-dominated) → **robust 18.9%**, which is the figure the threshold is set against — see section 12 |
 | Hourly MAE (gate window) | 0.4053 on the shipped calibrated artifact (0.373 uncalibrated — calibration trades per-hour error for aggregate level) |
 | Actual IL% (full cohort, 356,114 episodes) | **35.58%** |
 | Actual IL% (replay sample of 2,000 episodes) | 34.64% (IL ≈ ₩14.7M) |

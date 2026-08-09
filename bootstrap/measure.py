@@ -155,7 +155,9 @@ def m5_censoring(d):
     d["censored"] = d.units_sold >= d.starting_inventory
     # end-of-episode inventory only. Checking .any() across all hours returns a
     # spurious 1.0 because inventory dips to zero transiently before restock.
-    last = d.sort_values("hour_of_day").groupby("episode_id").tail(1)
+    # Ordered by (date, hour): hour_of_day alone puts a 36-hour window's
+    # day-one evening AFTER its day-two morning and picks the wrong last row.
+    last = episodes.last_rows(d)
     # true leftover: ending_inventory is written off to zero on the last row
     ep_zero = episodes.leftover_units(last.starting_inventory,
                                       last.units_sold).le(0)
@@ -336,7 +338,8 @@ def m10_fidelity_decomposition(d, cfg, pred_col="predicted_units"):
 
 # ---------------------------------------------------------------------- reassess
 
-def gates(res):
+def gates(res, cfg):
+    g = cfg["reassessment_gates"]
     m1 = res["m1_cost_ratio"]["overall"]
     m2 = res["m2_same_hour_variation"]
     m6 = res["m6_il_pct"]
@@ -344,12 +347,14 @@ def gates(res):
         "gate_1_exploration_viable": {
             "share_non_explorable": m1["share_non_explorable"],
             "verdict": "REVIEW — narrow MVP scope to explorable subset"
-                       if m1["share_non_explorable"] > 0.30 else "PASS",
+                       if m1["share_non_explorable"]
+                       > g["max_share_non_explorable"] else "PASS",
         },
         "gate_2_bracket_estimable": {
             "share_cells_std_below_0.5pp": m2["share_cells_std_below_0.5pp"],
             "verdict": "REVIEW — set posterior.prior.source=fallback"
-                       if m2["share_cells_std_below_0.5pp"] > 0.50 else "PASS",
+                       if m2["share_cells_std_below_0.5pp"]
+                       > g["max_share_cells_low_variation"] else "PASS",
         },
         "gate_3_ab_powerable": {
             "il_pct_ratio_se_clustered": m6["il_pct_ratio_se_clustered"],
@@ -387,7 +392,7 @@ def run_all(d, cfg):
         "m9_controller_replay": "NOT RUN -- requires fitted baseline model (backtest)",
         "m10_fidelity_decomposition": m10_fidelity_decomposition(d, cfg),
     }
-    res["reassessment_gates"] = gates(res)
+    res["reassessment_gates"] = gates(res, cfg)
     res["config_values_measured"] = config_values(res)
     return res
 

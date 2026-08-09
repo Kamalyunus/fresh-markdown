@@ -86,6 +86,12 @@ def test_prepared_data_is_priceable_and_self_consistent(workspace):
     assert (d.original_price > 0).all()
     # every surviving episode has at least one feasible discount tier
     assert (d.cost < d.original_price).all() and (d.d_max > 0).all()
+    # and no surviving HOUR is priced under cost. The filter must test the
+    # offered price: applied_price is 0 on zero-sale rows (~78% of them), so
+    # a filter reading it is blind on exactly those, and the survivors reach
+    # the planner as an anchor no feasible tier can match.
+    assert (d.total_discount <= d.d_max + 1e-9).all()
+    assert (d.offered_price >= d.cost - 1e-9).all()
     assert d.category.notna().all() and d.subcategory.notna().all()
     assert (d.hours_remaining >= 0).all()
     assert (d.hours_remaining <= cfg["data"]["max_window_hours"]).all()

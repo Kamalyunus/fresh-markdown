@@ -97,12 +97,14 @@ python3 -m pipeline.monitor
    rejected, use the configured fallback and let production exploration learn
    elasticity — that is the system's entire premise.
 
-4. **The calibration gate is read on the calib+test window** (the
-   `fidelity.gate_window` field in the backtest report), because the level
-   factors are fit on the calibration window and correction/evaluation must
-   share a demand regime. The all-history ratio in `fidelity.by_window.all`
-   is diagnostic only; when demand level drifts between the training period
-   and launch, no static factor can (or should) fix it.
+4. **The gate window is whatever `baseline_model.calibration_gate_window`
+   says** — currently `test`; the run records it as `fidelity.gate_window`,
+   so read that field rather than assuming. The rule that matters is that it
+   must be **DISJOINT from `calibration_fit_window`** (currently
+   `train+calib`), or the gate grades its own fit. The all-history ratio in
+   `fidelity.by_window.all` is diagnostic only; when the demand level drifts
+   between the training period and launch, no static factor can (or should)
+   fix it.
 
 5a. **Everything that compares predictions to realised sales uses the
    CENSORED expectation `E[min(D, inventory)]`** — fidelity, the gate, and
@@ -268,11 +270,11 @@ which is worse than losing the episode.
 | `zero_base_price_dropped` | rows | `original_price` still null/zero after ffill+bfill within the episode |
 | `negative_window_dropped` | episode | any `hours_remaining < 0` |
 | `window_too_long_dropped` | episode | `hours_remaining` above `data.max_window_hours` (48) — flc_window carries very large values from upstream data issues |
-| `below_cost_dropped` | episode | any hour priced under cost — legacy already violated the floor, so the episode is not evidence about a system that cannot |
+| `below_cost_dropped` | episode | any hour whose OFFERED price is under cost — legacy already violated the floor, so the episode is not evidence about a system that cannot. Test `original_price × (1 − discount)`, NEVER `applied_price`: the source zeroes that on zero-sale rows (~78% of rows), so a filter reading it is blind on exactly those and below-cost hours survive to be rejected one-by-one at decision time |
 | `non_priceable_dropped` | episode | `cost >= original_price`, i.e. `d_max <= 0`: no feasible tier exists |
 | `units_gt_inventory_dropped` | episode | sales exceed the inventory on hand |
-| `restocked_episodes_dropped` | episode | an hour opens with more stock than the previous hour left — mid-window replenishment breaks the one-inventory-pool assumption the DP rests on. Runs AFTER re-segmentation; across a data gap the jump would read as a restock |
 | `contiguous_episodes_built` | — | re-segmentation, not a filter: episode count can RISE here because earlier drops split windows |
+| `restocked_episodes_dropped` | episode | an hour opens with more stock than the previous hour left — mid-window replenishment breaks the one-inventory-pool assumption the DP rests on. Runs AFTER re-segmentation; across a data gap the jump would read as a restock |
 
 Restocks are detected on the inventory CHAIN (`next starting_inventory >
 max(0, this starting_inventory - units_sold)`), never by comparing against

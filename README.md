@@ -14,8 +14,9 @@ randomized exploration.
 | --- | --- | --- |
 | `config.yaml` | §7 | Every tunable parameter. Single source of truth; no numeric literals in code. |
 | `common/config.py` | §7 | Loader; strict mode refuses to start on null MEASURED values. |
-| `bootstrap/prepare_data.py` | §9.1–9.2 | Schema mapping, filter chain, contiguous-hour episode construction, waterfall, split manifest. |
-| `bootstrap/measure.py` | §8, App. A | Phase-0 measurement suite (m1–m8, m10) and reassessment gates. |
+| `bootstrap/prepare_data.py` | §9.1–9.2 | Schema mapping, 12-step filter chain, window-keyed episode construction (not date-keyed — 36-hour windows are common), waterfall, split manifest. |
+| `common/episodes.py` | §9.2 | One definition of episode endings and true leftover: `ending_inventory` is written off to zero on an episode's last row, so scrap is `max(0, starting − sold)`. Also extends episodes to their full window so the DP horizon is not shortened by a realised sellout. |
+| `bootstrap/measure.py` | §8, App. A | Phase-0 measurement suite (m1–m8, m10, m11 episode endings) and reassessment gates. |
 | `bootstrap/train_baseline.py` | §9.3 | Frozen LightGBM/Tweedie `mu_ref`; price features overwritten to `d_ref` at inference; level-calibration factor fit. |
 | `bootstrap/fit_dispersion.py` | §9.4 | Frozen NB `r` by subcategory (censored MLE, fallback, clamp) and global `rho` vs fitted residuals. |
 | `bootstrap/estimate_prior.py` | §9.5 | Bracket procedure (naive vs hour-controlled) on entry rows over the full search bound, acceptance checks, fallback on rejection. |
@@ -46,10 +47,12 @@ retrains the baseline every time — to iterate on one step, run that step's
 module directly. Agents: read `AGENTS.md` before touching the pipeline.)
 
 1. **Calibration gate (blocking, §9.3)** — `reports/backtest.json` carries
-   `fidelity_episode_sold_ratio` (read on the **calib+test window**, the
-   launch-adjacent regime the level factors are fit on; per-window ratios in
-   `fidelity.by_window` expose demand-regime drift) and the measurement-10
-   level/slope decomposition. Only the *level* component may be corrected
+   `calibration_gate_value` and `calibration_gate`, read on the window named
+   by `baseline_model.calibration_gate_window` and echoed as
+   `fidelity.gate_window` — it must stay disjoint from
+   `calibration_fit_window` or the gate grades its own fit. Per-window ratios
+   in `fidelity.by_window` expose demand-regime drift, and measurement 10
+   gives the level/slope decomposition. Only the *level* component may be corrected
    multiplicatively; a slope deficit means the prior misstates elasticity and
    must be re-estimated, never papered over. To apply the level remedy:
 

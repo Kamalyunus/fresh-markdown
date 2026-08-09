@@ -165,7 +165,14 @@ def load_and_filter(path, cfg=None):
     d = d[~d.episode_id.isin(bad)]
     d = step(d, "window_too_long_dropped")
 
-    below = (d.applied_price > 0) & (d.applied_price < d.cost)
+    # Test the OFFERED price, not applied_price. The source sets
+    # applied_price to 0 on zero-sale rows -- ~78% of rows -- so a filter
+    # reading it is blind on exactly those, and deep-discount zero-sale hours
+    # priced under cost survive. They then reach the planner as an anchor no
+    # feasible tier can match, and every remaining hour of the episode is
+    # rejected at decision time instead of being excluded here.
+    offered = d.original_price * (1 - d.total_discount)
+    below = offered < d.cost - 1e-9
     bad = d.loc[below, "episode_id"].unique()
     d = d[~d.episode_id.isin(bad)]
     d = step(d, "below_cost_dropped")
@@ -201,6 +208,11 @@ def load_and_filter(path, cfg=None):
     d["d_max"] = 1.0 - d.cost / d.original_price
     d["offered_price"] = d.original_price * (1 - d.total_discount)
     d = add_ref_rate_features(d, cfg)
+    # Guarantee window order on the way out. Several consumers take .first()
+    # / .last() / .iloc[-1] per episode without re-sorting, and the feature
+    # merges above can reorder rows -- an episode read out of order picks the
+    # wrong opening inventory and the wrong final hour.
+    d = d.sort_values(["episode_id", "date", "hour_of_day"])
     return d.reset_index(drop=True), wf
 
 

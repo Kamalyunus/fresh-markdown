@@ -25,7 +25,12 @@ data:
     calib_end:   "2026-07-27"
     test_start:  "2026-07-28"
     test_end:    "2026-08-03"
-  episode_key: ["sku_id", "fc", "date"]
+  episode_key: ["sku_id", "fc", "window_start_hour"]   # SET  DESCRIPTIVE ONLY.
+    # An episode is a maximal run of consecutive hourly rows for one sku x fc
+    # over which flc_window (hours_remaining) ticks down exactly one per
+    # elapsed hour -- see prepare_data.assign_episode_ids, which is the
+    # authoritative definition. NOT keyed by calendar date: 36-hour windows
+    # are common and a date key splits one economic episode into three.
   max_window_hours: 48                 # SET  upper bound on a plausible FLC
     # window. flc_window carries occasional very large values from upstream
     # data issues; an episode claiming a window longer than this is not
@@ -34,6 +39,15 @@ data:
     # window before mu_ref prediction, so an unbounded counter would generate
     # unbounded synthetic rows. extend_to_window raises rather than hanging if
     # a frame ever reaches it above this bound.
+
+reassessment_gates:                    # SET  section 8.1 phase-0 review gates
+  max_share_non_explorable: 0.30       # above this, narrow the MVP to the
+    # explorable subset -- too many episodes have a cost floor so tight that
+    # fewer than min_feasible_tiers discounts exist, so exploration cannot buy
+    # evidence there at any price
+  max_share_cells_low_variation: 0.50  # above this, the bracket is not
+    # estimable and posterior.prior.source must fall back: too few
+    # (category, hour) cells carry same-hour price variation to identify from
 
 baseline_model:
   objective: "tweedie"                 # SET
@@ -137,7 +151,10 @@ dispersion:
   mean_forced_hours_per_episode: 9.134 # MEASURED  ditto -> deff = 3.589
 
 posterior:
-  cell_level: "category"               # SET  MVP learns at category only
+  cell_level: "category"               # SET  DESCRIPTIVE ONLY in the MVP.
+    # The cell map is frozen into artifacts/posterior.json by
+    # bootstrap.init_posterior and read from there at runtime; changing this
+    # string alone has no effect. Subcategory cells are phase 2 (section 14).
   min_episodes_per_week_for_cell: 250  # SET  below this -> read the global cell
   epsilon_min: -4.00                   # SET  grid bound
   epsilon_max: -0.05                   # SET  sign constraint
