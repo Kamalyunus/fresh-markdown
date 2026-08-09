@@ -69,7 +69,17 @@ baseline_model:
   calibration_fit_trailing_weeks: 2    # SET BY OWNER 2026-08-09  weeks used by
     # the "trailing" fit window: recent enough to track a moving demand level,
     # long enough for stable anchor-row counts.
-  calibration_fit_window: "trailing"   # SET  "trailing" | "calib" |
+  calibration_gate_window: "test"      # SET  "test" | "calib+test". Must be
+    # DISJOINT from the fit window, or the gate grades its own fit. With
+    # fit_window "calib" the pairing is the split's intended design: train ->
+    # calib (fit factors, out-of-sample) -> test (gate, out-of-sample and
+    # later still), which is exactly production's fit-on-trailing,
+    # apply-forward protocol. Note a one-week test window carries the full
+    # weekly demand noise; widen test_end when the extract allows.
+  calibration_fit_window: "calib"      # SET BY OWNER 2026-08-09: the calib
+    # window IS the trailing 2 weeks -- recent enough to track a moving level,
+    # out-of-sample, and immediately before the gate.
+    # "trailing" | "calib" |
     # "train+calib" | "all". "trailing" = the last
     # calibration_fit_trailing_weeks of data ENDING WHERE THE GATE WINDOW
     # BEGINS -- fit and evaluation never overlap, so the gate cannot grade

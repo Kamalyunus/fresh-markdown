@@ -260,10 +260,11 @@ def fidelity(d, cfg, model, prior, r_lookup):
     """
     d = _attach_predictions(d, cfg, model, prior, r_lookup)
     splits = split_frames(d, cfg)
-    gate_d = pd.concat([splits["calib"], splits["test"]])
-    gate_window = "calib+test"
+    gate_window = cfg["baseline_model"]["calibration_gate_window"]
+    gate_d = (splits["test"] if gate_window == "test"
+              else pd.concat([splits["calib"], splits["test"]]))
     if not len(gate_d) or gate_d.predicted_units.sum() <= 0:
-        gate_d, gate_window = d, "all (calib/test windows empty)"
+        gate_d, gate_window = d, "all (configured gate window empty)"
 
     block = _fidelity_metrics(gate_d, cfg)
     sold_ratio = block["fidelity_episode_sold_ratio"]

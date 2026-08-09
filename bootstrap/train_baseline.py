@@ -180,10 +180,26 @@ def fit_level_calibration(d, cfg):
         calib = pd.concat([splits["train"], splits["calib"]])
     elif fit_window == "all":
         calib = d.copy()
+    elif fit_window == "trailing":
+        # the last N weeks ENDING WHERE THE GATE WINDOW BEGINS: recent enough
+        # to track a moving level, and disjoint from what the gate evaluates
+        # so a fit can never grade itself
+        weeks = cfg["baseline_model"]["calibration_fit_trailing_weeks"]
+        gate_start = pd.Timestamp(cfg["data"]["split"]["calib_start"])
+        lo = gate_start - pd.Timedelta(weeks=weeks)
+        dates = pd.to_datetime(d.date)
+        calib = d[(dates >= lo) & (dates < gate_start)].copy()
     else:
         raise ValueError(f"unknown calibration_fit_window: {fit_window}")
     if not len(calib):
         raise RuntimeError("calibration fit window contains no rows")
+
+    # a trailing window can land inside the training period, where the model
+    # fits by construction and the factor understates the correction the
+    # launch-adjacent weeks need -- surface it rather than hide it
+    fit_dates = pd.to_datetime(calib.date)
+    train_end = pd.Timestamp(cfg["data"]["split"]["train_end"])
+    in_sample_share = float((fit_dates <= train_end).mean())
     tier_step = cfg["pricing"]["tier_step"]
 
     # predict without any existing calibration applied
@@ -213,6 +229,10 @@ def fit_level_calibration(d, cfg):
         json.dump({"factor_by_category": factors,
                    "detail_by_category": detail,
                    "fit_window": fit_window,
+                   "fit_window_dates": [str(fit_dates.min().date()),
+                                        str(fit_dates.max().date())],
+                   "fit_rows": int(len(calib)),
+                   "fit_in_sample_share": round(in_sample_share, 4),
                    "split": cfg["data"]["split"],
                    "basis": "anchor rows only; categories below "
                             "calibration_min_anchor_rows left at 1.0"},
@@ -241,6 +261,17 @@ def main():
             info = detail[cat]
             print(f"  {cat:24s} {factor:.4f}  "
                   f"({info['basis']}, {info['anchor_rows']:,} anchor rows)")
+        with open(cfg["baseline_model"]["calibration_factor_path"]) as f:
+            meta = json.load(f)
+        print(f"fit window: {meta['fit_window']} "
+              f"{meta['fit_window_dates'][0]}..{meta['fit_window_dates'][1]} "
+              f"({meta['fit_rows']:,} rows)")
+        if meta["fit_in_sample_share"] > 0.5:
+            print(f"WARNING: {meta['fit_in_sample_share']:.0%} of the fit "
+                  "window is inside the training period -- the model fits "
+                  "there by construction, so the factor will understate what "
+                  "the launch-adjacent weeks need. Move the split so the "
+                  "trailing window sits after train_end.")
         uncorrected = [c for c, v in detail.items() if v["basis"] == "uncorrected"]
         if uncorrected:
             print(f"left uncorrected (below "
