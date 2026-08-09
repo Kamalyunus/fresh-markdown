@@ -39,15 +39,15 @@ def _validate_outcome(evt):
                       == evt["starting_inventory"] - evt["units_sold"])
         if not reconciles and not evt.get("adjustment_reason"):
             # Two breaks are legitimate and MUST be named by the producer:
-            # "intraday_restock" (stock added) and "window_close_write_off"
-            # (the source zeroes ending_inventory when the window closes,
-            # ~49.5% of episodes). An integration that omits the write-off
-            # reason quarantines roughly half its final-hour outcomes and
-            # fails the event-completeness gate for a reason that looks like
-            # a pipeline defect.
+            # "intraday_restock" (stock added) and "episode_close_write_off"
+            # (the source zeroes ending_inventory on an episode's FINAL row,
+            # writing off whatever remains -- ~49.5% of episodes). An
+            # integration that omits the write-off reason quarantines roughly
+            # half its final-hour outcomes and fails the event-completeness
+            # gate for what looks like a pipeline defect.
             problems.append("ending_inventory does not reconcile and no "
                             "adjustment_reason documented (expected "
-                            "'intraday_restock' or 'window_close_write_off')")
+                            "'intraday_restock' or 'episode_close_write_off')")
     price = evt.get("applied_price")
     if not isinstance(price, (int, float)) or price != price:
         problems.append("applied_price must be finite")

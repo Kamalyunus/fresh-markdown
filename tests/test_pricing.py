@@ -421,9 +421,31 @@ def test_write_off_outcome_is_documented_not_quarantined():
     assert _validate_outcome(base), "must not pass undocumented"
 
     assert not _validate_outcome({**base,
-                                  "adjustment_reason": "window_close_write_off"})
+                                  "adjustment_reason": "episode_close_write_off"})
     assert not _validate_outcome({**base, "ending_inventory": 5,
                                   "adjustment_reason": "intraday_restock"})
 
     # a clean reconciliation needs no reason at all
     assert not _validate_outcome({**base, "ending_inventory": 1})
+
+
+def test_adjustment_reason_names_every_legitimate_break():
+    """Anything legitimate but unnamed quarantines, and a quarantined outcome
+    never lands -- so a naming gap shows up as failed event completeness, not
+    as a labelling bug."""
+    from pipeline.shadow import adjustment_reason as why
+
+    # window ran out with stock left: written off at episode close
+    assert why(4, 3, 0, True) == "episode_close_write_off"
+    # TRUNCATED -- closes with stock left and window time to spare. Same
+    # write-off; keying this to hours_remaining == 0 left it quarantining.
+    assert why(9, 4, 0, True) == "episode_close_write_off"
+    # clean sellout reconciles on its own, no reason needed
+    assert why(3, 3, 0, True) is None
+    # stock added mid-episode
+    assert why(5, 1, 8, False) == "intraday_restock"
+    # ordinary mid-episode hour that reconciles
+    assert why(5, 1, 4, False) is None
+    # shortfall part-way through is unexplained loss: must stay unnamed so it
+    # quarantines rather than being absorbed
+    assert why(5, 1, 2, False) is None

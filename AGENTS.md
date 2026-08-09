@@ -285,13 +285,19 @@ quarantined** — and a quarantined outcome never lands, so event completeness
 drops and the shadow gate fails. Exactly two reasons are legitimate:
 
 - `intraday_restock` — `ending_inventory > max(0, starting - sold)`
-- `window_close_write_off` — `ending_inventory < leftover` **at the window
-  close** (`hours_remaining == 0`). This is ~49.5% of episodes. An
-  integration that omits it quarantines roughly half its final-hour outcomes
-  and fails the gate for what looks like a pipeline defect.
+- `episode_close_write_off` — `ending_inventory < leftover` on the episode's
+  **final observed row**. This is ~49.5% of episodes. An integration that
+  omits it quarantines roughly half its final-hour outcomes and fails the
+  gate for what looks like a pipeline defect.
 
-`ending_inventory < leftover` MID-window is unexplained shrinkage and is left
-undocumented on purpose, so it quarantines. Do not add a blanket reason to
+Key the write-off to the LAST OBSERVED HOUR, not to `hours_remaining == 0`.
+The source writes off when the EPISODE closes, and a sold-out-early or
+truncated episode closes before its window does — gating on the window
+counter leaves those quarantining. `pipeline.shadow.adjustment_reason` is the
+one implementation; production integrations should use the same rule.
+
+`ending_inventory < leftover` PART-WAY THROUGH an episode is unexplained
+inventory loss and is left undocumented on purpose, so it quarantines. Do not add a blanket reason to
 make the count go to zero — the quarantine file is the only place that
 failure is visible.
 
