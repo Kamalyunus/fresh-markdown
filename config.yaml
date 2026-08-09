@@ -142,13 +142,13 @@ dispersion:
   r_search_bounds: [0.05, 50.0]        # SET  MLE search range for r
   r_lookup_path: "artifacts/r_lookup.json"
   rho_path: "artifacts/rho.json"
-  rho: 0.3183                          # MEASURED  bootstrap.fit_dispersion,
+  rho: 0.3103                          # MEASURED  bootstrap.fit_dispersion,
     # against FITTED mu_ref residuals -- NOT phase 0's m3, which is a
     # category x hour proxy computed before any model exists and disclaims
     # itself. Must equal artifacts/rho.json; strict mode refuses to start on
     # divergence, because these two values set deff and deff deflates every
     # posterior update. Re-paste after every retrain.
-  mean_forced_hours_per_episode: 9.134 # MEASURED  ditto -> deff = 3.589
+  mean_forced_hours_per_episode: 8.563 # MEASURED  ditto -> deff = 3.347
 
 posterior:
   cell_level: "category"               # SET  DESCRIPTIVE ONLY in the MVP.
@@ -258,14 +258,20 @@ monitoring:
       # ratio series; no usable threshold sits above a floor larger than the
       # level itself. derive_thresholds now reports a MAD-based robust floor
       # and flags the series as outlier-dominated. Robust floor MEASURED on
-      # production: 0.189. Recommended 0.20 -- it clears the robust floor by
-      # only ~6%, so persistence_days is what makes it safe, not headroom.
+      # production: 1.5282 -- that is 153% RELATIVE, still above 1.0, so the
+      # daily scrap rate swings by more than its own level and NO threshold
+      # on this basis is both safe and useful. See design section 12: the
+      # trailing-mean basis is the wrong yardstick for this series; the
+      # control-arm basis (same-day, cancels the day effect) is what the
+      # monitor actually uses once the A/B is live, and is measured
+      # separately as scrap_rate_control_arm_basis.
     margin_deterioration_pct: null     # SET BY OWNER -- blocks section 15.4.
-      # Measured 3-sigma daily noise floor: 0.1358 (13.58%) -- this one is
-      # well behaved. Recommended 0.15, which clears it by ~10%; the
-      # persistence rule covers the rest. Anything at or under ~0.135 sits
-      # INSIDE the noise band and will false-fire, silently suspending
-      # exploration.
+      # Measured 3-sigma daily noise floor: 0.1363 (13.63%), robust 0.1494,
+      # NOT outlier-dominated -- this one is well behaved. Recommended 0.15,
+      # which clears the raw floor by ~10% but sits just UNDER the robust
+      # 0.1494; the 2-day persistence rule is what covers that gap. Anything
+      # at or under ~0.136 sits inside the noise band and will false-fire,
+      # silently suspending exploration.
   alert_posterior_std_flat_days: 21    # SET  learning-loop health
 
 ab_test:
@@ -277,7 +283,7 @@ ab_test:
   candidate_durations_weeks: [2, 3, 4, 5, 6, 8, 10, 12]  # SET  windows tested
   min_episodes_per_block: 100          # SET  blocks below this are skipped
   min_detectable_effect_pct: null      # SET BY OWNER  relative on IL%
-  il_pct_ratio_se_clustered: 0.002383  # MEASURED  phase 0; 84,792 SKU x FC
+  il_pct_ratio_se_clustered: 0.000875  # MEASURED  phase 0; 84,792 SKU x FC
     # units. 6x the 0.000383 originally assumed -- that figure was a
     # pre-measurement placeholder and sat here mislabelled as MEASURED.
     # Not consumed for power: derive_thresholds re-measures the SE on actual

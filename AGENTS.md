@@ -246,11 +246,26 @@ category × hour proxy computed before any model exists and says so in its
 own `note`.
 
 For the two guardrail thresholds, `bootstrap.derive_thresholds` measures the
-3σ daily noise floor and stamps `TOO TIGHT` on anything set below it — that
-verdict is blocking, not advisory. Measured on production data: scrap 0.0914,
-realised margin 0.1336. A margin threshold under ~0.13 fires on ordinary days
-and silently suspends exploration, which is the product. Buy sensitivity back
-with a persistence rule, never by going under the floor.
+noise floor and stamps `TOO TIGHT` on anything set below it — that verdict is
+blocking, not advisory.
+
+**Read the floor on the basis the monitor actually compares against.** The
+report carries two:
+
+- `guardrail_noise` — each day vs a **trailing 28-day mean**. Applies only
+  before an A/B is running. Measured on production: margin 3σ 0.1363 (robust
+  0.1494, well behaved); scrap 3σ **4.7962 raw / 1.5282 robust**, flagged
+  `outlier_dominated`. A floor above 1.0 means the series swings by more than
+  its own level — **no scrap threshold on this basis is both safe and
+  useful**, and quoting one is a mistake.
+- `guardrail_noise_control_arm_basis` — **same-day treatment vs control**,
+  using the identical arm hash as `pipeline.monitor`. This is what the
+  monitor uses once both arms are populated, and it cancels the day effect
+  that dominates the scrap series. Set the A/B-phase thresholds from here.
+
+A margin threshold under ~0.136 fires on ordinary days and silently suspends
+exploration, which is the product. Buy sensitivity back with
+`persistence_days`, never by going under the floor.
 
 ## What counts as a usable episode
 

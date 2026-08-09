@@ -1,6 +1,6 @@
 # Perishable Markdown MVP — System Design
 
-**Status:** Implemented; validated on production FLC data; calibration and shadow gates PASSED (2026-08-09)
+**Status:** Implemented; validated on production FLC data after the section 12a data-definition corrections; calibration and shadow gates PASSED (model `baseline-20260809120225`)
 **Audience:** Technical leadership review — this document is self-contained and requires no companion reading
 
 ---
@@ -11,8 +11,8 @@ This system prices perishable FLC (fresh-limited-clearance) inventory through
 its final selling window, replacing a legacy policy that ramps discounts
 deterministically ~1 percentage point per hour on the clock. It minimises
 **Inventory Loss (IL)** — discount given away on units sold, plus scrap cost
-on units unsold at expiry — currently running at **35.6% of full-price sales
-value** across the markdown cohort (356,114 episodes).
+on units unsold at expiry — running at **32.3% of full-price sales value**
+on the replay sample of 2,000 episodes.
 
 The central technical fact shaping the design: **price elasticity cannot be
 estimated from our own history.** The legacy ramp makes price collinear with
@@ -31,12 +31,14 @@ and the calibration process surfaced a measured fact about the business:
 weekly demand levels swing ±8% around a persistent baseline deficit, so the
 fidelity gate band was reset by the owner to [0.90, 1.10] (~2σ of the
 measured 3-week noise) with the daily drift ratio as the continuous guard.
-The calibrated model clears that gate (`level_bias_at_anchor` 1.0395), and
-the shadow phase has since run to completion on live data with no prices
-applied — 66,484 decisions, perfect event completeness, zero cost-floor
-violations. Two stop-condition thresholds and the A/B minimum detectable
-effect (section 12) remain open owner decisions; they are the only things
-between here and the exploit-only pilot.
+The calibrated model clears that gate (`level_bias_at_anchor` **1.0389**),
+and the shadow phase has run to completion on live data with no prices
+applied — 12,771 decisions, event completeness 0.9974, zero cost-floor
+violations. Under the same demand model the planner shows **38.0% less
+Inventory Loss** than the legacy ramp for **0.97pp** of clearance. Two
+stop-condition thresholds and the A/B minimum detectable effect (section 12)
+remain open owner decisions; they are the only things between here and the
+exploit-only pilot.
 
 The honest risk summary: the *safety* engineering is strong (a below-cost or
 rising price is structurally impossible, not merely checked for; every gate
@@ -142,9 +144,11 @@ which we observed directly: all sixteen categories initially pinned at the
 zero-side boundary of the search grid. The fix is to identify only from
 **entry-hour variation across episodes** (different episodes start at
 different hours and are truncated differently by the cost floor), never from
-adjacent hours within an episode. After that fix, one high-volume category
-(MEAT) produced a well-behaved interior estimate — evidence the mechanism,
-not the data, was the problem.
+adjacent hours within an episode. After that fix the boundary pinning
+stopped — the estimates moved into the interior, evidence the mechanism and
+not the data was the problem. They still do not survive the acceptance
+checks: on the corrected extract **no category brackets cleanly** (section
+9.3), so every cell launches on the wide fallback prior.
 
 ### 3.3 How the design responds
 
@@ -500,12 +504,12 @@ closed form. Ignoring censoring, one hour of IL is
 
 The first term of the derivative is the cost of discounting units that would
 have sold anyway; it dominates until demand responds hard enough to outrun
-it. At the measured cost ratio (~0.66) that bar is **|ε| ≈ 1.7–1.9**, and
+it. On the corrected extract the **measured median bar is |ε| = 2.429**, and
 censoring at a median starting inventory of 2 pushes the true switch point
 higher still. **Against the launch prior of −1.0, the DP is therefore
 structurally an enter-and-hold policy**: on the synthetic harness the median
-threshold is 1.89 against |ε| = 1.0 in use, and the DP deepens intra-episode
-in 0% of episodes. This is not a defect — if demand really is that
+threshold is 2.429 against |ε| = 1.0 in use, and the DP deepens
+intra-episode in 0% of episodes — 0% of them clear the bar. This is not a defect — if demand really is that
 inelastic, holding price *is* the IL-minimising action, and the replay's
 −12.0% IL comes precisely from refusing to ramp. But it means three things
 should be said out loud before the pilot:
@@ -572,7 +576,7 @@ IL cost of a perturbation both scale as `mu × (log price ratio)²`, so
 **information per won is approximately constant** — there is no clever
 targeting to do, only a budget to respect. High-volume SKUs automatically
 receive small perturbations because their loss curve is steeper. Measured
-starting point on production data: `tau` = ₩203.09 (the 22.7th percentile of
+starting point on production data: `tau` = ₩409.87 (the 11.4th percentile of
 the Q-value spread), implying ₩1,271/day of exploration spend against a
 ₩1,271/day budget on the replay sample.
 
@@ -633,8 +637,8 @@ normalises, and takes moments. Mechanics and rationale:
   pool, a demand shock, and a monotone price path; summed as independent
   they overstate evidence and declare convergence early. Accumulated
   information is divided by `deff = 1 + (forced_hours − 1) × rho` — measured
-  at `1 + 8.134 × 0.3183 ≈ 3.59`. Without this one line, the system would
-  report convergence three-and-a-half times too early. Both inputs are
+  at `1 + 7.563 × 0.3103 ≈ 3.35`. Without this one line, the system would
+  report convergence three-and-a-third times too early. Both inputs are
   fitted against the model's own residuals and frozen in
   `artifacts/rho.json`; strict start-up refuses to run when `config.yaml`
   disagrees with that artifact, because a paste left over from a previous
@@ -719,20 +723,27 @@ made this concrete: a 9.4% simulated improvement on a model selling 24%
 light).
 
 **The replay's headline result comes with a caveat that must travel with
-it.** The DP arm shows 12.0% less IL than the legacy arm, but also **3.25pp
-less clearance** — it holds price where the legacy ramp would have cut, sells
-fewer units, and scraps more. That is a coherent trade (discount saved
-exceeds scrap added, which is exactly what minimising absolute IL is supposed
-to find), and it is the *same* trade the scrap-deterioration guardrail exists
-to police. A 3.25pp clearance loss on a ~91% base is roughly a third more
-unsold units in relative terms — comfortably enough to trip a 20% scrap
-guardrail if it reproduces in production. Two consequences, both
-pre-committed here rather than improvised in the pilot: the exploit-only
-pilot reports clearance and scrap alongside IL from day one, and a scrap
-guardrail breach driven by *this* mechanism is a business decision about the
-IL/clearance trade-off, not a system fault to be debugged. Whether the
-trade survives contact with real demand is an A/B question; replay cannot
-settle it, for the reason just given. Finally, a derivation tool anchors even the *business* thresholds
+it.** The DP arm shows **38.0% less IL** than the legacy arm, and it gets
+there by opening far shallower — mean discount 0.1285 against legacy's 0.2935
+— and holding. The cost is **0.97pp of clearance** (77.58% → 77.61% under the
+model, +9.5% scrap cost), so the trade is real but small: the DP gives up
+about a twentieth of the unsold-unit base to save nearly two fifths of the
+loss.
+
+That is a materially better trade than the pre-correction run showed
+(−12.0% IL at −3.25pp clearance), and the reason is instructive rather than
+lucky. Before the section 12a fixes the planner was handed a horizon
+shortened by each episode's own realised sellout, which pulled the terminal
+scrap penalty forward and made it discount harder than warranted; and scrap
+was read as zero, which mispriced the very trade-off it was optimising. Both
+now corrected.
+
+Two consequences are pre-committed here rather than improvised in the pilot:
+the exploit-only pilot reports clearance and scrap alongside IL from day one,
+and a scrap-guardrail breach driven by *this* mechanism is a business
+decision about the IL/clearance trade-off, not a system fault to be debugged.
+Whether the trade survives contact with real demand is an A/B question;
+replay cannot settle it, for the reason just given. Finally, a derivation tool anchors even the *business* thresholds
 to measurement: it computes A/B power empirically on actual candidate-
 duration blocks of history, and the daily noise floors of the scrap and
 margin series — so the last three judgment calls in the system are made
@@ -779,11 +790,12 @@ the design — each caught by a gate or diagnostic doing its job:
    by construction; under-fed categories stay uncorrected rather than
    contaminated.
 3. **The survivorship confound** (section 3.2). **Change:** entry-rows-only
-   identification; one category now brackets cleanly, the rest fall back
+   identification; the boundary pinning stopped, though on the corrected
+   extract no category clears the acceptance checks and all 16 fall back
    honestly.
 4. **Per-SKU velocity features** (section 5.4). Adding them improved per-row
    accuracy (hourly MAE 0.405 → 0.373) and cut residual intra-episode
-   correlation (deff 4.07 → 3.589, ~13% more information per exploration
+   correlation (deff 4.07 → 3.347, ~18% more information per exploration
    outcome) — while exposing that Tweedie's objective is not sum-calibrated,
    leaving a persistent aggregate level deficit for the calibration factor
    to absorb.
@@ -798,33 +810,37 @@ the design — each caught by a gate or diagnostic doing its job:
    3-week pooled noise; the original ±5% band was ~1σ — a coin flip on
    natural volatility).
 
-## 8. Measured results (production data, 2026-08-09, feature-set v2)
+## 8. Measured results (production data, model `baseline-20260809120225`)
 
-> **These figures predate the data-definition corrections in section 12a**
-> (episodes keyed by window rather than date, scrap taken from the true
-> leftover rather than the written-off `ending_inventory`, restocked episodes
-> dropped, the DP horizon taken from the window). Every episode-terminal
-> number below is expected to move on the next bootstrap — the IL baseline
-> upward, since scrap was previously read as zero, and `deff` upward, since
-> whole windows are longer and more correlated than the fragments they were
-> measured on. Refresh with `tools.deck_numbers` before quoting any of them.
-
+Measured after the data-definition corrections in section 12a. Every
+episode-terminal figure below differs from the pre-correction run, in the
+direction those corrections predicted.
 
 | Quantity | Value |
 | --- | --- |
-| Weekly sold-ratio series | every week > 1: range 1.06–1.54, mean ≈ 1.30, σ ≈ ±8% |
-| Sold ratio by window (uncalibrated) | train 1.295 / calib 1.117 / test 1.312 |
-| Calibration gate | **PASS** — `level_bias_at_anchor` 1.0395 inside the owner band [0.90, 1.10] (post-calibration fidelity 1.0055) |
-| Shadow gate | **PASS** — 66,484 decisions, completeness 1.0000, matched 1.0000, cost-floor violations 0, drift ratio 0.9745, solver p95 24ms |
-| DP vs legacy (like-for-like, same demand model) | **−12.0% IL**, at **−3.25pp clearance** — the IL win is partly bought with scrap (see below) |
-| Guardrail 3σ daily noise floors | realised margin **13.58%**; scrap raw 914% (outlier-dominated) → **robust 18.9%**, which is the figure the threshold is set against — see section 12 |
-| Hourly MAE (gate window) | 0.4053 on the shipped calibrated artifact (0.373 uncalibrated — calibration trades per-hour error for aggregate level) |
-| Actual IL% (full cohort, 356,114 episodes) | **35.58%** |
-| Actual IL% (replay sample of 2,000 episodes) | 34.64% (IL ≈ ₩14.7M) |
-| Correlation `rho` / forced hours / implied deff | 0.3183 / 9.134 / **3.589** (was 4.07; fitted-residual basis, `artifacts/rho.json`) |
-| IL% clustered SE (full ~18-week window) | 0.002383 |
-| Elasticity prior | fallback −1.0 ± 0.6 for 14/16 categories; MEAT interior bracket accepted |
-| Exploration `tau` | ₩203.09, taken from the gate-passing report (earlier failing runs ranged ₩187–203; only a passing report may be pasted) |
+| Calibration gate | **PASS** — `level_bias_at_anchor` **1.0389**, inside the owner band [0.90, 1.10] |
+| Sold ratio by window (calibrated) | train 1.0134 / calib 0.8705 / test 1.0193 / all 0.9940, over 2,071,682 rows |
+| Post-calibration episode sold ratio | 1.0193 |
+| Hourly MAE (gate window) | 0.4399 on the shipped calibrated artifact |
+| Share of selling hours with a sale | 24.1% — three in four hours sell nothing |
+| Shadow gate | **PASS** — 12,771 decisions, completeness 0.9974, matched 0.9974, cost-floor violations 0, drift ratio 1.0225, solver p95 102 ms |
+| Actual IL% (replay sample, 2,000 episodes) | **32.27%** (IL ≈ ₩14.27M), clearance 93.3% |
+| DP vs legacy (like-for-like, same demand model) | **−38.0% IL** at **−0.97pp clearance** (77.58% → 77.61% … see section 5.7) |
+| DP vs legacy mean discount | 0.1285 vs 0.2935 — the DP opens far shallower and holds |
+| Intra-episode deepening | 0% of episodes; median \|ε\| needed 2.429 against 1.0 in use |
+| Correlation `rho` / forced hours / implied deff | 0.3103 / 8.563 / **3.347** (fitted-residual basis, `artifacts/rho.json`) |
+| IL% clustered SE | **0.000875** |
+| A/B minimum detectable effect | **3.05% at 2 weeks** (9 blocks); every candidate duration clears 7.5% |
+| Elasticity prior | **fallback −1.0 ± 0.6 for all 16 categories — 0 brackets accepted** |
+| Exploration `tau` | ₩409.87 (11.4th percentile of the Q-spread); implied spend ₩1,230.9/day against a ₩1,230.2 budget |
+| Would-be learning yield (shadow) | 1.09 bounded updates from the window; 1,837 episodes per update |
+| Guardrail 3σ noise, trailing-mean basis | realised margin **13.63%** (robust 14.94%, well behaved); scrap **480%** raw / **153%** robust — outlier-dominated and unusable, see section 12 |
+
+Four of these changed the story rather than the digits, and each is picked up
+where it belongs: the **elasticity bracket now fails everywhere** (section
+9.3), the **DP's IL advantage tripled while its clearance cost nearly
+vanished** (section 5.7), the **A/B became cheap** (section 12), and the
+**scrap guardrail lost its yardstick** (section 12).
 
 ## 9. Evaluation gates
 
@@ -887,15 +903,20 @@ in-window recalibration adopted in response to the measured August trend.
 
 Orientation must hold (naive ≤ controlled < 0), neither endpoint may sit at
 a search bound, and the width-derived std must not be a constant. Any
-failure → fallback prior, recorded. Status: applied; 14/16 fell back, by
-design.
+failure → fallback prior, recorded. Status: applied; **all 16 categories
+fell back** on the corrected extract. An earlier run accepted MEAT; the
+data-definition fixes in section 12a changed the identifying sample and it no
+longer clears the checks. That is the gate doing its job — a bracket that
+survives one definition of an episode and not another was never an estimate —
+but it removes the single category that would have launched informed, and it
+raises the weight the exploration budget carries.
 
 ### 9.4 Shadow gate (blocking) — is the pipeline production-ready?
 
 Event completeness > 99%, matched decisions > 99%, zero cost-floor
 violations, before any price is applied. Status: **run and passed** —
 completeness 1.0000, matched decision rate 1.0000, zero cost-floor
-violations, with a drift ratio of 0.9745 at the legacy price across 66,484 decisions (solver p95 24ms). The verdict
+violations, with a drift ratio of 1.0225 at the legacy price across 12,771 decisions (solver p95 102 ms). The verdict
 line reads "proceed to exploit-only pilot"; that is the phase-2 entry
 condition, not permission to apply prices in phase 1.
 
@@ -904,11 +925,11 @@ condition, not permission to apply prices in phase 1.
 | Phase | What happens | Exit gate | Status |
 | --- | --- | --- | --- |
 | 0. Measurement | historical measurement, config populated | gates reviewed | **Done** |
-| 0b. Calibration | fidelity diagnostic, prior estimation | section 9.2 + 9.3 | **Done** — `level_bias_at_anchor` 1.0395, inside [0.90, 1.10] |
-| 1. Shadow | decisions logged, no prices applied | section 9.4 | **Done** — completeness 1.0000, matched 1.0000, 0 cost-floor violations |
+| 0b. Calibration | fidelity diagnostic, prior estimation | section 9.2 + 9.3 | **Done** — `level_bias_at_anchor` 1.0389, inside [0.90, 1.10] |
+| 1. Shadow | decisions logged, no prices applied | section 9.4 | **Done** — completeness 0.9974, matched 0.9974, 0 cost-floor violations |
 | 2. Exploit-only pilot | small SKU set, exploration off | price mismatch <1%, finalization SLA | pending |
 | 3. Learning pilot | exploration at half budget on pilot set | posterior std falling; spend within budget | pending |
-| 4. A/B | full design below | powered duration; no guardrail breach | blocked on owner MDE |
+| 4. A/B | full design below | powered duration; no guardrail breach | blocked on owner MDE (evidence says 7.5% at 2 weeks is comfortable) |
 | 5. Scale | rollout | positive A/B on IL% | — |
 
 ## 11. A/B evaluation
@@ -946,78 +967,81 @@ derivation tool (`bootstrap.derive_thresholds`) produces the evidence to set
 them from; recommended values:
 
 **Minimum detectable effect for the A/B — recommend 7.5% relative on IL% at
-a 2-week duration.** The measured full-window clustered SE (0.002383) implies
-~1.3pp absolute detectable *only with all ~18 weeks of data*; a real A/B is
-shorter and loses precision, so the tool measures the SE **empirically on
-actual T-week blocks of history** rather than scaling by √T (which is
-optimistic under unit-level clustering). The measured table:
+a 2-week duration.** The tool measures the SE **empirically on actual T-week
+blocks of history** rather than scaling by √T (which is optimistic under
+unit-level clustering). On the corrected extract:
 
 | Duration | Detectable MDE (relative) | Blocks measured |
 | --- | --- | --- |
-| **2 weeks** | **5.54%** | 9 |
-| 3 weeks | 8.82% | 6 |
-| 4 weeks | 6.98% | 4 |
-| 5 weeks | 7.20% | 4 |
-| 6 weeks | 7.23% | 3 |
-| 8 weeks | 5.63% | 2 |
-| 10 weeks | 5.71% | 2 |
-| 12 weeks | 6.46% | 1 |
+| **2 weeks** | **3.05%** | 9 |
+| 3 weeks | 2.74% | 6 |
+| 4 weeks | 3.03% | 4 |
+| 5 weeks | 2.79% | 4 |
+| 6 weeks | 1.99% | 3 |
+| 8 weeks | 2.34% | 2 |
+| 10 weeks | 2.12% | 2 |
+| 12 weeks | 1.89% | 1 |
 
-Two things to read carefully. First, this **overturns the earlier arithmetic**
-that suggested ~5 weeks for 7.5%: on real blocks, 7.5% is detectable in two
-weeks, and 5% is within reach — the tool recommends 2 weeks. Second, the
-table is **non-monotonic**, which is impossible for a real power curve:
-longer windows cannot lose precision. The cause is visible in the right-hand
-column — the block count collapses from 9 to 1, so the long-duration rows are
-estimating an SE from one or two samples and are mostly noise. Trust the
-2–4 week rows; treat everything from 6 weeks on as uninformative rather than
-as evidence that a longer test is worse. The owner picks the (effect,
-duration) pair from the reliable rows; the duration is then fixed.
+**A/B power is no longer a constraint.** Every candidate duration clears
+7.5%, and two weeks detects 3.05%. This reverses the earlier reading, in
+which the clustered SE looked 6× the original assumption and the experiment
+looked marginal; the corrected extract measures **0.000875**, and the
+difference is the same section 12a fixes — IL that counts scrap is a larger
+and more stable quantity than IL that silently did not. Trust the 2–4 week
+rows, which rest on 4–9 blocks; from 6 weeks on the block count collapses to
+1–3 and those rows are mostly noise. Recommend committing to **7.5% at 2
+weeks (14 days)**, which leaves real headroom rather than sitting on the
+detection limit, and take the extra precision as insurance against a smaller
+true effect.
 
-**Scrap-deterioration stop threshold — recommend 20% relative** vs the
-control arm (or trailing 28 days), as a ratio of sums. Scrap is ~7% of IL at
-91% clearance; a legitimately-functioning system spending 1% of IL on
-exploration cannot move scrap anywhere near 20%, while the failure mode this
-guards against (price-holding miscalibration) breached the equivalent of
-this threshold 5–10× over in replay — caught in a day. The measured 3σ daily
-noise of the raw scrap series came back at **9.1386 — 914% relative**,
-because a handful of low-volume days dominate the ratio. No usable threshold
-sits above a floor larger than the level itself, so the tool now reports a
-MAD-based robust floor alongside the raw one and flags the series as
-outlier-dominated. The **robust floor is 18.9%**, and that is the number the
-decision rests on: 20% clears it by roughly 6%, not the comfortable multiple
-scrap first appeared to offer. That is acceptable *only* because of the
-persistence rule — see below.
+**Scrap-deterioration stop threshold — the daily basis has no usable
+threshold; set it against the control arm instead.** The intent is unchanged:
+a legitimately-functioning system spending 1% of IL on exploration cannot
+move scrap far, while the failure mode this guards against — price-holding
+miscalibration — breached the equivalent of a 20% threshold several times
+over in replay, caught within a day. What the corrected extract shows is that
+the *measurement basis* was wrong. The daily scrap series compared against a
+trailing 28-day mean has a 3σ noise floor of **480% raw / 153% robust**, and
+the tool flags it outlier-dominated. A floor above 1.0 means the series swings
+by more than its own level: **no threshold on that basis is both safe and
+useful**, and the 20% figure was never defensible against it.
+
+The fix is not a looser number, it is the right comparison.
+`pipeline.monitor` already compares **treatment against control on the same
+day** whenever both arms are populated, which cancels the common day effect
+that dominates this series; only before an A/B exists does it fall back to
+the trailing mean. `derive_thresholds` now measures that basis too, as
+`guardrail_noise_control_arm_basis`, so the owner sets the threshold against
+the yardstick the monitor will actually apply. **Set
+`scrap_deterioration_pct` from the control-arm floor on the production
+extract, and treat the pre-A/B phases as guarded by the scrap *level* review
+in the pilot readout rather than by an automatic daily trigger.**
 
 **Margin-deterioration stop threshold — recommend 15% relative** vs control,
-with the same 2-day persistence rule. Markdown-cohort margins are thin (cost
-ratio ~0.66, mean discount ~31%) and the daily realised-margin series is
-correspondingly noisy: the measured 3σ daily noise is **13.58%**. Any
-threshold at or below ~13.5% is *inside* the noise band and would false-fire
-on ordinary days — silently suspending exploration, which is the product. 15%
-clears the floor by ~10%; the persistence rule, not a tighter number, is what
-buys sensitivity back. If the owner wants a tighter trigger than 15%, it must
+with a 2-day persistence rule. This series is well behaved: 3σ noise
+**13.63%**, robust **14.94%**, *not* outlier-dominated. 15% clears the raw
+floor by ~10% and sits just under the robust one, so the persistence rule is
+what covers the gap rather than headroom. Anything at or below ~13.6% is
+inside the noise band and would false-fire on ordinary days — silently
+suspending exploration, which is the product. A tighter trigger than 15% must
 be paired with a longer persistence window (3+ consecutive days), never
 adopted alone.
 
-**Both thresholds sit close to their floors, which makes the persistence rule
-load-bearing rather than decorative.**
+**The persistence rule is load-bearing, not decorative.**
 `monitoring.stop_conditions.persistence_days` (default 2) means a condition
 fires only after that many *consecutive* days over threshold. A single day
 past a 3σ floor is expected roughly once a year per guardrail; two in a row
-essentially never. `pipeline.monitor` computes the daily scrap and
-realised-margin series on exactly the definitions the noise floors were
-measured on, compares treatment against the control arm (falling back to a
-trailing 28-day mean before the A/B), and reports the consecutive-day streak
-beside each verdict. Until this build the two thresholds had no evaluation
-path at all — setting them would have changed nothing.
+essentially never. `pipeline.monitor` computes both series on exactly the
+definitions the floors are measured on, and reports the consecutive-day
+streak beside each verdict. Until this build the two thresholds had no
+evaluation path at all — setting them would have changed nothing.
 
 Calibration principle for both guardrails: a false fire is cheap (it
 suspends exploration only; pricing continues), but a threshold that fires
 constantly silently kills the learning loop — which is the product.
-Thresholds sit at or above the measured 3σ daily noise; tighten via
-persistence rules, never by dipping below the noise floor.
-`bootstrap.derive_thresholds` re-measures both noise floors on the current
+Thresholds sit at or above the measured 3σ noise **on the basis the monitor
+compares against**; tighten via persistence rules, never by dipping below the
+floor. `bootstrap.derive_thresholds` re-measures both bases on the current
 extract and stamps `TOO TIGHT` on any threshold set beneath its own — run it
 before committing the owner values, and treat that verdict as blocking.
 
@@ -1167,31 +1191,35 @@ extended by holding its last observed discount, which is the legacy policy's
 own ramp-to-cap behaviour, so both arms still run the same horizon and the
 comparison stays like-for-like.
 
-**Re-run the full bootstrap on production data before quoting any number in
-this document.** Every episode-terminal figure here — the 35.58% IL baseline,
-clearance, `rho`/`deff`, the guardrail noise floors, and the replay's IL
-comparison — was measured under the date-keyed definition and is expected to
-move.
+**Every figure in section 8 is from the bootstrap re-run after these
+corrections**, and they moved as predicted. The IL baseline fell to 32.3% and
+became far more stable once scrap was counted properly (clustered SE 0.002383
+→ 0.000875, which is what turned the A/B from marginal into comfortable);
+`deff` fell to 3.347 as whole windows replaced fragments; and the DP's
+measured advantage tripled to 38.0% once the planner stopped being handed a
+horizon shortened by each episode's own realised sellout. One moved against
+expectation and is called out in section 9.3: the elasticity bracket, which
+previously accepted MEAT, now fails for all 16 categories.
 
 ## 13. Risk register
 
 | # | Risk | Evidence | Mitigation | Owner |
 | --- | --- | --- | --- | --- |
-| 1 | **Learning throughput** — and the deepening bar in risk 6 sets how far the posterior must travel, not just how fast | Per-outcome information is small (demand ~0.5–1/hr × squared log-price-ratio ~0.01–0.04, ÷ deff 3.589); prior is wide fallback for 14/16 categories; monotonicity concentrates identification at entry | Shadow now emits `learning_yield_would_be` — effective information per episode, episodes per bounded update — so weeks-to-convergence is read off before the pilot, not guessed. Two floors bind separately: evidence (episodes needed) and calendar (the 0.15 step cap with one human-gated update per day means ≥6 days to move the mean 1.0 → 1.9 however much evidence arrives). Levers: raise the budget share, coarser cells. A 21-day flat-posterior alert catches a dead loop | Eng + owner |
+| 1 | **Learning throughput** — and the deepening bar in risk 6 sets how far the posterior must travel, not just how fast | Per-outcome information is small (demand ~0.5–1/hr × squared log-price-ratio ~0.01–0.04, ÷ deff 3.347); prior is wide fallback for **all 16** categories; monotonicity concentrates identification at entry | Shadow now emits `learning_yield_would_be` — effective information per episode, episodes per bounded update — so weeks-to-convergence is read off before the pilot, not guessed. Two floors bind separately: evidence (episodes needed) and calendar (the 0.15 step cap with one human-gated update per day means ≥6 days to move the mean 1.0 → 1.9 however much evidence arrives). Levers: raise the budget share, coarser cells. A 21-day flat-posterior alert catches a dead loop | Eng + owner |
 | 2 | **Frozen-model drift over Sep–Dec** (seasonality incl. Chuseok; no trend features) | Drift already measured: 1.144 → 0.990 → 1.095 across windows; every economic quantity is denominated in the demand prediction | Final retrain immediately before the launch freeze (gate re-checked); daily drift ratio in shadow and production; pre-register a mid-window recalibration rule now so a drift response is not improvised | Eng |
-| 3 | **A/B power** — measured SE is 6× the original assumption | 0.002383 vs 0.000383; small effects may not fit the window | Empirical duration table from the derivation tool; owner commits to a feasible (effect, duration) pair before launch | Owner |
+| 3 | **A/B power** — no longer the binding constraint | Corrected extract measures SE 0.000875 (was 0.002383 pre-correction, against an original assumption of 0.000383); 3.05% detectable at 2 weeks, every candidate duration clears 7.5% | Empirical duration table from the derivation tool; owner commits to a feasible (effect, duration) pair before launch | Owner |
 | 4 | **Metric divergence at readout** — planner optimises IL, business reads IL% | Worked example in 2.3; likeliest A/B outcome is the escalation row | Both metrics + denominators in every cut; divergence flag monitored; decision table pre-committed | Owner |
 | 5 | **Single-elasticity misspecification** — threshold-shaped price response averaged into one exponent | Discount-gap diagnostics are noisy/non-monotonic | Residuals logged by discount region so the failure is visible before it is modelled; piecewise response in phase 2 | Eng |
-| 6 | **Enter-and-hold at the launch prior** — deepening pays only when \|ε\| > (1−d)/(γ−d) ≈ 1.7–1.9, against a prior of 1.0 | Backtest `intra_episode_deepening`: median threshold 1.89 vs \|ε\| 1.0 in use; DP deepens in 0% of episodes; clearance −3.25pp | Correct behaviour given the prior, not a bug — but pre-brief the pilot on lower clearance and higher scrap, and track the threshold gap every run. Exploration is the only thing that closes it; a wider action set cannot | Eng + owner |
+| 6 | **Enter-and-hold at the launch prior** — deepening pays only when \|ε\| > (1−d)/(γ−d), measured median **2.429**, against a prior of 1.0 | Backtest `intra_episode_deepening`: 0% of episodes clear the bar, DP deepens in none of them; mean discount 0.1285 vs legacy 0.2935; clearance −0.97pp | The gap is WIDER than first measured (2.429, not 1.89), so the posterior must travel further before the policy changes shape. Correct behaviour given the prior, not a bug — but pre-brief the pilot on lower clearance and higher scrap, and track the threshold gap every run. Exploration is the only thing that closes it; a wider action set cannot | Eng + owner |
 | 7 | **Multi-day episode fix invalidates the measured baseline** (section 12a) — 36-hour windows are common, so every episode-terminal figure was measured under a broken key | Monotonicity reset mid-window; DP terminal value fired 2-3x per window; carried inventory counted as scrap at each seam | Fixed at the source: episodes are now maximal runs with a consistent `hours_remaining` countdown, split assignment and the feature leakage guard follow the episode. **Full bootstrap must be re-run before any number is quoted** | Eng |
 | 8 | **Model under-prediction from censored training labels** | Anchor under-prediction with median starting inventory ~2 and ~12.6% stocked-out hours | First phase-2 priority: censored-count training | Eng |
 
 ## 14. Phase 2 (deferred until the loop demonstrably works)
 
 Priority-ordered by what bootstrap revealed: censored-count model training
-(risk 6); per-category prior acceptance (one category already brackets
-cleanly — currently any failure falls the whole prior back, the
-conservative reading); subcategory learning cells with leave-one-out
+(risk 6); per-category prior acceptance (currently any failure falls the
+whole prior back, the conservative reading — and on the corrected extract
+every category fails, so nothing is lost by it today); subcategory learning cells with leave-one-out
 pooling; automated posterior updates with criteria drafted from observed
 operator-gate behaviour; episode-level random effects replacing the deff
 deflation; off-policy correction to recover the majority of outcomes
@@ -1237,7 +1265,7 @@ is reproducible from its event alone. Run outputs (`data/`, `reports/`,
 | ε (elasticity) | Exponent mapping price ratio to demand; the only quantity learned in production |
 | `r` | Frozen negative-binomial dispersion (`Var = mu + mu²/r`) |
 | `rho` | Frozen intra-episode demand correlation |
-| deff | Design effect deflating correlated within-episode evidence (3.589) |
+| deff | Design effect deflating correlated within-episode evidence (3.347) |
 | `tau` | Currency threshold defining the affordable exploration set |
 | Cell | A learning unit: one high-volume category, or the pooled global cell |
 | Anchor | The price currently in force; hourly actions may only deepen from it |

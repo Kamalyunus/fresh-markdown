@@ -137,6 +137,76 @@ def _daily_series(d):
     return day
 
 
+def control_arm_noise(d, cfg):
+    """Same-day treatment-vs-control noise -- the basis the monitor actually
+    uses once the A/B is live.
+
+    guardrail_noise measures each day against a TRAILING MEAN, which carries
+    the full day-to-day swing of the series. `pipeline.monitor` compares the
+    two arms on the SAME day whenever both are populated, which cancels the
+    common day effect entirely. On a series as volatile as daily scrap the two
+    floors are not comparable, and setting an A/B threshold from the trailing
+    figure grades against the wrong yardstick.
+
+    Arm assignment uses the same stable SKU x FC hash as the monitor, so the
+    split measured here is the split that will run.
+    """
+    from pipeline.monitor import _arm
+
+    ep = d.sort_values(["date", "hour_of_day"]).groupby("episode_id").agg(
+        date=("date", "first"), sku_id=("sku_id", "first"), fc=("fc", "first"),
+        start_inv=("starting_inventory", "first"),
+        end_start_inv=("starting_inventory", "last"),
+        end_sold=("units_sold", "last"),
+        end_hours_remaining=("hours_remaining", "last"))
+    ep["scrap"] = episodes.scrap_units(ep.end_hours_remaining,
+                                       ep.end_start_inv, ep.end_sold)
+    ep = ep[ep.scrap.notna()]
+    rev = ((d.offered_price * d.units_sold).groupby(d.episode_id).sum()
+           .rename("revenue"))
+    mar = (((d.offered_price - d.cost) * d.units_sold)
+           .groupby(d.episode_id).sum().rename("margin"))
+    ep = ep.join(rev).join(mar)
+    alloc = cfg["ab_test"]["allocation"]
+    ep["arm"] = [_arm(s, f, alloc) for s, f in zip(ep.sku_id, ep.fc)]
+
+    def daily(g):
+        day = g.groupby("date").agg(start_inv=("start_inv", "sum"),
+                                    scrap=("scrap", "sum"),
+                                    revenue=("revenue", "sum"),
+                                    margin=("margin", "sum")).sort_index()
+        return pd.DataFrame({"scrap_rate": day.scrap / day.start_inv,
+                             "margin_rate": day.margin
+                             / day.revenue.replace(0, np.nan)})
+
+    arms = {a: daily(g) for a, g in ep.groupby("arm")}
+    if set(arms) < {"treatment", "control"}:
+        return {"note": "one arm empty -- cannot measure a same-day basis"}
+
+    out = {"basis": "same-day treatment vs control, arm hash as in monitor",
+           "allocation": alloc}
+    for metric, worse_high in (("scrap_rate", True), ("margin_rate", False)):
+        t, c = arms["treatment"][metric], arms["control"][metric]
+        common = t.index.intersection(c.index)
+        t, c = t.loc[common], c.loc[common]
+        rel = ((t / c - 1) if worse_high else (1 - t / c))
+        rel = rel.replace([np.inf, -np.inf], np.nan).dropna()
+        if len(rel) < 8:
+            out[metric] = {"days": int(len(rel)), "note": "too few paired days"}
+            continue
+        mad = float(np.median(np.abs(rel - np.median(rel))))
+        out[metric] = {
+            "days": int(len(rel)),
+            "three_sigma": round(3 * float(rel.std(ddof=1)), 4),
+            "three_sigma_robust": round(3 * 1.4826 * mad, 4),
+            "median_gap": round(float(np.median(rel)), 4),
+        }
+    out["note"] = ("Set the A/B-phase threshold against THIS floor. The "
+                   "trailing-mean floor in guardrail_noise applies only "
+                   "before an A/B is running, where no control arm exists.")
+    return out
+
+
 def guardrail_noise(d, cfg):
     """3-sigma daily noise of scrap rate and realised margin rate, as relative
     deviation from a trailing-window mean."""
@@ -247,6 +317,7 @@ def main():
     report = {
         "ab_duration": duration_table(se_by_T, cfg, mde),
         "guardrail_noise": guardrail_noise(d, cfg),
+        "guardrail_noise_control_arm_basis": control_arm_noise(d, cfg),
     }
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
