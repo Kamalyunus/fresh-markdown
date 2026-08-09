@@ -286,12 +286,18 @@ Never take the last row's `ending_inventory` as scrap. Use
 sum cannot treat unknown as zero. Truncated episodes are excluded from scrap
 and IL aggregates, with the excluded share reported.
 
-KNOWN DEFECT: `backtest` and `pipeline.shadow` build `mu_ref_path` from the
-rows that exist, so an episode that sold out early hands the DP a horizon
-shortened by its own realised outcome -- lookahead bias on 11.2% of decision
-rows, biased toward over-discounting fast movers. Production is unaffected if
-the caller supplies the true remaining window; `validate_state` enforces that
-the path length and `hours_remaining` agree.
+The DP horizon comes from the WINDOW, not the row count. `backtest` and
+`pipeline.shadow` call `common.episodes.extend_to_window` before predicting,
+which appends the hours a sold-out episode never recorded (marked
+`is_observed = False`). Without it the horizon is short precisely because the
+item sold out -- lookahead bias on ~10% of decision rows, biased toward
+over-discounting fast movers.
+
+Anything measuring the model against reality -- fidelity, the calibration
+gate, the likelihood, IL -- must filter to `is_observed`. A synthetic row has
+no sales and reads as a pure under-prediction. Sort by
+`["episode_id", "date", "hour_of_day"]`, never `hour_of_day` alone: a window
+running past midnight comes out scrambled.
 `validate_state` rejects any decision whose `mu_ref_path` length disagrees
 with `hours_remaining`.
 

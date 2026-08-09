@@ -1065,20 +1065,34 @@ would have overstated.
 with `hours_remaining`, so a truncated planning horizon fails loudly instead
 of silently optimising the wrong window.
 
-**Open defect, not yet fixed — the offline harnesses plan over the wrong
-horizon.** `backtest` and `pipeline.shadow` build `mu_ref_path` from the rows
-that exist, so an episode that sold out at hour 5 of an 8-hour window hands
-the DP a 5-hour horizon at hour 1. The reason it is 5 is that the item sold
-out — information from the future. **This is lookahead bias, it affects
-11.2% of decision rows, and it is concentrated in fast-selling episodes**,
-where a shortened horizon brings the terminal scrap penalty forward and
-pushes the DP to discount harder than it should. Production is unaffected
-*if* the integration supplies the true remaining window and a `mu_ref_path`
-to match, which `validate_state` now forces it to do consistently. Fixing the
-harnesses means predicting `mu_ref` for the unobserved tail hours of each
-window, which is mechanical but touches the fidelity and likelihood paths;
-it is queued rather than rushed, and the replay's policy numbers carry this
-caveat until it lands.
+### The horizon comes from the window, not from the row count
+
+Because rows stop at zero inventory, an episode's row count is short *because
+the item sold out* — so handing the DP that count as its horizon feeds it the
+outcome it is supposed to be deciding. Measured on the harness: the row count
+and `flc_window + 1` agree on 89.5% of decision rows and on 99.2% of rows
+within completed windows, which is why the error hid; where they disagree
+the horizon is **short** (9.7% of rows), concentrated exactly in the
+fast-selling episodes, and a short horizon brings the terminal scrap penalty
+forward and pushes the DP to discount harder than it should.
+
+`common.episodes.extend_to_window` now extends every episode to its full
+window before `mu_ref` is predicted, with the added rows marked
+`is_observed = False`. The extension is exact rather than an approximation:
+every baseline feature is either episode-constant (category, FC, price, and
+the velocity features, which are keyed to the episode's *first* date) or a
+function of the advancing timestamp. After it, rows-remaining equals
+`flc_window + 1` on every row — the invariant `validate_state` enforces on
+the live path.
+
+Three details make the extension safe rather than merely convenient.
+Synthetic rows carry no sales, so observed-world IL is untouched. **Fidelity,
+calibration and every ratio in the gate see only the observed rows** — a
+synthetic row would otherwise read as a pure under-prediction and corrupt the
+one metric the frozen model is gated on. And the legacy arm's price is
+extended by holding its last observed discount, which is the legacy policy's
+own ramp-to-cap behaviour, so both arms still run the same horizon and the
+comparison stays like-for-like.
 
 **Re-run the full bootstrap on production data before quoting any number in
 this document.** Every episode-terminal figure here — the 35.58% IL baseline,

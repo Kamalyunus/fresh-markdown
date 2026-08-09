@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 
 from common.config import load_config, deff, ConfigError
+from common import episodes
 from bootstrap.train_baseline import BaselineModel
 from bootstrap.fit_dispersion import lookup_r
 from events.store import EventStore
@@ -75,7 +76,15 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
         keep = rng.choice(population, max_episodes, replace=False)
         d = d[d.episode_id.isin(keep)]
 
-    d = d.sort_values(["episode_id", "hour_of_day"]).copy()
+    # extend each episode to its full window BEFORE predicting: rows stop at
+    # zero inventory, so an episode that sold out early would hand the DP a
+    # horizon shortened by its own realised outcome. Sorting must include the
+    # date -- hour_of_day alone scrambles a window that runs past midnight.
+    carry = [c for c in d.columns if c not in
+             ("episode_id", "date", "hour_of_day", "hours_remaining",
+              "starting_inventory", "ending_inventory", "units_sold")]
+    d = episodes.extend_to_window(d, carry)
+    d = d.sort_values(["episode_id", "date", "hour_of_day"]).copy()
     d["mu_ref_hat"] = model.predict_mu_ref(d)
     d["r_val"] = [lookup_r(r_lookup, s, c)
                   for s, c in zip(d.subcategory, d.category)]
@@ -95,6 +104,8 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
         anchor = None
         for t in range(len(g)):
             row = g.iloc[t]
+            if not row.is_observed:      # window tail: no outcome to record
+                continue
             q = int(row.starting_inventory)
             if q <= 0:                      # restock gap: no decision this hour
                 anchor = float(row.total_discount)

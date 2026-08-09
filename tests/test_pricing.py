@@ -241,6 +241,45 @@ def test_config_strict_refuses_null_measured(tmp_path):
         load_config(strict=True)
 
 
+def test_window_extension_removes_the_lookahead_horizon():
+    """Rows stop at zero inventory, so the DP's horizon must come from the
+    window, not from how many rows happen to exist -- a short row count is
+    short BECAUSE the item sold out, which is future information."""
+    from common import episodes
+
+    # an 8-hour window that sold out after 3 hours
+    d = pd.DataFrame({
+        "episode_id": ["e"] * 3,
+        "date": [pd.Timestamp("2026-03-01").date()] * 3,
+        "hour_of_day": [10, 11, 12],
+        "hours_remaining": [7, 6, 5],
+        "starting_inventory": [3, 2, 1],
+        "ending_inventory": [2, 1, 0],
+        "units_sold": [1, 1, 1],
+        "category": ["MEAT"] * 3,
+    })
+    assert len(d) == 3 and d.hours_remaining.iloc[0] + 1 == 8
+
+    e = episodes.extend_to_window(d, ["category"])
+    assert len(e) == 8, "the DP must see the whole window, not the 3 rows"
+    assert e.hours_remaining.iloc[-1] == 0
+    assert e.is_observed.sum() == 3 and (~e.is_observed).sum() == 5
+
+    # rows remaining now equals the window at every row -- the invariant
+    # validate_state enforces on the live path
+    rows_left = np.arange(len(e), 0, -1)
+    assert (rows_left == e.hours_remaining.to_numpy() + 1).all()
+
+    # synthetic rows carry features but no sales, so observed-world
+    # economics and fidelity are untouched by the extension
+    assert e[~e.is_observed].units_sold.eq(0).all()
+    assert e.category.notna().all()
+
+    # a window that ran to the end is left exactly as it was
+    done = d.assign(hours_remaining=[2, 1, 0])
+    assert len(episodes.extend_to_window(done, ["category"])) == 3
+
+
 def test_scrap_counted_only_where_the_window_actually_ran_out():
     """An episode stops at the window end OR at zero inventory, whichever
     comes first. Only the first ending scrapped anything; the second scrapped

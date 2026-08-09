@@ -82,3 +82,53 @@ def ending_summary(d):
                  "much a last-row-inventory scrap figure would have "
                  "overstated."),
     }
+
+
+def extend_to_window(d, feature_cols=()):
+    """Append the rows a window has but the data does not.
+
+    Rows stop at zero inventory, so an episode's row count understates its
+    window whenever it sold out. A planner handed the row count as its horizon
+    is being told the future: the horizon is short *because* the item sold
+    out. Every episode is therefore extended to its full window --
+    hours_remaining running down to 0 -- with synthetic rows marked
+    `is_observed = False`.
+
+    The extension is exact, not an approximation: every baseline feature is
+    either episode-constant (category, fc, price, the velocity features, which
+    are keyed to the episode's first date) or a function of the advancing
+    timestamp (hour_of_day, dow, day_of_month). Synthetic rows carry no sales
+    and must be filtered out of fidelity, likelihood and IL -- they exist only
+    so `mu_ref` can be predicted for the hours the DP must plan over.
+    """
+    d = d.copy()
+    d["is_observed"] = True
+    last = last_rows(d)
+    need = last[last.hours_remaining > 0]
+    if not len(need):
+        return d.sort_values(["episode_id", "date", "hour_of_day"])
+
+    carry = [c for c in feature_cols if c in d.columns]
+    # emit dates in the column's own type. Downstream split filters compare
+    # `date.astype(str)`, and a Timestamp stringifies with a time component
+    # that would silently fall outside every configured window.
+    as_date = not isinstance(d.date.iloc[0], pd.Timestamp)
+    rows = []
+    for r in need.itertuples():
+        base = pd.Timestamp(r.date) + pd.Timedelta(hours=int(r.hour_of_day))
+        for k in range(1, int(r.hours_remaining) + 1):
+            ts = base + pd.Timedelta(hours=k)
+            row = {c: getattr(r, c) for c in carry}
+            row.update({
+                "episode_id": r.episode_id,
+                "date": ts.date() if as_date else ts.normalize(),
+                "hour_of_day": ts.hour,
+                "hours_remaining": r.hours_remaining - k,
+                "starting_inventory": max(int(r.ending_inventory), 0),
+                "ending_inventory": max(int(r.ending_inventory), 0),
+                "units_sold": 0,
+                "is_observed": False,
+            })
+            rows.append(row)
+    out = pd.concat([d, pd.DataFrame(rows)], ignore_index=True)
+    return out.sort_values(["episode_id", "date", "hour_of_day"])

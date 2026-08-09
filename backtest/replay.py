@@ -28,6 +28,7 @@ from bootstrap.prepare_data import split_frames
 from bootstrap.train_baseline import BaselineModel
 from bootstrap.fit_dispersion import lookup_r
 from bootstrap.measure import m10_fidelity_decomposition
+from common import episodes
 from pricing import dp as dp_mod
 from pricing.demand import (mu_at, expected_min_demand_inventory,
                             expected_min_demand_inventory_vec)
@@ -35,8 +36,17 @@ from pricing.demand import (mu_at, expected_min_demand_inventory,
 
 def _attach_predictions(d, cfg, model, prior, r_lookup):
     """Predicted units at ACTUAL historical prices: mu_ref scaled by the prior
-    elasticity, expectation censored at starting inventory."""
-    d = d.copy()
+    elasticity, expectation censored at starting inventory.
+
+    The frame is first extended to each episode's full window (see
+    common.episodes.extend_to_window). Rows stop at zero inventory, so an
+    episode that sold out early would otherwise hand the DP a horizon
+    shortened by its own realised outcome.
+    """
+    carry = [c for c in d.columns if c not in
+             ("episode_id", "date", "hour_of_day", "hours_remaining",
+              "starting_inventory", "ending_inventory", "units_sold")]
+    d = episodes.extend_to_window(d, carry)
     d["r"] = [lookup_r(r_lookup, s, c) for s, c in zip(d.subcategory, d.category)]
     d["eps"] = d.category.map(
         lambda c: prior["per_category"][str(c)]["mean"]).astype(float)
@@ -250,7 +260,12 @@ def fidelity(d, cfg, model, prior, r_lookup):
     in-sample training rows and, when the demand level drifts between the
     training period and launch, it cannot be fixed by any static level factor.
     """
-    d = _attach_predictions(d, cfg, model, prior, r_lookup)
+    # Predict over the FULL window, including the hours a sold-out episode
+    # never recorded: the DP has to plan over them. Fidelity, calibration and
+    # every ratio below see only the observed rows -- a synthetic row has no
+    # sales and would read as a pure under-prediction.
+    d_full = _attach_predictions(d, cfg, model, prior, r_lookup)
+    d = d_full[d_full.is_observed]
     splits = split_frames(d, cfg)
     gate_window = cfg["baseline_model"]["calibration_gate_window"]
     gate_d = (splits["test"] if gate_window == "test"
@@ -344,22 +359,33 @@ def fidelity(d, cfg, model, prior, r_lookup):
     block["calibration_gate_value"] = gate_value
     block["calibration_gate"] = ("PASS" if band[0] <= gate_value <= band[1]
                                  else "FAIL -- blocking (PRD section 9.3)")
-    return block, d
+    return block, d_full
 
 
 def _episode_frame(g):
-    g = g.sort_values("hour_of_day")
+    g = g.sort_values(["date", "hour_of_day"])
+    obs = g.is_observed.to_numpy() if "is_observed" in g else np.ones(len(g), bool)
+    # legacy's price for the hours the data does not cover: hold the last
+    # observed discount. The legacy policy ramps to a cap and holds, so this
+    # is its own continuation, not an invented one. Both arms must run the
+    # same horizon or the comparison stops being like-for-like.
+    disc = pd.Series(g.total_discount.to_numpy()).where(
+        pd.Series(obs)).ffill().to_numpy()
+    obs_rows = g[obs] if obs.any() else g
     return {
+        "n_observed": int(obs.sum()),
+        "window_completed": bool(obs_rows.hours_remaining.iloc[-1] <= 0),
         "original_price": float(g.original_price.iloc[0]),
         "cost": float(g.cost.iloc[0]),
         "d_ref": float(g.d_ref.iloc[0]),
         "q0": int(g.starting_inventory.iloc[0]),
         "hours": len(g),
         "date": str(g.date.iloc[0]),
-        "actual_discounts": g.total_discount.to_numpy(),
+        "actual_discounts": disc,
+        # synthetic rows carry units_sold = 0, so observed-world economics are
+        # unaffected by the extension
         "actual_sold": g.units_sold.to_numpy(),
-        "end_inv": int(g.ending_inventory.iloc[-1]),
-        "window_completed": bool(g.hours_remaining.iloc[-1] <= 0),
+        "end_inv": int(obs_rows.ending_inventory.iloc[-1]),
         "mu_ref_path": g.mu_ref_hat.to_numpy(),
         "r": float(g.r.iloc[0]),
         "eps": float(g.eps.iloc[0]),
