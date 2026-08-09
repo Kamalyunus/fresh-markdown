@@ -71,6 +71,31 @@ def test_filter_chain_waterfall(workspace):
     assert (d.original_price > 0).all()
 
 
+def test_prepared_data_is_priceable_and_self_consistent(workspace):
+    """Postconditions of the filter chain: anything that survives must be
+    something the system can actually price and measure."""
+    _chdir(workspace)
+    d = pd.read_parquet("data/prepared.parquet")
+    cfg = yaml.safe_load(open("config.yaml"))
+
+    assert d.total_discount.between(0, 1).all()      # percent -> fraction once
+    assert (d.starting_inventory >= 0).all()
+    assert (d.units_sold >= 0).all()
+    assert (d.cost >= 0).all()
+    assert (d.units_sold <= d.starting_inventory).all()
+    assert (d.original_price > 0).all()
+    # every surviving episode has at least one feasible discount tier
+    assert (d.cost < d.original_price).all() and (d.d_max > 0).all()
+    assert d.category.notna().all() and d.subcategory.notna().all()
+    assert (d.hours_remaining >= 0).all()
+
+    # the exclusion window is removed whole-episode, so no survivor may have
+    # ANY hour inside it
+    excl = cfg["data"]["exclusion_window"]
+    ds = d.date.astype(str)
+    assert not (ds.ge(excl["start"]) & ds.le(excl["end"])).any()
+
+
 def test_every_episode_has_a_monotone_window_counter(workspace):
     """The episode rule's own postcondition: inside an episode, flc_window
     (hours_remaining) steps down exactly one per row, and the window is at

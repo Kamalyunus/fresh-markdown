@@ -105,8 +105,24 @@ def load_and_filter(path, cfg=None):
         wf.append((label, len(d), d.episode_id.nunique()))
         return d
 
-    d = df[df.date.astype(str).lt(excl["start"]) | df.date.astype(str).gt(excl["end"])]
+    # Episode-scoped, not row-scoped: a window running past midnight can
+    # straddle the boundary, and removing only its inside hours would leave a
+    # half-episode that re-segmentation turns into a spurious short window.
+    ds = df.date.astype(str)
+    inside = ds.ge(excl["start"]) & ds.le(excl["end"])
+    d = df[~df.episode_id.isin(df.loc[inside, "episode_id"].unique())]
     d = step(d, "exclusion_window_removed")
+
+    # A discount outside [0, 1] means the percent -> fraction conversion has
+    # been applied twice, or not at all. Silent and catastrophic: it inverts
+    # every price. Cheap to assert, so assert it.
+    bad = d.loc[~d.total_discount.between(0, 1), "episode_id"].unique()
+    d = d[~d.episode_id.isin(bad)]
+    d = step(d, "discount_out_of_range_dropped")
+
+    neg = (d.starting_inventory < 0) | (d.units_sold < 0) | (d.cost < 0)
+    d = d[~d.episode_id.isin(d.loc[neg, "episode_id"].unique())]
+    d = step(d, "negative_quantities_dropped")
 
     d = d[d.category.notna() & d.subcategory.notna()]
     d = step(d, "null_category_dropped")
@@ -125,6 +141,15 @@ def load_and_filter(path, cfg=None):
     bad = d.loc[below, "episode_id"].unique()
     d = d[~d.episode_id.isin(bad)]
     d = step(d, "below_cost_dropped")
+
+    # cost at or above the full price leaves d_max <= 0: no discount tier is
+    # feasible, so the episode cannot be priced by this system at all. It was
+    # being caught only incidentally, whenever such a row also happened to
+    # carry a discount; a zero-discount row at cost == price slipped through
+    # and polluted the cost-ratio and IL measurements.
+    bad = d.loc[d.cost >= d.original_price, "episode_id"].unique()
+    d = d[~d.episode_id.isin(bad)]
+    d = step(d, "non_priceable_dropped")
 
     bad = d.loc[d.units_sold > d.starting_inventory, "episode_id"].unique()
     d = d[~d.episode_id.isin(bad)]

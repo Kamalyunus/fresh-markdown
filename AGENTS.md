@@ -250,6 +250,37 @@ realised margin 0.1336. A margin threshold under ~0.13 fires on ordinary days
 and silently suspends exploration, which is the product. Buy sensitivity back
 with a persistence rule, never by going under the floor.
 
+## What counts as a usable episode
+
+`bootstrap.prepare_data` runs a deterministic, auditable filter chain; the
+waterfall in `artifacts/split_manifest.json` records rows and episodes after
+every step. **Almost every filter drops the WHOLE EPISODE, not the offending
+row** — a hole punched mid-window re-segments into a spurious short episode,
+which is worse than losing the episode.
+
+| Step | Scope | Drops |
+| --- | --- | --- |
+| `duplicate_hour_rows_dropped` | rows (both copies) | two states for one sku x fc x hour; no way to choose, and they collide two runs into one episode id |
+| `exclusion_window_removed` | episode | any episode with ANY hour in the known demand-issue window |
+| `discount_out_of_range_dropped` | episode | discount outside [0,1] — the percent->fraction conversion applied twice or not at all |
+| `negative_quantities_dropped` | episode | negative inventory, sales or cost |
+| `null_category_dropped` | rows | missing category/subcategory (no reference discount, no dispersion cell) |
+| `zero_base_price_dropped` | rows | `original_price` still null/zero after ffill+bfill within the episode |
+| `negative_window_dropped` | episode | any `hours_remaining < 0` |
+| `below_cost_dropped` | episode | any hour priced under cost — legacy already violated the floor, so the episode is not evidence about a system that cannot |
+| `non_priceable_dropped` | episode | `cost >= original_price`, i.e. `d_max <= 0`: no feasible tier exists |
+| `units_gt_inventory_dropped` | episode | sales exceed the inventory on hand |
+| `contiguous_episodes_built` | — | re-segmentation, not a filter: episode count can RISE here because earlier drops split windows |
+
+Deliberately NOT filtered: **intraday restocks**. `ending_inventory !=
+starting_inventory - units_sold` is real and preserved; outcomes record it
+with `adjustment_reason`.
+
+Postconditions are asserted by test, not assumed: discount in [0,1],
+non-negative quantities, sales <= inventory, `d_max > 0`, category present,
+no hour inside the exclusion window, and a monotone window counter inside
+every episode.
+
 ## Multi-day episodes
 
 FLC windows commonly run past midnight; 36-hour windows are common. An
