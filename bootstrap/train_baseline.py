@@ -193,7 +193,15 @@ def fit_level_calibration(d, cfg):
         # to track a moving level, and disjoint from what the gate evaluates
         # so a fit can never grade itself
         weeks = cfg["baseline_model"]["calibration_fit_trailing_weeks"]
-        gate_start = pd.Timestamp(cfg["data"]["split"]["calib_start"])
+        # the gate window's own start -- test_start when the gate reads test,
+        # calib_start when it reads calib+test. Hardcoding calib_start pushed
+        # the trailing window entirely inside the training period whenever the
+        # gate was on test.
+        split = cfg["data"]["split"]
+        gate_start = pd.Timestamp(
+            split["test_start"]
+            if cfg["baseline_model"]["calibration_gate_window"] == "test"
+            else split["calib_start"])
         lo = gate_start - pd.Timedelta(weeks=weeks)
         dates = pd.to_datetime(d.date)
         calib = d[(dates >= lo) & (dates < gate_start)].copy()

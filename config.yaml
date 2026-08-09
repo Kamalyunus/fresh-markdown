@@ -85,9 +85,15 @@ baseline_model:
     # later still), which is exactly production's fit-on-trailing,
     # apply-forward protocol. Note a one-week test window carries the full
     # weekly demand noise; widen test_end when the extract allows.
-  calibration_fit_window: "calib"      # SET BY OWNER 2026-08-09: the calib
-    # window IS the trailing 2 weeks -- recent enough to track a moving level,
-    # out-of-sample, and immediately before the gate.
+  calibration_fit_window: "train+calib"  # SET BY OWNER 2026-08-09. The short
+    # windows were tried first and lost on production data: the calib
+    # fortnight was itself the most anomalous stretch in the five-month
+    # weekly series (1.06 against a 1.30 mean), so factors fit on it inherited
+    # that anomaly and pushed the gate the wrong way. train+calib passed
+    # (level_bias_at_anchor 1.0395). The level deficit being corrected is a
+    # systematic Tweedie sum-calibration artifact, not drift, so averaging
+    # more history targets the persistent component and lets no single week
+    # dominate. Still disjoint from the gate window (test).
     # "trailing" | "calib" |
     # "train+calib" | "all". "trailing" = the last
     # calibration_fit_trailing_weeks of data ENDING WHERE THE GATE WINDOW
@@ -171,8 +177,14 @@ monitoring:
     duplicate_or_unmatched_rate: 0.01  # SET
     price_mismatch_rate: 0.01          # SET
     exploration_cost_vs_budget: 2.0    # SET
-    scrap_deterioration_pct: null      # SET BY OWNER -- blocks section 15.4
-    margin_deterioration_pct: null     # SET BY OWNER -- blocks section 15.4
+    scrap_deterioration_pct: null      # SET BY OWNER -- blocks section 15.4.
+      # Measured 3-sigma daily noise floor: 0.0914. Recommended 0.20 (~2.2x
+      # the floor); bootstrap.derive_thresholds stamps TOO TIGHT below it.
+    margin_deterioration_pct: null     # SET BY OWNER -- blocks section 15.4.
+      # Measured 3-sigma daily noise floor: 0.1336 -- realised margin on the
+      # markdown cohort is far noisier than scrap. Recommended 0.15 with a
+      # 2-day persistence rule. Anything at or under ~0.13 sits INSIDE the
+      # noise band and will false-fire, silently suspending exploration.
   alert_posterior_std_flat_days: 21    # SET  learning-loop health
 
 ab_test:

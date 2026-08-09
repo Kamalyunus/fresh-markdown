@@ -223,6 +223,13 @@ decisions — an agent must never invent these).
 MEASURED values produced by the pipeline are pasted into `config.yaml` by
 hand; SET BY OWNER values come from the PRD owner only.
 
+For the two guardrail thresholds, `bootstrap.derive_thresholds` measures the
+3σ daily noise floor and stamps `TOO TIGHT` on anything set below it — that
+verdict is blocking, not advisory. Measured on production data: scrap 0.0914,
+realised margin 0.1336. A margin threshold under ~0.13 fires on ordinary days
+and silently suspends exploration, which is the product. Buy sensitivity back
+with a persistence rule, never by going under the floor.
+
 ## Repo conventions
 
 - Modules are run as `python3 -m package.module` from the repo root.

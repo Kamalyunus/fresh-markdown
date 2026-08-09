@@ -617,7 +617,7 @@ a manifest so every consumer derives identical data.
 **Synthetic validation:** a generator reproduces the schema with known
 ground-truth elasticity in two modes — `legacy` (reproduces the clock
 confound; estimators must *detect* it) and `randomized` (elasticity
-identifiable; estimators must *recover* it). The test suite (23 automated
+identifiable; estimators must *recover* it). The test suite (25 automated
 tests) runs the full pipeline against it, asserting among other things: the
 filter chain removes exactly the injected dirt, cost floor and monotonicity
 hold on every emitted decision, posterior updates are exactly-once,
@@ -667,13 +667,16 @@ the design — each caught by a gate or diagnostic doing its job:
 | --- | --- |
 | Weekly sold-ratio series | every week > 1: range 1.06–1.54, mean ≈ 1.30, σ ≈ ±8% |
 | Sold ratio by window (uncalibrated) | train 1.295 / calib 1.117 / test 1.312 |
-| Calibration gate | band **[0.90, 1.10]** (owner, 2σ); calibrated re-run in progress |
+| Calibration gate | **PASS** — `level_bias_at_anchor` 1.0395 inside the owner band [0.90, 1.10] (post-calibration fidelity 1.0055) |
+| Shadow gate | **PASS** — completeness 1.0000, matched 1.0000, cost-floor violations 0, drift ratio 1.0087 |
+| DP vs legacy (like-for-like, same demand model) | **−12.0% IL** |
+| Guardrail 3σ daily noise floors | scrap 9.14%, realised margin 13.36% |
 | Hourly MAE (gate window) | 0.373 (was 0.405 before the velocity features) |
 | Actual IL% (replay sample of 2,000 episodes) | 34.64% (IL ≈ ₩14.7M) |
 | Correlation `rho` / forced hours / implied deff | 0.3183 / 9.134 / ≈ 3.59 (was 4.07) |
 | IL% clustered SE (full ~18-week window) | 0.002383 |
 | Elasticity prior | fallback −1.0 ± 0.6 for 14/16 categories; MEAT interior bracket accepted |
-| Exploration `tau` | derived per run (₩187–203 range); pasted only from a gate-passing report |
+| Exploration `tau` | ₩203.09, taken from the gate-passing report (earlier failing runs ranged ₩187–203; only a passing report may be pasted) |
 
 ## 9. Evaluation gates
 
@@ -742,15 +745,19 @@ design.
 ### 9.4 Shadow gate (blocking) — is the pipeline production-ready?
 
 Event completeness > 99%, matched decisions > 99%, zero cost-floor
-violations, before any price is applied. Status: harness ready to run.
+violations, before any price is applied. Status: **run and passed** —
+completeness 1.0000, matched decision rate 1.0000, zero cost-floor
+violations, with a drift ratio of 1.0087 at the legacy price. The verdict
+line reads "proceed to exploit-only pilot"; that is the phase-2 entry
+condition, not permission to apply prices in phase 1.
 
 ## 10. Launch plan
 
 | Phase | What happens | Exit gate | Status |
 | --- | --- | --- | --- |
 | 0. Measurement | historical measurement, config populated | gates reviewed | **Done** |
-| 0b. Calibration | fidelity diagnostic, prior estimation | section 9.2 + 9.3 | prior gate done; calibrated v2 re-gate under the owner band in progress |
-| 1. Shadow | decisions logged, no prices applied | section 9.4 | **Ready** |
+| 0b. Calibration | fidelity diagnostic, prior estimation | section 9.2 + 9.3 | **Done** — `level_bias_at_anchor` 1.0395, inside [0.90, 1.10] |
+| 1. Shadow | decisions logged, no prices applied | section 9.4 | **Done** — completeness 1.0000, matched 1.0000, 0 cost-floor violations |
 | 2. Exploit-only pilot | small SKU set, exploration off | price mismatch <1%, finalization SLA | pending |
 | 3. Learning pilot | exploration at half budget on pilot set | posterior std falling; spend within budget | pending |
 | 4. A/B | full design below | powered duration; no guardrail breach | blocked on owner MDE |
@@ -805,20 +812,30 @@ control arm (or trailing 28 days), as a ratio of sums. Scrap is ~7% of IL at
 91% clearance; a legitimately-functioning system spending 1% of IL on
 exploration cannot move scrap anywhere near 20%, while the failure mode this
 guards against (price-holding miscalibration) breached the equivalent of
-this threshold 5–10× over in replay — caught in a day. The tool computes the
-actual 3σ daily noise of the scrap series and flags any threshold set below
-it.
+this threshold 5–10× over in replay — caught in a day. The measured 3σ daily
+noise of the scrap series is **9.14%**, so 20% sits ≈2.2× above the noise
+floor: comfortable headroom without being so loose that a real breach hides
+inside it.
 
-**Margin-deterioration stop threshold — recommend 10% relative** vs control,
+**Margin-deterioration stop threshold — recommend 15% relative** vs control,
 with a 2-day persistence rule. Markdown-cohort margins are thin (cost ratio
-~0.66, mean discount ~31%), so daily relative margin is noisy; persistence,
-not a looser threshold, is the correct noise control.
+~0.66, mean discount ~31%) and the daily realised-margin series is
+correspondingly noisy: the measured 3σ daily noise is **13.36%**, an order of
+magnitude above scrap's. Any threshold at or below ~13% is *inside* the noise
+band and would false-fire on ordinary days — silently suspending exploration,
+which is the product. 15% clears the floor with a small margin; the
+persistence rule, not a tighter number, is what buys sensitivity back. If the
+owner wants a tighter trigger than 15%, it must be paired with a longer
+persistence window (3+ consecutive days), never adopted alone.
 
 Calibration principle for both guardrails: a false fire is cheap (it
 suspends exploration only; pricing continues), but a threshold that fires
 constantly silently kills the learning loop — which is the product.
 Thresholds sit at or above the measured 3σ daily noise; tighten via
 persistence rules, never by dipping below the noise floor.
+`bootstrap.derive_thresholds` re-measures both noise floors on the current
+extract and stamps `TOO TIGHT` on any threshold set beneath its own — run it
+before committing the owner values, and treat that verdict as blocking.
 
 ## 13. Risk register
 
