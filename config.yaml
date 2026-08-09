@@ -150,11 +150,23 @@ posterior:
 
 pricing:
   tier_step: 0.025                     # SET  hourly discount grid granularity
-  entry_offsets: [-0.15, -0.10, -0.05, 0.0]   # SET  the ENTRY action set, in
-    # discount percentage points RELATIVE TO the category reference: enter up
-    # to 15pp shallower than reference, or at reference. Sign convention:
-    # NEGATIVE = shallower discount = higher price. Flip the signs here to
-    # allow entry deeper than reference -- no code change needed.
+  entry_offsets: [-0.15, -0.10, -0.05, 0.0, 0.05]  # SET  the ENTRY action set,
+    # in discount percentage points RELATIVE TO the category reference: from
+    # 15pp shallower than reference to one 5pp step deeper. Sign convention:
+    # NEGATIVE = shallower discount = higher price.
+    #
+    # Spacing is a uniform 5pp on purpose. A +2.5pp arm was considered and
+    # rejected: information about epsilon scales as (log price ratio)^2, so an
+    # arm 2.5pp from the reference carries ~24% of the information of one 5pp
+    # away, while taking an equal share of the uniform exploration draw. Fine
+    # arms near the optimum dilute the evidence rather than adding to it. The
+    # hourly grid stays at tier_step; only ENTRY is coarse.
+    #
+    # The single deeper arm is the escape valve for the clearance/scrap trade
+    # (the replay's -12.0% IL came with -3.25pp clearance). It is an option,
+    # not a default -- the DP takes it only when Q says so. Note the cost
+    # floor removes it for the _default categories at cost ratios above ~0.65,
+    # so it is available where margin allows and silently absent where not.
     #
     # Entry is a separate decision from the hourly one and deserves a
     # different grid. Monotonicity makes it irreversible: price may only hold

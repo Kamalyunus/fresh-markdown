@@ -44,17 +44,26 @@ def test_dp_terminal_value_and_entry_arms():
     assert res.v_star >= -6000 * 5
 
 
-def test_entry_action_set_is_one_sided_and_cost_floored():
-    """Entry sets the ceiling for the whole episode (monotonicity), so with
-    non-positive offsets it may never open deeper than the reference."""
+def test_entry_action_set_matches_offsets_and_cost_floor():
     step = CFG["pricing"]["tier_step"]
+    offsets = CFG["pricing"]["entry_offsets"]
     d_ref = 0.30
 
     tiers, d_max = dp_mod.feasible_tiers(10000, 5000, step)      # d_max 0.50
     arms = [tiers[j] for j in dp_mod.entry_action_set(
         tiers, d_ref, d_max, CFG["pricing"])]
-    assert arms == [0.15, 0.20, 0.25, 0.30]
-    assert max(arms) <= d_ref + 1e-9
+    assert arms == [0.15, 0.20, 0.25, 0.30, 0.35]
+
+    # entry is BOUNDED on the deep side, not open-ended: the DP may open one
+    # step past the reference, never a discount the hourly grid would take
+    # many hours to reach
+    assert max(arms) <= d_ref + max(offsets) + 1e-9
+    assert max(offsets) <= 2 * step + 1e-9
+
+    # every arm is a real tier and separated from its neighbours by at least
+    # one hourly step -- adjacent arms would dilute the exploration draw
+    assert all(a in tiers for a in arms)
+    assert all(round(b - a, 6) >= step for a, b in zip(arms, arms[1:]))
 
     # a cost floor inside the requested band drops only the infeasible arms
     tiers, d_max = dp_mod.feasible_tiers(10000, 7800, step)      # d_max 0.22

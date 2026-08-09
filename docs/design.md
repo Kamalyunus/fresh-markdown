@@ -434,18 +434,26 @@ checked after the fact).
 anchor to respect, and because monotonicity makes it irreversible in one
 direction, the entry choice sets the ceiling on every later price in the
 episode. Its arms are `pricing.entry_offsets` — discount offsets relative to
-the category reference, currently `[−15, −10, −5, 0] pp`, so entry may open
-up to 15pp shallower than reference or at it, never deeper. Two reasons the
-grid differs from the hourly one:
+the category reference, currently `[−15, −10, −5, 0, +5] pp`: entry may open
+up to 15pp shallower than reference, at it, or one 5pp step deeper. Two
+reasons the grid differs from the hourly one:
 
-- *Entering deeper than reference is a double loss.* It spends margin in hour
-  one and forfeits the room to deepen later. Entering shallower is the lever
-  that actually saves IL, and the whole episode's price path hangs off it.
 - *Coarse arms concentrate the evidence.* Entry carries most of the
   identifying variation (section 3.2 — the confound-free signal is entry-hour
-  variation across episodes), so four well-separated arms give a far sharper
-  elasticity read than sixteen 2.5pp arms whose demand differences sit inside
-  the noise.
+  variation across episodes). Information about ε scales as (log price
+  ratio)², so an arm 2.5pp from the reference carries only ~24% of the
+  information of one 5pp away while taking an equal share of the uniform
+  exploration draw. Fine arms near the optimum dilute evidence rather than
+  adding to it, which is why the entry spacing is a uniform 5pp while the
+  hourly grid stays at 2.5pp.
+- *The deep side is bounded, not symmetric.* The predecessor design allowed
+  entry anywhere in a symmetric ±10pp band; under monotonicity that let an
+  episode open 10pp deeper than reference and never recover, spending margin
+  in hour one and forfeiting the room to deepen later. A single +5pp arm
+  keeps the option where it is worth having — it is the escape valve for the
+  clearance/scrap trade documented above, taken only when Q says so — without
+  reopening the range that made deep entry a default. The cost floor removes
+  it entirely for the default categories above a ~0.65 cost ratio.
 
 Offsets are snapped to the tier grid and filtered by the cost floor; if the
 floor forbids every requested arm, the deepest feasible tier becomes the only
