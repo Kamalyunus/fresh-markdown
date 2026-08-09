@@ -1,6 +1,6 @@
 # Perishable Markdown MVP — System Design
 
-**Status:** Implemented; bootstrap validated on production FLC data; calibration gate PASSED (2026-08-08)
+**Status:** Implemented; validated on production FLC data; calibration and shadow gates PASSED (2026-08-09)
 **Audience:** Technical leadership review — this document is self-contained and requires no companion reading
 
 ---
@@ -31,10 +31,12 @@ and the calibration process surfaced a measured fact about the business:
 weekly demand levels swing ±8% around a persistent baseline deficit, so the
 fidelity gate band was reset by the owner to [0.90, 1.10] (~2σ of the
 measured 3-week noise) with the daily drift ratio as the continuous guard.
-The calibrated gate re-run under this band is the current step; the
-shadow-phase harness is built and ready — decisions logged against live
-data, no prices applied. Two stop-condition thresholds and the A/B minimum
-detectable effect (section 12) remain open owner decisions.
+The calibrated model clears that gate (`level_bias_at_anchor` 1.0395), and
+the shadow phase has since run to completion on live data with no prices
+applied — 66,484 decisions, perfect event completeness, zero cost-floor
+violations. Two stop-condition thresholds and the A/B minimum detectable
+effect (section 12) remain open owner decisions; they are the only things
+between here and the exploit-only pilot.
 
 The honest risk summary: the *safety* engineering is strong (a below-cost or
 rising price is structurally impossible, not merely checked for; every gate
@@ -468,7 +470,7 @@ IL cost of a perturbation both scale as `mu × (log price ratio)²`, so
 **information per won is approximately constant** — there is no clever
 targeting to do, only a budget to respect. High-volume SKUs automatically
 receive small perturbations because their loss curve is steeper. Measured
-starting point on production data: `tau` = ₩202.8 (the 27.5th percentile of
+starting point on production data: `tau` = ₩203.09 (the 22.7th percentile of
 the Q-value spread), implying ₩1,271/day of exploration spend against a
 ₩1,271/day budget on the replay sample.
 
@@ -595,7 +597,23 @@ model whose world both arms share is the same model whose price response is
 an unvalidated prior, so replay can only show internal consistency; the
 controlled experiment is the only evidence of policy quality (an early run
 made this concrete: a 9.4% simulated improvement on a model selling 24%
-light). Finally, a derivation tool anchors even the *business* thresholds
+light).
+
+**The replay's headline result comes with a caveat that must travel with
+it.** The DP arm shows 12.0% less IL than the legacy arm, but also **3.25pp
+less clearance** — it holds price where the legacy ramp would have cut, sells
+fewer units, and scraps more. That is a coherent trade (discount saved
+exceeds scrap added, which is exactly what minimising absolute IL is supposed
+to find), and it is the *same* trade the scrap-deterioration guardrail exists
+to police. A 3.25pp clearance loss on a ~91% base is roughly a third more
+unsold units in relative terms — comfortably enough to trip a 20% scrap
+guardrail if it reproduces in production. Two consequences, both
+pre-committed here rather than improvised in the pilot: the exploit-only
+pilot reports clearance and scrap alongside IL from day one, and a scrap
+guardrail breach driven by *this* mechanism is a business decision about the
+IL/clearance trade-off, not a system fault to be debugged. Whether the
+trade survives contact with real demand is an A/B question; replay cannot
+settle it, for the reason just given. Finally, a derivation tool anchors even the *business* thresholds
 to measurement: it computes A/B power empirically on actual candidate-
 duration blocks of history, and the daily noise floors of the scrap and
 margin series — so the last three judgment calls in the system are made
@@ -668,10 +686,10 @@ the design — each caught by a gate or diagnostic doing its job:
 | Weekly sold-ratio series | every week > 1: range 1.06–1.54, mean ≈ 1.30, σ ≈ ±8% |
 | Sold ratio by window (uncalibrated) | train 1.295 / calib 1.117 / test 1.312 |
 | Calibration gate | **PASS** — `level_bias_at_anchor` 1.0395 inside the owner band [0.90, 1.10] (post-calibration fidelity 1.0055) |
-| Shadow gate | **PASS** — completeness 1.0000, matched 1.0000, cost-floor violations 0, drift ratio 1.0087 |
-| DP vs legacy (like-for-like, same demand model) | **−12.0% IL** |
-| Guardrail 3σ daily noise floors | scrap 9.14%, realised margin 13.36% |
-| Hourly MAE (gate window) | 0.373 (was 0.405 before the velocity features) |
+| Shadow gate | **PASS** — 66,484 decisions, completeness 1.0000, matched 1.0000, cost-floor violations 0, drift ratio 0.9745, solver p95 24ms |
+| DP vs legacy (like-for-like, same demand model) | **−12.0% IL**, at **−3.25pp clearance** — the IL win is partly bought with scrap (see below) |
+| Guardrail 3σ daily noise floors | realised margin **13.36%**; scrap **914%** — outlier-dominated, see section 12 |
+| Hourly MAE (gate window) | 0.4053 on the shipped calibrated artifact (0.373 uncalibrated — calibration trades per-hour error for aggregate level) |
 | Actual IL% (replay sample of 2,000 episodes) | 34.64% (IL ≈ ₩14.7M) |
 | Correlation `rho` / forced hours / implied deff | 0.3183 / 9.134 / ≈ 3.59 (was 4.07) |
 | IL% clustered SE (full ~18-week window) | 0.002383 |
@@ -747,7 +765,7 @@ design.
 Event completeness > 99%, matched decisions > 99%, zero cost-floor
 violations, before any price is applied. Status: **run and passed** —
 completeness 1.0000, matched decision rate 1.0000, zero cost-floor
-violations, with a drift ratio of 1.0087 at the legacy price. The verdict
+violations, with a drift ratio of 0.9745 at the legacy price across 66,484 decisions (solver p95 24ms). The verdict
 line reads "proceed to exploit-only pilot"; that is the phase-2 entry
 condition, not permission to apply prices in phase 1.
 
@@ -797,15 +815,34 @@ Three thresholds are business decisions that block strict start-up. A
 derivation tool (`bootstrap.derive_thresholds`) produces the evidence to set
 them from; recommended values:
 
-**Minimum detectable effect for the A/B — recommend 7.5% relative on IL%.**
-The measured full-window clustered SE (0.002383) implies ~1.3pp absolute
-detectable *only with all ~18 weeks of data*; a real A/B is shorter and
-loses precision. The tool measures the SE **empirically on actual T-week
-blocks of history** (square-root time scaling is optimistic under unit-level
-clustering) and reports the smallest detectable effect per candidate
-duration; prior arithmetic suggests ~5 weeks at 7.5%, while 5% likely does
-not fit the MVP window. The owner picks the (effect, duration) pair; the
-duration is then fixed.
+**Minimum detectable effect for the A/B — recommend 7.5% relative on IL% at
+a 2-week duration.** The measured full-window clustered SE (0.002383) implies
+~1.3pp absolute detectable *only with all ~18 weeks of data*; a real A/B is
+shorter and loses precision, so the tool measures the SE **empirically on
+actual T-week blocks of history** rather than scaling by √T (which is
+optimistic under unit-level clustering). The measured table:
+
+| Duration | Detectable MDE (relative) | Blocks measured |
+| --- | --- | --- |
+| **2 weeks** | **5.54%** | 9 |
+| 3 weeks | 8.82% | 6 |
+| 4 weeks | 6.98% | 4 |
+| 5 weeks | 7.20% | 4 |
+| 6 weeks | 7.23% | 3 |
+| 8 weeks | 5.63% | 2 |
+| 10 weeks | 5.71% | 2 |
+| 12 weeks | 6.46% | 1 |
+
+Two things to read carefully. First, this **overturns the earlier arithmetic**
+that suggested ~5 weeks for 7.5%: on real blocks, 7.5% is detectable in two
+weeks, and 5% is within reach — the tool recommends 2 weeks. Second, the
+table is **non-monotonic**, which is impossible for a real power curve:
+longer windows cannot lose precision. The cause is visible in the right-hand
+column — the block count collapses from 9 to 1, so the long-duration rows are
+estimating an SE from one or two samples and are mostly noise. Trust the
+2–4 week rows; treat everything from 6 weeks on as uninformative rather than
+as evidence that a longer test is worse. The owner picks the (effect,
+duration) pair from the reliable rows; the duration is then fixed.
 
 **Scrap-deterioration stop threshold — recommend 20% relative** vs the
 control arm (or trailing 28 days), as a ratio of sums. Scrap is ~7% of IL at
@@ -813,9 +850,13 @@ control arm (or trailing 28 days), as a ratio of sums. Scrap is ~7% of IL at
 exploration cannot move scrap anywhere near 20%, while the failure mode this
 guards against (price-holding miscalibration) breached the equivalent of
 this threshold 5–10× over in replay — caught in a day. The measured 3σ daily
-noise of the scrap series is **9.14%**, so 20% sits ≈2.2× above the noise
-floor: comfortable headroom without being so loose that a real breach hides
-inside it.
+noise of the scrap series came back at **9.1386 — that is 914% relative, not
+9.14%**, because a handful of low-volume days dominate the ratio series. No
+usable threshold sits above a floor larger than the level itself, so that
+number cannot be the basis for the decision. The tool now reports a
+MAD-based robust floor alongside the raw one and flags the series as
+outlier-dominated; **set 20% against the robust floor, and treat the
+recommendation as provisional until that re-run confirms it.**
 
 **Margin-deterioration stop threshold — recommend 15% relative** vs control,
 with a 2-day persistence rule. Markdown-cohort margins are thin (cost ratio

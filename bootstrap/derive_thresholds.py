@@ -140,16 +140,43 @@ def guardrail_noise(d, cfg):
         if len(s) < window + 7:
             return {"days": int(len(s)),
                     "note": f"needs at least {window + 7} days"}
-        trailing = s.rolling(window, min_periods=window // 2).mean().shift(1)
+        # a FULL trailing window only: with min_periods below `window` the
+        # warm-up days divide by a mean built from a handful of observations,
+        # which manufactures enormous relative deviations that are an artifact
+        # of the estimator rather than a property of the series
+        trailing = s.rolling(window, min_periods=window).mean().shift(1)
         rel_dev = (s / trailing - 1).dropna()
         sigma = float(rel_dev.std(ddof=1))
-        return {
+        # a plain std over a ratio series is dominated by any day whose
+        # denominator is small -- a single low-volume day can move it by an
+        # order of magnitude. The MAD-based estimate is the one to set a
+        # threshold against when the two disagree.
+        mad = float(np.median(np.abs(rel_dev - np.median(rel_dev))))
+        sigma_robust = 1.4826 * mad
+        out = {
             "days": int(len(s)),
+            "days_scored": int(len(rel_dev)),
             "mean_level": round(float(s.mean()), 4),
             "daily_rel_dev_sigma": round(sigma, 4),
             "three_sigma": round(3 * sigma, 4),
+            "daily_rel_dev_sigma_robust": round(sigma_robust, 4),
+            "three_sigma_robust": round(3 * sigma_robust, 4),
+            "p95_abs_rel_dev": round(float(np.percentile(np.abs(rel_dev), 95)), 4),
             "worst_observed_rel_dev": round(float(rel_dev.abs().max()), 4),
         }
+        # units: these are RELATIVE deviations, so 0.1336 means 13.36% and
+        # 9.1386 means 914%. A value above 1.0 is not a percentage point --
+        # it is a series whose daily swing exceeds its own level.
+        out["outlier_dominated"] = bool(sigma_robust > 0
+                                        and sigma > 2 * sigma_robust)
+        if out["outlier_dominated"]:
+            out["note"] = (
+                f"raw 3-sigma ({out['three_sigma']}) is "
+                f"{round(sigma / sigma_robust, 1)}x the robust estimate "
+                f"({out['three_sigma_robust']}) -- a few low-denominator days "
+                "dominate it. Set the threshold against three_sigma_robust "
+                "and investigate the outlier days before trusting either.")
+        return out
 
     scrap = noise(day.scrap_rate)
     margin = noise(day.margin_rate)
@@ -157,15 +184,20 @@ def guardrail_noise(d, cfg):
 
     def verdict(block, key):
         threshold = sc[key]
-        if threshold is None:
-            return f"{key} is null -- owner should set it at or above three_sigma"
         if "three_sigma" not in block:
             return "insufficient history to validate"
-        return ("OK -- threshold above daily noise"
-                if threshold >= block["three_sigma"]
-                else f"TOO TIGHT -- {threshold} is below the 3-sigma noise "
-                     f"level {block['three_sigma']}; it will false-fire and "
-                     "silently suspend exploration")
+        # against the robust floor where the raw one is outlier-dominated,
+        # otherwise they are the same number
+        floor = (block["three_sigma_robust"] if block.get("outlier_dominated")
+                 else block["three_sigma"])
+        basis = "robust 3-sigma" if block.get("outlier_dominated") else "3-sigma"
+        if threshold is None:
+            return (f"{key} is null -- owner should set it at or above the "
+                    f"{basis} floor {floor}")
+        if threshold >= floor:
+            return f"OK -- threshold above the {basis} daily noise floor {floor}"
+        return (f"TOO TIGHT -- {threshold} is below the {basis} noise floor "
+                f"{floor}; it will false-fire and silently suspend exploration")
 
     return {
         "basis": ("daily ratio-of-sums series over all episodes; relative "
@@ -176,10 +208,15 @@ def guardrail_noise(d, cfg):
         "margin_rate": {**margin,
                         "config_key": "monitoring.stop_conditions.margin_deterioration_pct",
                         "verdict": verdict(margin, "margin_deterioration_pct")},
+        "units": ("all sigma figures are RELATIVE deviations, not percentage "
+                  "points: 0.1336 = 13.36%, 9.1386 = 914%. Read the magnitude "
+                  "before quoting one -- a floor above 1.0 means the series "
+                  "swings by more than its own level and no useful threshold "
+                  "sits above it."),
         "note": ("A false fire only suspends exploration (section 15.4), but a "
                  "threshold that fires constantly kills the learning loop. "
-                 "Set thresholds at or above three_sigma; add a persistence "
-                 "rule rather than lowering below it."),
+                 "Set thresholds at or above the floor the verdict names; add "
+                 "a persistence rule rather than lowering below it."),
     }
 
 
@@ -225,7 +262,11 @@ def main():
     for key in ("scrap_rate", "margin_rate"):
         block = gn[key]
         sigma3 = block.get("three_sigma", "n/a")
-        print(f"{key:12s}: 3-sigma daily noise {sigma3} -> {block['verdict']}")
+        line = f"{key:12s}: 3-sigma daily noise {sigma3}"
+        if block.get("outlier_dominated"):
+            line += (f" (OUTLIER-DOMINATED; robust "
+                     f"{block['three_sigma_robust']})")
+        print(f"{line} -> {block['verdict']}")
     print(f"wrote {args.out}")
 
 

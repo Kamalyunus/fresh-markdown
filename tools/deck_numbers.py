@@ -56,6 +56,8 @@ def main():
     ap.add_argument("--shadow", default="reports/shadow.json")
     ap.add_argument("--phase0", default="reports/phase0.json")
     ap.add_argument("--thresholds", default="reports/thresholds.json")
+    ap.add_argument("--rho", default="artifacts/rho.json",
+                    help="authoritative rho/deff (fitted-residual basis)")
     args = ap.parse_args()
 
     bt, sh = load(args.backtest), load(args.shadow)
@@ -92,6 +94,16 @@ def main():
         "12")
     row("clearance delta",
         g(pol, "policy_gap_like_for_like", "clearance_delta"), "12")
+    # the IL win and the clearance loss are the same trade seen twice; the
+    # scrap guardrail polices exactly this, so the deck must not quote one
+    # without the other
+    row("  legacy-under-model clearance", g(pol, "legacy_model_clearance"), "12")
+    row("  DP clearance", g(pol, "dp_clearance"), "12")
+    row("  legacy-under-model scrap cost", g(pol, "legacy_model_scrap_cost"), "12")
+    row("  DP scrap cost", g(pol, "dp_scrap_cost"), "12")
+    row("  DP mean discount vs legacy",
+        f'{g(pol, "dp_mean_discount")} vs {g(pol, "legacy_model_mean_discount")}',
+        "12")
 
     section("EXPLORATION -- slide 9; design 8")
     tau = g(bt, "tau_initial_derivation", default={})
@@ -101,12 +113,17 @@ def main():
     row("cost-distribution quantile", g(tau, "cost_distribution_quantile"), "9")
 
     section("DISPERSION / POWER -- slides 7, 10, 12; design 8")
-    row("rho", g(p0, "m3_intra_episode_correlation", "rho"), "12")
-    row("mean forced hours",
-        g(p0, "m3_intra_episode_correlation", "mean_forced_hours_per_episode"),
-        "12")
-    row("implied deff",
-        g(p0, "m3_intra_episode_correlation", "implied_deff"), "7, 10, 12")
+    # AUTHORITATIVE rho is artifacts/rho.json, fitted against the baseline
+    # model's own mu_ref residuals. phase0's m3 is a category x hour proxy
+    # computed before any model exists and says so in its own note -- quoting
+    # it in the deck states a number the system does not actually use.
+    rj = load(args.rho)
+    row("rho (fitted residuals, AUTHORITATIVE)", g(rj, "rho"), "12")
+    row("mean forced hours", g(rj, "mean_forced_hours_per_episode"), "12")
+    row("implied deff", g(rj, "implied_deff"), "7, 10, 12")
+    row("  phase0 proxy rho / deff (do NOT quote)",
+        f'{g(p0, "m3_intra_episode_correlation", "rho")} / '
+        f'{g(p0, "m3_intra_episode_correlation", "implied_deff")}')
     row("IL% clustered SE",
         g(p0, "m6_il_pct", "il_pct_ratio_se_clustered"), "12")
 
@@ -125,14 +142,15 @@ def main():
 
     section("OWNER THRESHOLDS -- slide 15; design 12")
     gn = g(th, "guardrail_noise", default={})
-    row("scrap 3-sigma daily noise",
-        g(gn, "scrap_rate", "three_sigma"), "15")
-    row("scrap verdict at current config",
-        g(gn, "scrap_rate", "verdict"), "15")
-    row("margin 3-sigma daily noise",
-        g(gn, "margin_rate", "three_sigma"), "15")
-    row("margin verdict at current config",
-        g(gn, "margin_rate", "verdict"), "15")
+    print("  (relative deviations: 0.1336 = 13.36%, 9.1386 = 914%)")
+    for key, label in (("scrap_rate", "scrap"), ("margin_rate", "margin")):
+        b = g(gn, key, default={})
+        row(f"{label} 3-sigma daily noise", g(b, "three_sigma"), "15")
+        row(f"{label} 3-sigma robust", g(b, "three_sigma_robust"), "15")
+        row(f"{label} outlier-dominated?", g(b, "outlier_dominated"), "15")
+        row(f"{label} worst / p95 abs deviation",
+            f'{g(b, "worst_observed_rel_dev")} / {g(b, "p95_abs_rel_dev")}', "15")
+        row(f"{label} verdict at current config", g(b, "verdict"), "15")
     ab = g(th, "ab_duration", default={})
     row("recommended A/B duration (weeks)",
         g(ab, "recommended_duration_weeks"), "15")

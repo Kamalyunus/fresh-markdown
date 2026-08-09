@@ -178,13 +178,17 @@ monitoring:
     price_mismatch_rate: 0.01          # SET
     exploration_cost_vs_budget: 2.0    # SET
     scrap_deterioration_pct: null      # SET BY OWNER -- blocks section 15.4.
-      # Measured 3-sigma daily noise floor: 0.0914. Recommended 0.20 (~2.2x
-      # the floor); bootstrap.derive_thresholds stamps TOO TIGHT below it.
+      # Raw measured 3-sigma floor: 9.1386 -- these are RELATIVE deviations,
+      # so that is 914%, not 9.14%. A few low-volume days dominate the daily
+      # ratio series; no usable threshold sits above a floor larger than the
+      # level itself. derive_thresholds now reports a MAD-based robust floor
+      # and flags the series as outlier-dominated. Recommended 0.20, PROVISIONAL
+      # until validated against the robust floor on a re-run.
     margin_deterioration_pct: null     # SET BY OWNER -- blocks section 15.4.
-      # Measured 3-sigma daily noise floor: 0.1336 -- realised margin on the
-      # markdown cohort is far noisier than scrap. Recommended 0.15 with a
-      # 2-day persistence rule. Anything at or under ~0.13 sits INSIDE the
-      # noise band and will false-fire, silently suspending exploration.
+      # Measured 3-sigma daily noise floor: 0.1336 (13.36%) -- this one is
+      # well behaved. Recommended 0.15 with a 2-day persistence rule. Anything
+      # at or under ~0.13 sits INSIDE the noise band and will false-fire,
+      # silently suspending exploration.
   alert_posterior_std_flat_days: 21    # SET  learning-loop health
 
 ab_test:
@@ -196,5 +200,9 @@ ab_test:
   candidate_durations_weeks: [2, 3, 4, 5, 6, 8, 10, 12]  # SET  windows tested
   min_episodes_per_block: 100          # SET  blocks below this are skipped
   min_detectable_effect_pct: null      # SET BY OWNER  relative on IL%
-  il_pct_ratio_se_clustered: 0.000383  # MEASURED  phase 0; 84,792 SKU x FC units
+  il_pct_ratio_se_clustered: 0.002383  # MEASURED  phase 0; 84,792 SKU x FC
+    # units. 6x the 0.000383 originally assumed -- that figure was a
+    # pre-measurement placeholder and sat here mislabelled as MEASURED.
+    # Not consumed for power: derive_thresholds re-measures the SE on actual
+    # T-week blocks, since sqrt-T scaling is optimistic under clustering.
   duration_days: null                  # DERIVED   bootstrap.derive_thresholds
