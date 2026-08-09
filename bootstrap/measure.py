@@ -156,7 +156,9 @@ def m5_censoring(d):
     # end-of-episode inventory only. Checking .any() across all hours returns a
     # spurious 1.0 because inventory dips to zero transiently before restock.
     last = d.sort_values("hour_of_day").groupby("episode_id").tail(1)
-    ep_zero = (last.ending_inventory <= 0)
+    # true leftover: ending_inventory is written off to zero on the last row
+    ep_zero = episodes.leftover_units(last.starting_inventory,
+                                      last.units_sold).le(0)
     return {
         "overall_censored_hour_rate": round(float(d.censored.mean()), 4),
         "episodes_reaching_zero_inventory": round(float(ep_zero.mean()), 4),
@@ -181,7 +183,8 @@ def m6_il_pct(d):
         sku_id=("sku_id", "first"),
         original_price=("original_price", "first"),
         start_inv=("starting_inventory", "first"),
-        end_inv=("ending_inventory", "last"),
+        end_start_inv=("starting_inventory", "last"),
+        end_sold=("units_sold", "last"),
         end_hours_remaining=("hours_remaining", "last"),
         cost=("cost", "first"),
         discount_cost=("discount_cost", "sum"),
@@ -190,7 +193,8 @@ def m6_il_pct(d):
     # scrap only where the window actually ran out. An episode that sold out
     # early scrapped nothing; a truncated one has no recorded window end, so
     # its leftover units are unknown -- charging them to scrap overstates IL.
-    ep["scrap_units"] = episodes.scrap_units(ep.end_hours_remaining, ep.end_inv)
+    ep["scrap_units"] = episodes.scrap_units(
+        ep.end_hours_remaining, ep.end_start_inv, ep.end_sold)
     dropped = int(ep.scrap_units.isna().sum())
     ep = ep[ep.scrap_units.notna()]
     ep["il"] = ep.discount_cost + ep.cost * ep.scrap_units
@@ -281,8 +285,8 @@ def m11_episode_endings(d):
         return "NOT RUN -- no episodes"
     out = episodes.ending_summary(d)
     last = episodes.last_rows(d)
-    trunc = last[episodes.classify(last.hours_remaining,
-                                   last.ending_inventory) == episodes.TRUNCATED]
+    trunc = last[episodes.classify(last.hours_remaining, last.starting_inventory,
+                                   last.units_sold) == episodes.TRUNCATED]
     out["median_hours_unrecorded_when_truncated"] = float(
         trunc.hours_remaining.median()) if len(trunc) else 0.0
     return out

@@ -385,7 +385,9 @@ def _episode_frame(g):
         # synthetic rows carry units_sold = 0, so observed-world economics are
         # unaffected by the extension
         "actual_sold": g.units_sold.to_numpy(),
-        "end_inv": int(obs_rows.ending_inventory.iloc[-1]),
+        # written-off zero on the last row -- take the true leftover
+        "end_inv": max(int(obs_rows.starting_inventory.iloc[-1])
+                       - int(obs_rows.units_sold.iloc[-1]), 0),
         "mu_ref_path": g.mu_ref_hat.to_numpy(),
         "r": float(g.r.iloc[0]),
         "eps": float(g.eps.iloc[0]),

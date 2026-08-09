@@ -165,7 +165,10 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
                 "execution_status": SHADOW_STATUS,
                 "finalized_at": pd.Timestamp.now("UTC").isoformat(),
             }
-            if ending != q - sold:
+            # a restock ADDS inventory. ending < q - sold is the window-close
+            # write-off, not a restock -- testing inequality either way would
+            # flag every episode's last hour.
+            if ending > q - sold:
                 outcome["adjustment_reason"] = "intraday_restock"
             if store.emit_outcome(outcome):
                 n_out += 1

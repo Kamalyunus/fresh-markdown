@@ -320,9 +320,14 @@ first, so its row count is NOT its window length. `m11_episode_endings` in
 hit 0 -- leftover inventory IS scrap), `sold_out_early` (no scrap by
 construction), `truncated` (no recorded window end -- scrap UNKNOWN).
 
-Never take the last row's `ending_inventory` as scrap. Use
-`common.episodes.scrap_units`, which returns NaN for truncated episodes so a
-sum cannot treat unknown as zero. Truncated episodes are excluded from scrap
+**`ending_inventory` IS ALWAYS ZERO ON AN EPISODE'S LAST ROW** -- the source
+writes off the remainder when the window closes (~49.5% of episodes end this
+way). Reading it as scrap reports ZERO SCRAP EVERYWHERE and silently deletes
+the scrap term from IL; dropping those episodes as "broken chain" keeps only
+guaranteed sellouts. Scrap is `max(0, starting_inventory - units_sold)` on the
+last row -- `common.episodes.leftover_units` is the only definition, and
+`scrap_units` wraps it, returning NaN for truncated episodes so a sum cannot
+treat unknown as zero. Truncated episodes are excluded from scrap
 and IL aggregates, with the excluded share reported.
 
 The DP horizon comes from the WINDOW, not the row count. `backtest` and

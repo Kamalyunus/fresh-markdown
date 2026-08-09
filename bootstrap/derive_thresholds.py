@@ -113,12 +113,14 @@ def _daily_series(d):
     ep = d.sort_values(["date", "hour_of_day"]).groupby("episode_id").agg(
         date=("date", "first"),
         start_inv=("starting_inventory", "first"),
-        end_inv=("ending_inventory", "last"),
+        end_start_inv=("starting_inventory", "last"),
+        end_sold=("units_sold", "last"),
         end_hours_remaining=("hours_remaining", "last"),
         sold=("units_sold", "sum"))
     # scrap only where the window ran out; a truncated episode's leftover is
     # unknown, and the noise floor must not be measured on an invented number
-    ep["end_inv"] = episodes.scrap_units(ep.end_hours_remaining, ep.end_inv)
+    ep["end_inv"] = episodes.scrap_units(
+        ep.end_hours_remaining, ep.end_start_inv, ep.end_sold)
     ep = ep[ep.end_inv.notna()]
     rev = ((d.offered_price * d.units_sold).groupby(d.episode_id).sum()
            .rename("revenue"))

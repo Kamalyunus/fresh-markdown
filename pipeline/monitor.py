@@ -21,6 +21,7 @@ from common.config import load_config, deff
 from events.store import EventStore
 from pricing.posterior import PosteriorStore
 from pricing import explore
+from common import episodes
 
 
 def _arm(sku_id, fc, allocation):
@@ -45,7 +46,7 @@ def business_metrics(decisions, outcomes, cfg):
             "hours_remaining": d["hours_remaining"],
             "original_price": d["original_price"], "cost": d["cost"],
             "units_sold": o["units_sold"],
-            "ending_inventory": o["ending_inventory"],
+            "starting_inventory": o["starting_inventory"],
             "discount_cost": (d["original_price"] - o["applied_price"])
                              * o["units_sold"],
             "arm": _arm(d["sku_id"], d["fc"], cfg["ab_test"]["allocation"]),
@@ -56,8 +57,12 @@ def business_metrics(decisions, outcomes, cfg):
         category=("category", "first"), fc=("fc", "first"), arm=("arm", "first"),
         original_price=("original_price", "first"), cost=("cost", "first"),
         discount_cost=("discount_cost", "sum"), units_sold=("units_sold", "sum"),
-        end_inv=("ending_inventory", "last"))
-    ep["il"] = ep.discount_cost + ep.cost * ep.end_inv.clip(lower=0)
+        end_start_inv=("starting_inventory", "last"),
+        end_sold=("units_sold", "last"))
+    # leftover, not the reported ending_inventory (written off to zero at the
+    # window close). Reading the field directly zeroes IL's scrap term.
+    ep["end_inv"] = episodes.leftover_units(ep.end_start_inv, ep.end_sold)
+    ep["il"] = ep.discount_cost + ep.cost * ep.end_inv
     ep["denom"] = ep.original_price * ep.units_sold
 
     def cut(g):
@@ -104,7 +109,7 @@ def guardrail_series(decisions, outcomes, cfg):
             "hours_remaining": d["hours_remaining"],
             "cost": d["cost"],
             "start_inv": o["starting_inventory"],
-            "end_inv": o["ending_inventory"],
+
             "sold": o["units_sold"],
             "revenue": o["applied_price"] * o["units_sold"],
             "margin": (o["applied_price"] - d["cost"]) * o["units_sold"],
@@ -118,9 +123,15 @@ def guardrail_series(decisions, outcomes, cfg):
     ep = df.sort_values("hours_remaining", ascending=False).groupby(
         "episode_id").agg(date=("date", "first"), arm=("arm", "first"),
                           start_inv=("start_inv", "first"),
-                          end_inv=("end_inv", "last"),
+                          end_start_inv=("start_inv", "last"),
+                          end_sold=("sold", "last"),
                           revenue=("revenue", "sum"),
                           margin=("margin", "sum"))
+    # scrap is max(0, inventory - sold) on the last hour, never the reported
+    # ending_inventory: the source writes the remainder off to zero when the
+    # window closes, so reading it directly reports zero scrap for every
+    # episode and silently deletes the scrap term from IL.
+    ep["end_inv"] = episodes.leftover_units(ep.end_start_inv, ep.end_sold)
 
     def daily(frame):
         day = frame.groupby("date").agg(

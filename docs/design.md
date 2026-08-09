@@ -1037,6 +1037,41 @@ much inventory sat at each seam. And `rho` / `mean_forced_hours` are now
 measured over whole windows, so `deff` rises and evidence is no longer
 over-counted, which was the anti-conservative direction.
 
+### The last hour writes off, it does not report
+
+**`ending_inventory` is always zero on an episode's last row.** When the
+window closes the source writes off whatever remains, so the last hour breaks
+the inventory chain by design: `ending_inventory == 0` regardless of whether
+it equals `starting_inventory − units_sold`. Verified upstream across 953K
+episodes — never positive there — and **~49.5% of episodes end by write-off**
+rather than clean sellout.
+
+Two failure modes follow, and both are silent:
+
+- **Reading the field as scrap reports zero scrap for every episode.** IL
+  collapses to discount cost alone, the planner's reward loses the term that
+  makes markdown worth doing, the guardrail noise floors are measured on a
+  flat-zero series, and nothing anywhere looks broken. This is what the code
+  in this repo did until the quirk surfaced.
+- **Treating the broken chain as a data error and dropping those episodes**
+  discards essentially all the genuine waste and keeps only guaranteed
+  sellouts — precisely the wrong sample for estimating a scrap cost.
+
+True leftover is therefore `max(0, starting_inventory − units_sold)` on the
+last row, never `ending_inventory`. That formula is also correct wherever the
+chain is honest, so it is the only one used: `common.episodes.leftover_units`
+is the single definition, and `m6_il_pct`, `m5_censoring`, the replay's
+observed-world scrap, `derive_thresholds`, the monitor's IL and guardrail
+series, and the window extension all go through it.
+`m11_episode_endings` reports
+`last_row_ending_inventory_ever_positive` so the convention can be confirmed
+on any new extract rather than assumed.
+
+One knock-on: a restock is now detected as `ending_inventory > starting −
+sold` (inventory went *up*), not as inequality in either direction. The
+write-off makes the last hour of every episode fail an inequality test, which
+would have flagged all of them as restocks.
+
 ### An episode is not as long as its window
 
 Rows stop at the window end **or at zero inventory, whichever comes first**,

@@ -3,22 +3,36 @@
 An episode does not necessarily run the length of its window. `hours_remaining`
 (source `flc_window`) counts the window down; rows stop either when the window
 ends or when inventory reaches zero, whichever comes first. Those two endings
-are economically opposite and must not be pooled:
+are economically opposite and must not be pooled.
 
-  completed        hours_remaining reached 0. The window is over and whatever
-                   inventory is left IS scrapped. This is the only ending that
-                   contributes scrap.
-  sold_out_early   inventory hit zero with window time left. A success, and
-                   scrap is zero -- not because we assumed it, but because
-                   there is nothing left to scrap.
-  truncated        window time left AND inventory left, but no more rows. The
-                   window's outcome is NOT IN THE DATA. Scrap is unknown, and
-                   assuming the leftover was scrapped overstates it.
+DATA QUIRK -- `ending_inventory` IS ALWAYS ZERO ON AN EPISODE'S LAST ROW.
+The source writes off whatever remains when the window closes, so the last
+hour breaks the inventory chain by design: `ending_inventory == 0` regardless
+of whether it equals `starting_inventory - units_sold`. Verified upstream
+across 953K episodes -- it is never positive there, and ~49.5% of episodes end
+by write-off rather than clean sellout. Two consequences, both severe if
+missed:
 
-Counting every episode's last ending_inventory as scrap -- which every metric
-here used to do -- charges the truncated episodes' unsold units to scrap on no
-evidence. Those episodes are excluded from scrap-based aggregates instead, and
-the excluded share is reported so the exclusion is visible rather than silent.
+  * Reading the last row's `ending_inventory` as scrap reports ZERO SCRAP FOR
+    EVERY EPISODE. IL collapses to discount cost, the planner's reward loses
+    the term that makes markdown worth doing, and nothing looks broken.
+  * Treating the broken chain as a data error and dropping those episodes
+    discards essentially all the genuine waste, keeping only guaranteed
+    sellouts -- the exact opposite of the sample a scrap-cost signal needs.
+
+True leftover at the window close is therefore `max(0, starting_inventory -
+units_sold)` on the last row, never `ending_inventory`. That formula is also
+correct where the chain is honest, so it is the only one used here.
+
+  completed        hours_remaining reached 0. The window is over and the
+                   leftover IS scrapped. The only ending that contributes
+                   scrap.
+  sold_out_early   inventory hit zero with window time left. Scrap is zero
+                   because there is nothing left, not by assumption.
+  truncated        window time left AND stock left, but no more rows. The
+                   window's outcome is NOT IN THE DATA, so scrap is unknown
+                   and those episodes are excluded from scrap aggregates
+                   rather than counted as zero.
 """
 
 import numpy as np
@@ -34,53 +48,66 @@ def last_rows(d, order=("date", "hour_of_day")):
     return d.sort_values(list(order)).groupby("episode_id").tail(1)
 
 
-def classify(hours_remaining, ending_inventory):
+def leftover_units(starting_inventory, units_sold):
+    """Stock still on hand at the close of the last hour.
+
+    `max(0, starting_inventory - units_sold)`. NOT `ending_inventory`, which
+    the source zeroes on the last row when it writes the remainder off.
+    """
+    start = np.asarray(starting_inventory, dtype=float)
+    sold = np.asarray(units_sold, dtype=float)
+    out = np.clip(start - sold, 0, None)
+    idx = getattr(starting_inventory, "index", None)
+    return pd.Series(out, index=idx)
+
+
+def classify(hours_remaining, starting_inventory, units_sold):
     """Ending type per row of a last-rows frame."""
     hr = np.asarray(hours_remaining, dtype=float)
-    inv = np.asarray(ending_inventory, dtype=float)
+    left = leftover_units(starting_inventory, units_sold)
     return pd.Series(
         np.where(hr <= 0, COMPLETED,
-                 np.where(inv <= 0, SOLD_OUT_EARLY, TRUNCATED)),
-        index=getattr(hours_remaining, "index", None))
+                 np.where(left.to_numpy() <= 0, SOLD_OUT_EARLY, TRUNCATED)),
+        index=left.index)
 
 
-def scrap_units(hours_remaining, ending_inventory):
+def scrap_units(hours_remaining, starting_inventory, units_sold):
     """Units scrapped, NaN where the window's outcome is not in the data.
 
     NaN propagates: a sum over a frame containing truncated episodes must be
     taken with the truncated ones dropped, not silently treated as zero.
     """
-    kind = classify(hours_remaining, ending_inventory)
-    inv = pd.Series(np.asarray(ending_inventory, dtype=float),
-                    index=kind.index).clip(lower=0)
-    return inv.where(kind == COMPLETED,
-                     pd.Series(np.where(kind == SOLD_OUT_EARLY, 0.0, np.nan),
-                               index=kind.index))
+    kind = classify(hours_remaining, starting_inventory, units_sold)
+    left = leftover_units(starting_inventory, units_sold)
+    return left.where(kind == COMPLETED,
+                      pd.Series(np.where(kind == SOLD_OUT_EARLY, 0.0, np.nan),
+                                index=kind.index))
 
 
 def ending_summary(d):
     """Share of each ending type, and the scrap at stake in the unknown one."""
     last = last_rows(d)
-    kind = classify(last.hours_remaining, last.ending_inventory)
+    kind = classify(last.hours_remaining, last.starting_inventory,
+                    last.units_sold)
+    left = leftover_units(last.starting_inventory, last.units_sold)
     counts = kind.value_counts()
     n = max(len(last), 1)
-    inv = last.ending_inventory.clip(lower=0)
     return {
         "episodes": int(len(last)),
         "shares": {k: round(float(counts.get(k, 0)) / n, 4)
                    for k in (COMPLETED, SOLD_OUT_EARLY, TRUNCATED)},
-        "scrap_units_completed": int(inv[kind == COMPLETED].sum()),
-        "scrap_units_unknown_truncated": int(inv[kind == TRUNCATED].sum()),
-        "share_of_naive_scrap_that_is_unknown": round(
-            float(inv[kind == TRUNCATED].sum() / inv.sum()), 4)
-            if inv.sum() > 0 else None,
-        "note": ("Only `completed` windows contribute scrap. `sold_out_early` "
-                 "has none by construction. `truncated` episodes have no "
-                 "recorded window end, so their leftover units are unknown "
-                 "rather than scrapped -- they are excluded from scrap and IL "
-                 "aggregates. share_of_naive_scrap_that_is_unknown is how "
-                 "much a last-row-inventory scrap figure would have "
-                 "overstated."),
+        "scrap_units_completed": int(left[kind == COMPLETED].sum()),
+        "scrap_units_unknown_truncated": int(left[kind == TRUNCATED].sum()),
+        "share_episodes_ending_by_write_off": round(float(
+            ((kind == COMPLETED) & (left > 0)).mean()), 4),
+        "last_row_ending_inventory_ever_positive": bool(
+            (last.ending_inventory > 0).any()),
+        "note": ("Scrap is max(0, starting_inventory - units_sold) on the last "
+                 "row, NOT ending_inventory, which the source zeroes when it "
+                 "writes off the remainder. If "
+                 "last_row_ending_inventory_ever_positive is false, the "
+                 "write-off convention is in force and any metric reading "
+                 "ending_inventory directly is reporting zero scrap."),
     }
 
 
@@ -124,6 +151,7 @@ def extend_to_window(d, feature_cols=(), max_tail_hours=None):
     rows = []
     for r in need.itertuples():
         base = pd.Timestamp(r.date) + pd.Timedelta(hours=int(r.hour_of_day))
+        tail_inv = max(int(r.starting_inventory) - int(r.units_sold), 0)
         for k in range(1, int(r.hours_remaining) + 1):
             ts = base + pd.Timedelta(hours=k)
             row = {c: getattr(r, c) for c in carry}
@@ -132,8 +160,9 @@ def extend_to_window(d, feature_cols=(), max_tail_hours=None):
                 "date": ts.date() if as_date else ts.normalize(),
                 "hour_of_day": ts.hour,
                 "hours_remaining": r.hours_remaining - k,
-                "starting_inventory": max(int(r.ending_inventory), 0),
-                "ending_inventory": max(int(r.ending_inventory), 0),
+                # true leftover, not the written-off zero
+                "starting_inventory": tail_inv,
+                "ending_inventory": tail_inv,
                 "units_sold": 0,
                 "is_observed": False,
             })

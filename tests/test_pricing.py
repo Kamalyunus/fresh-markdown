@@ -306,20 +306,25 @@ def test_scrap_counted_only_where_the_window_actually_ran_out():
     nothing, and a truncated episode's leftover is simply unknown."""
     from common import episodes
 
+    # the source writes the remainder off at the window close, so
+    # ending_inventory is ZERO on every last row -- scrap must come from
+    # max(0, starting_inventory - units_sold) instead
     hr = pd.Series([0, 0, 4, 3])            # window counter at the last row
-    inv = pd.Series([7, 0, 0, 5])           # inventory at the last row
-    kind = episodes.classify(hr, inv)
+    start = pd.Series([7, 3, 5, 9])         # inventory entering the last hour
+    sold = pd.Series([0, 3, 5, 4])          # write-off / sellout / sellout / left
+    kind = episodes.classify(hr, start, sold)
     assert list(kind) == [episodes.COMPLETED, episodes.COMPLETED,
                           episodes.SOLD_OUT_EARLY, episodes.TRUNCATED]
 
-    scrap = episodes.scrap_units(hr, inv)
-    assert scrap.iloc[0] == 7                # window ran out with stock left
+    scrap = episodes.scrap_units(hr, start, sold)
+    assert scrap.iloc[0] == 7                # window ran out, 7 written off
     assert scrap.iloc[1] == 0                # ran out with nothing left
     assert scrap.iloc[2] == 0                # sold out early: nothing to scrap
     assert pd.isna(scrap.iloc[3])            # unknown, NOT zero and NOT 5
 
-    # the naive last-row-inventory figure overstates by the unknown part
-    assert inv.sum() == 12 and scrap.sum() == 7
+    # reading the zeroed ending_inventory instead would report NO scrap at all
+    zeroed_ending = pd.Series([0, 0, 0, 0])
+    assert zeroed_ending.sum() == 0 and scrap.sum() == 7
 
 
 def test_state_rejected_when_planning_horizon_disagrees_with_recorded_one():
