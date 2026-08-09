@@ -382,3 +382,73 @@ def test_state_rejected_not_priced(workspace):
             "q": 3, "original_price": -5.0, "cost": 10.0, "r": 1.0,
             "mu_ref_path": [1.0, 1.0], "current_discount": None,
         }, None, None, cfg, np.random.default_rng(0), 100.0, "v")
+
+
+def _window(sku, fc, start, hours, base_hr=None):
+    """One selling window as hourly rows, counting hours_remaining down."""
+    hr = hours - 1 if base_hr is None else base_hr
+    ts = pd.date_range(start, periods=hours, freq="h")
+    return pd.DataFrame({
+        "sku_id": sku, "fc": fc,
+        "date": ts.normalize(), "hour_of_day": ts.hour,
+        "hours_remaining": [hr - i for i in range(hours)],
+    })
+
+
+def test_episode_spans_midnight_as_one_window():
+    """FLC windows commonly run past midnight -- 36 hours is common. A
+    date-keyed episode would split one economic window into three, resetting
+    the monotonicity anchor and charging carried inventory to scrap twice."""
+    from bootstrap.prepare_data import assign_episode_ids
+
+    long_window = _window(1, "FC1", "2026-03-01 10:00", 36)
+    d = long_window.sort_values(["sku_id", "fc", "date", "hour_of_day"])
+    ids = assign_episode_ids(d)
+    assert ids.nunique() == 1, "a 36-hour window must be ONE episode"
+    assert d.date.nunique() == 2, "and it must genuinely cross midnight"
+    assert ids.iloc[0] == "1|FC1|2026-03-01T10"
+    assert len(d) == 36 and d.hours_remaining.iloc[-1] == 0
+
+    # a window long enough to cross twice is still one episode
+    three = _window(1, "FC1", "2026-03-01 20:00", 36)
+    three = three.sort_values(["sku_id", "fc", "date", "hour_of_day"])
+    assert assign_episode_ids(three).nunique() == 1
+    assert three.date.nunique() == 3
+
+
+def test_back_to_back_windows_and_gaps_still_split():
+    from bootstrap.prepare_data import assign_episode_ids
+
+    # two windows abutting with no time gap: only the counter reset separates
+    # them, so time-contiguity alone would wrongly merge these
+    a = _window(1, "FC1", "2026-03-01 10:00", 6)
+    b = _window(1, "FC1", "2026-03-01 16:00", 6)
+    d = pd.concat([a, b]).sort_values(["sku_id", "fc", "date", "hour_of_day"])
+    assert assign_episode_ids(d).nunique() == 2
+
+    # a missing hour inside a window splits it, so an episode's row count
+    # always equals its clock -- validate_state rejects any mismatch
+    g = _window(1, "FC1", "2026-03-01 10:00", 6).drop(index=3)
+    assert assign_episode_ids(g).nunique() == 2
+
+    # different sku x fc never merge
+    two = pd.concat([_window(1, "FC1", "2026-03-01 10:00", 4),
+                     _window(2, "FC1", "2026-03-01 10:00", 4)])
+    two = two.sort_values(["sku_id", "fc", "date", "hour_of_day"])
+    assert assign_episode_ids(two).nunique() == 2
+
+
+def test_split_assigns_straddling_episode_by_start_date():
+    """A window that starts in train and ends in calib belongs wholly to
+    train -- otherwise the boundary runs through the middle of an episode."""
+    from bootstrap.prepare_data import split_frames
+
+    cfg = {"data": {"split": {
+        "train_start": "2026-03-01", "train_end": "2026-03-02",
+        "calib_start": "2026-03-03", "calib_end": "2026-03-04",
+        "test_start": "2026-03-05", "test_end": "2026-03-06"}}}
+    d = _window(1, "FC1", "2026-03-02 10:00", 36)     # crosses into 03-03/04
+    d["episode_id"] = "1|FC1|2026-03-02T10"
+    frames = split_frames(d, cfg)
+    assert len(frames["train"]) == len(d)
+    assert len(frames["calib"]) == 0 and len(frames["test"]) == 0

@@ -989,45 +989,54 @@ persistence rules, never by dipping below the noise floor.
 extract and stamps `TOO TIGHT` on any threshold set beneath its own — run it
 before committing the owner values, and treat that verdict as blocking.
 
-## 12a. Known limitation — episodes that outlive their calendar date
+## 12a. Multi-day episodes
 
-`episode_id` is `sku_id | fc | date`, split into contiguous hour runs. A
-selling window that crosses midnight therefore becomes **two episodes**, and
-everything episode-terminal is wrong at the seam. This is a real limitation,
-not a hypothetical: `m11_truncated_episodes` in phase 0 measures it directly
-by asking whether the source's own `hours_remaining` is still positive on an
-episode's last row, and separates cross-midnight windows from intraday data
-gaps by checking for a same-SKU run on the following date.
+FLC windows commonly run past midnight — **36-hour windows are common**. The
+episode key was `sku_id | fc | date`, so one economic window became two or
+three episodes and everything episode-terminal was wrong at each seam. This
+is now fixed at the source rather than worked around downstream.
 
-What breaks, in order of consequence:
+**An episode is a maximal run of consecutive hourly rows for one SKU × FC
+over which the source's own `hours_remaining` counter ticks down exactly one
+per elapsed hour.** Two signals must agree, because either alone is too weak:
+time-contiguity alone would merge two back-to-back windows, and the counter
+alone would stitch across a hole in the data, leaving an episode whose row
+count disagrees with its clock. Crossing midnight is a one-hour step like any
+other — which is the entire point. `episode_id` is now keyed by the window's
+first hour, not by a calendar date.
 
-| Component | Effect at a truncated boundary |
+Three things moved with it:
+
+| Component | Change |
 | --- | --- |
-| **DP terminal value** | `V(·, q, 0) = −cost × q` is applied at the false end, so the planner believes everything unsold is about to be scrapped and over-discounts into the seam. The error is largest exactly where inventory is highest |
-| **Monotonicity** | The constraint is enforced *within* an episode. The continuation has no anchor, so it is treated as an entry and the price may **rise** across the boundary — the one thing the design promises cannot happen |
-| **Entry action set** | The coarse entry arms are offered mid-window, at a moment that is not an entry |
-| **Scrap, IL, IL%, clearance** | Inventory that carried over is counted as scrap. IL is overstated, clearance understated, and the bias lands on the same metrics the A/B is read on |
-| **Guardrail noise floors** | `derive_thresholds` measures daily scrap on the same episode-terminal definition, so both the series and its 3σ floor inherit the bias |
-| **`rho` / `deff`** | Correlation is measured within truncated episodes and `mean_forced_hours_per_episode` is understated, so `deff` is too small and evidence is **over**-counted. This one is anti-conservative: it brings convergence forward |
-| **`prior_episode_ref_sales_rate`** | The "prior episode" may be the earlier half of the same window |
+| **Split assignment** | An episode belongs *wholly* to the split its window started in. Slicing by row date put the later hours of a window in a different split from the entry decision that set its price path — the train/calib boundary ran through the middle of episodes |
+| **Leakage guard on the velocity features** | Features are read as of the episode's **first** date. Keyed per row, a window's second-day rows read a trailing window ending the previous day — which contains that same episode's first-day sales. The episode was predicting itself |
+| **`prior_episode_ref_sales_rate`** | Computed at true episode grain. The daily shift handed a multi-day episode its own earlier day as its "previous episode" |
 
-Two guards are in place now. `validate_state` rejects any decision whose
-`mu_ref_path` length disagrees with `hours_remaining`, so a caller that knows
-the true window but supplies a truncated path gets a rejected state rather
-than a silently mis-planned one — "reject, never guess" applied to the
-horizon. And phase 0 quantifies the exposure, including the share of all
-counted scrap that is really carryover, so the size of the bias is a measured
-number rather than an assumption.
+What this fixes, in order of consequence: the **monotonicity anchor no longer
+resets mid-window**, so price can no longer rise across midnight — previously
+the continuation was treated as an entry, breaking the one guarantee the
+design says is structural. The **DP terminal value** `−cost × q` now fires
+once, at the real window end, instead of two or three times, so the planner
+no longer over-discounts into a false deadline. **Scrap, IL, IL% and
+clearance** no longer count carried-over inventory as scrapped — the IL
+baseline and the guardrail noise floors were biased pessimistic by however
+much inventory sat at each seam. And `rho` / `mean_forced_hours` are now
+measured over whole windows, so `deff` rises and evidence is no longer
+over-counted, which was the anti-conservative direction.
 
-What is **not** fixed: episodes are still not stitched across midnight. Doing
-so is a data-model change — the episode key, the contiguity rule, the
-carryover semantics of `starting_inventory`, and the terminal condition all
-move together — and it should be sized against the measured prevalence rather
-than done pre-emptively. **Read `m11_truncated_episodes.continues_next_date_
-share` and `share_of_all_counted_scrap` on the production extract first.** If
-cross-midnight windows are rare, the bias is a footnote on the IL baseline;
-if they are common, stitching is a prerequisite for the A/B readout, because
-the metric the experiment is judged on carries the bias.
+`m11_truncated_episodes` remains, and its meaning is now sharper: with date
+seams gone, a last row still carrying `hours_remaining > 0` is genuine
+missing data rather than an artifact of the key. `validate_state` rejects any
+decision whose `mu_ref_path` length disagrees with `hours_remaining`, so a
+truncated planning horizon fails loudly instead of silently optimising the
+wrong window.
+
+**Re-run the full bootstrap on production data before quoting any number in
+this document.** Every episode-terminal figure here — the 35.58% IL baseline,
+clearance, `rho`/`deff`, the guardrail noise floors, and the replay's IL
+comparison — was measured under the date-keyed definition and is expected to
+move.
 
 ## 13. Risk register
 
@@ -1039,7 +1048,7 @@ the metric the experiment is judged on carries the bias.
 | 4 | **Metric divergence at readout** — planner optimises IL, business reads IL% | Worked example in 2.3; likeliest A/B outcome is the escalation row | Both metrics + denominators in every cut; divergence flag monitored; decision table pre-committed | Owner |
 | 5 | **Single-elasticity misspecification** — threshold-shaped price response averaged into one exponent | Discount-gap diagnostics are noisy/non-monotonic | Residuals logged by discount region so the failure is visible before it is modelled; piecewise response in phase 2 | Eng |
 | 6 | **Enter-and-hold at the launch prior** — deepening pays only when \|ε\| > (1−d)/(γ−d) ≈ 1.7–1.9, against a prior of 1.0 | Backtest `intra_episode_deepening`: median threshold 1.89 vs \|ε\| 1.0 in use; DP deepens in 0% of episodes; clearance −3.25pp | Correct behaviour given the prior, not a bug — but pre-brief the pilot on lower clearance and higher scrap, and track the threshold gap every run. Exploration is the only thing that closes it; a wider action set cannot | Eng + owner |
-| 7 | **Cross-midnight episodes** (section 12a) — episode key is per-date, so a window spanning midnight splits and every episode-terminal quantity is wrong at the seam | `m11_truncated_episodes` measures truncated share, whether a continuation exists next date, and the share of counted scrap that is really carryover | `validate_state` now rejects a horizon mismatch; phase 0 quantifies exposure. Stitching is a data-model change gated on the measured prevalence — if it is material, it precedes the A/B, since the readout metric carries the bias | Eng + owner |
+| 7 | **Multi-day episode fix invalidates the measured baseline** (section 12a) — 36-hour windows are common, so every episode-terminal figure was measured under a broken key | Monotonicity reset mid-window; DP terminal value fired 2-3x per window; carried inventory counted as scrap at each seam | Fixed at the source: episodes are now maximal runs with a consistent `hours_remaining` countdown, split assignment and the feature leakage guard follow the episode. **Full bootstrap must be re-run before any number is quoted** | Eng |
 | 8 | **Model under-prediction from censored training labels** | Anchor under-prediction with median starting inventory ~2 and ~12.6% stocked-out hours | First phase-2 priority: censored-count training | Eng |
 
 ## 14. Phase 2 (deferred until the loop demonstrably works)

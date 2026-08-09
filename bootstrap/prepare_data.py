@@ -38,9 +38,36 @@ SOURCE_TO_PRD = {
 }
 
 # Persisted with the split manifest; production must derive identical boundaries.
-EPISODE_RULE = ("episode_id = sku_id|fc|date, split into contiguous runs of "
-                "selling hours; a gap of more than one hour starts a new "
-                "segment, suffixed |s<n> for n > 0")
+EPISODE_RULE = (
+    "episode_id = sku_id|fc|<first hour of the window>, where a window is a "
+    "maximal run of consecutive hourly rows for one sku x fc over which the "
+    "source hours_remaining counter decrements by exactly one per elapsed "
+    "hour. The window is NOT keyed by calendar date: FLC windows commonly run "
+    "past midnight (36-hour windows are common), and a date key would split "
+    "one economic episode into two, resetting the monotonicity anchor and "
+    "charging the carried-over inventory to scrap at the seam.")
+
+
+def assign_episode_ids(df):
+    """Maximal runs of consecutive hours with a consistent window countdown.
+
+    Two signals must agree for a row to continue the previous episode: the
+    timestamp advances exactly one hour, and `hours_remaining` -- the source's
+    own view of the window -- ticks down exactly one. Either alone is too
+    weak. Time alone would merge two back-to-back windows; the counter alone
+    would stitch across a gap in the data, leaving an episode whose row count
+    disagrees with its clock (and `validate_state` rejects exactly that).
+
+    Crossing midnight is a one-hour step like any other, which is the point.
+    """
+    ts = pd.to_datetime(df.date) + pd.to_timedelta(df.hour_of_day, unit="h")
+    grp = [df.sku_id, df.fc]
+    dt_h = ts.groupby(grp).diff().dt.total_seconds() / 3600.0
+    hr_diff = df.hours_remaining.groupby(grp).diff()
+    starts = (dt_h.ne(1.0) | hr_diff.ne(-1.0)).fillna(True)
+    start_ts = ts.where(starts).groupby(grp).ffill()
+    return (df.sku_id.astype(str) + "|" + df.fc.astype(str) + "|"
+            + start_ts.dt.strftime("%Y-%m-%dT%H"))
 
 
 def load_and_filter(path, cfg=None):
@@ -60,8 +87,8 @@ def load_and_filter(path, cfg=None):
     df["starting_inventory"] = df["starting_inventory"].round().astype("int64")
     df["ending_inventory"] = df["ending_inventory"].round().astype("int64")
 
-    df["episode_id"] = (df.sku_id.astype(str) + "|" + df.fc.astype(str)
-                        + "|" + df.date.astype(str))
+    df = df.sort_values(["sku_id", "fc", "date", "hour_of_day"])
+    df["episode_id"] = assign_episode_ids(df)
 
     wf = [("raw", len(df), df.episode_id.nunique())]
 
@@ -94,12 +121,10 @@ def load_and_filter(path, cfg=None):
     d = d[~d.episode_id.isin(bad)]
     d = step(d, "units_gt_inventory_dropped")
 
-    # contiguous-hours episode construction (section 9.1 property 3)
+    # re-segment: the filters above drop rows, which can punch a hole in a
+    # window that was contiguous in the raw extract
     d = d.sort_values(["sku_id", "fc", "date", "hour_of_day"]).copy()
-    gap = d.groupby("episode_id")["hour_of_day"].diff().fillna(1).gt(1)
-    seg = gap.groupby(d["episode_id"]).cumsum().astype(int)
-    d.loc[seg > 0, "episode_id"] = (
-        d.loc[seg > 0, "episode_id"] + "|s" + seg[seg > 0].astype(str))
+    d["episode_id"] = assign_episode_ids(d)
     wf.append(("contiguous_episodes_built", len(d), d.episode_id.nunique()))
 
     d["d_ref"] = d.category.map(lambda c: reference_discount(cfg, c))
@@ -165,25 +190,48 @@ def add_ref_rate_features(d, cfg):
                     on=["sku_id", "date"], how="left")
     day["sku_ref_sales_rate_30d"] = day.rate_sku_fc.fillna(day.rate_sku)
 
-    day = day.sort_values(["sku_id", "fc", "date"])
-    ep_rate = day.a_sold / day.a_hours.replace(0, np.nan)
-    day["prior_episode_ref_sales_rate"] = (
-        ep_rate.groupby([day.sku_id, day.fc]).shift(1))
-
     day["date"] = day.date.astype(str)
-    feats = day[["sku_id", "fc", "date",
-                 "sku_ref_sales_rate_30d", "prior_episode_ref_sales_rate"]]
-    d["_date_str"] = d.date.astype(str)
+    feats = day[["sku_id", "fc", "date", "sku_ref_sales_rate_30d"]]
+
+    # Features are read as of the episode's FIRST date, not each row's own
+    # date. A window running past midnight would otherwise let its second-day
+    # rows read a trailing window ending the previous day -- which contains
+    # that same episode's first-day sales. The episode would be predicting
+    # itself.
+    d["_date_str"] = (d.groupby("episode_id")["date"].transform("min")
+                      .astype(str))
     d = (d.merge(feats.rename(columns={"date": "_date_str"}),
-                 on=["sku_id", "fc", "_date_str"], how="left")
+                 on=["sku_id", "fc", "_date_str"], how="left"))
+
+    # prior_episode_ref_sales_rate at true EPISODE grain. Shifting the daily
+    # series would hand a multi-day episode its own earlier day as its
+    # "previous episode".
+    ep = (pd.DataFrame({
+        "episode_id": d.episode_id, "sku_id": d.sku_id, "fc": d.fc,
+        "start": d._date_str,
+        "a_sold": d.units_sold.where(anchor, 0),
+        "a_hours": anchor.astype(int)})
+        .groupby(["episode_id", "sku_id", "fc", "start"], as_index=False).sum()
+        .sort_values(["sku_id", "fc", "start", "episode_id"]))
+    ep["rate"] = ep.a_sold / ep.a_hours.replace(0, np.nan)
+    ep["prior_episode_ref_sales_rate"] = (
+        ep.rate.groupby([ep.sku_id, ep.fc]).shift(1))
+    d = (d.merge(ep[["episode_id", "prior_episode_ref_sales_rate"]],
+                 on="episode_id", how="left")
          .drop(columns=["_date_str"]))
     return d
 
 
 def split_frames(d, cfg):
-    """Date splits for baseline fitting only (config data.split)."""
+    """Date splits for baseline fitting only (config data.split).
+
+    An episode is assigned WHOLLY to the split its window started in. Slicing
+    by row date would put the later hours of a cross-midnight window in a
+    different split from the entry decision that set its price path -- the
+    train/calib boundary would run through the middle of an episode.
+    """
     s = cfg["data"]["split"]
-    ds = d.date.astype(str)
+    ds = d.groupby("episode_id")["date"].transform("min").astype(str)
     return {
         "train": d[ds.ge(s["train_start"]) & ds.le(s["train_end"])],
         "calib": d[ds.ge(s["calib_start"]) & ds.le(s["calib_end"])],
