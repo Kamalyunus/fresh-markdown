@@ -120,6 +120,28 @@ def fidelity(d, cfg, model, prior, r_lookup):
         for w, g in d.groupby(week) if g.predicted_units.sum() > 0}
     block["measurement_10"] = m10_fidelity_decomposition(gate_d, cfg)
 
+    # trend triage: an anchor-level climb driven by NEW-assortment SKUs
+    # (no rate-feature history -> NaN -> model predicts low while they sell)
+    # is an assortment effect, not a macro demand trend
+    if "sku_ref_sales_rate_30d" in gate_d.columns:
+        tier_step = cfg["pricing"]["tier_step"]
+        anchor_rows = gate_d[
+            (gate_d.total_discount - gate_d.d_ref).abs() <= tier_step / 2]
+        has_hist = anchor_rows.sku_ref_sales_rate_30d.notna()
+
+        def _ratio(g):
+            pred = g.predicted_units.sum()
+            return round(float(g.units_sold.sum() / pred), 4) if pred > 0 else None
+
+        block["anchor_ratio_by_rate_history"] = {
+            "with_history": _ratio(anchor_rows[has_hist]),
+            "no_history": _ratio(anchor_rows[~has_hist]),
+            "share_rows_no_history": round(float((~has_hist).mean()), 4)
+                if len(anchor_rows) else None,
+            "note": "no_history far above with_history means new-assortment "
+                    "SKUs are driving the level gap, not a macro trend",
+        }
+
     # gate metric: the pooled ratio judges the model at actual prices (and so
     # embeds the elasticity prior); level_at_anchor judges only the frozen
     # artifact's own responsibility -- the level at reference price

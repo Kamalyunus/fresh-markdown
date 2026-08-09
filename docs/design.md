@@ -704,10 +704,24 @@ and the continuous production guard is the daily
 economic quantity is denominated in the demand prediction, and an early
 25%-light model priced to under-clear (replay clearance 91% → 50%, scrap
 +70%). Level factors, when warranted, are fit on the long
-`calibration_fit_window` so no single anomalous week dominates. Status: a
-final retrain + re-gate at the launch freeze is planned regardless, so the
-level is measured on the freshest data the frozen model will carry into
-production.
+`calibration_fit_window` so no single anomalous week dominates.
+
+Two temporal rules complete the gate's semantics. First, the verdict that
+matters is the one on the **freeze-time model**: a monotone anchor-ratio
+*trend* across the gate weeks (as opposed to wobble) means the demand level
+is in motion and the gated model is stale — August 2026 measured the anchor
+climbing 1.04 → 1.73 over four consecutive weeks against a July-trained
+model, which is a staleness reading, not a launch verdict, and no band
+should be tuned to pass it. (The report's `anchor_ratio_by_rate_history`
+triages such a climb first: new-assortment SKUs with no rate history
+predicting low is an assortment effect, not a macro trend.) Second, when
+the level is measured to move within the MVP window, the level factors are
+**re-fit on a schedule** (weekly, trailing window) and applied through the
+versioned calibration artifact — the frozen model, and with it price
+response and the attribution of posterior movement, stays frozen; only the
+level multiplier tracks the world, which is exactly what a multiplier is
+for. Status: final retrain + re-gate at the launch freeze, with scheduled
+in-window recalibration adopted in response to the measured August trend.
 
 ### 9.3 Prior-acceptance gate (blocking) — is the bracket honest?
 
