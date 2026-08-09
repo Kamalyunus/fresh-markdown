@@ -148,6 +148,13 @@ def main():
     row("would-be forced rate",
         g(sh, "exploration_would_be", "forced_rate"), "13")
     row("solver latency p95 (s)", g(sh, "solver_latency_p95_s"), "13")
+    ly = g(sh, "learning_yield_would_be", default={})
+    row("would-be bounded updates from window",
+        g(ly, "bounded_updates_supported"), "13, 14")
+    row("  episodes per bounded update",
+        g(ly, "episodes_per_bounded_update"), "13, 14")
+    row("  effective information per episode",
+        g(ly, "effective_information_per_episode"), "13, 14")
 
     section("OWNER THRESHOLDS -- slide 15; design 12")
     gn = g(th, "guardrail_noise", default={})

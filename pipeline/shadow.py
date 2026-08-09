@@ -30,7 +30,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from common.config import load_config, ConfigError
+from common.config import load_config, deff, ConfigError
 from bootstrap.train_baseline import BaselineModel
 from bootstrap.fit_dispersion import lookup_r
 from events.store import EventStore
@@ -86,6 +86,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
     n_dec = n_out = cost_floor_violations = differs = 0
     rec_disc = leg_disc = would_be_cost = 0.0
     n_forced = empty_affordable = 0
+    raw_information = 0.0
     latencies = []
     drift = {"mu": [], "r": [], "q": [], "sold": []}
 
@@ -121,6 +122,16 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
             if evt["is_exploration"]:
                 n_forced += 1
                 would_be_cost += evt["exploration_cost"]
+                # would-be learning yield. pipeline.update accumulates
+                # mu * (log price ratio)^2 with the ratio taken against the
+                # REFERENCE discount, not against the DP optimum -- so what
+                # drives information is how far the applied price sits from
+                # the anchor, not how large the perturbation was.
+                lr = np.log((1 - evt["applied_discount"])
+                            / (1 - evt["reference_discount"]))
+                mu_rec = max(mu_path[t] * np.exp(evt["epsilon_posterior_mean"] * lr),
+                             cfg["pricing"]["demand_floor"])
+                raw_information += mu_rec * lr ** 2
             if evt["affordable_set_size"] == 0:
                 empty_affordable += 1
             legacy_d = float(row.total_discount)
@@ -169,6 +180,34 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
         np.array(drift["q"], dtype=float), cfg["pricing"]["negbin_max_k"])
     drift_ratio = (float(np.sum(drift["sold"]) / predicted.sum())
                    if predicted.sum() > 0 else None)
+
+    # weeks-to-convergence input (section 19 / risk 1): how much evidence the
+    # recommendations would have bought, and therefore how many BOUNDED
+    # posterior steps it supports. The step cap and the daily human gate put a
+    # calendar floor under this that no amount of evidence removes.
+    eff_information = raw_information / deff(cfg)
+    inc = cfg["learning"]["information_increment"]
+    n_ep = len(groups)
+    per_episode = eff_information / n_ep if n_ep else 0.0
+    step = cfg["learning"]["max_mean_step"]
+    learning_yield = {
+        "effective_information_total": round(eff_information, 2),
+        "effective_information_per_episode": round(per_episode, 5),
+        "deff_applied": round(deff(cfg), 3),
+        "bounded_updates_supported": round(eff_information / inc, 2),
+        "episodes_per_bounded_update": round(inc / per_episode, 1)
+            if per_episode > 0 else None,
+        "max_mean_step": step,
+        "calendar_floor_days_per_0.15_of_mean": 1,
+        "note": ("Would-be: no price was applied, so this is the evidence the "
+                 "recommendations WOULD have bought. Each bounded update moves "
+                 f"the posterior mean at most {step} and at most one commits "
+                 "per day (human gate), so shifting the mean by X takes at "
+                 f"least ceil(X/{step}) calendar days however much evidence "
+                 "arrives. Divide episodes_per_bounded_update by the pilot's "
+                 "daily episode count for the evidence-side estimate; the "
+                 "binding constraint is whichever is larger."),
+    }
 
     completeness = n_out / n_dec
     matched = n_out / n_dec        # 1:1 by construction; gaps = quarantined/dupes
@@ -230,6 +269,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
             "note": "no price was applied; costs are the expected IL the "
                     "recommendations would have spent",
         },
+        "learning_yield_would_be": learning_yield,
         "recommendation_vs_legacy": {
             "mean_recommended_discount": round(rec_disc / n_dec, 4),
             "mean_legacy_discount": round(leg_disc / n_dec, 4),
@@ -294,6 +334,11 @@ def main():
           f"(differs {rv['share_hours_differing']:.1%} of hours)")
     print(f"drift ratio        : "
           f"{report['realised_vs_predicted_sold_ratio_at_legacy_price']}")
+    ly = report["learning_yield_would_be"]
+    print(f"would-be learning  : {ly['bounded_updates_supported']} bounded "
+          f"updates from this window "
+          f"({ly['episodes_per_bounded_update']} episodes per update); "
+          f"calendar floor is 1 update/day")
     print(g["verdict"])
     print(f"wrote {args.out}")
 

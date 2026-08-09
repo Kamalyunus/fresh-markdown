@@ -498,6 +498,18 @@ should be said out loud before the pilot:
   between the threshold and the elasticity in use, so the distance left to
   travel is visible every run.
 
+One reassurance about the evidence side, since enter-and-hold sounds like it
+should starve the learner. It does the opposite. `pipeline.update` accumulates
+`mu × (log price ratio)²` with the ratio taken against the **reference**
+discount, not against the DP's own optimum — so what generates information is
+how far the applied price sits from the anchor, not how large the random
+perturbation was. Holding at `d_ref − 15pp` parks every hour of the episode
+at `(log ratio)² ≈ 0.038`, whereas a 2.5pp wiggle around a price sitting *on*
+the reference would yield ≈ 0.001. The enter-and-hold regime is a
+high-information regime, not a desert; on the launch prior, moving the mean
+from 1.0 to 1.9 needs roughly 8,600 exploration outcomes. `shadow` reports
+the realised figure as `learning_yield_would_be` before any price is applied.
+
 The planner solves the finite-horizon problem exactly:
 
 ```
@@ -968,7 +980,7 @@ before committing the owner values, and treat that verdict as blocking.
 
 | # | Risk | Evidence | Mitigation | Owner |
 | --- | --- | --- | --- | --- |
-| 1 | **Learning throughput** — posterior may converge too slowly for the 13-week window | Per-outcome information is small (demand ~0.5–1/hr × squared log-price-ratio ~0.01–0.04, ÷ deff 3.589); prior is wide fallback for 14/16 categories; monotonicity concentrates identification at entry | Quantify weeks-to-convergence from shadow's would-be exploration stats **before** the learning pilot; levers: concentrate budget on entry decisions, raise the budget share, coarser cells. A 21-day flat-posterior alert catches a dead loop | Eng + owner |
+| 1 | **Learning throughput** — and the deepening bar in risk 6 sets how far the posterior must travel, not just how fast | Per-outcome information is small (demand ~0.5–1/hr × squared log-price-ratio ~0.01–0.04, ÷ deff 3.589); prior is wide fallback for 14/16 categories; monotonicity concentrates identification at entry | Shadow now emits `learning_yield_would_be` — effective information per episode, episodes per bounded update — so weeks-to-convergence is read off before the pilot, not guessed. Two floors bind separately: evidence (episodes needed) and calendar (the 0.15 step cap with one human-gated update per day means ≥6 days to move the mean 1.0 → 1.9 however much evidence arrives). Levers: raise the budget share, coarser cells. A 21-day flat-posterior alert catches a dead loop | Eng + owner |
 | 2 | **Frozen-model drift over Sep–Dec** (seasonality incl. Chuseok; no trend features) | Drift already measured: 1.144 → 0.990 → 1.095 across windows; every economic quantity is denominated in the demand prediction | Final retrain immediately before the launch freeze (gate re-checked); daily drift ratio in shadow and production; pre-register a mid-window recalibration rule now so a drift response is not improvised | Eng |
 | 3 | **A/B power** — measured SE is 6× the original assumption | 0.002383 vs 0.000383; small effects may not fit the window | Empirical duration table from the derivation tool; owner commits to a feasible (effect, duration) pair before launch | Owner |
 | 4 | **Metric divergence at readout** — planner optimises IL, business reads IL% | Worked example in 2.3; likeliest A/B outcome is the escalation row | Both metrics + denominators in every cut; divergence flag monitored; decision table pre-committed | Owner |
