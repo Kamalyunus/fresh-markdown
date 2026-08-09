@@ -159,3 +159,30 @@ def test_config_strict_refuses_null_measured(tmp_path):
     from common.config import ConfigError
     with pytest.raises(ConfigError, match="refusing to start"):
         load_config(strict=True)
+
+
+def test_config_detects_stale_paste_from_frozen_artifact(tmp_path):
+    """A config rho left over from a previous retrain silently mis-weights
+    every posterior update, because rho and forced-hours set deff."""
+    import json
+    from common.config import artifact_mirror_drift
+
+    with open("config.yaml") as f:
+        cfg = yaml.safe_load(f)
+    rho_path = tmp_path / "rho.json"
+    cfg["dispersion"]["rho_path"] = str(rho_path)
+    cfg["dispersion"]["rho"] = 0.3183
+    cfg["dispersion"]["mean_forced_hours_per_episode"] = 9.134
+
+    # no artifact yet -- bootstrap has not run, which is not drift
+    assert artifact_mirror_drift(cfg) == []
+
+    rho_path.write_text(json.dumps(
+        {"rho": 0.3183, "mean_forced_hours_per_episode": 9.134}))
+    assert artifact_mirror_drift(cfg) == []
+
+    # retrain moved rho; config still holds the old paste
+    rho_path.write_text(json.dumps(
+        {"rho": 0.2510, "mean_forced_hours_per_episode": 9.134}))
+    drift = artifact_mirror_drift(cfg)
+    assert len(drift) == 1 and "dispersion.rho" in drift[0]

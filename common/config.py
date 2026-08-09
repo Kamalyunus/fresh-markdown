@@ -12,6 +12,7 @@ Two loading modes:
                                 is null (PRD section 7).
 """
 
+import json
 import os
 
 import yaml
@@ -33,11 +34,46 @@ RUNTIME_REQUIRED = [
 ]
 
 
+# Values that exist in TWO places: written by bootstrap into a frozen
+# artifact, then hand-pasted into config. A stale paste is silent and
+# consequential -- rho and forced-hours set deff, which divides accumulated
+# information in pipeline.update, so a config left over from a previous model
+# version mis-weights every posterior step for the whole MVP window. Strict
+# mode refuses to start on divergence rather than trusting the paste.
+ARTIFACT_MIRRORS = [
+    (("dispersion", "rho_path"), "rho", ("dispersion", "rho")),
+    (("dispersion", "rho_path"), "mean_forced_hours_per_episode",
+     ("dispersion", "mean_forced_hours_per_episode")),
+]
+
+
 def _get(cfg, path):
     node = cfg
     for key in path:
         node = node[key]
     return node
+
+
+def artifact_mirror_drift(cfg, tol=5e-4):
+    """Config values that disagree with the artifact they were pasted from.
+
+    Returns a list of human-readable divergences (empty when consistent).
+    A missing artifact is not drift -- bootstrap has not run yet.
+    """
+    drift = []
+    for path_key, field, cfg_path in ARTIFACT_MIRRORS:
+        path = _get(cfg, path_key)
+        if not os.path.exists(path):
+            continue
+        with open(path) as f:
+            artifact = json.load(f)
+        if field not in artifact:
+            continue
+        pasted, frozen = _get(cfg, cfg_path), artifact[field]
+        if pasted is None or abs(float(pasted) - float(frozen)) > tol:
+            drift.append(f"{'.'.join(cfg_path)}={pasted} but "
+                         f"{path}:{field}={frozen}")
+    return drift
 
 
 def load_config(path="config.yaml", strict=False):
@@ -60,6 +96,13 @@ def load_config(path="config.yaml", strict=False):
             raise ConfigError(
                 "refusing to start: null MEASURED / SET BY OWNER values: "
                 + ", ".join(missing))
+        drift = artifact_mirror_drift(cfg)
+        if drift:
+            raise ConfigError(
+                "refusing to start: config disagrees with the frozen "
+                "artifacts it was pasted from (" + "; ".join(drift)
+                + "). Re-paste from the artifact -- these set deff, which "
+                  "deflates every posterior update.")
     return cfg
 
 

@@ -531,8 +531,12 @@ normalises, and takes moments. Mechanics and rationale:
   pool, a demand shock, and a monotone price path; summed as independent
   they overstate evidence and declare convergence early. Accumulated
   information is divided by `deff = 1 + (forced_hours − 1) × rho` — measured
-  at `1 + 8.134 × 0.377 ≈ 4.07`. Without this one line, the system would
-  report convergence four times too early.
+  at `1 + 8.134 × 0.3183 ≈ 3.59`. Without this one line, the system would
+  report convergence three-and-a-half times too early. Both inputs are
+  fitted against the model's own residuals and frozen in
+  `artifacts/rho.json`; strict start-up refuses to run when `config.yaml`
+  disagrees with that artifact, because a paste left over from a previous
+  retrain mis-weights every posterior step in the window.
 - **Bounded steps, human-gated.** An update applies when accumulated
   effective information crosses a threshold; each step moves the mean at
   most 0.15 and shrinks the std at most 25% (floored), with any clipped
@@ -664,7 +668,7 @@ the design — each caught by a gate or diagnostic doing its job:
    honestly.
 4. **Per-SKU velocity features** (section 5.4). Adding them improved per-row
    accuracy (hourly MAE 0.405 → 0.373) and cut residual intra-episode
-   correlation (deff 4.07 → 3.59, ~12% more information per exploration
+   correlation (deff 4.07 → 3.589, ~13% more information per exploration
    outcome) — while exposing that Tweedie's objective is not sum-calibrated,
    leaving a persistent aggregate level deficit for the calibration factor
    to absorb.
@@ -691,7 +695,7 @@ the design — each caught by a gate or diagnostic doing its job:
 | Guardrail 3σ daily noise floors | realised margin **13.36%**; scrap **914%** — outlier-dominated, see section 12 |
 | Hourly MAE (gate window) | 0.4053 on the shipped calibrated artifact (0.373 uncalibrated — calibration trades per-hour error for aggregate level) |
 | Actual IL% (replay sample of 2,000 episodes) | 34.64% (IL ≈ ₩14.7M) |
-| Correlation `rho` / forced hours / implied deff | 0.3183 / 9.134 / ≈ 3.59 (was 4.07) |
+| Correlation `rho` / forced hours / implied deff | 0.3183 / 9.134 / **3.589** (was 4.07; fitted-residual basis, `artifacts/rho.json`) |
 | IL% clustered SE (full ~18-week window) | 0.002383 |
 | Elasticity prior | fallback −1.0 ± 0.6 for 14/16 categories; MEAT interior bracket accepted |
 | Exploration `tau` | ₩203.09, taken from the gate-passing report (earlier failing runs ranged ₩187–203; only a passing report may be pasted) |
@@ -882,7 +886,7 @@ before committing the owner values, and treat that verdict as blocking.
 
 | # | Risk | Evidence | Mitigation | Owner |
 | --- | --- | --- | --- | --- |
-| 1 | **Learning throughput** — posterior may converge too slowly for the 13-week window | Per-outcome information is small (demand ~0.5–1/hr × squared log-price-ratio ~0.01–0.04, ÷ deff 4.07); prior is wide fallback for 14/16 categories; monotonicity concentrates identification at entry | Quantify weeks-to-convergence from shadow's would-be exploration stats **before** the learning pilot; levers: concentrate budget on entry decisions, raise the budget share, coarser cells. A 21-day flat-posterior alert catches a dead loop | Eng + owner |
+| 1 | **Learning throughput** — posterior may converge too slowly for the 13-week window | Per-outcome information is small (demand ~0.5–1/hr × squared log-price-ratio ~0.01–0.04, ÷ deff 3.589); prior is wide fallback for 14/16 categories; monotonicity concentrates identification at entry | Quantify weeks-to-convergence from shadow's would-be exploration stats **before** the learning pilot; levers: concentrate budget on entry decisions, raise the budget share, coarser cells. A 21-day flat-posterior alert catches a dead loop | Eng + owner |
 | 2 | **Frozen-model drift over Sep–Dec** (seasonality incl. Chuseok; no trend features) | Drift already measured: 1.144 → 0.990 → 1.095 across windows; every economic quantity is denominated in the demand prediction | Final retrain immediately before the launch freeze (gate re-checked); daily drift ratio in shadow and production; pre-register a mid-window recalibration rule now so a drift response is not improvised | Eng |
 | 3 | **A/B power** — measured SE is 6× the original assumption | 0.002383 vs 0.000383; small effects may not fit the window | Empirical duration table from the derivation tool; owner commits to a feasible (effect, duration) pair before launch | Owner |
 | 4 | **Metric divergence at readout** — planner optimises IL, business reads IL% | Worked example in 2.3; likeliest A/B outcome is the escalation row | Both metrics + denominators in every cut; divergence flag monitored; decision table pre-committed | Owner |
@@ -938,7 +942,7 @@ is reproducible from its event alone. Run outputs (`data/`, `reports/`,
 | ε (elasticity) | Exponent mapping price ratio to demand; the only quantity learned in production |
 | `r` | Frozen negative-binomial dispersion (`Var = mu + mu²/r`) |
 | `rho` | Frozen intra-episode demand correlation |
-| deff | Design effect deflating correlated within-episode evidence (≈ 4.07) |
+| deff | Design effect deflating correlated within-episode evidence (3.589) |
 | `tau` | Currency threshold defining the affordable exploration set |
 | Cell | A learning unit: one high-volume category, or the pooled global cell |
 | Anchor | The price currently in force; hourly actions may only deepen from it |

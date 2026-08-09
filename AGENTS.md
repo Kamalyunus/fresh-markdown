@@ -223,6 +223,18 @@ decisions — an agent must never invent these).
 MEASURED values produced by the pipeline are pasted into `config.yaml` by
 hand; SET BY OWNER values come from the PRD owner only.
 
+**`dispersion.rho` and `dispersion.mean_forced_hours_per_episode` must be
+re-pasted from `artifacts/rho.json` after every retrain.** They set `deff`,
+which divides accumulated information in `pipeline.update`, so a paste left
+over from a previous model version mis-weights every posterior step for the
+whole window — silently, and in the direction of slower learning. Strict
+start-up now refuses to run on divergence, but the check only fires in
+strict mode: re-paste as part of the retrain, not when something breaks.
+Take them from `artifacts/rho.json` (fitted against the model's own
+residuals), never from phase 0's `m3_intra_episode_correlation`, which is a
+category × hour proxy computed before any model exists and says so in its
+own `note`.
+
 For the two guardrail thresholds, `bootstrap.derive_thresholds` measures the
 3σ daily noise floor and stamps `TOO TIGHT` on anything set below it — that
 verdict is blocking, not advisory. Measured on production data: scrap 0.0914,
