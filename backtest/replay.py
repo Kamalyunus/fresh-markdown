@@ -299,6 +299,27 @@ def fidelity(d, cfg, model, prior, r_lookup):
                     "SKUs are driving the level gap, not a macro trend",
         }
 
+    # how much of the apparent model bias is censoring? sales cannot exceed
+    # inventory, so a comparison against raw mu (E[D]) rather than the
+    # censored E[min(D,q)] understates what the model predicts and makes it
+    # look better than it is -- quantified here so the basis is never implicit
+    raw_mu_total = float(gate_d.mu_hat.sum())
+    censored_total = float(gate_d.predicted_units.sum())
+    sold_total = float(gate_d.units_sold.sum())
+    block["prediction_basis"] = {
+        "sold_over_censored_prediction": round(sold_total / censored_total, 4)
+            if censored_total > 0 else None,
+        "sold_over_raw_mu": round(sold_total / raw_mu_total, 4)
+            if raw_mu_total > 0 else None,
+        "censoring_shrinkage": round(censored_total / raw_mu_total, 4)
+            if raw_mu_total > 0 else None,
+        "censored_hour_rate": round(
+            float((gate_d.units_sold >= gate_d.starting_inventory).mean()), 4),
+        "note": ("censored is the gate basis and the one every fit must use; "
+                 "the raw-mu figure is shown only to size the gap between "
+                 "them -- a factor fit on raw mu is wrong by this much"),
+    }
+
     # is the weekly level movement demand drift, or SKU composition?
     block["level_mix_decomposition"] = level_mix_decomposition(d, cfg)
     # how long should the level factor's fit window be? measured, not assumed

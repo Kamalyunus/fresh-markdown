@@ -29,12 +29,12 @@ import os
 
 import numpy as np
 import pandas as pd
-from scipy.stats import nbinom
 
 from common.config import load_config, ConfigError
 from bootstrap.train_baseline import BaselineModel
 from bootstrap.fit_dispersion import lookup_r
 from events.store import EventStore
+from pricing.demand import expected_min_demand_inventory_vec
 from inference.decide import decide, StateRejected
 from pricing.posterior import PosteriorStore
 
@@ -49,19 +49,6 @@ def _require_shadow_config(cfg):
         missing.append("exploration.tau_initial (from a PASSING backtest)")
     if missing:
         raise ConfigError("shadow phase blocked by null config: " + "; ".join(missing))
-
-
-def _censored_expected_units(mu, r, q, max_k):
-    """Vectorised E[min(D, q)] for the drift ratio, chunked."""
-    out = np.empty(len(mu))
-    k = np.arange(max_k + 1)
-    for start in range(0, len(mu), 100000):
-        sl = slice(start, min(start + 100000, len(mu)))
-        p = (r[sl] / (r[sl] + mu[sl]))[:, None]
-        pmf = nbinom.pmf(k[None, :], r[sl][:, None], p)
-        pmf[:, -1] += np.clip(1.0 - pmf.sum(axis=1), 0.0, None)
-        out[sl] = np.sum(pmf * np.minimum(k[None, :], q[sl][:, None]), axis=1)
-    return out
 
 
 def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=0):
@@ -164,7 +151,9 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=0):
     if n_dec == 0:
         raise RuntimeError("no decisions produced -- empty input or all states rejected")
 
-    predicted = _censored_expected_units(
+    # censored basis: sales cannot exceed inventory, so the drift ratio
+    # compares realised sales against E[min(D, q)] -- never raw mu
+    predicted = expected_min_demand_inventory_vec(
         np.array(drift["mu"]), np.array(drift["r"]),
         np.array(drift["q"], dtype=float), cfg["pricing"]["negbin_max_k"])
     drift_ratio = (float(np.sum(drift["sold"]) / predicted.sum())
