@@ -111,6 +111,13 @@ def fidelity(d, cfg, model, prior, r_lookup):
                if g.predicted_units.sum() > 0 else None}
         for name, g in [("train", splits["train"]), ("calib", splits["calib"]),
                         ("test", splits["test"]), ("all", d)]}
+    # weekly sold ratios over ALL history: if these swing wider than the gate
+    # band, the gate is measuring week-scale demand volatility, not model
+    # quality -- a gate-window/band decision, not a retraining problem
+    week = pd.to_datetime(d.date).dt.to_period("W").astype(str)
+    block["by_week"] = {
+        str(w): round(float(g.units_sold.sum() / g.predicted_units.sum()), 4)
+        for w, g in d.groupby(week) if g.predicted_units.sum() > 0}
     block["measurement_10"] = m10_fidelity_decomposition(gate_d, cfg)
     band = cfg["baseline_model"]["calibration_gate_band"]
     block["calibration_gate_band"] = band
