@@ -40,6 +40,15 @@ def validate_state(s, tiers, anchor_discount, mu_ref_path):
         failures.append("feasible set is empty")
     if not all(math.isfinite(m) and m > 0 for m in mu_ref_path):
         failures.append("demand predictions must be finite and positive")
+    # the DP plans over len(mu_ref_path) and applies terminal scrap value at
+    # the end of it, while the event records hours_remaining. If the caller
+    # disagrees with itself the system silently optimises the wrong horizon --
+    # exactly what a window truncated at a date boundary looks like. Reject.
+    if len(mu_ref_path) != s["hours_remaining"]:
+        failures.append(
+            f"mu_ref_path has {len(mu_ref_path)} hours but hours_remaining is "
+            f"{s['hours_remaining']}: the planning horizon and the recorded "
+            "horizon must be the same window")
     if anchor_discount is not None and tiers \
             and not any(d >= anchor_discount - 1e-9 for d in tiers):
         failures.append("no feasible tier at or below the current anchor price")

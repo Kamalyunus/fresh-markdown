@@ -257,6 +257,60 @@ def m8_entry_hour(d):
     }
 
 
+def m11_truncated_episodes(d):
+    """Episodes whose selling window did not actually end where the episode
+    record ends -- the multi-day / cross-midnight case.
+
+    episode_id is sku_id|fc|DATE split into contiguous hour runs, so a window
+    that spans midnight (or has an hour gap) becomes two episodes. The source
+    `hours_remaining` column is the business's own view of the window, so a
+    last row with hours_remaining > 0 means the window continued past the
+    episode boundary. Everything episode-terminal is wrong for those rows:
+    the DP applies terminal scrap value there, and every scrap/IL figure
+    counts inventory that in reality carried over and could still sell.
+
+    `continues_next_date` separates the two causes: a same sku|fc run starting
+    on the following date means a genuine cross-midnight window, while no
+    continuation points at an intraday data gap.
+    """
+    g = d.sort_values("hour_of_day").groupby("episode_id")
+    last = g.tail(1)
+    truncated = last[last.hours_remaining > 0]
+    n_ep = int(d.episode_id.nunique())
+    if not n_ep:
+        return "NOT RUN -- no episodes"
+
+    # does a run for the same sku x fc exist on the next calendar date?
+    have = set(zip(d.sku_id, d.fc, pd.to_datetime(d.date).dt.normalize()))
+    nxt = [(r.sku_id, r.fc,
+            pd.Timestamp(r.date).normalize() + pd.Timedelta(days=1))
+           for r in truncated.itertuples()]
+    continues = sum(1 for key in nxt if key in have)
+
+    scrap_all = float(last.ending_inventory.clip(lower=0).sum())
+    scrap_trunc = float(truncated.ending_inventory.clip(lower=0).sum())
+    return {
+        "episodes": n_ep,
+        "truncated_episodes": int(len(truncated)),
+        "truncated_share": round(len(truncated) / n_ep, 4),
+        "continues_next_date": int(continues),
+        "continues_next_date_share": round(continues / max(len(truncated), 1), 4),
+        "median_hours_remaining_at_truncation": float(
+            truncated.hours_remaining.median()) if len(truncated) else 0.0,
+        "units_counted_as_scrap_but_carried": int(scrap_trunc),
+        "share_of_all_counted_scrap": round(scrap_trunc / scrap_all, 4)
+            if scrap_all > 0 else None,
+        "note": ("Inventory in truncated episodes is counted as scrap by every "
+                 "episode-terminal metric (IL, IL%, clearance, the guardrail "
+                 "scrap series and its noise floor) and is the horizon the DP "
+                 "applies -cost*q at. A high share_of_all_counted_scrap means "
+                 "those figures are biased pessimistic and the DP "
+                 "over-discounts near the false window end. Monotonicity also "
+                 "resets at the boundary: the continuation is treated as an "
+                 "entry, so price may rise across it."),
+    }
+
+
 def m10_fidelity_decomposition(d, cfg, pred_col="predicted_units"):
     """Measurement 10 -- separates LEVEL bias from SLOPE bias in the baseline.
 
@@ -348,6 +402,7 @@ def run_all(d, cfg):
         "m6_il_pct": m6_il_pct(d),
         "m7_learning_rate": m7_learning_rate(d),
         "m8_entry_hour": m8_entry_hour(d),
+        "m11_truncated_episodes": m11_truncated_episodes(d),
         "m9_controller_replay": "NOT RUN -- requires fitted baseline model (backtest)",
         "m10_fidelity_decomposition": m10_fidelity_decomposition(d, cfg),
     }

@@ -989,6 +989,46 @@ persistence rules, never by dipping below the noise floor.
 extract and stamps `TOO TIGHT` on any threshold set beneath its own — run it
 before committing the owner values, and treat that verdict as blocking.
 
+## 12a. Known limitation — episodes that outlive their calendar date
+
+`episode_id` is `sku_id | fc | date`, split into contiguous hour runs. A
+selling window that crosses midnight therefore becomes **two episodes**, and
+everything episode-terminal is wrong at the seam. This is a real limitation,
+not a hypothetical: `m11_truncated_episodes` in phase 0 measures it directly
+by asking whether the source's own `hours_remaining` is still positive on an
+episode's last row, and separates cross-midnight windows from intraday data
+gaps by checking for a same-SKU run on the following date.
+
+What breaks, in order of consequence:
+
+| Component | Effect at a truncated boundary |
+| --- | --- |
+| **DP terminal value** | `V(·, q, 0) = −cost × q` is applied at the false end, so the planner believes everything unsold is about to be scrapped and over-discounts into the seam. The error is largest exactly where inventory is highest |
+| **Monotonicity** | The constraint is enforced *within* an episode. The continuation has no anchor, so it is treated as an entry and the price may **rise** across the boundary — the one thing the design promises cannot happen |
+| **Entry action set** | The coarse entry arms are offered mid-window, at a moment that is not an entry |
+| **Scrap, IL, IL%, clearance** | Inventory that carried over is counted as scrap. IL is overstated, clearance understated, and the bias lands on the same metrics the A/B is read on |
+| **Guardrail noise floors** | `derive_thresholds` measures daily scrap on the same episode-terminal definition, so both the series and its 3σ floor inherit the bias |
+| **`rho` / `deff`** | Correlation is measured within truncated episodes and `mean_forced_hours_per_episode` is understated, so `deff` is too small and evidence is **over**-counted. This one is anti-conservative: it brings convergence forward |
+| **`prior_episode_ref_sales_rate`** | The "prior episode" may be the earlier half of the same window |
+
+Two guards are in place now. `validate_state` rejects any decision whose
+`mu_ref_path` length disagrees with `hours_remaining`, so a caller that knows
+the true window but supplies a truncated path gets a rejected state rather
+than a silently mis-planned one — "reject, never guess" applied to the
+horizon. And phase 0 quantifies the exposure, including the share of all
+counted scrap that is really carryover, so the size of the bias is a measured
+number rather than an assumption.
+
+What is **not** fixed: episodes are still not stitched across midnight. Doing
+so is a data-model change — the episode key, the contiguity rule, the
+carryover semantics of `starting_inventory`, and the terminal condition all
+move together — and it should be sized against the measured prevalence rather
+than done pre-emptively. **Read `m11_truncated_episodes.continues_next_date_
+share` and `share_of_all_counted_scrap` on the production extract first.** If
+cross-midnight windows are rare, the bias is a footnote on the IL baseline;
+if they are common, stitching is a prerequisite for the A/B readout, because
+the metric the experiment is judged on carries the bias.
+
 ## 13. Risk register
 
 | # | Risk | Evidence | Mitigation | Owner |
@@ -999,7 +1039,8 @@ before committing the owner values, and treat that verdict as blocking.
 | 4 | **Metric divergence at readout** — planner optimises IL, business reads IL% | Worked example in 2.3; likeliest A/B outcome is the escalation row | Both metrics + denominators in every cut; divergence flag monitored; decision table pre-committed | Owner |
 | 5 | **Single-elasticity misspecification** — threshold-shaped price response averaged into one exponent | Discount-gap diagnostics are noisy/non-monotonic | Residuals logged by discount region so the failure is visible before it is modelled; piecewise response in phase 2 | Eng |
 | 6 | **Enter-and-hold at the launch prior** — deepening pays only when \|ε\| > (1−d)/(γ−d) ≈ 1.7–1.9, against a prior of 1.0 | Backtest `intra_episode_deepening`: median threshold 1.89 vs \|ε\| 1.0 in use; DP deepens in 0% of episodes; clearance −3.25pp | Correct behaviour given the prior, not a bug — but pre-brief the pilot on lower clearance and higher scrap, and track the threshold gap every run. Exploration is the only thing that closes it; a wider action set cannot | Eng + owner |
-| 7 | **Model under-prediction from censored training labels** | Anchor under-prediction with median starting inventory ~2 and ~12.6% stocked-out hours | First phase-2 priority: censored-count training | Eng |
+| 7 | **Cross-midnight episodes** (section 12a) — episode key is per-date, so a window spanning midnight splits and every episode-terminal quantity is wrong at the seam | `m11_truncated_episodes` measures truncated share, whether a continuation exists next date, and the share of counted scrap that is really carryover | `validate_state` now rejects a horizon mismatch; phase 0 quantifies exposure. Stitching is a data-model change gated on the measured prevalence — if it is material, it precedes the A/B, since the readout metric carries the bias | Eng + owner |
+| 8 | **Model under-prediction from censored training labels** | Anchor under-prediction with median starting inventory ~2 and ~12.6% stocked-out hours | First phase-2 priority: censored-count training | Eng |
 
 ## 14. Phase 2 (deferred until the loop demonstrably works)
 

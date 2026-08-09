@@ -250,6 +250,26 @@ realised margin 0.1336. A margin threshold under ~0.13 fires on ordinary days
 and silently suspends exploration, which is the product. Buy sensitivity back
 with a persistence rule, never by going under the floor.
 
+## Multi-day episodes
+
+`episode_id` is `sku_id|fc|date` split into contiguous hour runs, so a window
+crossing midnight becomes two episodes and every episode-terminal quantity is
+wrong at the seam (DP terminal scrap value, monotonicity, scrap/IL/clearance,
+the guardrail noise floors, `rho`/`deff`). Check
+`m11_truncated_episodes` in `reports/phase0.json` on any new extract before
+quoting an IL baseline:
+
+- `continues_next_date_share` near 1 -> genuine cross-midnight windows
+- near 0 -> intraday data gaps instead
+- `share_of_all_counted_scrap` -> how much of the scrap figure is really
+  carryover, i.e. how pessimistic IL and clearance are
+
+Do NOT paper over it by widening the episode key without also changing the
+contiguity rule, the carryover semantics of `starting_inventory`, and the DP
+terminal condition -- they move together. `validate_state` rejects any
+decision whose `mu_ref_path` length disagrees with `hours_remaining`, so a
+truncated planning horizon fails loudly rather than silently.
+
 ## Refreshing the numbers in the docs and deck
 
 `docs/design.md` and `docs/perishable_markdown_tech_deck.pptx` quote ~25

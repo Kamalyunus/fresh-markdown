@@ -240,6 +240,21 @@ def test_config_strict_refuses_null_measured(tmp_path):
         load_config(strict=True)
 
 
+def test_state_rejected_when_planning_horizon_disagrees_with_recorded_one():
+    """A window truncated at a date boundary looks exactly like this: the
+    caller believes the episode runs longer than the path it supplied."""
+    from inference.decide import validate_state
+
+    base = {"original_price": 10000.0, "cost": 6000.0, "q": 3,
+            "hours_remaining": 4, "r": 1.0}
+    tiers = [0.0, 0.025, 0.05]
+
+    assert validate_state(base, tiers, None, [1.0, 1.0, 1.0, 1.0]) == []
+
+    failures = validate_state(base, tiers, None, [1.0, 1.0])
+    assert any("planning horizon" in f for f in failures)
+
+
 def test_guardrail_fires_only_after_persistence():
     """The owner thresholds must actually be evaluated -- and must not fire on
     a single day over, which is what the noise floor makes routine."""
