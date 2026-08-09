@@ -70,12 +70,29 @@ def assign_episode_ids(df):
             + start_ts.dt.strftime("%Y-%m-%dT%H"))
 
 
+def restocked_episodes(d):
+    """Episode ids where the next hour opens with more stock than this hour
+    left behind.
+
+    Tested on the inventory CHAIN, never on `ending_inventory`: the source
+    zeroes that field at the window close, so an equality test against it
+    would flag every episode's last hour. Callers must run this only on
+    contiguous episodes -- across a data gap the jump reads as a restock.
+    """
+    leftover = (d.starting_inventory - d.units_sold).clip(lower=0)
+    nxt = d.groupby("episode_id")["starting_inventory"].shift(-1)
+    restocked = nxt.notna() & (nxt > leftover)
+    return d.loc[restocked, "episode_id"].unique()
+
+
 def load_and_filter(path, cfg=None):
     """Section 9.1 mapping + section 9.2 filter chain. Returns (df, waterfall).
 
     Filter order is deterministic and auditable; the waterfall records row and
-    episode counts after every step. Intraday restocks are preserved (nothing
-    here drops rows on inventory increase).
+    episode counts after every step. Episodes with an intraday restock are
+    dropped whole: mid-window replenishment breaks the one-inventory-pool
+    assumption the DP's state transition rests on, and the demand the extra
+    units meet is not the demand the episode's price path was chosen for.
     """
     cfg = cfg or load_config()
     excl = cfg["data"]["exclusion_window"]
@@ -171,6 +188,14 @@ def load_and_filter(path, cfg=None):
     d = d.sort_values(["sku_id", "fc", "date", "hour_of_day"]).copy()
     d["episode_id"] = assign_episode_ids(d)
     wf.append(("contiguous_episodes_built", len(d), d.episode_id.nunique()))
+
+    # Intraday restock: the next hour opens with more stock than this hour
+    # left behind. Detected on the inventory CHAIN, never on
+    # ending_inventory, which is written off to zero at the window close.
+    # Run only after re-segmentation -- across a data gap the chain test
+    # would read the jump as a restock.
+    d = d[~d.episode_id.isin(restocked_episodes(d))]
+    d = step(d, "restocked_episodes_dropped")
 
     d["d_ref"] = d.category.map(lambda c: reference_discount(cfg, c))
     d["d_max"] = 1.0 - d.cost / d.original_price

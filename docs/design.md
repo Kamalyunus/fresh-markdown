@@ -1067,10 +1067,16 @@ series, and the window extension all go through it.
 `last_row_ending_inventory_ever_positive` so the convention can be confirmed
 on any new extract rather than assumed.
 
-One knock-on: a restock is now detected as `ending_inventory > starting −
-sold` (inventory went *up*), not as inequality in either direction. The
-write-off makes the last hour of every episode fail an inequality test, which
-would have flagged all of them as restocks.
+One knock-on: a restock is detected as inventory going *up* — the next hour
+opening with more stock than this one left behind — not as inequality in
+either direction. The write-off makes the last hour of every episode fail an
+inequality test, which would have flagged all of them as restocks.
+
+**Episodes with an intraday restock are dropped whole.** Mid-window
+replenishment breaks the single-inventory-pool assumption the DP's state
+transition rests on, and the demand those extra units meet is not the demand
+the episode's price path was chosen for. The check runs after re-segmentation,
+because across a data gap the inventory jump would read as a restock.
 
 ### An episode is not as long as its window
 

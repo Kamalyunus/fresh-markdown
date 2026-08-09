@@ -495,3 +495,58 @@ def test_split_assigns_straddling_episode_by_start_date():
     frames = split_frames(d, cfg)
     assert len(frames["train"]) == len(d)
     assert len(frames["calib"]) == 0 and len(frames["test"]) == 0
+
+
+def _observed_episode():
+    """The worked example from the production extract: a MEAT episode that
+    closes with stock left, while ending_inventory reports zero."""
+    hours = [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    inv = [8, 8, 8, 8, 8, 5, 5, 5, 5, 4]
+    sold = [0, 0, 0, 0, 3, 0, 0, 0, 1, 3]
+    end = [8, 8, 8, 8, 5, 5, 5, 5, 4, 0]      # zeroed at the close
+    return pd.DataFrame({
+        "episode_id": ["m"] * 10,
+        "date": [pd.Timestamp("2026-03-01").date()] * 10,
+        "hour_of_day": hours,
+        "hours_remaining": list(range(9, -1, -1)),
+        "starting_inventory": inv, "units_sold": sold, "ending_inventory": end,
+    })
+
+
+def test_true_leftover_on_the_production_worked_example():
+    from common import episodes
+
+    d = _observed_episode()
+    last = episodes.last_rows(d)
+    assert int(last.ending_inventory.iloc[0]) == 0     # what the source says
+
+    # 4 units enter the final hour, 3 sell -> 1 is written off, not zero
+    left = episodes.leftover_units(last.starting_inventory, last.units_sold)
+    assert float(left.iloc[0]) == 1.0
+    assert int(d.starting_inventory.iloc[0]) == 8 and int(d.units_sold.sum()) == 7
+
+    # the window ran out, so that 1 unit IS scrap
+    kind = episodes.classify(last.hours_remaining, last.starting_inventory,
+                             last.units_sold)
+    assert kind.iloc[0] == episodes.COMPLETED
+    assert float(episodes.scrap_units(last.hours_remaining,
+                                      last.starting_inventory,
+                                      last.units_sold).iloc[0]) == 1.0
+
+
+def test_restocked_episodes_are_dropped():
+    from bootstrap.prepare_data import restocked_episodes
+
+    clean = _observed_episode()
+    assert len(restocked_episodes(clean)) == 0
+
+    # hour 17 opens with 9 units after hour 16 left 5 behind
+    restocked = clean.copy()
+    restocked.loc[restocked.hour_of_day >= 17, "starting_inventory"] += 4
+    assert list(restocked_episodes(restocked)) == ["m"]
+
+    # selling stock down is never a restock, however steep the drop
+    steep = clean.copy()
+    steep.loc[steep.hour_of_day == 15, "units_sold"] = 8
+    steep.loc[steep.hour_of_day > 15, "starting_inventory"] = 0
+    assert len(restocked_episodes(steep)) == 0

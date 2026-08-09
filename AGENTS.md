@@ -271,11 +271,14 @@ which is worse than losing the episode.
 | `below_cost_dropped` | episode | any hour priced under cost — legacy already violated the floor, so the episode is not evidence about a system that cannot |
 | `non_priceable_dropped` | episode | `cost >= original_price`, i.e. `d_max <= 0`: no feasible tier exists |
 | `units_gt_inventory_dropped` | episode | sales exceed the inventory on hand |
+| `restocked_episodes_dropped` | episode | an hour opens with more stock than the previous hour left — mid-window replenishment breaks the one-inventory-pool assumption the DP rests on. Runs AFTER re-segmentation; across a data gap the jump would read as a restock |
 | `contiguous_episodes_built` | — | re-segmentation, not a filter: episode count can RISE here because earlier drops split windows |
 
-Deliberately NOT filtered: **intraday restocks**. `ending_inventory !=
-starting_inventory - units_sold` is real and preserved; outcomes record it
-with `adjustment_reason`.
+Restocks are detected on the inventory CHAIN (`next starting_inventory >
+max(0, this starting_inventory - units_sold)`), never by comparing against
+`ending_inventory` — that field is zeroed at the window close, so an equality
+test would flag every episode's last hour. In production a restock can still
+happen after the fact; the outcome records it with `adjustment_reason`.
 
 The window cap is load-bearing beyond data hygiene: `hours_remaining` drives
 episode identification, the DP horizon, and the synthetic tail that
