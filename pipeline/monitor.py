@@ -146,17 +146,31 @@ def guardrail_series(decisions, outcomes, cfg):
     by_arm = {arm: daily(g) for arm, g in ep.groupby("arm")}
     window = cfg["monitoring"]["guardrail_noise_window_days"]
 
-    def deterioration(metric, worse_when_higher):
-        """Relative deterioration per day, positive = worse than baseline."""
+    smoothing = cfg["monitoring"]["stop_conditions"]["deterioration_smoothing_days"]
+
+    def deterioration(metric, worse_when_higher, smooth):
+        """Relative deterioration, positive = worse than baseline.
+
+        Both series are averaged over `smooth` days before comparing, exactly
+        as bootstrap.derive_thresholds measures the noise floor. A low-base
+        series like daily scrap swings by more than its own level day to day;
+        smoothing is what makes the floor smaller than the failure the
+        condition exists to catch. Floor and trigger MUST use the same
+        smoothing or the threshold is set against the wrong yardstick.
+        """
+        def sm(x):
+            return (x.rolling(smooth, min_periods=smooth).mean().dropna()
+                    if smooth > 1 else x)
+
         treat = by_arm.get("treatment")
         ctrl = by_arm.get("control")
         if treat is not None and ctrl is not None:
-            t, c = treat[metric], ctrl[metric]
+            t, c = sm(treat[metric]), sm(ctrl[metric])
             common = t.index.intersection(c.index)
             t, c, basis = t.loc[common], c.loc[common], "control_arm"
         else:
-            t = overall[metric]
-            c = t.rolling(window, min_periods=window).mean().shift(1)
+            t = sm(overall[metric])
+            c = t.rolling(window, min_periods=window).mean().shift(smooth)
             basis = f"trailing_{window}d_mean"
         rel = (t / c - 1) if worse_when_higher else (1 - t / c)
         return rel.replace([np.inf, -np.inf], np.nan).dropna(), basis
@@ -168,9 +182,10 @@ def guardrail_series(decisions, outcomes, cfg):
                                  for k, v in overall.margin_rate.dropna().items()}}
     for metric, worse_high, key in (("scrap_rate", True, "scrap"),
                                     ("margin_rate", False, "margin")):
-        rel, basis = deterioration(metric, worse_high)
+        rel, basis = deterioration(metric, worse_high, smoothing[key])
         out[f"{key}_deterioration"] = {
             "basis": basis,
+            "smoothing_days": smoothing[key],
             "by_day": {str(k): round(float(v), 4) for k, v in rel.items()},
             "latest": round(float(rel.iloc[-1]), 4) if len(rel) else None,
         }
@@ -187,11 +202,17 @@ def evaluate_guardrail(block, threshold, persistence_days):
     load-bearing, not decoration -- the scrap threshold sits ~6% above its
     floor, so without this rule it would be a coin flip on the tail.
     """
+    base = {"fired": False, "threshold": threshold,
+            "persistence_days": persistence_days,
+            "basis": block.get("basis"), "latest": block.get("latest")}
     if threshold is None:
-        return {"fired": False, "status": "BLOCKED -- threshold is null (SET BY OWNER)"}
+        return {**base, "status": "BLOCKED -- threshold is null (SET BY OWNER)"}
     by_day = block.get("by_day") or {}
     if not by_day:
-        return {"fired": False, "status": "no comparable days yet"}
+        # smoothing consumes the first `smoothing_days - 1` days, so a short
+        # window legitimately has nothing to compare yet
+        return {**base, "consecutive_days_over": 0,
+                "status": "no comparable days yet"}
     days = sorted(by_day)
     streak = 0
     for day in reversed(days):

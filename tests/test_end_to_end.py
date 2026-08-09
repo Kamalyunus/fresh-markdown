@@ -292,7 +292,11 @@ def test_decision_loop_and_exactly_once_update(workspace):
     live = stop_conditions(*args, cfg)
     for key in ("scrap_deterioration_pct", "margin_deterioration_pct"):
         assert live["fired"][key] in (True, False)     # evaluated, not skipped
-        assert live["guardrails"][key]["threshold"] is not None
+        g = live["guardrails"][key]
+        # the result shape is the same whether or not comparable days exist,
+        # so a caller never has to branch on it
+        assert g["threshold"] is not None
+        assert "persistence_days" in g and "consecutive_days_over" in g
 
 
 def test_fit_calibration_cli(workspace):

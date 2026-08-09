@@ -303,19 +303,23 @@ quarantined** — and a quarantined outcome never lands, so event completeness
 drops and the shadow gate fails. Exactly two reasons are legitimate:
 
 - `intraday_restock` — `ending_inventory > max(0, starting - sold)`
-- `episode_close_write_off` — `ending_inventory < leftover` on the episode's
-  **final observed row**. This is ~49.5% of episodes. An integration that
-  omits it quarantines roughly half its final-hour outcomes and fails the
-  gate for what looks like a pipeline defect.
+- `episode_close_write_off` — `ending_inventory == 0` while stock remained.
+  This is ~49.5% of episodes. An integration that omits it quarantines
+  roughly half its outcomes and fails the gate for what looks like a pipeline
+  defect.
 
-Key the write-off to the LAST OBSERVED HOUR, not to `hours_remaining == 0`.
-The source writes off when the EPISODE closes, and a sold-out-early or
-truncated episode closes before its window does — gating on the window
-counter leaves those quarantining. `pipeline.shadow.adjustment_reason` is the
-one implementation; production integrations should use the same rule.
+**Recognise the write-off by the ZERO, never by position in the episode.**
+Two earlier versions keyed it to `hours_remaining == 0` and then to "our last
+observed hour"; both quarantined real outcomes in bulk. The source zeroes at
+ITS OWN episode boundary, and once a window is merged across midnight that
+row sits in the MIDDLE of ours. Position is our bookkeeping; the zero is the
+source's fact. `pipeline.shadow.adjustment_reason` is the one implementation
+— production integrations should call it rather than reimplement.
 
-`ending_inventory < leftover` PART-WAY THROUGH an episode is unexplained
-inventory loss and is left undocumented on purpose, so it quarantines. Do not add a blanket reason to
+A PARTIAL shortfall — `0 < ending_inventory < leftover` — matches no
+convention and is left undocumented on purpose, so it quarantines. That is
+unexplained inventory loss and the quarantine file is the only place it is
+visible; do not add a catch-all reason to drive the count to zero. Do not add a blanket reason to
 make the count go to zero — the quarantine file is the only place that
 failure is visible.
 

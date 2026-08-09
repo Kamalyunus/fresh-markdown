@@ -435,17 +435,41 @@ def test_adjustment_reason_names_every_legitimate_break():
     as a labelling bug."""
     from pipeline.shadow import adjustment_reason as why
 
-    # window ran out with stock left: written off at episode close
-    assert why(4, 3, 0, True) == "episode_close_write_off"
-    # TRUNCATED -- closes with stock left and window time to spare. Same
-    # write-off; keying this to hours_remaining == 0 left it quarantining.
-    assert why(9, 4, 0, True) == "episode_close_write_off"
+    # a reported ZERO with stock remaining is the source's write-off, wherever
+    # it falls. Position must NOT matter: the source zeroes at its own episode
+    # boundary, which sits mid-episode once we merge a window across midnight.
+    assert why(4, 3, 0) == "episode_close_write_off"
+    assert why(9, 4, 0) == "episode_close_write_off"
     # clean sellout reconciles on its own, no reason needed
-    assert why(3, 3, 0, True) is None
-    # stock added mid-episode
-    assert why(5, 1, 8, False) == "intraday_restock"
-    # ordinary mid-episode hour that reconciles
-    assert why(5, 1, 4, False) is None
-    # shortfall part-way through is unexplained loss: must stay unnamed so it
-    # quarantines rather than being absorbed
-    assert why(5, 1, 2, False) is None
+    assert why(3, 3, 0) is None
+    # stock added
+    assert why(5, 1, 8) == "intraday_restock"
+    # ordinary hour that reconciles
+    assert why(5, 1, 4) is None
+    # PARTIAL shortfall -- above zero but below the leftover -- matches no
+    # convention. Unexplained inventory loss must stay unnamed so it
+    # quarantines rather than being absorbed by a catch-all.
+    assert why(5, 1, 2) is None
+
+
+def test_noise_floor_and_monitor_use_the_same_smoothing():
+    """The floor the owner sets a threshold from and the series the monitor
+    triggers on must be averaged identically, or the threshold is graded
+    against a yardstick nothing uses."""
+    import inspect
+    from bootstrap import derive_thresholds as dt
+    from pipeline import monitor
+
+    sm = CFG["monitoring"]["stop_conditions"]["deterioration_smoothing_days"]
+    assert set(sm) == {"scrap", "margin"}
+    # scrap is a low-base series and needs averaging; margin does not
+    assert sm["scrap"] > 1 and sm["margin"] == 1
+
+    # both sides read the same config key rather than hardcoding a window
+    assert "deterioration_smoothing_days" in inspect.getsource(dt.guardrail_noise)
+    assert "deterioration_smoothing_days" in inspect.getsource(
+        monitor.guardrail_series)
+    # and both shift the trailing baseline by the smoothing, so the compared
+    # windows never overlap
+    assert ".shift(smooth)" in inspect.getsource(dt.guardrail_noise)
+    assert ".shift(smooth)" in inspect.getsource(monitor.guardrail_series)

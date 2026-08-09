@@ -1123,10 +1123,16 @@ series, and the window extension all go through it.
 `last_row_ending_inventory_ever_positive` so the convention can be confirmed
 on any new extract rather than assumed.
 
-One knock-on: a restock is detected as inventory going *up* — the next hour
-opening with more stock than this one left behind — not as inequality in
-either direction. The write-off makes the last hour of every episode fail an
-inequality test, which would have flagged all of them as restocks.
+Two knock-ons for the event store, which quarantines any outcome whose
+inventory does not reconcile without a documented reason. A **restock** is
+inventory going *up* — the next hour opening with more than this one left
+behind — not inequality in either direction, since the write-off makes many
+hours fail an inequality test. And the **write-off is recognised by the zero
+itself**, not by position: the source zeroes at its own episode boundary, so
+after a window is merged across midnight that row can sit mid-episode for us.
+A partial shortfall (above zero but below the leftover) matches neither
+convention, stays undocumented, and quarantines — that is unexplained
+inventory loss, and the quarantine file is the only place it shows.
 
 **Episodes with an intraday restock are dropped whole.** Mid-window
 replenishment breaks the single-inventory-pool assumption the DP's state

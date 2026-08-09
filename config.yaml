@@ -246,6 +246,22 @@ monitoring:
     duplicate_or_unmatched_rate: 0.01  # SET
     price_mismatch_rate: 0.01          # SET
     exploration_cost_vs_budget: 2.0    # SET
+    deterioration_smoothing_days:      # SET  days averaged BEFORE comparing,
+      scrap: 7                         # per metric, chosen from measured noise
+      margin: 1
+      # The scrap rate averages ~1.76% of units, so ordinary daily swing is
+      # enormous in RELATIVE terms: robust 3-sigma is 153%, which overlaps the
+      # 100-200% breach the guardrail exists to catch. A guardrail whose noise
+      # floor and failure mode are the same size is not a guardrail. Averaging
+      # 7 days before comparing cuts the floor to ~58% (sigma falls ~1/sqrt k)
+      # and separates them cleanly, at the cost of a few days' detection
+      # latency -- the right trade for a condition that should fire on
+      # sustained damage, not on one bad day.
+      #
+      # Margin needs none: its daily floor is 13.63% and it is not
+      # outlier-dominated, so smoothing would only cost detection speed.
+      # derive_thresholds measures each floor at ITS configured smoothing, so
+      # the floor and the monitor always use the same yardstick.
     persistence_days: 2                # SET  a deterioration stop condition
       # fires only after this many CONSECUTIVE days over threshold. This is
       # what lets a threshold sit just above its measured noise floor without

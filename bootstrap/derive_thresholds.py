@@ -213,8 +213,14 @@ def guardrail_noise(d, cfg):
     window = cfg["monitoring"]["guardrail_noise_window_days"]
     day = _daily_series(d)
 
-    def noise(series):
+    def noise(series, smooth=1):
         s = series.dropna()
+        # average `smooth` days BEFORE comparing. On a low-base series the
+        # daily relative swing can exceed the failure it must detect; sigma
+        # falls ~1/sqrt(smooth), and the trailing baseline is shifted by the
+        # same amount so the two windows never overlap.
+        if smooth > 1:
+            s = s.rolling(smooth, min_periods=smooth).mean().dropna()
         if len(s) < window + 7:
             return {"days": int(len(s)),
                     "note": f"needs at least {window + 7} days"}
@@ -222,7 +228,7 @@ def guardrail_noise(d, cfg):
         # warm-up days divide by a mean built from a handful of observations,
         # which manufactures enormous relative deviations that are an artifact
         # of the estimator rather than a property of the series
-        trailing = s.rolling(window, min_periods=window).mean().shift(1)
+        trailing = s.rolling(window, min_periods=window).mean().shift(smooth)
         rel_dev = (s / trailing - 1).dropna()
         sigma = float(rel_dev.std(ddof=1))
         # a plain std over a ratio series is dominated by any day whose
@@ -234,6 +240,7 @@ def guardrail_noise(d, cfg):
         out = {
             "days": int(len(s)),
             "days_scored": int(len(rel_dev)),
+            "smoothing_days": smooth,
             "mean_level": round(float(s.mean()), 4),
             "daily_rel_dev_sigma": round(sigma, 4),
             "three_sigma": round(3 * sigma, 4),
@@ -256,9 +263,10 @@ def guardrail_noise(d, cfg):
                 "and investigate the outlier days before trusting either.")
         return out
 
-    scrap = noise(day.scrap_rate)
-    margin = noise(day.margin_rate)
     sc = cfg["monitoring"]["stop_conditions"]
+    sm = sc["deterioration_smoothing_days"]
+    scrap = noise(day.scrap_rate, sm["scrap"])
+    margin = noise(day.margin_rate, sm["margin"])
 
     def verdict(block, key):
         threshold = sc[key]

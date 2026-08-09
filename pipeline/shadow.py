@@ -42,30 +42,32 @@ from pricing.posterior import PosteriorStore
 SHADOW_STATUS = "shadow_not_applied"
 
 
-def adjustment_reason(starting_inventory, units_sold, ending_inventory,
-                      is_last_observed_hour):
+def adjustment_reason(starting_inventory, units_sold, ending_inventory):
     """Why an outcome's inventory does not reconcile, or None.
 
     The event store quarantines any non-reconciling outcome that carries no
     reason, and a quarantined outcome never lands -- so an unnamed but
     legitimate break sinks event completeness and fails the shadow gate.
-    Exactly two breaks are legitimate:
 
-      restock          stock was added: ending exceeds what was left.
-      write-off        the source zeroes ending_inventory on an episode's
-                       FINAL row, writing off whatever remains. Keyed to the
-                       last observed hour, NOT to hours_remaining == 0: a
-                       truncated or sold-out episode closes before its window
-                       does and is written off just the same.
+      restock     ending EXCEEDS what was left: stock was added.
+      write-off   ending is exactly ZERO while stock remained. That is the
+                  source's own convention -- it writes the remainder off and
+                  reports 0 -- and it is recognised BY THE ZERO ITSELF, not
+                  by position in the episode.
 
-    Anything else -- a shortfall part-way through an episode -- is
-    unexplained inventory loss and returns None ON PURPOSE, so it quarantines
-    and stays visible.
+    Keying the write-off to "our last observed hour" was wrong and quarantined
+    real outcomes in bulk: the source zeroes at ITS episode boundary, and once
+    a window is merged across midnight that row sits in the MIDDLE of ours.
+    Position is our bookkeeping; the zero is the source's fact.
+
+    A PARTIAL shortfall -- ending above zero but below the leftover -- is
+    unexplained inventory loss, matches no convention, and returns None on
+    purpose so it quarantines and stays visible.
     """
     leftover = max(starting_inventory - units_sold, 0)
     if ending_inventory > leftover:
         return "intraday_restock"
-    if ending_inventory < leftover and is_last_observed_hour:
+    if ending_inventory == 0 and leftover > 0:
         return "episode_close_write_off"
     return None
 
@@ -130,11 +132,6 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
     for eid, g in groups:
         mu_path = list(g.mu_ref_hat.to_numpy())
         anchor = None
-        # the source writes off remaining stock when the EPISODE closes, not
-        # only when the window runs out -- a sold-out-early or truncated
-        # episode gets the same zeroed ending_inventory on its final row
-        obs_pos = [i for i, v in enumerate(g.is_observed.to_numpy()) if v]
-        last_obs = obs_pos[-1] if obs_pos else -1
         for t in range(len(g)):
             row = g.iloc[t]
             if not row.is_observed:      # window tail: no outcome to record
@@ -209,7 +206,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
             #     same, and gating on hours_remaining left those quarantining.
             #   ending < leftover mid-episode    : unexplained shrinkage,
             #     left undocumented ON PURPOSE so it quarantines.
-            reason = adjustment_reason(q, sold, ending, t == last_obs)
+            reason = adjustment_reason(q, sold, ending)
             if reason:
                 outcome["adjustment_reason"] = reason
             if store.emit_outcome(outcome):
