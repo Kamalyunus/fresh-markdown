@@ -280,6 +280,21 @@ max(0, this starting_inventory - units_sold)`), never by comparing against
 test would flag every episode's last hour. In production a restock can still
 happen after the fact; the outcome records it with `adjustment_reason`.
 
+**Any outcome whose inventory does not reconcile MUST name a reason or it is
+quarantined** — and a quarantined outcome never lands, so event completeness
+drops and the shadow gate fails. Exactly two reasons are legitimate:
+
+- `intraday_restock` — `ending_inventory > max(0, starting - sold)`
+- `window_close_write_off` — `ending_inventory < leftover` **at the window
+  close** (`hours_remaining == 0`). This is ~49.5% of episodes. An
+  integration that omits it quarantines roughly half its final-hour outcomes
+  and fails the gate for what looks like a pipeline defect.
+
+`ending_inventory < leftover` MID-window is unexplained shrinkage and is left
+undocumented on purpose, so it quarantines. Do not add a blanket reason to
+make the count go to zero — the quarantine file is the only place that
+failure is visible.
+
 The window cap is load-bearing beyond data hygiene: `hours_remaining` drives
 episode identification, the DP horizon, and the synthetic tail that
 `extend_to_window` generates. An unbounded counter would generate an

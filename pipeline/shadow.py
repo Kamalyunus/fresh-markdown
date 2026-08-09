@@ -165,11 +165,20 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
                 "execution_status": SHADOW_STATUS,
                 "finalized_at": pd.Timestamp.now("UTC").isoformat(),
             }
-            # a restock ADDS inventory. ending < q - sold is the window-close
-            # write-off, not a restock -- testing inequality either way would
-            # flag every episode's last hour.
-            if ending > q - sold:
+            # The store quarantines any outcome whose inventory does not
+            # reconcile and carries no documented reason, so both legitimate
+            # breaks must be named -- and only those two.
+            #   ending > leftover : stock was added mid-window
+            #   ending < leftover at the window close: the source wrote the
+            #     remainder off, which is ~49.5% of episodes. Unnamed, every
+            #     one of them would quarantine and sink event completeness.
+            #   ending < leftover mid-window: unexplained shrinkage. Left
+            #     undocumented ON PURPOSE so it quarantines.
+            leftover = max(q - sold, 0)
+            if ending > leftover:
                 outcome["adjustment_reason"] = "intraday_restock"
+            elif ending < leftover and int(row.hours_remaining) <= 0:
+                outcome["adjustment_reason"] = "window_close_write_off"
             if store.emit_outcome(outcome):
                 n_out += 1
 

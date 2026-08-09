@@ -403,3 +403,27 @@ def test_config_detects_stale_paste_from_frozen_artifact(tmp_path):
         {"rho": 0.2510, "mean_forced_hours_per_episode": 9.134}))
     drift = artifact_mirror_drift(cfg)
     assert len(drift) == 1 and "dispersion.rho" in drift[0]
+
+
+def test_write_off_outcome_is_documented_not_quarantined():
+    """The source zeroes ending_inventory at the window close (~49.5% of
+    episodes). Unnamed, every one of those final-hour outcomes quarantines
+    and event completeness collapses -- the shadow gate fails for what looks
+    like a pipeline defect."""
+    from events.store import _validate_outcome
+
+    base = {"outcome_id": "o", "decision_id": "d", "units_sold": 3,
+            "starting_inventory": 4, "ending_inventory": 0,
+            "applied_price": 5000.0, "is_stockout": False,
+            "execution_status": "ok", "finalized_at": "2026-03-01T20:00:00Z"}
+
+    # 4 in, 3 sold -> 1 left, reported as 0: does not reconcile
+    assert _validate_outcome(base), "must not pass undocumented"
+
+    assert not _validate_outcome({**base,
+                                  "adjustment_reason": "window_close_write_off"})
+    assert not _validate_outcome({**base, "ending_inventory": 5,
+                                  "adjustment_reason": "intraday_restock"})
+
+    # a clean reconciliation needs no reason at all
+    assert not _validate_outcome({**base, "ending_inventory": 1})
