@@ -119,8 +119,9 @@ python3 -m pipeline.monitor
    `calibration_fit_window` (default train+calib — measured weekly demand
    swings ±8%, so a factor fit on one fortnight inherits that fortnight's
    anomaly; the 07-13 calib week measured 1.06 against a five-month mean of
-   1.30). The GATE stays on calib+test. A factor **below 1** on a long fit
-   window means the model genuinely over-predicts at the anchor —
+   1.30). The GATE stays on whatever `calibration_gate_window` names, and
+   must not overlap the fit window (rule 4). A factor **below 1** on a long
+   fit window means the model genuinely over-predicts at the anchor —
    investigate before applying; do not apply blindly.
 
 6. **Only the level component may be corrected multiplicatively** (§9.3). A
