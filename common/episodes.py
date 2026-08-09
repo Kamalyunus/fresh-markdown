@@ -84,7 +84,7 @@ def ending_summary(d):
     }
 
 
-def extend_to_window(d, feature_cols=()):
+def extend_to_window(d, feature_cols=(), max_tail_hours=None):
     """Append the rows a window has but the data does not.
 
     Rows stop at zero inventory, so an episode's row count understates its
@@ -107,6 +107,14 @@ def extend_to_window(d, feature_cols=()):
     need = last[last.hours_remaining > 0]
     if not len(need):
         return d.sort_values(["episode_id", "date", "hour_of_day"])
+
+    if max_tail_hours is not None and len(need):
+        worst = float(need.hours_remaining.max())
+        if worst > max_tail_hours:
+            raise ValueError(
+                f"episode window of {worst:.0f}h exceeds max_window_hours "
+                f"({max_tail_hours}); prepare_data should have dropped it. "
+                "Refusing to generate an unbounded synthetic tail.")
 
     carry = [c for c in feature_cols if c in d.columns]
     # emit dates in the column's own type. Downstream split filters compare

@@ -88,6 +88,7 @@ def test_prepared_data_is_priceable_and_self_consistent(workspace):
     assert (d.cost < d.original_price).all() and (d.d_max > 0).all()
     assert d.category.notna().all() and d.subcategory.notna().all()
     assert (d.hours_remaining >= 0).all()
+    assert (d.hours_remaining <= cfg["data"]["max_window_hours"]).all()
 
     # the exclusion window is removed whole-episode, so no survivor may have
     # ANY hour inside it

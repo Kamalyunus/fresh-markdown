@@ -137,6 +137,17 @@ def load_and_filter(path, cfg=None):
     d = d[~d.episode_id.isin(bad[bad].index)]
     d = step(d, "negative_window_dropped")
 
+    # flc_window carries occasional very large values from upstream data
+    # issues. An episode claiming an implausible window is not trusted: its
+    # counter drives episode identification, the DP horizon, and the window
+    # extension, so a bad value propagates everywhere rather than staying
+    # local. Dropped whole rather than clamped -- clamping would invent a
+    # window end the data never recorded.
+    cap = cfg["data"]["max_window_hours"]
+    bad = d.loc[d.hours_remaining > cap, "episode_id"].unique()
+    d = d[~d.episode_id.isin(bad)]
+    d = step(d, "window_too_long_dropped")
+
     below = (d.applied_price > 0) & (d.applied_price < d.cost)
     bad = d.loc[below, "episode_id"].unique()
     d = d[~d.episode_id.isin(bad)]

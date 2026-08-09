@@ -241,6 +241,26 @@ def test_config_strict_refuses_null_measured(tmp_path):
         load_config(strict=True)
 
 
+def test_implausible_window_is_refused_not_expanded():
+    """flc_window carries very large values from upstream data issues. The
+    window drives episode identification, the DP horizon AND the synthetic
+    tail, so a bad value must be dropped upstream -- and if one ever reaches
+    the extension it must raise, not generate an unbounded frame."""
+    from common import episodes
+
+    d = pd.DataFrame({
+        "episode_id": ["e"], "date": [pd.Timestamp("2026-03-01").date()],
+        "hour_of_day": [10], "hours_remaining": [9000],
+        "starting_inventory": [3], "ending_inventory": [3],
+        "units_sold": [0], "category": ["MEAT"],
+    })
+    with pytest.raises(ValueError, match="exceeds max_window_hours"):
+        episodes.extend_to_window(d, ["category"], max_tail_hours=48)
+
+    ok = d.assign(hours_remaining=[5])
+    assert len(episodes.extend_to_window(ok, ["category"], 48)) == 6
+
+
 def test_window_extension_removes_the_lookahead_horizon():
     """Rows stop at zero inventory, so the DP's horizon must come from the
     window, not from how many rows happen to exist -- a short row count is

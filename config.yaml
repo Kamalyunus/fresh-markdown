@@ -26,6 +26,14 @@ data:
     test_start:  "2026-07-28"
     test_end:    "2026-08-03"
   episode_key: ["sku_id", "fc", "date"]
+  max_window_hours: 48                 # SET  upper bound on a plausible FLC
+    # window. flc_window carries occasional very large values from upstream
+    # data issues; an episode claiming a window longer than this is not
+    # trusted and is dropped whole (window_too_long_dropped in the waterfall).
+    # The bound is also a safety rail: episodes are extended to their full
+    # window before mu_ref prediction, so an unbounded counter would generate
+    # unbounded synthetic rows. extend_to_window raises rather than hanging if
+    # a frame ever reaches it above this bound.
 
 baseline_model:
   objective: "tweedie"                 # SET

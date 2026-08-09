@@ -267,6 +267,7 @@ which is worse than losing the episode.
 | `null_category_dropped` | rows | missing category/subcategory (no reference discount, no dispersion cell) |
 | `zero_base_price_dropped` | rows | `original_price` still null/zero after ffill+bfill within the episode |
 | `negative_window_dropped` | episode | any `hours_remaining < 0` |
+| `window_too_long_dropped` | episode | `hours_remaining` above `data.max_window_hours` (48) — flc_window carries very large values from upstream data issues |
 | `below_cost_dropped` | episode | any hour priced under cost — legacy already violated the floor, so the episode is not evidence about a system that cannot |
 | `non_priceable_dropped` | episode | `cost >= original_price`, i.e. `d_max <= 0`: no feasible tier exists |
 | `units_gt_inventory_dropped` | episode | sales exceed the inventory on hand |
@@ -276,10 +277,17 @@ Deliberately NOT filtered: **intraday restocks**. `ending_inventory !=
 starting_inventory - units_sold` is real and preserved; outcomes record it
 with `adjustment_reason`.
 
+The window cap is load-bearing beyond data hygiene: `hours_remaining` drives
+episode identification, the DP horizon, and the synthetic tail that
+`extend_to_window` generates. An unbounded counter would generate an
+unbounded frame, so the extension raises rather than hanging if a frame ever
+reaches it above the cap. The bad value is dropped, never clamped — clamping
+would invent a window end the data never recorded.
+
 Postconditions are asserted by test, not assumed: discount in [0,1],
 non-negative quantities, sales <= inventory, `d_max > 0`, category present,
-no hour inside the exclusion window, and a monotone window counter inside
-every episode.
+no hour inside the exclusion window, `hours_remaining` within the cap, and a
+monotone window counter inside every episode.
 
 ## Multi-day episodes
 

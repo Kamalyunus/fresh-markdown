@@ -46,7 +46,7 @@ def _attach_predictions(d, cfg, model, prior, r_lookup):
     carry = [c for c in d.columns if c not in
              ("episode_id", "date", "hour_of_day", "hours_remaining",
               "starting_inventory", "ending_inventory", "units_sold")]
-    d = episodes.extend_to_window(d, carry)
+    d = episodes.extend_to_window(d, carry, cfg["data"]["max_window_hours"])
     d["r"] = [lookup_r(r_lookup, s, c) for s, c in zip(d.subcategory, d.category)]
     d["eps"] = d.category.map(
         lambda c: prior["per_category"][str(c)]["mean"]).astype(float)

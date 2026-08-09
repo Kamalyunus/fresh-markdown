@@ -83,7 +83,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
     carry = [c for c in d.columns if c not in
              ("episode_id", "date", "hour_of_day", "hours_remaining",
               "starting_inventory", "ending_inventory", "units_sold")]
-    d = episodes.extend_to_window(d, carry)
+    d = episodes.extend_to_window(d, carry, cfg["data"]["max_window_hours"])
     d = d.sort_values(["episode_id", "date", "hour_of_day"]).copy()
     d["mu_ref_hat"] = model.predict_mu_ref(d)
     d["r_val"] = [lookup_r(r_lookup, s, c)
