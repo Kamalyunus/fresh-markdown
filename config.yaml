@@ -39,7 +39,12 @@ baseline_model:
   freeze_at_launch: true               # SET  no retraining in MVP window
   model_path: "artifacts/baseline_model.txt"
   feature_schema_path: "artifacts/feature_schema.json"
-  calibration_gate_band: [0.95, 1.05]  # SET  fidelity_episode_sold_ratio must land here
+  calibration_gate_band: [0.90, 1.10]  # SET BY OWNER 2026-08-09. Weekly sold
+    # ratios swing +-8% around the level (measured, fidelity.by_week); a
+    # 3-week pooled gate therefore carries ~4.6% sigma, and the original
+    # [0.95, 1.05] band was ~1 sigma wide -- a coin flip on natural
+    # volatility. This band is ~2 sigma; the continuous guard is the daily
+    # realised_vs_predicted_sold_ratio in shadow and production.
   calibration_min_anchor_rows: 200     # SET  anchor basis needs this many rows
   calibration_fit_window: "train+calib"  # SET  "calib" | "train+calib" | "all".
     # Measured weekly sold-ratios swing +-8% around a persistent level deficit;

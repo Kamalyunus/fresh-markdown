@@ -147,7 +147,9 @@ python3 -m pipeline.monitor
 
 - `fidelity.fidelity_episode_sold_ratio` = actual ÷ predicted on the gate
   window. Above 1 → model under-predicts; below 1 → over-predicts. Gate
-  passes inside `calibration_gate_band` ([0.95, 1.05]).
+  passes inside `calibration_gate_band` ([0.90, 1.10] — set by the owner
+  2026-08-09 at ~2σ of the measured 3-week pooled weekly volatility; the
+  original [0.95, 1.05] was ~1σ and coin-flipped on natural demand noise).
 - `fidelity.by_window` — compare `train` vs `calib`/`test` sold ratios; a
   large gap means demand-level drift the frozen features don't capture.
   Config-only remedy to try first: move `data.split.train_start` later so the

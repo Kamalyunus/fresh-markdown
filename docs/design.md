@@ -24,12 +24,17 @@ demand variance, correlation structure — and learns elasticity **in
 production**, from deliberately randomized price perturbations whose total
 cost is capped at **1% of markdown IL** per day.
 
-Current state: all offline gates have cleared on production data; the model-
-calibration gate passed at 1.0247 against a 0.95–1.05 band. The shadow-phase
-harness is built and ready — decisions logged against live data, no prices
-applied. Three business thresholds (section 12) remain open and block launch;
-they are owner decisions, and this document provides recommended values with
-a data-derivation tool.
+Current state: the pipeline has been exercised end-to-end on production data
+through four bootstrap iterations, each of which caught and fixed a real
+defect (section 7). The demand model now carries per-SKU velocity features,
+and the calibration process surfaced a measured fact about the business:
+weekly demand levels swing ±8% around a persistent baseline deficit, so the
+fidelity gate band was reset by the owner to [0.90, 1.10] (~2σ of the
+measured 3-week noise) with the daily drift ratio as the continuous guard.
+The calibrated gate re-run under this band is the current step; the
+shadow-phase harness is built and ready — decisions logged against live
+data, no prices applied. Two stop-condition thresholds and the A/B minimum
+detectable effect (section 12) remain open owner decisions.
 
 The honest risk summary: the *safety* engineering is strong (a below-cost or
 rising price is structurally impossible, not merely checked for; every gate
@@ -583,38 +588,53 @@ malformed events quarantine, and shadow outcomes cannot reach the learner.
 
 ## 7. What running on production data changed
 
-Three findings from the first real-data bootstrap materially improved the
-design — each caught by a gate doing its job:
+Five findings from the real-data bootstrap iterations materially improved
+the design — each caught by a gate or diagnostic doing its job:
 
-1. **Demand-regime drift, not model bias.** Whole-history fidelity read
-   1.1196 (model 11% light) and failed the calibration gate — but per-window
-   ratios told a different story: training period 1.144, calibration window
-   0.990, test week 1.095. The demand *level* had shifted between spring and
-   summer; a July-fitted correction applied to a spring-dominated evaluation
-   made things mechanically worse. **Change:** the gate is now read on the
-   calibration+test window — the launch-adjacent regime, and the one any
-   correction is fitted on. Result: **PASS at 1.0247, no correction needed.**
+1. **Demand-regime awareness in the gate.** Whole-history fidelity mixed the
+   spring training regime with the launch-adjacent summer one and made the
+   gate unreadable. **Change:** the gate is read on the calibration+test
+   window, with per-window and per-week ratios reported so regime structure
+   is visible instead of silently averaged.
 2. **Slope error must not contaminate level correction.** An early
    correction basis scaled predictions by the prior elasticity, letting a
    wrong prior push level factors below 1. **Change:** level factors are
-   fitted exclusively on anchor rows (discount within half a tier of the
-   reference), where the elasticity multiplier is ~1 by construction;
-   under-fed categories stay uncorrected rather than contaminated.
+   fitted exclusively on anchor rows, where the elasticity multiplier is ~1
+   by construction; under-fed categories stay uncorrected rather than
+   contaminated.
 3. **The survivorship confound** (section 3.2). **Change:** entry-rows-only
    identification; one category now brackets cleanly, the rest fall back
    honestly.
+4. **Per-SKU velocity features** (section 5.4). Adding them improved per-row
+   accuracy (hourly MAE 0.405 → 0.373) and cut residual intra-episode
+   correlation (deff 4.07 → 3.59, ~12% more information per exploration
+   outcome) — while exposing that Tweedie's objective is not sum-calibrated,
+   leaving a persistent aggregate level deficit for the calibration factor
+   to absorb.
+5. **Weekly demand volatility is a measured fact, not noise in the gate.**
+   The weekly fidelity series showed the model under-predicting in *every*
+   week of five months (range 1.06–1.54, mean ≈ 1.30) with ±8% weekly swing
+   — and the two-week calibration window was the single most anomalous
+   stretch in the series, which is why a factor fit on it moved the gate the
+   wrong way. **Changes:** calibration factors fit on a long window
+   (`calibration_fit_window: train+calib`) so no one week dominates, and the
+   gate band reset by the owner to **[0.90, 1.10]** (~2σ of the measured
+   3-week pooled noise; the original ±5% band was ~1σ — a coin flip on
+   natural volatility).
 
-## 8. Measured results (production data, 2026-08-08)
+## 8. Measured results (production data, 2026-08-09, feature-set v2)
 
 | Quantity | Value |
 | --- | --- |
-| Calibration gate (calib+test window) | **1.0247 — PASS** (band 0.95–1.05) |
-| Sold ratio by window | train 1.144 / calib 0.990 / test 1.095 |
+| Weekly sold-ratio series | every week > 1: range 1.06–1.54, mean ≈ 1.30, σ ≈ ±8% |
+| Sold ratio by window (uncalibrated) | train 1.295 / calib 1.117 / test 1.312 |
+| Calibration gate | band **[0.90, 1.10]** (owner, 2σ); calibrated re-run in progress |
+| Hourly MAE (gate window) | 0.373 (was 0.405 before the velocity features) |
 | Actual IL% (replay sample of 2,000 episodes) | 34.64% (IL ≈ ₩14.7M) |
-| Correlation `rho` / forced hours / implied deff | 0.3772 / 9.134 / ≈ 4.07 |
-| Initial exploration threshold `tau` | ₩202.8 (spend ₩1,271/day vs budget ₩1,271/day) |
+| Correlation `rho` / forced hours / implied deff | 0.3183 / 9.134 / ≈ 3.59 (was 4.07) |
 | IL% clustered SE (full ~18-week window) | 0.002383 |
 | Elasticity prior | fallback −1.0 ± 0.6 for 14/16 categories; MEAT interior bracket accepted |
+| Exploration `tau` | derived per run (₩187–203 range); pasted only from a gate-passing report |
 
 ## 9. Evaluation gates
 
@@ -627,15 +647,22 @@ has fired so far fired correctly.
 ### 9.2 Calibration gate (blocking) — is the demand model usable at all?
 
 Replaying at actual historical prices, predicted units must land within
-[0.95, 1.05] of actual on the launch-adjacent window. Every economic
-quantity in the system is denominated in the demand prediction; a model 25%
-light prices to under-clear and absorb scrap — an early miscalibrated run
-drove replay clearance from 91% to 50% and scrap up 70%. The gate comes with
-a mandated diagnostic separating **level** bias (ratio off at the reference
-anchor, flat in discount → multiplicative correction permitted) from
-**slope** bias (ratio degrading as discount departs the anchor → the
+**[0.90, 1.10]** of actual on the launch-adjacent (calib+test) window — a
+band set by the owner at ~2σ of the *measured* 3-week pooled weekly
+volatility (finding 5, section 7); the continuous guard thereafter is the
+daily `realised_vs_predicted_sold_ratio` in shadow and production, which
+tracks the same quantity every day instead of judging it once on three
+weeks. Every economic quantity in the system is denominated in the demand
+prediction; a model 25% light prices to under-clear and absorb scrap — an
+early miscalibrated run drove replay clearance from 91% to 50% and scrap up
+70%. The gate comes with a mandated diagnostic separating **level** bias
+(ratio off at the reference anchor, flat in discount → multiplicative
+correction permitted, factors fit on the long `calibration_fit_window`)
+from **slope** bias (ratio degrading as discount departs the anchor → the
 elasticity prior is wrong; correcting the level would *mask* it, so it is
-forbidden). Status: **passed**, without correction.
+forbidden). Status: calibrated re-run of the v2 feature-set model in
+progress; a final retrain + calibration re-fit is planned at the launch
+freeze regardless.
 
 ### 9.3 Prior-acceptance gate (blocking) — is the bracket honest?
 
@@ -654,7 +681,7 @@ violations, before any price is applied. Status: harness ready to run.
 | Phase | What happens | Exit gate | Status |
 | --- | --- | --- | --- |
 | 0. Measurement | historical measurement, config populated | gates reviewed | **Done** |
-| 0b. Calibration | fidelity diagnostic, prior estimation | section 9.2 + 9.3 | **Done** |
+| 0b. Calibration | fidelity diagnostic, prior estimation | section 9.2 + 9.3 | prior gate done; calibrated v2 re-gate under the owner band in progress |
 | 1. Shadow | decisions logged, no prices applied | section 9.4 | **Ready** |
 | 2. Exploit-only pilot | small SKU set, exploration off | price mismatch <1%, finalization SLA | pending |
 | 3. Learning pilot | exploration at half budget on pilot set | posterior std falling; spend within budget | pending |
