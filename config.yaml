@@ -45,6 +45,15 @@ baseline_model:
     # [0.95, 1.05] band was ~1 sigma wide -- a coin flip on natural
     # volatility. This band is ~2 sigma; the continuous guard is the daily
     # realised_vs_predicted_sold_ratio in shadow and production.
+  calibration_grain: "subcategory"     # SET  "subcategory" | "category".
+    # Factors are solved at every level of a subcategory -> category ->
+    # global hierarchy (mirroring dispersion.fallback_order) and each level
+    # is shrunk toward its parent by the evidence behind it, so thin cells
+    # inherit the parent rather than contributing noise -- no threshold
+    # cliff, and zero evidence lands exactly on the parent factor.
+  calibration_shrinkage_units: 100     # SET  pseudo-count, in anchor units
+    # sold, pulling a cell toward its parent. A cell with this many units has
+    # equal weight on itself and its parent.
   calibration_min_anchor_rows: 200     # SET  anchor basis needs this many rows
   mix_decomposition_min_unit_rows: 30  # SET  anchor rows before a SKU x FC
     # ratio is trusted in the mix decomposition; thinner units fall back to

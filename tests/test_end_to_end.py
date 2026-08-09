@@ -23,6 +23,9 @@ def workspace(tmp_path_factory):
     # shrink the expensive knobs for test speed; semantics unchanged
     cfg["baseline_model"]["num_boost_round"] = 60
     cfg["posterior"]["prior"]["search_grid_size"] = 41
+    # the fixture's dataset is a fraction of production size; scale the
+    # anchor-row guard with it rather than disabling it
+    cfg["baseline_model"]["calibration_min_anchor_rows"] = 20
     (ws / "config.yaml").write_text(yaml.safe_dump(cfg))
 
     env = {**os.environ, "PYTHONPATH": REPO}
@@ -210,8 +213,17 @@ def test_fit_calibration_cli(workspace):
     assert r.returncode == 0, r.stdout + r.stderr
     with open("artifacts/calibration.json") as f:
         calib = json.load(f)
-    factors = calib["factor_by_category"]
+    factors = calib["factors"]
     assert factors and all(v > 0 for v in factors.values())
+    assert calib["grain"] in ("subcategory", "category")
+    # every cell must sit between its own raw fit and its parent: shrinkage
+    # pulls toward the parent, it never extrapolates past either
+    for key, info in calib["detail"].items():
+        lo, hi = sorted([info["raw_factor"], info["parent_factor"]])
+        assert lo - 1e-6 <= factors[key] <= hi + 1e-6, key
+    # a thin cell must sit nearer its parent than a data-rich one does
+    weights = [i["shrinkage_weight_on_self"] for i in calib["detail"].values()]
+    assert all(0.0 <= w <= 1.0 for w in weights)
     # the trained model must still be loadable with factors applied
     from common.config import load_config
     from bootstrap.train_baseline import BaselineModel

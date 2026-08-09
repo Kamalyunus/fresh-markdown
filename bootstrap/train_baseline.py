@@ -71,10 +71,12 @@ class BaselineModel:
         self.booster = lgb.Booster(model_file=bm["model_path"])
         with open(bm["feature_schema_path"]) as f:
             self.schema = json.load(f)
-        self.calibration = {}
+        self.calibration, self.calibration_grain = {}, "category"
         if os.path.exists(bm["calibration_factor_path"]):
             with open(bm["calibration_factor_path"]) as f:
-                self.calibration = json.load(f)["factor_by_category"]
+                cal = json.load(f)
+            self.calibration = cal.get("factors", cal.get("factor_by_category", {}))
+            self.calibration_grain = cal.get("grain", "category")
         self.version = self.schema["model_version"]
 
     def _matrix(self, d):
@@ -103,8 +105,8 @@ class BaselineModel:
         mu = self.booster.predict(self._matrix(d))
         mu = np.clip(mu, self.cfg["pricing"]["demand_floor"], None)
         if self.cfg["baseline_model"]["apply_level_calibration"]:
-            factor = d["category"].map(
-                lambda c: self.calibration.get(str(c), 1.0)).to_numpy()
+            key = d[self.calibration_grain]      # grain is the artifact's own
+            factor = key.map(lambda k: self.calibration.get(str(k), 1.0)).to_numpy()
             mu = mu * factor
         return mu
 
@@ -259,25 +261,81 @@ def fit_level_calibration(d, cfg):
         return (lo + hi) / 2, base
 
     min_anchor = cfg["baseline_model"]["calibration_min_anchor_rows"]
-    factors, detail = {}, {}
-    for cat, g in calib.groupby("category"):
-        anchor = g[(g.total_discount - g.d_ref).abs() <= tier_step / 2]
-        fitted = len(anchor) >= min_anchor and anchor["mu_ref_hat"].sum() > 0
-        factor, pred = solve_factor(anchor) if fitted else (1.0, 0.0)
-        factors[str(cat)] = round(float(factor), 4)
-        detail[str(cat)] = {
-            "basis": ("anchor_censored" if fitted and censored_basis
-                      else "anchor_raw_mu" if fitted else "uncorrected"),
-            "anchor_rows": int(len(anchor)),
-            "calib_rows": int(len(g)),
-            "anchor_sold": int(anchor["units_sold"].sum()),
-            "anchor_predicted_at_f1": round(float(pred), 1),
-        }
+    grain = cfg["baseline_model"]["calibration_grain"]
+    k_shrink = cfg["baseline_model"]["calibration_shrinkage_units"]
+
+    anchor_all = calib[(calib.total_discount - calib.d_ref).abs() <= tier_step / 2]
+    if len(anchor_all) < min_anchor or anchor_all["mu_ref_hat"].sum() <= 0:
+        raise RuntimeError(
+            f"fit window has only {len(anchor_all)} anchor rows "
+            f"(need {min_anchor}) -- widen calibration_fit_window")
+
+    def shrink(cell, parent, evidence):
+        """Geometric shrinkage toward the parent, weighted by evidence (anchor
+        units sold). Factors are multiplicative, so the pull is in log space.
+        Zero evidence lands exactly on the parent -- no threshold cliff."""
+        if evidence <= 0 or cell <= 0:
+            return parent
+        w = evidence / (evidence + k_shrink)
+        return float(np.exp(w * np.log(cell) + (1 - w) * np.log(parent)))
+
+    f_global, _ = solve_factor(anchor_all)
+
+    def fit_level(groups, parent_of):
+        out, det = {}, {}
+        for key, g in groups:
+            raw, pred = solve_factor(g)
+            evidence = float(g["units_sold"].sum())
+            parent = parent_of(key, g)
+            f = shrink(raw, parent, evidence)
+            out[str(key)] = round(float(f), 4)
+            det[str(key)] = {
+                "anchor_rows": int(len(g)),
+                "anchor_sold": int(evidence),
+                "anchor_predicted_at_f1": round(float(pred), 1),
+                "raw_factor": round(float(raw), 4),
+                "parent_factor": round(float(parent), 4),
+                "shrinkage_weight_on_self": round(
+                    float(evidence / (evidence + k_shrink)), 3),
+            }
+        return out, det
+
+    cat_factors, cat_detail = fit_level(
+        anchor_all.groupby("category"), lambda k, g: f_global)
+
+    if grain == "subcategory":
+        factors, detail = fit_level(
+            anchor_all.groupby("subcategory"),
+            lambda k, g: cat_factors.get(str(g["category"].iloc[0]), f_global))
+    elif grain == "category":
+        factors, detail = cat_factors, cat_detail
+    else:
+        raise ValueError(f"unknown calibration_grain: {grain}")
 
     path = cfg["baseline_model"]["calibration_factor_path"]
     with open(path, "w") as f:
-        json.dump({"factor_by_category": factors,
-                   "detail_by_category": detail,
+        # is calibration needed at all? factors clustered on 1.0 mean the
+        # frozen model is already level-correct and the remedy should stay
+        # off; wide dispersion is evidence of systematic per-cell model bias
+        # -- a training signal, not something to paper over indefinitely
+        fv = np.array(list(factors.values()), dtype=float)
+        json.dump({"grain": grain,
+                   "factor_summary": {
+                       "p10": round(float(np.percentile(fv, 10)), 4),
+                       "p50": round(float(np.percentile(fv, 50)), 4),
+                       "p90": round(float(np.percentile(fv, 90)), 4),
+                       "share_within_5pct_of_1": round(
+                           float((np.abs(fv - 1.0) <= 0.05).mean()), 4),
+                       "note": "clustered on 1.0 -> model is level-correct, "
+                               "leave apply_level_calibration false; wide -> "
+                               "systematic per-cell bias worth fixing in "
+                               "training, not only in the multiplier",
+                   },
+                   "factors": factors,
+                   "detail": detail,
+                   "global_factor": round(float(f_global), 4),
+                   "category_factors": cat_factors,
+                   "shrinkage_units": k_shrink,
                    "fit_window": fit_window,
                    "fit_basis": "censored E[min(D,q)]" if censored_basis
                        else "raw mu (r_lookup missing)",
@@ -308,27 +366,33 @@ def main():
     if args.fit_calibration:
         factors = fit_level_calibration(d, cfg)
         with open(cfg["baseline_model"]["calibration_factor_path"]) as f:
-            detail = json.load(f)["detail_by_category"]
-        for cat, factor in sorted(factors.items()):
-            info = detail[cat]
-            print(f"  {cat:24s} {factor:.4f}  "
-                  f"({info['basis']}, {info['anchor_rows']:,} anchor rows)")
-        with open(cfg["baseline_model"]["calibration_factor_path"]) as f:
-            meta = json.load(f)
-        print(f"fit window: {meta['fit_window']} "
-              f"{meta['fit_window_dates'][0]}..{meta['fit_window_dates'][1]} "
-              f"({meta['fit_rows']:,} rows)")
-        if meta["fit_in_sample_share"] > 0.5:
-            print(f"WARNING: {meta['fit_in_sample_share']:.0%} of the fit "
+            art = json.load(f)
+        detail = art["detail"]
+        print(f"grain: {art['grain']}  ({len(factors)} cells, global factor "
+              f"{art['global_factor']:.4f})")
+        print(f"fit window: {art['fit_window']} "
+              f"{art['fit_window_dates'][0]}..{art['fit_window_dates'][1]} "
+              f"({art['fit_rows']:,} rows, basis {art['fit_basis']})")
+        if art["fit_in_sample_share"] > 0.5:
+            print(f"WARNING: {art['fit_in_sample_share']:.0%} of the fit "
                   "window is inside the training period -- the model fits "
                   "there by construction, so the factor will understate what "
                   "the launch-adjacent weeks need. Move the split so the "
                   "trailing window sits after train_end.")
-        uncorrected = [c for c, v in detail.items() if v["basis"] == "uncorrected"]
-        if uncorrected:
-            print(f"left uncorrected (below "
-                  f"{cfg['baseline_model']['calibration_min_anchor_rows']} "
-                  f"anchor rows): {', '.join(sorted(uncorrected))}")
+        widest = sorted(factors.items(), key=lambda kv: -abs(kv[1] - 1.0))[:12]
+        for key, factor in widest:
+            info = detail[key]
+            print(f"  {key:26s} {factor:.4f}  (raw {info['raw_factor']:.4f} "
+                  f"-> parent {info['parent_factor']:.4f}, self-weight "
+                  f"{info['shrinkage_weight_on_self']:.2f}, "
+                  f"{info['anchor_rows']:,} rows)")
+        if len(factors) > len(widest):
+            print(f"  ... {len(factors) - len(widest)} more cells nearer 1.0")
+        below = [k for k, v in factors.items() if v < 1.0]
+        if below:
+            print(f"{len(below)}/{len(factors)} cells below 1.0 (model "
+                  "over-predicts there) -- investigate before applying "
+                  "(AGENTS rule 5)")
         print(f"wrote {cfg['baseline_model']['calibration_factor_path']}")
         print("next: set baseline_model.apply_level_calibration: true in "
               "config.yaml, re-run backtest WITHOUT retraining the baseline, "
