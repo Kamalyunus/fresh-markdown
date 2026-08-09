@@ -230,6 +230,22 @@ realised margin 0.1336. A margin threshold under ~0.13 fires on ordinary days
 and silently suspends exploration, which is the product. Buy sensitivity back
 with a persistence rule, never by going under the floor.
 
+## Refreshing the numbers in the docs and deck
+
+`docs/design.md` and `docs/perishable_markdown_tech_deck.pptx` quote ~25
+measured quantities that go stale on every re-run (the launch-freeze retrain
+changes most of them). Do not hunt through the JSON:
+
+```bash
+python3 -m tools.deck_numbers --backtest reports/<gate-passing>.json \
+    [--shadow reports/shadow.json] [--phase0 reports/phase0.json] \
+    [--thresholds reports/thresholds.json]
+```
+
+It prints each quantity tagged with the slide(s) and design-doc sections that
+carry it. Missing reports print `--` rather than failing. Only ever quote a
+**gate-passing** backtest — the same rule that governs pasting `tau_initial`.
+
 ## Repo conventions
 
 - Modules are run as `python3 -m package.module` from the repo root.
