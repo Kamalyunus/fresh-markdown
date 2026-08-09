@@ -646,23 +646,29 @@ has fired so far fired correctly.
 
 ### 9.2 Calibration gate (blocking) — is the demand model usable at all?
 
-Replaying at actual historical prices, predicted units must land within
-**[0.90, 1.10]** of actual on the launch-adjacent (calib+test) window — a
-band set by the owner at ~2σ of the *measured* 3-week pooled weekly
-volatility (finding 5, section 7); the continuous guard thereafter is the
-daily `realised_vs_predicted_sold_ratio` in shadow and production, which
-tracks the same quantity every day instead of judging it once on three
-weeks. Every economic quantity in the system is denominated in the demand
-prediction; a model 25% light prices to under-clear and absorb scrap — an
-early miscalibrated run drove replay clearance from 91% to 50% and scrap up
-70%. The gate comes with a mandated diagnostic separating **level** bias
-(ratio off at the reference anchor, flat in discount → multiplicative
-correction permitted, factors fit on the long `calibration_fit_window`)
-from **slope** bias (ratio degrading as discount departs the anchor → the
-elasticity prior is wrong; correcting the level would *mask* it, so it is
-forbidden). Status: calibrated re-run of the v2 feature-set model in
-progress; a final retrain + calibration re-fit is planned at the launch
-freeze regardless.
+The gate judges the frozen model on its **only production responsibility:
+the demand level at the reference discount.** Inference always overwrites
+price to the reference anchor; every other price is produced by the
+parametric layer (`mu_ref × ratio^ε`). The gate metric is therefore
+`level_bias_at_anchor` on the launch-adjacent window, within **[0.90,
+1.10]** — a band set by the owner at ~2σ of the *measured* weekly demand
+volatility (finding 5, section 7). Both choices are owner decisions
+(2026-08-09), made after the pooled-at-actual-prices ratio was shown to be
+dominated by the elasticity prior's slope (anchor ≈ 1.0 over five months
+while the pooled ratio sat at 1.17): a pooled gate was structurally
+measuring the one quantity history cannot identify, and would have blocked
+launch forever on the prior rather than the model. The pooled ratio and
+`slope_ratio_by_discount_gap` remain reported as diagnostics; the slope
+itself is validated where it can be — by posterior movement and the A/B —
+and the continuous production guard is the daily
+`realised_vs_predicted_sold_ratio`. Why the gate matters at all: every
+economic quantity is denominated in the demand prediction, and an early
+25%-light model priced to under-clear (replay clearance 91% → 50%, scrap
++70%). Level factors, when warranted, are fit on the long
+`calibration_fit_window` so no single anomalous week dominates. Status: a
+final retrain + re-gate at the launch freeze is planned regardless, so the
+level is measured on the freshest data the frozen model will carry into
+production.
 
 ### 9.3 Prior-acceptance gate (blocking) — is the bracket honest?
 

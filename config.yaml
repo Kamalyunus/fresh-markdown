@@ -46,17 +46,18 @@ baseline_model:
     # volatility. This band is ~2 sigma; the continuous guard is the daily
     # realised_vs_predicted_sold_ratio in shadow and production.
   calibration_min_anchor_rows: 200     # SET  anchor basis needs this many rows
-  calibration_gate_metric: "pooled_ratio"  # SET BY OWNER: "pooled_ratio" |
-    # "level_at_anchor". The pooled ratio judges the model at ACTUAL
-    # (mostly deep-discount) prices and is therefore hostage to the
-    # elasticity prior -- the quantity the system exists to learn in
-    # production. level_at_anchor judges only what the frozen artifact is
-    # responsible for: the demand level at reference price. Measured
-    # 2026-08-09: anchor ratio ~1.0 on train+calib while the pooled ratio
-    # sits at 1.17 on slope alone -- the section 9.3 slope case with an
-    # unidentifiable prior. Switching to level_at_anchor is the coherent
-    # gate for that situation; slope is then watched via
-    # slope_ratio_by_discount_gap and the daily drift ratio.
+  calibration_gate_metric: "level_at_anchor"  # SET BY OWNER 2026-08-09
+    # ("pooled_ratio" | "level_at_anchor"). The model's only production job
+    # is predicting demand at the reference discount -- inference always
+    # overwrites price to d_ref and the parametric layer (mu_ref x ratio^e)
+    # handles every other price. The pooled ratio judges the model at
+    # ACTUAL, mostly deep-discount prices and is therefore hostage to the
+    # elasticity prior, the quantity the system exists to learn in
+    # production (measured: anchor ~1.0 on train+calib while pooled sat at
+    # 1.17 on slope alone). level_at_anchor gates the frozen artifact on
+    # its own responsibility; slope stays visible via
+    # slope_ratio_by_discount_gap and is validated by posterior movement
+    # and the A/B, with the daily drift ratio as the production guard.
   calibration_fit_window: "train+calib"  # SET  "calib" | "train+calib" | "all".
     # Measured weekly sold-ratios swing +-8% around a persistent level deficit;
     # factors fit on one fortnight inherit that fortnight's anomaly (the 07-13

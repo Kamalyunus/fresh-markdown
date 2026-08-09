@@ -146,10 +146,14 @@ python3 -m pipeline.monitor
 ## Reading a backtest report
 
 - `fidelity.fidelity_episode_sold_ratio` = actual ÷ predicted on the gate
-  window. Above 1 → model under-predicts; below 1 → over-predicts. Gate
-  passes inside `calibration_gate_band` ([0.90, 1.10] — set by the owner
-  2026-08-09 at ~2σ of the measured 3-week pooled weekly volatility; the
-  original [0.95, 1.05] was ~1σ and coin-flipped on natural demand noise).
+  window. Above 1 → model under-predicts; below 1 → over-predicts. The gate
+  verdict uses `calibration_gate_metric` (owner-set 2026-08-09:
+  `level_at_anchor` — the model's only production job is the level at
+  d_ref; the pooled ratio embeds the unidentifiable prior's slope) against
+  `calibration_gate_band` ([0.90, 1.10], ~2σ of measured weekly
+  volatility). The report's `calibration_gate_metric` /
+  `calibration_gate_value` fields name what the verdict used; the pooled
+  ratio stays reported as a diagnostic.
 - `fidelity.by_window` — compare `train` vs `calib`/`test` sold ratios; a
   large gap means demand-level drift the frozen features don't capture.
   Config-only remedy to try first: move `data.split.train_start` later so the
