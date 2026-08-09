@@ -106,6 +106,44 @@ def test_mu_floor():
         == CFG["pricing"]["demand_floor"]
 
 
+def test_censored_expectation_below_raw_mu():
+    """E[min(D,q)] <= E[D]: the basis mismatch that broke calibration."""
+    from pricing.demand import expected_min_demand_inventory_vec as E
+    mu = np.array([0.5, 1.0, 3.0])
+    r = np.array([1.2, 1.2, 1.2])
+    q = np.array([2.0, 2.0, 2.0])
+    censored = E(mu, r, q, CFG["pricing"]["negbin_max_k"])
+    assert (censored <= mu + 1e-9).all()
+    assert censored[2] < mu[2] * 0.8        # heavy censoring at low inventory
+
+
+def test_level_factor_must_be_solved_on_censored_basis():
+    """A factor fit against raw mu reads low -- it can even land below 1 while
+    the true correction is above 1, which is why calibration could not move
+    the gate. Solving against E[min(D,q)] recovers the true scaling."""
+    from pricing.demand import expected_min_demand_inventory_vec as E
+    max_k = CFG["pricing"]["negbin_max_k"]
+    rng = np.random.default_rng(0)
+    n = 2000
+    mu = rng.uniform(0.2, 3.0, n)
+    r = np.full(n, 1.2)
+    q = rng.integers(1, 4, n).astype(float)     # tiny inventories: heavy censoring
+    true_f = 1.45
+    sold = E(true_f * mu, r, q, max_k).sum()
+
+    raw_fit = sold / mu.sum()
+    assert raw_fit < 1.0 < true_f               # wrong side of 1
+
+    lo, hi = 0.1, 10.0
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        if E(mid * mu, r, q, max_k).sum() < sold:
+            lo = mid
+        else:
+            hi = mid
+    assert abs((lo + hi) / 2 - true_f) < 0.01
+
+
 def test_config_rejects_narrowed_search_bounds(tmp_path):
     with open("config.yaml") as f:
         cfg = yaml.safe_load(f)

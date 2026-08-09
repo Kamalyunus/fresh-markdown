@@ -46,3 +46,28 @@ def expected_min_demand_inventory(mu, r, q, max_k):
     pmf, _ = nb_pmf_vector(mu, r, max_k)
     k = np.arange(len(pmf))
     return float(np.sum(pmf * np.minimum(k, q)))
+
+
+def expected_min_demand_inventory_vec(mu, r, q, max_k, chunk=100000):
+    """Vectorised E[min(D, q)].
+
+    This is the CENSORED expectation -- what can actually be observed as
+    sales, since an hour cannot sell more than its inventory. Any comparison
+    of predictions against realised sales (fidelity, the calibration gate,
+    the level factors) must use this, never raw mu: E[min(D,q)] <= E[D], so
+    mixing the two makes the model look better on one basis than the other
+    and a factor fit on raw mu can never move a gate read on censored
+    predictions.
+    """
+    mu = np.asarray(mu, dtype=float)
+    r = np.asarray(r, dtype=float)
+    q = np.asarray(q, dtype=float)
+    out = np.empty(len(mu))
+    k = np.arange(max_k + 1)
+    for start in range(0, len(mu), chunk):
+        sl = slice(start, min(start + chunk, len(mu)))
+        p = (r[sl] / (r[sl] + mu[sl]))[:, None]
+        pmf = nbinom.pmf(k[None, :], r[sl][:, None], p)
+        pmf[:, -1] += np.clip(1.0 - pmf.sum(axis=1), 0.0, None)
+        out[sl] = np.sum(pmf * np.minimum(k[None, :], q[sl][:, None]), axis=1)
+    return out

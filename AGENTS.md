@@ -96,6 +96,15 @@ python3 -m pipeline.monitor
    is diagnostic only; when demand level drifts between the training period
    and launch, no static factor can (or should) fix it.
 
+5a. **Everything that compares predictions to realised sales uses the
+   CENSORED expectation `E[min(D, inventory)]`** — fidelity, the gate, and
+   the level factors. Raw `mu` is always ≥ the censored expectation, so
+   mixing bases makes a factor read low: measured, a true correction of
+   1.45 fits as 0.68 on raw mu — the wrong side of 1, which is why
+   calibration used to leave the gate unmoved (or worse). The factor is
+   *solved* on that basis, not divided out, because scaling mu before
+   censoring moves the censored total by less than the factor.
+
 5. **Level-calibration factors are fit on anchor rows only**, over the
    `calibration_fit_window` (default train+calib — measured weekly demand
    swings ±8%, so a factor fit on one fortnight inherits that fortnight's

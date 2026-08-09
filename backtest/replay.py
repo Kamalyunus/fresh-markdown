@@ -29,7 +29,8 @@ from bootstrap.train_baseline import BaselineModel
 from bootstrap.fit_dispersion import lookup_r
 from bootstrap.measure import m10_fidelity_decomposition
 from pricing import dp as dp_mod
-from pricing.demand import mu_at, expected_min_demand_inventory
+from pricing.demand import (mu_at, expected_min_demand_inventory,
+                            expected_min_demand_inventory_vec)
 
 
 def _attach_predictions(d, cfg, model, prior, r_lookup):
@@ -46,18 +47,9 @@ def _attach_predictions(d, cfg, model, prior, r_lookup):
     d["mu_ref_hat"] = mu_ref
     d["mu_hat"] = mu
 
-    max_k = cfg["pricing"]["negbin_max_k"]
-    k = np.arange(max_k + 1)
-    pred = np.empty(len(d))
-    q = d.starting_inventory.to_numpy()
-    r = d.r.to_numpy()
-    for start in range(0, len(d), 100000):
-        sl = slice(start, min(start + 100000, len(d)))
-        p = (r[sl] / (r[sl] + mu[sl]))[:, None]
-        pmf = nbinom.pmf(k[None, :], r[sl][:, None], p)
-        pmf[:, -1] += np.clip(1.0 - pmf.sum(axis=1), 0.0, None)
-        pred[sl] = np.sum(pmf * np.minimum(k[None, :], q[sl][:, None]), axis=1)
-    d["predicted_units"] = pred
+    d["predicted_units"] = expected_min_demand_inventory_vec(
+        mu, d.r.to_numpy(), d.starting_inventory.to_numpy(),
+        cfg["pricing"]["negbin_max_k"])
     return d
 
 

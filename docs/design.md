@@ -703,8 +703,17 @@ and the continuous production guard is the daily
 `realised_vs_predicted_sold_ratio`. Why the gate matters at all: every
 economic quantity is denominated in the demand prediction, and an early
 25%-light model priced to under-clear (replay clearance 91% → 50%, scrap
-+70%). Level factors, when warranted, are fit on the long
-`calibration_fit_window` so no single anomalous week dominates.
++70%). Level factors are fit on anchor rows over a fit window disjoint from
+the gate window, and — critically — on the **censored basis**: sales cannot
+exceed inventory, so predictions are compared as `E[min(D, q)]`, the same
+quantity the gate measures. An earlier implementation fit against raw `mu`,
+which is always the larger number, so factors read systematically low; on a
+controlled check a true correction of 1.45 fit as **0.68** — the wrong side
+of 1. That single basis mismatch explains why level calibration had appeared
+useless on real data (factors below 1 on a model that under-predicts, a gate
+that never moved, and one run that got worse). Because the factor scales
+`mu` *before* censoring, the censored total moves by less than the factor,
+so the factor is solved for by bisection rather than divided out.
 
 Two temporal rules complete the gate's semantics. First, the verdict that
 matters is the one on the **freeze-time model**: a monotone anchor-ratio

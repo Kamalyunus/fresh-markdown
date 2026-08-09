@@ -32,6 +32,7 @@ import pandas as pd
 
 from common.config import load_config, reference_discount
 from bootstrap.prepare_data import split_frames
+from pricing.demand import expected_min_demand_inventory_vec
 
 # Feature order is authoritative in feature_schema.json; this list only seeds
 # the first fit. `total_discount` is the SINGLE price feature and is the one
@@ -162,15 +163,20 @@ def fit_level_calibration(d, cfg):
     elasticity-dependent basis: any basis that scales predictions by the
     prior elasticity lets slope error leak into the level factor.
 
-    The fit window is configurable (calibration_fit_window). Weekly demand
-    levels were measured swinging +-8% around a persistent deficit; a factor
-    fit on a single fortnight inherits that fortnight's anomaly and can move
-    the gate the wrong way, so the default fits on train+calib -- long enough
-    that no one week dominates -- while the GATE stays on calib+test.
+    The fit window is configurable (calibration_fit_window) and must be
+    DISJOINT from calibration_gate_window, or the fit grades itself. The
+    factor is solved on the CENSORED basis -- sales cannot exceed inventory,
+    so predictions are compared as E[min(D, q)], the same quantity the gate
+    measures. Fitting against raw mu instead reads systematically low (raw mu
+    >= censored expectation) and produces a factor that cannot move the gate;
+    and because the factor scales mu BEFORE censoring, the censored total
+    moves by less than the factor, so f is solved for rather than divided out.
 
     A factor below 1 means the model OVER-predicts at the anchor on the fit
-    window; with a long window that is a real signal worth a manual look.
+    window -- worth a manual look before applying.
     """
+    from bootstrap.fit_dispersion import lookup_r   # local: avoids a cycle
+
     model = BaselineModel(cfg)
     splits = split_frames(d, cfg)
     fit_window = cfg["baseline_model"]["calibration_fit_window"]
@@ -208,20 +214,64 @@ def fit_level_calibration(d, cfg):
     calib["mu_ref_hat"] = model.predict_mu_ref(calib)
     cfg["baseline_model"]["apply_level_calibration"] = saved
 
+    # censoring basis: sales are capped at inventory, so the factor must be
+    # solved against E[min(D, q)] -- the same quantity the gate measures.
+    # Fitting against raw mu makes the factor read systematically low and it
+    # can never move a gate read on censored predictions. Scaling mu by f
+    # also moves the censored total by LESS than f, so f is solved for, not
+    # divided out.
+    max_k = cfg["pricing"]["negbin_max_k"]
+    r_path = cfg["dispersion"]["r_lookup_path"]
+    censored_basis = os.path.exists(r_path)
+    if censored_basis:
+        with open(r_path) as f:
+            r_lookup = json.load(f)
+        calib["r_val"] = [lookup_r(r_lookup, s, c)
+                          for s, c in zip(calib.subcategory, calib.category)]
+
+    def solve_factor(anchor):
+        sold = float(anchor["units_sold"].sum())
+        mu = anchor["mu_ref_hat"].to_numpy()
+        if not censored_basis:
+            pred = float(mu.sum())
+            return (sold / pred if pred > 0 else 1.0), pred
+        r = anchor["r_val"].to_numpy()
+        q = anchor["starting_inventory"].to_numpy()
+
+        def predicted(f):
+            return float(expected_min_demand_inventory_vec(
+                f * mu, r, q, max_k).sum())
+
+        base = predicted(1.0)
+        if base <= 0 or sold <= 0:
+            return 1.0, base
+        lo, hi = 0.1, 10.0
+        if predicted(lo) > sold:
+            return lo, base
+        if predicted(hi) < sold:
+            return hi, base
+        for _ in range(40):                    # monotone in f -> bisection
+            mid = (lo + hi) / 2
+            if predicted(mid) < sold:
+                lo = mid
+            else:
+                hi = mid
+        return (lo + hi) / 2, base
+
     min_anchor = cfg["baseline_model"]["calibration_min_anchor_rows"]
     factors, detail = {}, {}
     for cat, g in calib.groupby("category"):
         anchor = g[(g.total_discount - g.d_ref).abs() <= tier_step / 2]
-        pred = float(anchor["mu_ref_hat"].sum())
-        fitted = len(anchor) >= min_anchor and pred > 0
-        factor = float(anchor["units_sold"].sum() / pred) if fitted else 1.0
-        factors[str(cat)] = round(factor, 4)
+        fitted = len(anchor) >= min_anchor and anchor["mu_ref_hat"].sum() > 0
+        factor, pred = solve_factor(anchor) if fitted else (1.0, 0.0)
+        factors[str(cat)] = round(float(factor), 4)
         detail[str(cat)] = {
-            "basis": "anchor" if fitted else "uncorrected",
+            "basis": ("anchor_censored" if fitted and censored_basis
+                      else "anchor_raw_mu" if fitted else "uncorrected"),
             "anchor_rows": int(len(anchor)),
             "calib_rows": int(len(g)),
             "anchor_sold": int(anchor["units_sold"].sum()),
-            "anchor_predicted": round(pred, 1),
+            "anchor_predicted_at_f1": round(float(pred), 1),
         }
 
     path = cfg["baseline_model"]["calibration_factor_path"]
@@ -229,6 +279,8 @@ def fit_level_calibration(d, cfg):
         json.dump({"factor_by_category": factors,
                    "detail_by_category": detail,
                    "fit_window": fit_window,
+                   "fit_basis": "censored E[min(D,q)]" if censored_basis
+                       else "raw mu (r_lookup missing)",
                    "fit_window_dates": [str(fit_dates.min().date()),
                                         str(fit_dates.max().date())],
                    "fit_rows": int(len(calib)),
