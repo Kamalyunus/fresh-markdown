@@ -52,6 +52,14 @@ python3 -m bootstrap.init_posterior
 python3 -m pipeline.shadow --input data/prepared.parquet --out reports/shadow.json
 ```
 
+Shadow runs on a uniform sample of `monitoring.shadow_gate.sample_episodes`
+episodes (default 10,000, drawn before `mu_ref` prediction so the cost scales
+with the sample). Override with `--max-episodes N`, or `--max-episodes 0` for
+every episode — worth doing once for the final pre-launch record, not for
+iteration. A sampled report sets `window.sampled` and adds
+`shadow_gate.sampling_caveat`; quote the caveat whenever you quote the zero
+violation count.
+
 Shadow needs `apply_level_calibration` and `tau_initial` non-null. Its exit
 gate: event completeness and matched rate above `monitoring.shadow_gate`
 thresholds and ZERO cost-floor violations. Shadow outcomes carry

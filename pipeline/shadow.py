@@ -51,7 +51,7 @@ def _require_shadow_config(cfg):
         raise ConfigError("shadow phase blocked by null config: " + "; ".join(missing))
 
 
-def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=0):
+def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
     _require_shadow_config(cfg)
     model = BaselineModel(cfg)
     posterior = PosteriorStore(cfg)
@@ -61,15 +61,26 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=0):
     rng = np.random.default_rng(seed)
     tau = float(cfg["exploration"]["tau_initial"])
 
+    if max_episodes is None:
+        max_episodes = cfg["monitoring"]["shadow_gate"]["sample_episodes"]
+
+    # SAMPLE FIRST. The gate reads rates (completeness, matched, drift) plus a
+    # violation count, and a uniform episode sample estimates all of them --
+    # but only if the sample is drawn before the work, not after. Predicting
+    # mu_ref over every row and then discarding most of them costs the full
+    # run for a sample's worth of evidence.
+    population = d.episode_id.unique()
+    sampled = bool(max_episodes) and len(population) > max_episodes
+    if sampled:
+        keep = rng.choice(population, max_episodes, replace=False)
+        d = d[d.episode_id.isin(keep)]
+
     d = d.sort_values(["episode_id", "hour_of_day"]).copy()
     d["mu_ref_hat"] = model.predict_mu_ref(d)
     d["r_val"] = [lookup_r(r_lookup, s, c)
                   for s, c in zip(d.subcategory, d.category)]
 
     groups = list(d.groupby("episode_id", sort=False))
-    if max_episodes and len(groups) > max_episodes:
-        idx = rng.choice(len(groups), max_episodes, replace=False)
-        groups = [groups[i] for i in sorted(idx)]
 
     rejected = {}
     n_dec = n_out = cost_floor_violations = differs = 0
@@ -176,6 +187,17 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=0):
             "threshold": 0,
             "pass": cost_floor_violations == 0},
     }
+    if sampled:
+        # the rate gates are estimates and a sample supports them; a zero
+        # COUNT is only zero over what was sampled. Say so in the artifact
+        # rather than letting "0 violations" read as a proof over the window.
+        gate["sampling_caveat"] = (
+            f"gate measured on {len(groups):,} of {len(population):,} episodes "
+            f"(seed {seed}). The rates are sample estimates; the zero "
+            "cost-floor violation count is zero OVER THE SAMPLE, not a proof "
+            "over the window. Cost-floor safety is structural (the action set "
+            "cannot express a below-cost price) and separately unit-tested -- "
+            "this gate confirms it end-to-end, it does not establish it.")
     gate["verdict"] = ("PASS -- proceed to exploit-only pilot (section 19)"
                        if all(g["pass"] for g in gate.values()
                               if isinstance(g, dict))
@@ -189,7 +211,10 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=0):
             "config_version": cfg["meta"]["config_version"],
         },
         "window": {"date_min": str(d.date.min()), "date_max": str(d.date.max()),
-                   "episodes": len(groups)},
+                   "episodes": len(groups),
+                   "population_episodes": int(len(population)),
+                   "sampled": sampled,
+                   "sample_seed": seed if sampled else None},
         "decision_count": n_dec,
         "outcome_count": n_out,
         "state_rejected_count": int(sum(rejected.values())),
@@ -228,8 +253,9 @@ def main():
     ap.add_argument("--date-start", default=None)
     ap.add_argument("--date-end", default=None)
     ap.add_argument("--events-dir", default=None)
-    ap.add_argument("--max-episodes", type=int, default=0,
-                    help="0 = all episodes")
+    ap.add_argument("--max-episodes", type=int, default=None,
+                    help="episode sample size; 0 = all episodes. Default: "
+                         "monitoring.shadow_gate.sample_episodes")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -250,6 +276,10 @@ def main():
         json.dump(report, f, indent=2, default=str)
 
     g = report["shadow_gate"]
+    w = report["window"]
+    print(f"episodes           : {w['episodes']:,} of "
+          f"{w['population_episodes']:,}"
+          + (f" (sample, seed {w['sample_seed']})" if w["sampled"] else ""))
     print(f"decisions          : {report['decision_count']:,} "
           f"({report['state_rejected_count']} states rejected)")
     print(f"event completeness : {g['event_completeness']['value']:.4f} "

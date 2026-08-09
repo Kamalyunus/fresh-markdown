@@ -288,6 +288,14 @@ def test_shadow_phase_harness(workspace):
     assert gate["matched_decision_rate"]["pass"]
     assert report["decision_count"] > 50
 
+    # a sampled gate must say so, and must not let a zero violation COUNT
+    # read as a proof over the whole window
+    w = report["window"]
+    assert w["sampled"] and w["episodes"] == 60
+    assert w["population_episodes"] > w["episodes"]
+    assert "sampling_caveat" in gate
+    assert gate["verdict"].startswith("PASS")   # caveat is not a gate row
+
     # shadow outcomes are NOT learning evidence: update must consume nothing
     from common.config import load_config
     from pipeline.update import run as update_run

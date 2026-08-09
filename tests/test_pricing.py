@@ -161,6 +161,18 @@ def test_config_strict_refuses_null_measured(tmp_path):
         load_config(strict=True)
 
 
+def test_shadow_sample_size_defaults_to_config():
+    """--max-episodes unset must read the config sample, not fall back to
+    'every episode' -- the whole point is that a full sweep is too slow."""
+    import inspect
+    from pipeline import shadow
+
+    assert inspect.signature(shadow.run_shadow).parameters[
+        "max_episodes"].default is None
+    cfg = load_config()
+    assert cfg["monitoring"]["shadow_gate"]["sample_episodes"] > 0
+
+
 def test_config_detects_stale_paste_from_frozen_artifact(tmp_path):
     """A config rho left over from a previous retrain silently mis-weights
     every posterior update, because rho and forced-hours set deff."""

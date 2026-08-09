@@ -178,6 +178,18 @@ monitoring:
   shadow_gate:                         # SET  section 19 phase-1 exit gate
     min_event_completeness: 0.99
     min_matched_decision_rate: 0.99
+    sample_episodes: 10000             # SET  0 = every episode. The gate reads
+      # three rates and a violation count; a uniform episode sample estimates
+      # all of them, and at 10k episodes (~66k decisions on the production
+      # extract) the standard error on a rate near 0.99 is well under the
+      # 0.01 the gate discriminates on. Sampling happens BEFORE mu_ref
+      # prediction, so the cost scales with the sample, not the extract.
+      # What it does NOT buy: "zero cost-floor violations" becomes zero over
+      # the sample rather than over the window. That is acceptable because
+      # cost-floor safety is structural -- the feasible action set cannot
+      # express a below-cost price -- and separately unit-tested; the gate
+      # confirms the property end-to-end, it does not establish it. Set to 0
+      # for the final pre-launch run if a full sweep is wanted on the record.
   stop_conditions:
     duplicate_or_unmatched_rate: 0.01  # SET
     price_mismatch_rate: 0.01          # SET
