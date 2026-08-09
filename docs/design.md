@@ -1005,6 +1005,18 @@ count disagrees with its clock. Crossing midnight is a one-hour step like any
 other — which is the entire point. `episode_id` is now keyed by the window's
 first hour, not by a calendar date.
 
+A precondition had to be enforced first. Two rows sharing a
+`(sku, fc, date, hour)` timestamp make two runs start at the same instant,
+which collides them into one `episode_id` and produces an "episode" whose
+window counter is not monotone. One SKU × FC cannot have two states in the
+same hour and there is no principled way to choose between them, so **both
+copies are dropped**, recorded as `duplicate_hour_rows_dropped` in the
+waterfall. On the synthetic harness this was 114 rows and the sole cause of
+every counter anomaly; the resulting hole simply splits the window, which is
+loud rather than silent. A test now asserts the postcondition directly: inside
+every episode the counter steps down exactly one per row, and the window is
+at least as long as the rows held.
+
 Three things moved with it:
 
 | Component | Change |

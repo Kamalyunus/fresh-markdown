@@ -71,6 +71,23 @@ def test_filter_chain_waterfall(workspace):
     assert (d.original_price > 0).all()
 
 
+def test_every_episode_has_a_monotone_window_counter(workspace):
+    """The episode rule's own postcondition: inside an episode, flc_window
+    (hours_remaining) steps down exactly one per row, and the window is at
+    least as long as the rows we hold. A violation means two runs collided
+    into one id -- which is what duplicate (sku, fc, date, hour) rows did."""
+    _chdir(workspace)
+    d = pd.read_parquet("data/prepared.parquet")
+    g = d.sort_values(["date", "hour_of_day"]).groupby("episode_id")
+    for eid, s in g.hours_remaining:
+        steps = set(np.diff(s.to_numpy()))
+        assert steps <= {-1.0}, f"{eid} has window-counter steps {steps}"
+    first, n = g.hours_remaining.first(), g.size()
+    assert (first >= n - 1).all()
+    assert not d.duplicated(
+        subset=["sku_id", "fc", "date", "hour_of_day"]).any()
+
+
 def test_phase0_report_complete(workspace):
     _chdir(workspace)
     with open("reports/phase0.json") as f:

@@ -270,6 +270,11 @@ Three things follow the episode, not the row date, and must stay that way:
 3. **`prior_episode_ref_sales_rate`** — computed at episode grain; a daily
    shift hands a multi-day episode its own earlier day.
 
+Duplicate `(sku, fc, date, hour)` rows are dropped outright
+(`duplicate_hour_rows_dropped` in the waterfall) — both copies, since there is
+no way to pick. Left in, they collide two runs into one `episode_id` and the
+window counter stops being monotone.
+
 `m11_truncated_episodes` in `reports/phase0.json` now measures genuine
 missing data (a last row with `hours_remaining > 0`), not date seams.
 `validate_state` rejects any decision whose `mu_ref_path` length disagrees

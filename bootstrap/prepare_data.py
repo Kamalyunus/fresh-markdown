@@ -87,10 +87,19 @@ def load_and_filter(path, cfg=None):
     df["starting_inventory"] = df["starting_inventory"].round().astype("int64")
     df["ending_inventory"] = df["ending_inventory"].round().astype("int64")
 
+    # One sku x fc cannot have two states in the same hour, and there is no
+    # principled way to choose between them -- keep neither. Left in, they
+    # also break episode identification: two runs starting at the same instant
+    # collide into one id, and the "episode" that results has a
+    # non-monotonic window counter.
     df = df.sort_values(["sku_id", "fc", "date", "hour_of_day"])
+    dup = df.duplicated(subset=["sku_id", "fc", "date", "hour_of_day"],
+                        keep=False)
+    df = df[~dup]
     df["episode_id"] = assign_episode_ids(df)
 
-    wf = [("raw", len(df), df.episode_id.nunique())]
+    wf = [("raw", len(df) + int(dup.sum()), df.episode_id.nunique()),
+          ("duplicate_hour_rows_dropped", len(df), df.episode_id.nunique())]
 
     def step(d, label):
         wf.append((label, len(d), d.episode_id.nunique()))
