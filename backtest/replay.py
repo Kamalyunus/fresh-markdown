@@ -83,6 +83,82 @@ def _fidelity_metrics(d, cfg):
     }
 
 
+def calibration_window_sweep(d, cfg):
+    """Rolling-origin test of the calibration MECHANISM, as production runs it.
+
+    For each candidate trailing window W: fit per-category level factors on
+    weeks [t-W, t-1], apply them to week t, and measure the anchor ratio that
+    results -- repeated over every eligible week. This answers "how long
+    should the fit window be" with data rather than assertion, and it is the
+    honest test when the level moves: a longer window averages more history
+    and is therefore MORE stale, not more accurate. `uncalibrated` is the
+    same series with no factor applied, as the comparison baseline.
+    """
+    band = cfg["baseline_model"]["calibration_gate_band"]
+    tier_step = cfg["pricing"]["tier_step"]
+    windows = cfg["baseline_model"]["calibration_window_sweep_weeks"]
+
+    a = d[(d.total_discount - d.d_ref).abs() <= tier_step / 2].copy()
+    if not len(a):
+        return "NOT RUN -- no anchor rows"
+    a["week"] = pd.to_datetime(a.date).dt.to_period("W")
+    cw = (a.groupby(["category", "week"], observed=True)
+          .agg(sold=("units_sold", "sum"), pred=("predicted_units", "sum"))
+          .reset_index())
+    weeks = sorted(cw.week.unique())
+
+    def summarise(ratios):
+        arr = np.array(ratios)
+        return {
+            "eval_weeks": int(len(arr)),
+            "median_anchor_ratio": round(float(np.median(arr)), 4),
+            "share_weeks_in_band": round(
+                float(((arr >= band[0]) & (arr <= band[1])).mean()), 4),
+            "mean_abs_log_error": round(float(np.mean(np.abs(np.log(arr)))), 4),
+        }
+
+    def ratios_for(window):
+        out = []
+        for i, t in enumerate(weeks):
+            if i < max(window, 1):
+                continue
+            cur = cw[cw.week == t]
+            if window == 0:
+                factor = None
+            else:
+                fit = (cw[cw.week.isin(weeks[i - window:i])]
+                       .groupby("category", observed=True)[["sold", "pred"]].sum())
+                factor = fit.sold / fit.pred.replace(0, np.nan)
+            f = (np.ones(len(cur)) if factor is None
+                 else cur.category.map(factor).fillna(1.0).to_numpy())
+            adj = float((cur.pred.to_numpy() * f).sum())
+            if adj > 0:
+                out.append(float(cur.sold.sum() / adj))
+        return out
+
+    result = {}
+    base = ratios_for(0)
+    if base:
+        result["uncalibrated"] = summarise(base)
+    for w in windows:
+        r = ratios_for(w)
+        if r:
+            result[f"trailing_{w}w"] = summarise(r)
+
+    candidates = {k: v for k, v in result.items() if k != "uncalibrated"}
+    if candidates:
+        best = min(candidates,
+                   key=lambda k: (-candidates[k]["share_weeks_in_band"],
+                                  candidates[k]["mean_abs_log_error"]))
+        result["recommended_fit_window"] = best
+        result["note"] = (
+            "Rolling-origin: factors fit on the trailing window, applied to "
+            "the NEXT week. If shorter windows score better, the demand level "
+            "is trending and recency beats sample size; if longer windows win, "
+            "the variation is noise and averaging helps.")
+    return result
+
+
 def fidelity(d, cfg, model, prior, r_lookup):
     """Section 17.3 fidelity block: how well the model reproduces what actually
     happened, at actual historical prices.
@@ -141,6 +217,9 @@ def fidelity(d, cfg, model, prior, r_lookup):
             "note": "no_history far above with_history means new-assortment "
                     "SKUs are driving the level gap, not a macro trend",
         }
+
+    # how long should the level factor's fit window be? measured, not assumed
+    block["calibration_window_sweep"] = calibration_window_sweep(d, cfg)
 
     # gate metric: the pooled ratio judges the model at actual prices (and so
     # embeds the elasticity prior); level_at_anchor judges only the frozen

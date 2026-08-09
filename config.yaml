@@ -58,6 +58,11 @@ baseline_model:
     # its own responsibility; slope stays visible via
     # slope_ratio_by_discount_gap and is validated by posterior movement
     # and the A/B, with the daily drift ratio as the production guard.
+  calibration_window_sweep_weeks: [1, 2, 4, 8]  # SET  trailing-window lengths
+    # tested by the rolling-origin calibration sweep in the backtest report:
+    # fit factors on the trailing W weeks, apply to the next week, measure the
+    # anchor ratio that results. Under a trending level a LONGER window is
+    # more stale, not more accurate -- the sweep decides W with data.
   calibration_fit_window: "train+calib"  # SET  "calib" | "train+calib" | "all".
     # Measured weekly sold-ratios swing +-8% around a persistent level deficit;
     # factors fit on one fortnight inherit that fortnight's anomaly (the 07-13
