@@ -462,6 +462,42 @@ fallback to the full grid. The value function is built over the full grid
 either way, so the DP prices each entry arm knowing the episode will deepen
 on 2.5pp steps afterwards.
 
+**The hourly action set is every tier deeper than the anchor** — not a single
+2.5pp step. The DP may hold, step 2.5pp, or jump straight to the cost floor
+in one hour, and it re-solves each hour from the true state, so stranded
+inventory with few hours left is exactly the situation that should pull it
+deeper.
+
+Whether it *does* is economics, not action-set width, and the condition has a
+closed form. Ignoring censoring, one hour of IL is
+`P₀·d·mu(d) + c·(q − mu(d))`, so deepening reduces IL only when
+
+```
+|ε|  >  (1 − d) / (γ − d)        γ = cost / price
+```
+
+The first term of the derivative is the cost of discounting units that would
+have sold anyway; it dominates until demand responds hard enough to outrun
+it. At the measured cost ratio (~0.66) that bar is **|ε| ≈ 1.7–1.9**, and
+censoring at a median starting inventory of 2 pushes the true switch point
+higher still. **Against the launch prior of −1.0, the DP is therefore
+structurally an enter-and-hold policy**: on the synthetic harness the median
+threshold is 1.89 against |ε| = 1.0 in use, and the DP deepens intra-episode
+in 0% of episodes. This is not a defect — if demand really is that
+inelastic, holding price *is* the IL-minimising action, and the replay's
+−12.0% IL comes precisely from refusing to ramp. But it means three things
+should be said out loud before the pilot:
+
+- The day-one policy's entire IL advantage comes from **the entry choice and
+  from not ramping**, not from dynamic intra-episode markdown.
+- The clearance loss (−3.25pp) and any scrap-guardrail pressure follow
+  directly from this, and are the expected behaviour rather than a surprise.
+- **Widening the action set cannot change it.** Only a posterior that moves
+  past the threshold will, which is exactly what exploration is funded to
+  find out. `intra_episode_deepening` in the backtest report tracks the gap
+  between the threshold and the elasticity in use, so the distance left to
+  travel is visible every run.
+
 The planner solves the finite-horizon problem exactly:
 
 ```
@@ -937,7 +973,8 @@ before committing the owner values, and treat that verdict as blocking.
 | 3 | **A/B power** — measured SE is 6× the original assumption | 0.002383 vs 0.000383; small effects may not fit the window | Empirical duration table from the derivation tool; owner commits to a feasible (effect, duration) pair before launch | Owner |
 | 4 | **Metric divergence at readout** — planner optimises IL, business reads IL% | Worked example in 2.3; likeliest A/B outcome is the escalation row | Both metrics + denominators in every cut; divergence flag monitored; decision table pre-committed | Owner |
 | 5 | **Single-elasticity misspecification** — threshold-shaped price response averaged into one exponent | Discount-gap diagnostics are noisy/non-monotonic | Residuals logged by discount region so the failure is visible before it is modelled; piecewise response in phase 2 | Eng |
-| 6 | **Model under-prediction from censored training labels** | Anchor under-prediction with median starting inventory ~2 and ~12.6% stocked-out hours | First phase-2 priority: censored-count training | Eng |
+| 6 | **Enter-and-hold at the launch prior** — deepening pays only when \|ε\| > (1−d)/(γ−d) ≈ 1.7–1.9, against a prior of 1.0 | Backtest `intra_episode_deepening`: median threshold 1.89 vs \|ε\| 1.0 in use; DP deepens in 0% of episodes; clearance −3.25pp | Correct behaviour given the prior, not a bug — but pre-brief the pilot on lower clearance and higher scrap, and track the threshold gap every run. Exploration is the only thing that closes it; a wider action set cannot | Eng + owner |
+| 7 | **Model under-prediction from censored training labels** | Anchor under-prediction with median starting inventory ~2 and ~12.6% stocked-out hours | First phase-2 priority: censored-count training | Eng |
 
 ## 14. Phase 2 (deferred until the loop demonstrably works)
 

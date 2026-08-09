@@ -78,6 +78,39 @@ def test_entry_action_set_matches_offsets_and_cost_floor():
     assert arms == [len(tiers) - 1] and len(arms) < len(tiers)
 
 
+def test_hourly_set_holds_every_deeper_tier_and_dp_uses_them_when_paid():
+    """The hourly action set is not a single 2.5pp step -- it is every tier
+    down to the cost floor. Whether the DP takes a deep one is economics, and
+    the closed-form threshold must agree with what the solver actually does.
+    """
+    P0, cost, d_ref, anchor = 10000, 6000, 0.30, 0.15
+    res = dp_mod.solve(P0, cost, q0=5, mu_ref_path=[1.0] * 3, d_ref=d_ref,
+                       epsilon=-1.2, r=1.0, cfg=CFG, anchor_discount=anchor)
+    arms = sorted(res.tiers[j] for j in res.q_by_tier)
+    assert min(arms) == pytest.approx(anchor)          # may hold
+    assert max(arms) == pytest.approx(0.40)            # may jump to the floor
+    steps = [round(a - anchor, 3) for a in arms if a > anchor]
+    assert 0.025 in steps and 0.05 in steps and 0.10 in steps
+
+    thr = dp_mod.deepening_threshold_epsilon(P0, cost, anchor)
+    assert thr == pytest.approx((1 - anchor) / (cost / P0 - anchor))
+
+    def chosen(eps):
+        r = dp_mod.solve(P0, cost, q0=5, mu_ref_path=[1.0] * 3, d_ref=d_ref,
+                         epsilon=eps, r=1.0, cfg=CFG, anchor_discount=anchor)
+        return r.tiers[r.optimal_index]
+
+    # comfortably inside the hold region, and comfortably past it. Censoring
+    # makes the true switch later than `thr`, so the bound is one-sided:
+    # below it the DP must hold; above it, eventually deepens.
+    assert chosen(-(thr * 0.5)) == pytest.approx(anchor)
+    assert chosen(-(thr * 0.9)) == pytest.approx(anchor)
+    assert chosen(-(thr * 2.0)) > anchor
+
+    # price at or below cost: no deepening can ever pay
+    assert dp_mod.deepening_threshold_epsilon(10000, 6000, 0.60) == float("inf")
+
+
 def test_entry_choice_never_blocks_later_deepening():
     """The shallowest entry arm must still leave the hourly grid room to
     deepen, or entry would trade one decision away for the whole episode."""

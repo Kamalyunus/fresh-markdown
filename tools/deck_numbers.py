@@ -103,6 +103,13 @@ def main():
     row("  DP clearance", g(pol, "dp_clearance"), "12")
     row("  legacy-under-model scrap cost", g(pol, "legacy_model_scrap_cost"), "12")
     row("  DP scrap cost", g(pol, "dp_scrap_cost"), "12")
+    row("pct DP deepened vs actual", g(pol, "pct_dp_deepened"), "12")
+    ied = g(pol, "intra_episode_deepening", default={})
+    row("  |eps| needed to deepen (median)",
+        g(ied, "median_threshold_abs_eps"), "12")
+    row("  |eps| in use (median)", g(ied, "median_abs_eps_in_use"), "12")
+    row("  share episodes past the threshold",
+        g(ied, "share_episodes_eps_above_threshold"), "12")
     row("  DP mean discount vs legacy",
         f'{g(pol, "dp_mean_discount")} vs {g(pol, "legacy_model_mean_discount")}',
         "12")

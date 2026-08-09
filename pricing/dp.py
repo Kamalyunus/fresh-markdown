@@ -31,6 +31,34 @@ def feasible_tiers(original_price, cost, tier_step):
     return [round(k * tier_step, 6) for k in range(n + 1)], d_max
 
 
+def deepening_threshold_epsilon(original_price, cost, d):
+    """|epsilon| above which deepening the discount below `d` reduces IL.
+
+    The hourly action set already contains EVERY tier deeper than the anchor
+    -- 2.5pp, 5pp, or a jump straight to the cost floor. Whether the DP uses
+    them is an economics question, not an action-set question, and it has a
+    closed form. Ignoring inventory censoring, one hour of IL is
+
+        IL(d) = P0*d*mu(d) + c*(q - mu(d)),   mu(d) = mu_ref*((1-d)/(1-d_ref))^eps
+
+    so with a = |epsilon|, dmu/dd = mu*a/(1-d) and
+
+        dIL/dd = mu * [ P0 + (P0*d - c) * a/(1-d) ]
+
+    which is negative -- deepening pays -- only when a > (1-d)/(gamma-d),
+    gamma = cost/price. The first term is the cost of discounting the units
+    that would have sold anyway; it dominates until demand responds hard
+    enough to outrun it.
+
+    Returns inf when gamma <= d (price already at or under cost: no deepening
+    can pay). The bound is OPTIMISTIC: censoring at small inventory blunts the
+    demand gain, so the true switch point sits above this value -- with median
+    starting inventory ~2, materially so.
+    """
+    gamma = cost / original_price
+    return float("inf") if gamma - d <= 1e-9 else (1.0 - d) / (gamma - d)
+
+
 def entry_action_set(tiers, d_ref, d_max, pcfg):
     """Tier indices allowed for the ENTRY decision.
 

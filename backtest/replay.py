@@ -465,6 +465,9 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0):
             "dp_mean_discount": (dp_disc_weighted / dp_sold_total
                                  if dp_sold_total else 0.0),
             "date": e["date"],
+            "eps": e["eps"],
+            "deepening_threshold": dp_mod.deepening_threshold_epsilon(
+                e["original_price"], e["cost"], e["d_ref"]),
         })
 
     ep = pd.DataFrame(rows)
@@ -502,6 +505,24 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0):
         "dp_mean_discount": round(float(ep.dp_mean_discount.mean()), 4),
         "pct_dp_deepened": round(float(
             (ep.dp_mean_discount > ep.actual_mean_discount).mean()), 4),
+        # WHY the DP holds or deepens is an economics question, not an
+        # action-set one: the hourly set already contains every tier deeper
+        # than the anchor. Deepening reduces IL only when |eps| clears
+        # (1-d)/(cost/price - d), so compare the prior against that bar.
+        "intra_episode_deepening": {
+            "median_threshold_abs_eps": round(float(
+                ep.deepening_threshold.replace(np.inf, np.nan).median()), 3),
+            "median_abs_eps_in_use": round(float(ep.eps.abs().median()), 3),
+            "share_episodes_eps_above_threshold": round(float(
+                (ep.eps.abs() > ep.deepening_threshold).mean()), 4),
+            "note": ("share near 0 means the DP is structurally an "
+                     "enter-and-hold policy at the current elasticity: the "
+                     "deeper tiers are available every hour and decline to "
+                     "pay for themselves. Only a posterior moving past the "
+                     "threshold changes that -- widening the action set "
+                     "cannot. Threshold ignores censoring and is therefore "
+                     "optimistic."),
+        },
         # apples-to-apples: both policies simulated under the SAME demand
         # model, so model bias hits both arms identically and cancels in
         # the comparison. actual_* vs model figures are fidelity, not policy.
