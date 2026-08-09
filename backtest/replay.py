@@ -83,6 +83,94 @@ def _fidelity_metrics(d, cfg):
     }
 
 
+def level_mix_decomposition(d, cfg):
+    """Is the weekly anchor-level movement demand drift, or SKU mix?
+
+    The aggregate anchor ratio is a volume-weighted average of per-SKU
+    ratios, and which SKUs enter the markdown cohort each week is driven by
+    overstock and expiry -- not stable. So the aggregate can move purely
+    because the composition moved. Each SKU x FC ratio is estimated ONCE over
+    all history (stable), then every week is recomputed holding those ratios
+    fixed and letting only that week's composition vary:
+
+      raw_t          = sum(sold_t) / sum(pred_t)
+      mix_expected_t = sum(pred_t * ratio_sku) / sum(pred_t)
+
+    mix_expected tracking raw  -> composition explains the movement
+    raw climbing above it      -> genuine within-SKU level drift
+
+    Also reports whether per-SKU calibration is even feasible: a factor fit
+    on a handful of anchor rows is noise, and applying it forward projects
+    that noise onto prices.
+    """
+    tier_step = cfg["pricing"]["tier_step"]
+    min_unit_rows = cfg["baseline_model"]["mix_decomposition_min_unit_rows"]
+
+    a = d[(d.total_discount - d.d_ref).abs() <= tier_step / 2].copy()
+    if not len(a) or a.predicted_units.sum() <= 0:
+        return "NOT RUN -- no anchor rows"
+    a["week"] = pd.to_datetime(a.date).dt.to_period("W").astype(str)
+    a["unit"] = a.sku_id.astype(str) + "|" + a.fc.astype(str)
+    overall = float(a.units_sold.sum() / a.predicted_units.sum())
+
+    u = a.groupby("unit").agg(sold=("units_sold", "sum"),
+                              pred=("predicted_units", "sum"),
+                              rows=("units_sold", "size"),
+                              category=("category", "first"))
+    c = a.groupby("category").agg(sold=("units_sold", "sum"),
+                                  pred=("predicted_units", "sum"))
+    cat_ratio = c.sold / c.pred.replace(0, np.nan)
+    enough = (u.rows >= min_unit_rows) & (u.pred > 0)
+    u["ratio"] = np.where(enough, u.sold / u.pred.replace(0, np.nan),
+                          u.category.map(cat_ratio).fillna(overall))
+    ratio_map = u.ratio
+
+    series = {}
+    for w, g in a.groupby("week"):
+        pred = float(g.predicted_units.sum())
+        if pred <= 0:
+            continue
+        mix_expected = float(
+            (g.predicted_units * g.unit.map(ratio_map).fillna(overall)).sum() / pred)
+        series[w] = {"raw": round(float(g.units_sold.sum() / pred), 4),
+                     "mix_expected": round(mix_expected, 4)}
+
+    weeks = sorted(series)
+    summary = {}
+    if len(weeks) >= 2:
+        raw_chg = series[weeks[-1]]["raw"] - series[weeks[0]]["raw"]
+        mix_chg = (series[weeks[-1]]["mix_expected"]
+                   - series[weeks[0]]["mix_expected"])
+        summary = {
+            "raw_change_first_to_last": round(raw_chg, 4),
+            "mix_change_first_to_last": round(mix_chg, 4),
+            "mix_explained_share": round(mix_chg / raw_chg, 4)
+                if abs(raw_chg) > 1e-9 else None,
+        }
+
+    trusted = u[enough]
+    return {
+        "by_week": series,
+        "summary": summary,
+        "sku_level_feasibility": {
+            "sku_fc_units": int(len(u)),
+            "share_units_ge_10_anchor_rows": round(float((u.rows >= 10).mean()), 4),
+            "share_units_ge_30_anchor_rows": round(float((u.rows >= 30).mean()), 4),
+            "share_units_ge_100_anchor_rows": round(float((u.rows >= 100).mean()), 4),
+            "anchor_rows_per_unit_p50": int(np.percentile(u.rows, 50)),
+            "trusted_unit_ratio_p10_p90": [
+                round(float(np.percentile(trusted.ratio, 10)), 3),
+                round(float(np.percentile(trusted.ratio, 90)), 3)]
+                if len(trusted) > 10 else None,
+        },
+        "note": ("mix_explained_share near 1 means the level movement is "
+                 "composition, not demand -- the remedy is a mix-robust gate "
+                 "metric, not a finer calibration grain. Per-SKU factors are "
+                 "only viable where units carry enough anchor rows to fit "
+                 "them on signal rather than noise."),
+    }
+
+
 def calibration_window_sweep(d, cfg):
     """Rolling-origin test of the calibration MECHANISM, as production runs it.
 
@@ -218,6 +306,8 @@ def fidelity(d, cfg, model, prior, r_lookup):
                     "SKUs are driving the level gap, not a macro trend",
         }
 
+    # is the weekly level movement demand drift, or SKU composition?
+    block["level_mix_decomposition"] = level_mix_decomposition(d, cfg)
     # how long should the level factor's fit window be? measured, not assumed
     block["calibration_window_sweep"] = calibration_window_sweep(d, cfg)
 
