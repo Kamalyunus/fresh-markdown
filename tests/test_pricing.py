@@ -32,16 +32,53 @@ def test_nb_pmf_tail_mass_folded():
     assert tail >= 0
 
 
-def test_dp_terminal_value_and_entry_band():
+def test_dp_terminal_value_and_entry_arms():
     mu_path = [1.5, 1.2, 1.0]
-    res = dp_mod.solve(10000, 6000, q0=5, mu_ref_path=mu_path, d_ref=0.30,
+    d_ref = 0.30
+    res = dp_mod.solve(10000, 6000, q0=5, mu_ref_path=mu_path, d_ref=d_ref,
                        epsilon=-1.2, r=1.0, cfg=CFG, entry=True)
-    lo = 0.30 - CFG["pricing"]["entry_window"]
-    hi = 0.30 + CFG["pricing"]["entry_window"]
-    for j in res.q_by_tier:
-        assert lo - 1e-9 <= res.tiers[j] <= hi + 1e-9
+    offsets = CFG["pricing"]["entry_offsets"]
+    chosen = sorted(round(res.tiers[j], 6) for j in res.q_by_tier)
+    assert chosen == sorted(round(d_ref + o, 6) for o in offsets)
     # value can never be worse than scrapping everything immediately
     assert res.v_star >= -6000 * 5
+
+
+def test_entry_action_set_is_one_sided_and_cost_floored():
+    """Entry sets the ceiling for the whole episode (monotonicity), so with
+    non-positive offsets it may never open deeper than the reference."""
+    step = CFG["pricing"]["tier_step"]
+    d_ref = 0.30
+
+    tiers, d_max = dp_mod.feasible_tiers(10000, 5000, step)      # d_max 0.50
+    arms = [tiers[j] for j in dp_mod.entry_action_set(
+        tiers, d_ref, d_max, CFG["pricing"])]
+    assert arms == [0.15, 0.20, 0.25, 0.30]
+    assert max(arms) <= d_ref + 1e-9
+
+    # a cost floor inside the requested band drops only the infeasible arms
+    tiers, d_max = dp_mod.feasible_tiers(10000, 7800, step)      # d_max 0.22
+    arms = [tiers[j] for j in dp_mod.entry_action_set(
+        tiers, d_ref, d_max, CFG["pricing"])]
+    assert arms == [0.15, 0.20] and max(arms) <= d_max + 1e-9
+
+    # a floor below every requested arm leaves ONE action -- the deepest
+    # feasible tier -- not a silent fallback to the whole grid
+    tiers, d_max = dp_mod.feasible_tiers(10000, 9500, step)      # d_max 0.05
+    arms = dp_mod.entry_action_set(tiers, d_ref, d_max, CFG["pricing"])
+    assert arms == [len(tiers) - 1] and len(arms) < len(tiers)
+
+
+def test_entry_choice_never_blocks_later_deepening():
+    """The shallowest entry arm must still leave the hourly grid room to
+    deepen, or entry would trade one decision away for the whole episode."""
+    step = CFG["pricing"]["tier_step"]
+    d_ref = 0.30
+    tiers, d_max = dp_mod.feasible_tiers(10000, 6000, step)
+    arms = dp_mod.entry_action_set(tiers, d_ref, d_max, CFG["pricing"])
+    for j in arms:
+        deeper = [d for d in tiers if d >= tiers[j] - 1e-9]
+        assert len(deeper) >= CFG["exploration"]["min_feasible_tiers"]
 
 
 def test_dp_hourly_monotonicity():

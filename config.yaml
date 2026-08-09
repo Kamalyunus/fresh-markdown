@@ -149,8 +149,23 @@ posterior:
     per_category: null                 # MEASURED  re-run section 9.5 after bound fix
 
 pricing:
-  tier_step: 0.025                     # SET  discount grid granularity
-  entry_window: 0.10                   # SET  entry arms within d_ref +/- this
+  tier_step: 0.025                     # SET  hourly discount grid granularity
+  entry_offsets: [-0.15, -0.10, -0.05, 0.0]   # SET  the ENTRY action set, in
+    # discount percentage points RELATIVE TO the category reference: enter up
+    # to 15pp shallower than reference, or at reference. Sign convention:
+    # NEGATIVE = shallower discount = higher price. Flip the signs here to
+    # allow entry deeper than reference -- no code change needed.
+    #
+    # Entry is a separate decision from the hourly one and deserves a
+    # different grid. Monotonicity makes it irreversible: price may only hold
+    # or deepen afterwards, so entry sets the ceiling on every later price in
+    # the episode. Entering deeper than reference would spend margin in hour
+    # one and forfeit the room to deepen later. And entry is where
+    # identification lives (the confound-free variation is entry-hour
+    # variation ACROSS episodes), so four well-separated arms give a far
+    # sharper elasticity read than sixteen 2.5pp arms whose demand
+    # differences sit inside the noise. Offsets are snapped to the tier grid
+    # and filtered by the cost floor.
   negbin_max_k: 25                     # SET  demand truncation
   demand_floor: 0.01                   # SET
 

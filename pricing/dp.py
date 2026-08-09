@@ -31,6 +31,48 @@ def feasible_tiers(original_price, cost, tier_step):
     return [round(k * tier_step, 6) for k in range(n + 1)], d_max
 
 
+def entry_action_set(tiers, d_ref, d_max, pcfg):
+    """Tier indices allowed for the ENTRY decision.
+
+    Entry is a genuinely different decision from the hourly one and gets its
+    own, coarser action set: `pricing.entry_offsets` in percentage points of
+    discount RELATIVE TO the category reference, e.g. [-0.15, -0.10, -0.05, 0]
+    means "enter up to 15pp shallower than reference, or at reference".
+
+    Two reasons the entry grid is coarse and one-sided rather than the hourly
+    2.5pp grid:
+
+    - Monotonicity makes entry irreversible in one direction. Price may only
+      hold or deepen afterwards, so the entry choice sets the ceiling on
+      every later price in the episode. Entering deeper than reference spends
+      margin in hour one AND forfeits the room to deepen later; entering
+      shallower is the lever that saves IL, and the whole episode's path
+      hangs off it.
+    - Coarse arms concentrate exploration evidence. Entry is where
+      identification lives (section 3.2 -- the confound-free variation is
+      entry-hour variation across episodes), so four well-separated arms
+      produce a far sharper elasticity read than sixteen 2.5pp arms whose
+      demand differences are inside the noise.
+
+    Offsets are snapped to the tier grid and filtered by the cost floor. If
+    the floor forbids every requested arm, the deepest feasible tier is the
+    only action -- a single-action decision, correctly non-explorable, rather
+    than a silent fallback to the full grid.
+    """
+    step = pcfg["tier_step"]
+    allowed = []
+    for offset in pcfg["entry_offsets"]:
+        target = d_ref + offset
+        if target < -1e-9 or target > d_max + 1e-9:
+            continue
+        j = min(range(len(tiers)), key=lambda i: abs(tiers[i] - target))
+        if abs(tiers[j] - target) <= step / 2 + 1e-9 and j not in allowed:
+            allowed.append(j)
+    if not allowed:
+        allowed = [len(tiers) - 1]
+    return sorted(allowed)
+
+
 class DPResult:
     def __init__(self, tiers, q_by_tier, v_star, solver_latency_s, tail_mass_max):
         self.tiers = tiers                    # discounts, ascending
@@ -49,9 +91,14 @@ def solve(original_price, cost, q0, mu_ref_path, d_ref, epsilon, r, cfg,
     """Solve the episode DP from the current decision onward.
 
     mu_ref_path: mu_ref for each remaining hour, index 0 = the hour being
-    priced. Returns Q over the actions allowed NOW: entry arms within
-    d_ref +/- entry_window for an entry decision, else feasible tiers at or
+    priced. Returns Q over the actions allowed NOW: the coarse entry arms
+    (see entry_action_set) for an entry decision, else feasible tiers at or
     above the current anchor discount.
+
+    Note the value function is built over the FULL tier grid either way --
+    only the action set allowed at this decision is restricted. An episode
+    that enters on a coarse arm still deepens on the 2.5pp grid, and the DP
+    accounts for that when valuing the entry choice.
     """
     t0 = time.monotonic()
     pcfg = cfg["pricing"]
@@ -95,11 +142,7 @@ def solve(original_price, cost, q0, mu_ref_path, d_ref, epsilon, r, cfg,
             Q_now = Q
 
     if entry:
-        lo = max(0.0, d_ref - pcfg["entry_window"])
-        hi = min(d_max, d_ref + pcfg["entry_window"])
-        allowed = [j for j, d in enumerate(tiers) if lo - 1e-9 <= d <= hi + 1e-9]
-        if not allowed:                     # clip to [0, d_max] can empty the band
-            allowed = list(range(n_tiers))
+        allowed = entry_action_set(tiers, d_ref, d_max, pcfg)
     else:
         if anchor_discount is None:
             raise ValueError("hourly decision requires anchor_discount")

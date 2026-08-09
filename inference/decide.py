@@ -73,7 +73,11 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
         s["original_price"], s["cost"], int(s["q"]), s["mu_ref_path"],
         d_ref, eps, s["r"], cfg, anchor_discount=anchor, entry=entry)
 
-    explorable = len(tiers) >= cfg["exploration"]["min_feasible_tiers"]
+    # explorability is a property of the actions allowed AT THIS DECISION, not
+    # of the full grid: late in an episode the monotonicity anchor can leave
+    # one action while the grid still has twenty, and at entry the coarse arm
+    # set is the action set. Judging on len(tiers) overstated both.
+    explorable = len(result.q_by_tier) >= cfg["exploration"]["min_feasible_tiers"]
     choice = explore.select(result, tau_current, rng, explorable=explorable)
 
     d_opt = result.tiers[result.optimal_index]
@@ -97,6 +101,11 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
         "cost": float(s["cost"]),
         "d_max": float(d_max),
         "feasible_tier_count": len(tiers),
+        # actions allowed at THIS decision -- the coarse entry arms, or the
+        # tiers at/deeper than the anchor. Distinct from the grid size, and
+        # the quantity explorability is judged on
+        "action_set_size": len(result.q_by_tier),
+        "entry_offset_applied": round(d_applied - d_ref, 6) if entry else None,
         "optimal_price": float(s["original_price"] * (1 - d_opt)),
         "optimal_discount": float(d_opt),
         # absolute IL under the chosen policy -- the objective (section 3.1)

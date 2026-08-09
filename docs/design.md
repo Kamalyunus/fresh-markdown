@@ -428,9 +428,33 @@ to `1 − cost/price` — the cost floor *is the boundary of the set*, so a
 below-cost price cannot be expressed. Hourly actions are further restricted
 to tiers at or deeper than the current anchor (price never rises within an
 episode — a customer-trust constraint encoded in the transition, not
-checked after the fact). The entry decision is unanchored within ±10pp of
-the reference discount and carries most of the identifying variation. The
-planner solves the finite-horizon problem exactly:
+checked after the fact).
+
+**Entry is a separate decision with its own, coarser action set.** It has no
+anchor to respect, and because monotonicity makes it irreversible in one
+direction, the entry choice sets the ceiling on every later price in the
+episode. Its arms are `pricing.entry_offsets` — discount offsets relative to
+the category reference, currently `[−15, −10, −5, 0] pp`, so entry may open
+up to 15pp shallower than reference or at it, never deeper. Two reasons the
+grid differs from the hourly one:
+
+- *Entering deeper than reference is a double loss.* It spends margin in hour
+  one and forfeits the room to deepen later. Entering shallower is the lever
+  that actually saves IL, and the whole episode's price path hangs off it.
+- *Coarse arms concentrate the evidence.* Entry carries most of the
+  identifying variation (section 3.2 — the confound-free signal is entry-hour
+  variation across episodes), so four well-separated arms give a far sharper
+  elasticity read than sixteen 2.5pp arms whose demand differences sit inside
+  the noise.
+
+Offsets are snapped to the tier grid and filtered by the cost floor; if the
+floor forbids every requested arm, the deepest feasible tier becomes the only
+action — a single-action decision, correctly non-explorable, rather than a
+fallback to the full grid. The value function is built over the full grid
+either way, so the DP prices each entry arm knowing the episode will deepen
+on 2.5pp steps afterwards.
+
+The planner solves the finite-horizon problem exactly:
 
 ```
 Q(anchor, q, h, p) = Σ_k P(D=k | r, mu(p)) × [ min(k,q)·(−(P₀−p)) + V(p, q−min(k,q), h−1) ]
