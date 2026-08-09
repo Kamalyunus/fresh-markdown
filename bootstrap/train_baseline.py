@@ -154,23 +154,36 @@ def train(d, cfg):
 
 
 def fit_level_calibration(d, cfg):
-    """Per-category multiplicative factor on the calibration window.
+    """Per-category multiplicative level factor, fit at the reference anchor.
 
-    Fit ONLY at the reference anchor, where the elasticity multiplier is ~1,
-    so the factor captures LEVEL error in mu_ref alone. A category without
-    enough anchor rows is left uncorrected (factor 1.0) rather than fit
-    through an elasticity-dependent basis: any basis that scales predictions
-    by the prior elasticity lets slope error leak into the level factor,
-    which is exactly the contamination PRD section 9.3 forbids.
+    Fit ONLY at the anchor, where the elasticity multiplier is ~1, so the
+    factor captures LEVEL error in mu_ref alone. A category without enough
+    anchor rows is left uncorrected (factor 1.0) rather than fit through an
+    elasticity-dependent basis: any basis that scales predictions by the
+    prior elasticity lets slope error leak into the level factor.
 
-    Factors are >= 1 wherever the baseline under-predicts at the anchor;
-    a factor below 1 means the model OVER-predicts there and is worth a
-    manual look before applying.
+    The fit window is configurable (calibration_fit_window). Weekly demand
+    levels were measured swinging +-8% around a persistent deficit; a factor
+    fit on a single fortnight inherits that fortnight's anomaly and can move
+    the gate the wrong way, so the default fits on train+calib -- long enough
+    that no one week dominates -- while the GATE stays on calib+test.
+
+    A factor below 1 means the model OVER-predicts at the anchor on the fit
+    window; with a long window that is a real signal worth a manual look.
     """
     model = BaselineModel(cfg)
-    calib = split_frames(d, cfg)["calib"].copy()
+    splits = split_frames(d, cfg)
+    fit_window = cfg["baseline_model"]["calibration_fit_window"]
+    if fit_window == "calib":
+        calib = splits["calib"].copy()
+    elif fit_window == "train+calib":
+        calib = pd.concat([splits["train"], splits["calib"]])
+    elif fit_window == "all":
+        calib = d.copy()
+    else:
+        raise ValueError(f"unknown calibration_fit_window: {fit_window}")
     if not len(calib):
-        raise RuntimeError("calibration window contains no rows")
+        raise RuntimeError("calibration fit window contains no rows")
     tier_step = cfg["pricing"]["tier_step"]
 
     # predict without any existing calibration applied
@@ -199,7 +212,8 @@ def fit_level_calibration(d, cfg):
     with open(path, "w") as f:
         json.dump({"factor_by_category": factors,
                    "detail_by_category": detail,
-                   "fit_window": cfg["data"]["split"],
+                   "fit_window": fit_window,
+                   "split": cfg["data"]["split"],
                    "basis": "anchor rows only; categories below "
                             "calibration_min_anchor_rows left at 1.0"},
                   f, indent=2)

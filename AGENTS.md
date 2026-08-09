@@ -96,10 +96,13 @@ python3 -m pipeline.monitor
    is diagnostic only; when demand level drifts between the training period
    and launch, no static factor can (or should) fix it.
 
-5. **Level-calibration factors are fit on anchor rows only** and are expected
-   to be ≥ 1 when the model under-predicts. A factor **below 1** means the
-   model OVER-predicts at the anchor in the calibration window — investigate
-   (usually regime drift) before applying; do not apply blindly.
+5. **Level-calibration factors are fit on anchor rows only**, over the
+   `calibration_fit_window` (default train+calib — measured weekly demand
+   swings ±8%, so a factor fit on one fortnight inherits that fortnight's
+   anomaly; the 07-13 calib week measured 1.06 against a five-month mean of
+   1.30). The GATE stays on calib+test. A factor **below 1** on a long fit
+   window means the model genuinely over-predicts at the anchor —
+   investigate before applying; do not apply blindly.
 
 6. **Only the level component may be corrected multiplicatively** (§9.3). A
    sold-ratio that degrades as `|discount − d_ref|` grows is slope error

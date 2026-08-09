@@ -41,6 +41,11 @@ baseline_model:
   feature_schema_path: "artifacts/feature_schema.json"
   calibration_gate_band: [0.95, 1.05]  # SET  fidelity_episode_sold_ratio must land here
   calibration_min_anchor_rows: 200     # SET  anchor basis needs this many rows
+  calibration_fit_window: "train+calib"  # SET  "calib" | "train+calib" | "all".
+    # Measured weekly sold-ratios swing +-8% around a persistent level deficit;
+    # factors fit on one fortnight inherit that fortnight's anomaly (the 07-13
+    # calib week measured 1.06 against a five-month mean of 1.30). A long fit
+    # window targets the persistent component only.
   calibration_factor_path: "artifacts/calibration.json"   # per-category level correction
   apply_level_calibration: null        # DECIDE after section 9.3 diagnostic; null blocks start
 
