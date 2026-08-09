@@ -51,8 +51,14 @@ def main():
     print(f"gate ({fid['calibration_gate_metric']}) : "
           f"{fid['calibration_gate_value']} vs {fid['calibration_gate_band']}"
           f"  -> {fid['calibration_gate']}")
-    print(f"actual IL {pol['actual_il']:,.0f} (IL% {pol['actual_il_pct']})  "
-          f"dp IL {pol['dp_il']:,.0f} (IL% {pol['dp_il_pct']})")
+    gap = pol["policy_gap_like_for_like"]
+    print(f"observed world  : legacy IL {pol['actual_il']:,.0f} "
+          f"(IL% {pol['actual_il_pct']})")
+    print(f"model world     : legacy IL {pol['legacy_model_il']:,.0f} "
+          f"vs DP IL {pol['dp_il']:,.0f}  -> DP reduces IL by "
+          f"{gap['dp_il_reduction_pct_of_legacy']:.1%} (like-for-like)"
+          if gap["dp_il_reduction_pct_of_legacy"] is not None else
+          "model world     : like-for-like gap unavailable")
     print(f"pct_dp_deepened             : {pol['pct_dp_deepened']:.1%}")
     if tau:
         print(f"tau_initial (currency)      : {tau['tau_initial']}  "

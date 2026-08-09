@@ -158,6 +158,38 @@ not the data, was the problem.
    costed, uniformly-randomized set of price perturbations whose outcomes
    are the only evidence the learner consumes.
 
+### 3.4 Why the cold-start elasticity is not fitted to history
+
+The obvious shortcut — pick the ε where `mu_ref × ratio^ε` best fits
+history — deserves a direct answer, because it *was* run, in its most
+defensible form: proper censored likelihood, per category, restricted to the
+cleanest identifying slice (entry hours). That is exactly what the prior
+procedure computes, and its output is the argument against trusting it. On
+production data, DAIRY's best-fit ε was **−0.10 under one defensible
+specification and −3.05 under another** — a 30× swing on a single modelling
+choice; BAKERY's "estimate" sat pinned at the search bound (an optimiser
+reporting its cage, not the customer); and the implied direction *inverted*
+between model versions. A best-fit ε is unstable because the likelihood
+optimum is set by whatever variation dominates the data — the clock,
+survivorship, weekly demand shocks — not by price response.
+
+The trap makes it worse than useless: a fitted ε would make the offline
+replay look excellent, because it fits the residual by construction — and
+then the planner prices with it. If the fit absorbed "deep discounts
+coincide with items that don't sell" (survivorship), the DP concludes
+markdowns are futile, holds price, and burns scrap: the exact under-clearing
+failure the calibration gate exists to prevent, induced by the number that
+made the gate green. Optimising replay optics with ε is how a pricing
+system fails while its dashboard smiles.
+
+What history legitimately contributes is therefore bounded: honest brackets
+where the acceptance checks pass, and a neutral, wide, cheap-to-correct
+cold start (−1.0 ± 0.6) where they do not. The wide std is not resignation
+— it deliberately holds the exploration budget at full scale, so **the
+first weeks of the learning pilot are themselves the ε fit**, run on
+randomized data where the optimum finally means price response, at a cost
+capped at 1% of markdown IL per day.
+
 ---
 
 ## 4. Architecture overview
@@ -550,13 +582,20 @@ section 13 *before* any price is applied.
 ### 5.14 Replay and threshold derivation — evaluation discipline
 
 Offline replay has exactly three jobs: the calibration gate, deriving the
-initial exploration threshold, and sanity-checking the planner. **Replay
-output is never evidence the policy works** — a replay whose demand model
-under-predicts will always flatter a price-holding policy, because the
-volume it forgoes is volume the model never believed in; an early run
-demonstrated this concretely (a 9.4% simulated improvement on a model
-selling 24% light). The controlled experiment is the only evidence of policy
-quality. Finally, a derivation tool anchors even the *business* thresholds
+initial exploration threshold, and sanity-checking the planner. Its policy
+comparison is **like-for-like by construction**: both the legacy price path
+and the DP price path are simulated under the *same* frozen demand model
+and prior, so model bias hits both arms identically and cancels in the
+comparison. Comparing observed reality (legacy) against model-simulated
+outcomes (DP) — the naive framing — charges every ounce of model bias to
+one side and can make a superior policy look catastrophic; observed-vs-model
+differences belong to *fidelity*, never to the policy verdict. Even
+like-for-like, **replay output is never evidence the policy works** — the
+model whose world both arms share is the same model whose price response is
+an unvalidated prior, so replay can only show internal consistency; the
+controlled experiment is the only evidence of policy quality (an early run
+made this concrete: a 9.4% simulated improvement on a model selling 24%
+light). Finally, a derivation tool anchors even the *business* thresholds
 to measurement: it computes A/B power empirically on actual candidate-
 duration blocks of history, and the daily noise floors of the scrap and
 margin series — so the last three judgment calls in the system are made

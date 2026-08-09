@@ -162,9 +162,12 @@ python3 -m pipeline.monitor
 - `fidelity.measurement_10` — `level_bias_at_anchor` far from 1 with a flat
   slope → level error (calibration permitted). Near 1 at anchor but degrading
   with gap → slope error (re-estimate prior).
-- `policy_deltas` with `pct_dp_deepened = 0.0`, clearance falling, scrap
-  rising is the signature of an under-calibrated baseline (§17.5) — it says
-  nothing about the DP until the fidelity gate passes.
+- `policy_deltas`: the policy verdict is `policy_gap_like_for_like` —
+  legacy-under-model vs DP-under-model, same demand generator both arms, so
+  model bias cancels. Never compare `actual_*` (observed world) against
+  `dp_*` (model world) as a policy statement — that charges all model bias
+  to the DP; `actual_*` vs model figures are fidelity only (§17.5). Even
+  like-for-like, replay is internal consistency, not launch evidence.
 - `tau_initial_derivation.tau_initial` is a currency amount (§12.3). Only
   paste it into config from a report whose fidelity gate PASSED.
 - Replay output is never evidence the policy works (§17.1). The A/B is.

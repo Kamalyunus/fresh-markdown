@@ -104,6 +104,16 @@ def test_backtest_blocks_reported_separately(workspace):
     # absolute IL reported alongside every IL% figure (PRD 3.6 / 17.4)
     assert "actual_il" in pol and "actual_il_pct" in pol
     assert "dp_il" in pol and "dp_il_pct" in pol
+    # policy comparison must be apples-to-apples: both arms under the model
+    assert "legacy_model_il" in pol
+    gap = pol["policy_gap_like_for_like"]
+    assert abs(gap["dp_minus_legacy_il"]
+               - (pol["dp_il"] - pol["legacy_model_il"])) < 1.0
+    # the DP optimises expected IL under this same model; like-for-like it
+    # should not lose materially (small slack: tier grid, entry band, and
+    # the deterministic transition differ slightly from the DP's objective)
+    if pol["legacy_model_il"] > 0:
+        assert gap["dp_minus_legacy_il"] <= 0.05 * pol["legacy_model_il"]
     tau = bt["tau_initial_derivation"]
     assert tau is None or tau["tau_initial"] >= 0
 
