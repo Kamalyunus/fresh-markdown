@@ -1037,12 +1037,48 @@ much inventory sat at each seam. And `rho` / `mean_forced_hours` are now
 measured over whole windows, so `deff` rises and evidence is no longer
 over-counted, which was the anti-conservative direction.
 
-`m11_truncated_episodes` remains, and its meaning is now sharper: with date
-seams gone, a last row still carrying `hours_remaining > 0` is genuine
-missing data rather than an artifact of the key. `validate_state` rejects any
-decision whose `mu_ref_path` length disagrees with `hours_remaining`, so a
-truncated planning horizon fails loudly instead of silently optimising the
-wrong window.
+### An episode is not as long as its window
+
+Rows stop at the window end **or at zero inventory, whichever comes first**,
+so an episode's row count is not its window length and a last row carrying
+`hours_remaining > 0` is usually a **sell-out**, not missing data. Three
+endings, and they are economically opposite:
+
+| Ending | Test on the last row | Scrap | Measured share |
+| --- | --- | --- | --- |
+| `completed` | `hours_remaining == 0` | leftover inventory **is** scrapped | 85.4% |
+| `sold_out_early` | `hours_remaining > 0`, inventory 0 | none, by construction | 10.9% |
+| `truncated` | `hours_remaining > 0`, inventory left | **unknown** — no recorded window end | 3.7% |
+
+Every scrap figure in the system used to take the last row's
+`ending_inventory` regardless, which charges the truncated episodes' unsold
+units to scrap on no evidence. `common.episodes` now classifies the ending
+once and returns scrap as **NaN** for truncated episodes, so a sum cannot
+silently treat unknown as zero; those episodes are excluded from scrap and IL
+aggregates and the excluded share is reported. This corrects `m6_il_pct` (the
+IL baseline), the replay's observed-world scrap, and `derive_thresholds` —
+which was measuring the guardrail noise floors on the contaminated series.
+`m11_episode_endings` reports the split and how much a naive scrap figure
+would have overstated.
+
+`validate_state` rejects any decision whose `mu_ref_path` length disagrees
+with `hours_remaining`, so a truncated planning horizon fails loudly instead
+of silently optimising the wrong window.
+
+**Open defect, not yet fixed — the offline harnesses plan over the wrong
+horizon.** `backtest` and `pipeline.shadow` build `mu_ref_path` from the rows
+that exist, so an episode that sold out at hour 5 of an 8-hour window hands
+the DP a 5-hour horizon at hour 1. The reason it is 5 is that the item sold
+out — information from the future. **This is lookahead bias, it affects
+11.2% of decision rows, and it is concentrated in fast-selling episodes**,
+where a shortened horizon brings the terminal scrap penalty forward and
+pushes the DP to discount harder than it should. Production is unaffected
+*if* the integration supplies the true remaining window and a `mu_ref_path`
+to match, which `validate_state` now forces it to do consistently. Fixing the
+harnesses means predicting `mu_ref` for the unobserved tail hours of each
+window, which is mechanical but touches the fidelity and likelihood paths;
+it is queued rather than rushed, and the replay's policy numbers carry this
+caveat until it lands.
 
 **Re-run the full bootstrap on production data before quoting any number in
 this document.** Every episode-terminal figure here — the 35.58% IL baseline,

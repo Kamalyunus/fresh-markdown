@@ -1,6 +1,7 @@
 """Unit tests for the decision core: tiers, DP, exploration, bounded step."""
 
 import numpy as np
+import pandas as pd
 import pytest
 import yaml
 
@@ -238,6 +239,28 @@ def test_config_strict_refuses_null_measured(tmp_path):
     from common.config import ConfigError
     with pytest.raises(ConfigError, match="refusing to start"):
         load_config(strict=True)
+
+
+def test_scrap_counted_only_where_the_window_actually_ran_out():
+    """An episode stops at the window end OR at zero inventory, whichever
+    comes first. Only the first ending scrapped anything; the second scrapped
+    nothing, and a truncated episode's leftover is simply unknown."""
+    from common import episodes
+
+    hr = pd.Series([0, 0, 4, 3])            # window counter at the last row
+    inv = pd.Series([7, 0, 0, 5])           # inventory at the last row
+    kind = episodes.classify(hr, inv)
+    assert list(kind) == [episodes.COMPLETED, episodes.COMPLETED,
+                          episodes.SOLD_OUT_EARLY, episodes.TRUNCATED]
+
+    scrap = episodes.scrap_units(hr, inv)
+    assert scrap.iloc[0] == 7                # window ran out with stock left
+    assert scrap.iloc[1] == 0                # ran out with nothing left
+    assert scrap.iloc[2] == 0                # sold out early: nothing to scrap
+    assert pd.isna(scrap.iloc[3])            # unknown, NOT zero and NOT 5
+
+    # the naive last-row-inventory figure overstates by the unknown part
+    assert inv.sum() == 12 and scrap.sum() == 7
 
 
 def test_state_rejected_when_planning_horizon_disagrees_with_recorded_one():

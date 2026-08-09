@@ -32,6 +32,7 @@ import pandas as pd
 from scipy.stats import norm
 
 from common.config import load_config
+from common import episodes
 from bootstrap.measure import m6_il_pct
 
 
@@ -109,11 +110,16 @@ def duration_table(se_by_T, cfg, mde_rel):
 # --------------------------------------------------------- guardrail noise
 
 def _daily_series(d):
-    ep = d.sort_values("hour_of_day").groupby("episode_id").agg(
+    ep = d.sort_values(["date", "hour_of_day"]).groupby("episode_id").agg(
         date=("date", "first"),
         start_inv=("starting_inventory", "first"),
         end_inv=("ending_inventory", "last"),
+        end_hours_remaining=("hours_remaining", "last"),
         sold=("units_sold", "sum"))
+    # scrap only where the window ran out; a truncated episode's leftover is
+    # unknown, and the noise floor must not be measured on an invented number
+    ep["end_inv"] = episodes.scrap_units(ep.end_hours_remaining, ep.end_inv)
+    ep = ep[ep.end_inv.notna()]
     rev = ((d.offered_price * d.units_sold).groupby(d.episode_id).sum()
            .rename("revenue"))
     margin = (((d.offered_price - d.cost) * d.units_sold)
@@ -124,7 +130,7 @@ def _daily_series(d):
                                  end_inv=("end_inv", "sum"),
                                  revenue=("revenue", "sum"),
                                  margin=("margin", "sum")).sort_index()
-    day["scrap_rate"] = day.end_inv.clip(lower=0) / day.start_inv
+    day["scrap_rate"] = day.end_inv / day.start_inv
     day["margin_rate"] = day.margin / day.revenue.replace(0, np.nan)
     return day
 

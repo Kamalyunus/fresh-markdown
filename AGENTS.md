@@ -275,8 +275,23 @@ Duplicate `(sku, fc, date, hour)` rows are dropped outright
 no way to pick. Left in, they collide two runs into one `episode_id` and the
 window counter stops being monotone.
 
-`m11_truncated_episodes` in `reports/phase0.json` now measures genuine
-missing data (a last row with `hours_remaining > 0`), not date seams.
+An episode ends at the window end OR at zero inventory, whichever comes
+first, so its row count is NOT its window length. `m11_episode_endings` in
+`reports/phase0.json` splits the three cases: `completed` (hours_remaining
+hit 0 -- leftover inventory IS scrap), `sold_out_early` (no scrap by
+construction), `truncated` (no recorded window end -- scrap UNKNOWN).
+
+Never take the last row's `ending_inventory` as scrap. Use
+`common.episodes.scrap_units`, which returns NaN for truncated episodes so a
+sum cannot treat unknown as zero. Truncated episodes are excluded from scrap
+and IL aggregates, with the excluded share reported.
+
+KNOWN DEFECT: `backtest` and `pipeline.shadow` build `mu_ref_path` from the
+rows that exist, so an episode that sold out early hands the DP a horizon
+shortened by its own realised outcome -- lookahead bias on 11.2% of decision
+rows, biased toward over-discounting fast movers. Production is unaffected if
+the caller supplies the true remaining window; `validate_state` enforces that
+the path length and `hours_remaining` agree.
 `validate_state` rejects any decision whose `mu_ref_path` length disagrees
 with `hours_remaining`.
 

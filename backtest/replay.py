@@ -359,6 +359,7 @@ def _episode_frame(g):
         "actual_discounts": g.total_discount.to_numpy(),
         "actual_sold": g.units_sold.to_numpy(),
         "end_inv": int(g.ending_inventory.iloc[-1]),
+        "window_completed": bool(g.hours_remaining.iloc[-1] <= 0),
         "mu_ref_path": g.mu_ref_hat.to_numpy(),
         "r": float(g.r.iloc[0]),
         "eps": float(g.eps.iloc[0]),
@@ -391,7 +392,10 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0):
         # ---- actual path economics (observed world, legacy prices)
         a_sold = e["actual_sold"]
         a_disc_cost = float(np.sum(p0 * e["actual_discounts"] * a_sold))
-        a_scrap = cost * max(e["end_inv"], 0)
+        # only a window that ran out scrapped anything. A truncated episode's
+        # leftover units have no recorded ending, so charging them to scrap
+        # overstates the observed-world baseline the policy is compared to.
+        a_scrap = cost * max(e["end_inv"], 0) if e["window_completed"] else 0.0
         a_denom = p0 * float(a_sold.sum())
 
         # ---- LEGACY path under the MODEL's demand: same generator as the DP
@@ -444,6 +448,7 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0):
         dp_scrap = cost * max(q, 0.0)
 
         rows.append({
+            "window_completed": e["window_completed"],
             "actual_il": a_disc_cost + a_scrap,
             "actual_discount_cost": a_disc_cost, "actual_scrap_cost": a_scrap,
             "actual_denom": a_denom,
@@ -480,6 +485,7 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0):
     lg_il, dp_il = float(ep.legacy_model_il.sum()), float(ep.dp_il.sum())
     block = {
         "episodes_replayed": int(len(ep)),
+        "share_windows_completed": round(float(ep.window_completed.mean()), 4),
         "actual_il": money("actual_il"),
         "actual_discount_cost": money("actual_discount_cost"),
         "actual_scrap_cost": money("actual_scrap_cost"),
