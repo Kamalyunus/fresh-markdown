@@ -31,26 +31,17 @@ def _arm(sku_id, fc, allocation):
         else "control"
 
 
-def _still_running(df, tolerance_hours=episodes.BOUNDARY_TOLERANCE_HOURS):
-    """Episodes whose last decision sits at the report's edge.
+def _still_running(ep):
+    """Episodes with stock on hand and no closure sentinel -- still open.
 
-    The live analogue of the extract boundary in common.episodes: an episode
-    that has not ended yet has leftover on the shelf, not scrap in the bin.
-    Counting it as scrap makes the monitor's series disagree with the series
-    the noise floors were measured on, which is exactly how a guardrail ends
-    up graded against a yardstick nothing uses.
+    The live counterpart of truncation in common.episodes, and literally the
+    same function: an episode that has not closed has leftover on the shelf,
+    not scrap in the bin. Counting it as scrap makes the monitor's series
+    disagree with the series the noise floors were measured on, which is how a
+    guardrail ends up graded against a yardstick nothing uses.
     """
-    if "timestamp" not in df:
-        return set()
-    ts = pd.to_datetime(df.timestamp)
-    # A backfill stamps every event at write time, collapsing the window to a
-    # point. There is then no edge to be near, and applying the rule anyway
-    # would exclude the entire population and silently empty the metric.
-    if (ts.max() - ts.min()).total_seconds() / 3600.0 <= tolerance_hours:
-        return set()
-    last = ts.groupby(df.episode_id).max()
-    gap = (ts.max() - last).dt.total_seconds() / 3600.0
-    return set(gap.index[gap <= tolerance_hours])
+    kind = episodes.classify_last(ep)
+    return set(kind.index[kind == episodes.TRUNCATED])
 
 
 def business_metrics(decisions, outcomes, cfg):
@@ -70,6 +61,7 @@ def business_metrics(decisions, outcomes, cfg):
             "original_price": d["original_price"], "cost": d["cost"],
             "units_sold": o["units_sold"],
             "starting_inventory": o["starting_inventory"],
+            "ending_inventory": o["ending_inventory"],
             "discount_cost": (d["original_price"] - o["applied_price"])
                              * o["units_sold"],
             "arm": _arm(d["sku_id"], d["fc"], cfg["ab_test"]["allocation"]),
@@ -80,17 +72,17 @@ def business_metrics(decisions, outcomes, cfg):
         category=("category", "first"), fc=("fc", "first"), arm=("arm", "first"),
         original_price=("original_price", "first"), cost=("cost", "first"),
         discount_cost=("discount_cost", "sum"), units_sold=("units_sold", "sum"),
-        end_start_inv=("starting_inventory", "last"),
-        end_sold=("units_sold", "last"))
+        starting_inventory=("starting_inventory", "last"),
+        end_sold=("units_sold", "last"),
+        ending_inventory=("ending_inventory", "last"))
     # leftover, not the reported ending_inventory (written off to zero at the
     # window close). Reading the field directly zeroes IL's scrap term.
-    ep["end_inv"] = episodes.leftover_units(ep.end_start_inv, ep.end_sold)
-    # ...but an episode still running at the report edge has not ended, so its
-    # leftover is not yet scrap. Excluding it here is what keeps this metric on
-    # the same population bootstrap.measure and derive_thresholds measure on;
-    # a population mismatch between the floor and the trigger is the same class
-    # of defect as a smoothing mismatch.
-    running = _still_running(df)
+    ep["end_inv"] = episodes.leftover_units(ep.starting_inventory, ep.end_sold)
+    # ...but an episode with no closure sentinel has not ended, so its leftover
+    # is not yet scrap. Excluding it keeps this metric on the same population
+    # bootstrap.measure and derive_thresholds measure on; a population mismatch
+    # between floor and trigger is the same defect class as a smoothing one.
+    running = _still_running(ep.assign(units_sold=ep.end_sold))
     ep = ep[~ep.index.isin(running)]
     ep["il"] = ep.discount_cost + ep.cost * ep.end_inv
     ep["denom"] = ep.original_price * ep.units_sold
@@ -143,7 +135,7 @@ def guardrail_series(decisions, outcomes, cfg):
             "hours_remaining": d["hours_remaining"],
             "cost": d["cost"],
             "start_inv": o["starting_inventory"],
-
+            "ending_inventory": o["ending_inventory"],
             "sold": o["units_sold"],
             "revenue": o["applied_price"] * o["units_sold"],
             "margin": (o["applied_price"] - d["cost"]) * o["units_sold"],
@@ -157,18 +149,19 @@ def guardrail_series(decisions, outcomes, cfg):
     ep = df.sort_values("hours_remaining", ascending=False).groupby(
         "episode_id").agg(date=("date", "first"), arm=("arm", "first"),
                           start_inv=("start_inv", "first"),
-                          end_start_inv=("start_inv", "last"),
-                          end_sold=("sold", "last"),
+                          starting_inventory=("start_inv", "last"),
+                          units_sold=("sold", "last"),
+                          ending_inventory=("ending_inventory", "last"),
                           revenue=("revenue", "sum"),
                           margin=("margin", "sum"))
     # scrap is max(0, inventory - sold) on the last hour, never the reported
     # ending_inventory: the source writes the remainder off to zero when the
     # window closes, so reading it directly reports zero scrap for every
     # episode and silently deletes the scrap term from IL.
-    ep["end_inv"] = episodes.leftover_units(ep.end_start_inv, ep.end_sold)
+    ep["end_inv"] = episodes.leftover_units(ep.starting_inventory, ep.units_sold)
     # same population rule as business_metrics and the threshold derivation:
-    # an episode still running at the report edge has leftover, not scrap
-    ep = ep[~ep.index.isin(_still_running(df))]
+    # an episode with no closure sentinel is still open -- leftover, not scrap
+    ep = ep[~ep.index.isin(_still_running(ep))]
 
     def daily(frame):
         day = frame.groupby("date").agg(

@@ -230,6 +230,15 @@ def generate(n_skus, n_days, policy, seed, dirty_frac):
                     sku.category, sku.subcategory,
                 ))
                 inv = ending
+            # WRITE-OFF SENTINEL. The source zeroes ending_inventory on the
+            # row where a listing closes, whatever remained. Emulating it is
+            # not cosmetic: it is the signal common.episodes reads to tell a
+            # closed episode from one still open, so a fixture without it
+            # exercises a code path production never takes.
+            if records and records[-1][0] == day:
+                last = list(records[-1])
+                last[10] = 0.0
+                records[-1] = tuple(last)
 
     df = pd.DataFrame(records, columns=[f.name for f in SCHEMA])
 

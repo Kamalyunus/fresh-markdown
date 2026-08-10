@@ -1235,9 +1235,9 @@ are economically opposite:
 
 | Ending | Test on the last row | Scrap |
 | --- | --- | --- |
-| `completed` | stock on hand, and the row is **before the extract boundary** | leftover **is** disposed of — this is where essentially all scrap lives |
-| `sold_out_early` | inventory 0 | none, by construction |
-| `truncated` | stock on hand, and the row sits **at the extract boundary** | **unknown** — the episode may have been cut mid-window |
+| `sold_out_early` | leftover 0 | none, by construction — tested first, it is unambiguous |
+| `completed` | leftover > 0 **and the closure sentinel is present** | leftover **is** disposed of — this is where essentially all scrap lives |
+| `truncated` | leftover > 0 **and no sentinel** | **unknown** — the episode is still open, or the feed cut it |
 
 **The counter is not the end-of-window signal, and keying scrap to it was a
 serious error.** The first version of this classification tested
@@ -1252,12 +1252,26 @@ scrap at all.
 
 Confirmed with the business: **when a listing ends with stock on hand, those
 units are disposed of and counted as scrap**, whatever the nominal counter
-says. So the signal that an episode ended is its *listing ending* — the row
-stream stopping — and the only genuine uncertainty is at the **extract
-boundary**, where an episode may simply have been cut. `classify()` therefore
-takes the whole frame and derives the boundary from it, rather than accepting
-a caller's idea of where the data stops; truncation is now a sliver of the
-population rather than most of it.
+says.
+
+**The closure signal is the source's own write-off sentinel.** Measured on the
+filtered extract, **356,228 of 356,228 final rows carry `ending_inventory = 0`
+— not one reports honest inventory.** The source zeroes the field when a
+listing closes, so the zero *is* the statement "this episode ended here", and
+its **absence** is the only thing that marks an episode as still open or cut
+by the feed. That is the source's own fact, and it needs no timestamp
+heuristic and no tolerance constant. (An intermediate version of this fix
+inferred closure from proximity to the extract's last timestamp; the sentinel
+supersedes it, and handles per-FC feed lag for free.)
+
+The sentinel is **detected, not assumed**. A final row reporting
+`ending_inventory = 0` while stock remained can only be a write-off, so one
+such row proves the convention is in force. A feed that reports honest
+inventory throughout has no sentinel to read, and treating every episode as
+unclosed there would move all scrap into UNKNOWN — the same silent emptying
+this module already suffered once. `ending_summary` reports
+`write_off_convention_in_force` and
+`final_rows_without_closure_sentinel` so the fallback can never be silent.
 
 Two consequences worth being explicit about. First, the old rule's effect was
 **anti-conservative in measurement and conservative in reporting**: the
@@ -1270,8 +1284,10 @@ the live monitor triggers on tens of thousands, which is the most likely
 explanation for the absurd 480%/153% daily floor and for the fact that no
 sane scrap threshold could be found. **A population mismatch between the
 floor and the trigger is the same class of defect as a smoothing mismatch,
-and both are now closed:** the monitor excludes episodes still running at the
-report edge, using the same tolerance constant.
+and both are now closed:** the monitor calls the *same* classifier, so an
+episode with no closure sentinel — one still running — is excluded there
+exactly as it is in the threshold derivation, and the excluded count is
+reported alongside the metric.
 
 `m11_episode_endings` reports the split, plus
 `share_last_row_counter_at_zero` and

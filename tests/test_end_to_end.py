@@ -542,13 +542,12 @@ def test_true_leftover_on_the_production_worked_example():
     assert float(left.iloc[0]) == 1.0
     assert int(d.starting_inventory.iloc[0]) == 8 and int(d.units_sold.sum()) == 7
 
-    # the listing ended holding that unit, so it IS scrap. The boundary is
-    # passed explicitly because a one-episode frame is its own extract edge,
-    # which would classify it as truncated -- correctly, but uselessly.
-    edge = pd.Timestamp("2026-03-08 12:00")
-    kind = episodes.classify(d, boundary=edge)
+    # the final row carries the closure sentinel (ending_inventory zeroed with
+    # a unit still on hand), so the listing ended and that unit IS scrap
+    assert episodes.write_off_convention(last)
+    kind = episodes.classify(d)
     assert kind.iloc[0] == episodes.COMPLETED
-    assert float(episodes.scrap_units(d, boundary=edge).iloc[0]) == 1.0
+    assert float(episodes.scrap_units(d).iloc[0]) == 1.0
 
     # and the counter is at zero here only because the fixture makes it so;
     # on production it is still positive on ~99.9% of final rows, which is

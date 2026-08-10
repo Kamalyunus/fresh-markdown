@@ -301,69 +301,70 @@ def test_window_extension_removes_the_lookahead_horizon():
 
 
 def _last_row_frame(rows):
-    """One-row-per-episode frame: (episode_id, date, hour, hr, start, sold)."""
+    """One row per episode: (episode_id, hr, start, sold, ending_inventory)."""
     return pd.DataFrame(
-        [{"episode_id": e, "date": pd.Timestamp(dt).date(), "hour_of_day": h,
-          "hours_remaining": hr, "starting_inventory": si, "units_sold": us,
-          "ending_inventory": 0}
-         for e, dt, h, hr, si, us in rows])
+        [{"episode_id": e, "date": pd.Timestamp("2026-03-01").date(),
+          "hour_of_day": 9, "hours_remaining": hr,
+          "starting_inventory": si, "units_sold": us, "ending_inventory": ei}
+         for e, hr, si, us, ei in rows])
 
 
-def test_scrap_is_keyed_to_the_listing_ending_not_the_nominal_counter():
-    """The counter is nominal and usually still positive when a listing ends.
-    Keying scrap to `hours_remaining <= 0` classified ~99% of real leftover as
-    unknown and dropped it from every scrap aggregate. What ends an episode is
-    the listing ending; the only genuine unknown is the extract boundary."""
+def test_scrap_is_keyed_to_the_closure_sentinel_not_the_nominal_counter():
+    """The counter is nominal and usually still positive when a listing ends,
+    so `hours_remaining <= 0` classified ~99% of real leftover as unknown. What
+    marks closure is the source's own sentinel: ending_inventory zeroed on the
+    final row. Its ABSENCE is the only thing that makes an outcome unknown."""
     from common import episodes
 
-    # extract runs to 2026-03-05 10:00. ending_inventory is zero on every last
-    # row (the source writes the remainder off), so scrap must come from
-    # max(0, starting_inventory - units_sold).
     d = _last_row_frame([
-        # counter at zero, stock left -- scrap, and the RARE case in real data
-        ("counter-zero", "2026-03-01", 9, 0, 7, 0),
-        # counter STILL POSITIVE, stock left, ended well before the edge.
-        # This is the common case and it must count as scrap, not unknown.
-        ("early-leftover", "2026-03-02", 9, 28, 9, 4),
-        # sold out: a genuine zero
-        ("sold-out", "2026-03-03", 9, 4, 5, 5),
-        # last row sits AT the extract edge -- may have been cut mid-window
-        ("at-boundary", "2026-03-05", 10, 6, 9, 4),
+        # counter at zero, stock left, sentinel present -- scrap. RARE in real
+        # data: the counter reaches zero on ~0.1% of episodes.
+        ("counter-zero", 0, 7, 0, 0),
+        # counter STILL POSITIVE, stock left, sentinel present. The common
+        # case, and it must count as scrap rather than unknown.
+        ("early-leftover", 28, 9, 4, 0),
+        # sold out: a genuine zero, and unambiguous whatever the sentinel says
+        ("sold-out", 4, 5, 5, 0),
+        # stock left and NO sentinel -- still open, or the feed cut it
+        ("still-open", 6, 9, 4, 5),
     ])
 
     kind = episodes.classify(d)
     assert kind["counter-zero"] == episodes.COMPLETED
     assert kind["early-leftover"] == episodes.COMPLETED     # the fix
     assert kind["sold-out"] == episodes.SOLD_OUT_EARLY
-    assert kind["at-boundary"] == episodes.TRUNCATED
+    assert kind["still-open"] == episodes.TRUNCATED
 
     scrap = episodes.scrap_units(d)
     assert scrap["counter-zero"] == 7
     assert scrap["early-leftover"] == 5      # 9 - 4, NOT dropped as unknown
     assert scrap["sold-out"] == 0
-    assert pd.isna(scrap["at-boundary"])     # unknown, NOT zero and NOT 5
+    assert pd.isna(scrap["still-open"])      # unknown, NOT zero and NOT 5
 
-    # the regression this test exists for: under the old counter-keyed rule
-    # only `counter-zero` scrapped, so 5 of the 12 real units vanished
+    # the regression this test exists for: under the counter-keyed rule only
+    # `counter-zero` scrapped, so 5 of the 12 knowable units vanished
     assert scrap.sum() == 12
 
-    # reading the zeroed ending_inventory instead would report NO scrap at all
-    assert d.ending_inventory.sum() == 0
 
-
-def test_boundary_is_measured_on_the_frame_it_is_given():
-    """A truncated episode is one at THIS extract's edge. Extend the extract
-    and the same episode becomes a known disposal -- so the boundary must come
-    from the frame, never from a caller's idea of where the data stops."""
+def test_missing_write_off_convention_does_not_empty_every_scrap_figure():
+    """A feed that reports honest ending_inventory throughout has no sentinel
+    to read. Treating every episode as unclosed would move ALL scrap into
+    UNKNOWN -- the exact silent emptying this module already suffered once."""
     from common import episodes
 
-    rows = [("a", "2026-03-02", 9, 28, 9, 4), ("b", "2026-03-05", 10, 6, 9, 4)]
-    assert episodes.classify(_last_row_frame(rows))["b"] == episodes.TRUNCATED
+    honest = _last_row_frame([("a", 3, 9, 4, 5), ("b", 2, 6, 6, 0)])
+    assert not episodes.write_off_convention(honest)
+    kind = episodes.classify(honest)
+    assert kind["a"] == episodes.COMPLETED       # not TRUNCATED
+    assert kind["b"] == episodes.SOLD_OUT_EARLY
+    assert episodes.scrap_units(honest)["a"] == 5
 
-    later = rows + [("c", "2026-03-08", 12, 3, 4, 4)]
-    kind = episodes.classify(_last_row_frame(later))
-    assert kind["b"] == episodes.COMPLETED   # no longer at the edge
-    assert kind["c"] == episodes.SOLD_OUT_EARLY
+    # one write-off row is enough to prove the convention, and then a final
+    # row still reporting inventory genuinely means "not closed"
+    mixed = _last_row_frame([("a", 3, 9, 4, 5), ("w", 1, 8, 2, 0)])
+    assert episodes.write_off_convention(mixed)
+    assert episodes.classify(mixed)["a"] == episodes.TRUNCATED
+    assert pd.isna(episodes.scrap_units(mixed)["a"])
 
 
 def test_state_rejected_when_planning_horizon_disagrees_with_recorded_one():
@@ -532,8 +533,8 @@ def _paired_arm_frame(days=70, skus=60, seed=0):
             rows.append(dict(episode_id=f"{day.date()}|{sku}", date=day.date(),
                              hour_of_day=10, sku_id=sku, fc="FC1",
                              starting_inventory=20, units_sold=sold,
-                             hours_remaining=0, offered_price=1000.0,
-                             cost=600.0))
+                             ending_inventory=0, hours_remaining=0,
+                             offered_price=1000.0, cost=600.0))
     return pd.DataFrame(rows)
 
 
