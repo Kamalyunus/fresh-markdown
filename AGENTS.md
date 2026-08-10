@@ -434,9 +434,9 @@ deliberately.
 
 ## Refreshing the numbers in the docs and deck
 
-`docs/design.md` and `docs/perishable_markdown_tech_deck.pptx` quote ~25
-measured quantities that go stale on every re-run (the launch-freeze retrain
-changes most of them). Do not hunt through the JSON:
+`docs/design.md` and `docs/perishable_markdown_tech_deck.pptx` (34 slides)
+quote ~25 measured quantities that go stale on every re-run (the launch-freeze
+retrain changes most of them). Do not hunt through the JSON:
 
 ```bash
 python3 -m tools.deck_numbers --backtest reports/<gate-passing>.json \
@@ -447,6 +447,10 @@ python3 -m tools.deck_numbers --backtest reports/<gate-passing>.json \
 It prints each quantity tagged with the slide(s) and design-doc sections that
 carry it. Missing reports print `--` rather than failing. Only ever quote a
 **gate-passing** backtest — the same rule that governs pasting `tau_initial`.
+
+Slide tags refer to the 34-slide deck. If slides are inserted or reordered,
+re-map the tags in `tools/deck_numbers.py` in the same change — a stale tag
+sends the next person to the wrong slide, which is worse than no tag.
 
 ## Repo conventions
 

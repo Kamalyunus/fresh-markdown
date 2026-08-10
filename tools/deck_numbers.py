@@ -75,109 +75,109 @@ def main():
     fid = g(bt, "fidelity", default={})
     pol = g(bt, "policy_deltas", default={})
 
-    section("CALIBRATION GATE -- slides 1, 11, 12; design 8, 9.2, 10")
-    row("gate metric", g(fid, "calibration_gate_metric"), "12")
-    row("gate band", g(fid, "calibration_gate_band"), "1, 11, 12")
-    row("gate value", g(fid, "calibration_gate_value"), "1, 12")
-    row("gate verdict", g(fid, "calibration_gate"), "1, 12, 13")
+    section("CALIBRATION GATE -- slides 1, 24, 28; design 8, 9.2, 10")
+    row("gate metric", g(fid, "calibration_gate_metric"), "28")
+    row("gate band", g(fid, "calibration_gate_band"), "1, 24, 28")
+    row("gate value", g(fid, "calibration_gate_value"), "1, 28")
+    row("gate verdict", g(fid, "calibration_gate"), "1, 28, 31")
     row("post-calibration episode sold ratio",
-        g(fid, "fidelity_episode_sold_ratio"), "11")
-    row("hourly MAE (gate window)", g(fid, "fidelity_hourly_mae"), "11")
-    row("sold ratio by window", g(fid, "by_window"), "11, 14")
-    row("share of hours non-zero", g(fid, "fidelity_pct_nonzero"), "2")
+        g(fid, "fidelity_episode_sold_ratio"), "24")
+    row("hourly MAE (gate window)", g(fid, "fidelity_hourly_mae"), "24")
+    row("sold ratio by window", g(fid, "by_window"), "24, 32")
+    row("share of hours non-zero", g(fid, "fidelity_pct_nonzero"), "2, 21")
 
-    section("POLICY -- slides 2, 12; design 8")
-    row("episodes replayed", g(pol, "episodes_replayed"), "2, 12")
-    row("actual IL%", g(pol, "actual_il_pct"), "2, 12")
-    row("actual IL (currency)", g(pol, "actual_il"), "2, 12")
+    section("POLICY -- slides 2, 17, 28; design 8")
+    row("episodes replayed", g(pol, "episodes_replayed"), "2, 28")
+    row("actual IL%", g(pol, "actual_il_pct"), "2, 28")
+    row("actual IL (currency)", g(pol, "actual_il"), "2, 28")
     row("actual clearance", g(pol, "actual_clearance"), "2")
     row("DP IL reduction vs legacy (like-for-like)",
         g(pol, "policy_gap_like_for_like", "dp_il_reduction_pct_of_legacy"),
-        "12")
+        "17, 28")
     row("clearance delta",
-        g(pol, "policy_gap_like_for_like", "clearance_delta"), "12")
+        g(pol, "policy_gap_like_for_like", "clearance_delta"), "28")
     # the IL win and the clearance loss are the same trade seen twice; the
     # scrap guardrail polices exactly this, so the deck must not quote one
     # without the other
-    row("  legacy-under-model clearance", g(pol, "legacy_model_clearance"), "12")
-    row("  DP clearance", g(pol, "dp_clearance"), "12")
-    row("  legacy-under-model scrap cost", g(pol, "legacy_model_scrap_cost"), "12")
-    row("  DP scrap cost", g(pol, "dp_scrap_cost"), "12")
-    row("pct DP deepened vs actual", g(pol, "pct_dp_deepened"), "12")
+    row("  legacy-under-model clearance", g(pol, "legacy_model_clearance"), "28")
+    row("  DP clearance", g(pol, "dp_clearance"), "28")
+    row("  legacy-under-model scrap cost", g(pol, "legacy_model_scrap_cost"), "28")
+    row("  DP scrap cost", g(pol, "dp_scrap_cost"), "28")
+    row("pct DP deepened vs actual", g(pol, "pct_dp_deepened"), "28")
     ied = g(pol, "intra_episode_deepening", default={})
     row("  |eps| needed to deepen (median)",
-        g(ied, "median_threshold_abs_eps"), "12")
-    row("  |eps| in use (median)", g(ied, "median_abs_eps_in_use"), "12")
+        g(ied, "median_threshold_abs_eps"), "17, 28")
+    row("  |eps| in use (median)", g(ied, "median_abs_eps_in_use"), "17, 28")
     row("  share episodes past the threshold",
-        g(ied, "share_episodes_eps_above_threshold"), "12")
+        g(ied, "share_episodes_eps_above_threshold"), "17, 28")
     row("  DP mean discount vs legacy",
         f'{g(pol, "dp_mean_discount")} vs {g(pol, "legacy_model_mean_discount")}',
-        "12")
+        "28")
 
-    section("EXPLORATION -- slide 9; design 8")
+    section("EXPLORATION -- slides 18, 19; design 8")
     tau = g(bt, "tau_initial_derivation", default={})
-    row("tau_initial", g(tau, "tau_initial"), "9, 12")
-    row("implied daily spend", g(tau, "implied_daily_spend"), "9")
-    row("daily budget", g(tau, "daily_budget"), "9")
-    row("cost-distribution quantile", g(tau, "cost_distribution_quantile"), "9")
+    row("tau_initial", g(tau, "tau_initial"), "18, 19, 28")
+    row("implied daily spend", g(tau, "implied_daily_spend"), "18, 19")
+    row("daily budget", g(tau, "daily_budget"), "18, 19")
+    row("cost-distribution quantile", g(tau, "cost_distribution_quantile"), "18, 19")
 
-    section("DISPERSION / POWER -- slides 7, 10, 12; design 8")
+    section("DISPERSION / POWER -- slides 11, 20, 23, 27, 28; design 8")
     # AUTHORITATIVE rho is artifacts/rho.json, fitted against the baseline
     # model's own mu_ref residuals. phase0's m3 is a category x hour proxy
     # computed before any model exists and says so in its own note -- quoting
     # it in the deck states a number the system does not actually use.
     rj = load(args.rho)
-    row("rho (fitted residuals, AUTHORITATIVE)", g(rj, "rho"), "12")
-    row("mean forced hours", g(rj, "mean_forced_hours_per_episode"), "12")
-    row("implied deff", g(rj, "implied_deff"), "7, 10, 12")
+    row("rho (fitted residuals, AUTHORITATIVE)", g(rj, "rho"), "28")
+    row("mean forced hours", g(rj, "mean_forced_hours_per_episode"), "28")
+    row("implied deff", g(rj, "implied_deff"), "11, 20, 23, 28")
     row("  phase0 proxy rho / deff (do NOT quote)",
         f'{g(p0, "m3_intra_episode_correlation", "rho")} / '
         f'{g(p0, "m3_intra_episode_correlation", "implied_deff")}')
     row("IL% clustered SE",
-        g(p0, "m6_il_pct", "il_pct_ratio_se_clustered"), "12")
+        g(p0, "m6_il_pct", "il_pct_ratio_se_clustered"), "27, 28")
 
-    section("SHADOW GATE -- slides 1, 13; design 9.4, 10")
+    section("SHADOW GATE -- slides 1, 19, 25, 31; design 9.4, 10")
     sg = g(sh, "shadow_gate", default={})
-    row("event completeness", g(sg, "event_completeness", "value"), "13")
-    row("matched decision rate", g(sg, "matched_decision_rate", "value"), "13")
-    row("cost-floor violations", g(sg, "cost_floor_violations", "value"), "13")
-    row("verdict", g(sg, "verdict"), "1, 13")
+    row("event completeness", g(sg, "event_completeness", "value"), "25, 31")
+    row("matched decision rate", g(sg, "matched_decision_rate", "value"), "25, 31")
+    row("cost-floor violations", g(sg, "cost_floor_violations", "value"), "25, 31")
+    row("verdict", g(sg, "verdict"), "1, 25, 31")
     row("drift ratio at legacy price",
-        g(sh, "realised_vs_predicted_sold_ratio_at_legacy_price"), "13")
-    row("decisions", g(sh, "decision_count"), "13")
+        g(sh, "realised_vs_predicted_sold_ratio_at_legacy_price"), "31")
+    row("decisions", g(sh, "decision_count"), "31")
     row("would-be forced rate",
-        g(sh, "exploration_would_be", "forced_rate"), "13")
-    row("solver latency p95 (s)", g(sh, "solver_latency_p95_s"), "13")
+        g(sh, "exploration_would_be", "forced_rate"), "19, 25, 31")
+    row("solver latency p95 (s)", g(sh, "solver_latency_p95_s"), "14, 19, 25, 31")
     ly = g(sh, "learning_yield_would_be", default={})
     row("would-be bounded updates from window",
-        g(ly, "bounded_updates_supported"), "13, 14")
+        g(ly, "bounded_updates_supported"), "23, 31, 32")
     row("  episodes per bounded update",
-        g(ly, "episodes_per_bounded_update"), "13, 14")
+        g(ly, "episodes_per_bounded_update"), "23, 31, 32")
     row("  effective information per episode",
-        g(ly, "effective_information_per_episode"), "13, 14")
+        g(ly, "effective_information_per_episode"), "23, 31, 32")
 
-    section("OWNER THRESHOLDS -- slide 15; design 12")
+    section("OWNER THRESHOLDS -- slides 26, 27, 33; design 12")
     gn = g(th, "guardrail_noise", default={})
     print("  (relative deviations: 0.1336 = 13.36%, 9.1386 = 914%)")
     for key, label in (("scrap_rate", "scrap"), ("margin_rate", "margin")):
         b = g(gn, key, default={})
-        row(f"{label} 3-sigma daily noise", g(b, "three_sigma"), "15")
-        row(f"{label} 3-sigma robust", g(b, "three_sigma_robust"), "15")
-        row(f"{label} outlier-dominated?", g(b, "outlier_dominated"), "15")
+        row(f"{label} 3-sigma daily noise", g(b, "three_sigma"), "26, 33")
+        row(f"{label} 3-sigma robust", g(b, "three_sigma_robust"), "26, 33")
+        row(f"{label} outlier-dominated?", g(b, "outlier_dominated"), "33")
         row(f"{label} worst / p95 abs deviation",
-            f'{g(b, "worst_observed_rel_dev")} / {g(b, "p95_abs_rel_dev")}', "15")
-        row(f"{label} verdict at current config", g(b, "verdict"), "15")
+            f'{g(b, "worst_observed_rel_dev")} / {g(b, "p95_abs_rel_dev")}', "33")
+        row(f"{label} verdict at current config", g(b, "verdict"), "33")
     ab = g(th, "ab_duration", default={})
     row("recommended A/B duration (weeks)",
-        g(ab, "recommended_duration_weeks"), "15")
+        g(ab, "recommended_duration_weeks"), "27, 33")
     for label, r in (g(ab, "by_duration", default={}) or {}).items():
         row(f"  detectable MDE @ {label}",
             f"{g(r, 'detectable_mde_rel')} "
             f"({g(r, 'blocks_measured')} blocks)"
             + ("  <-- meets target" if g(r, "meets_target") is True else ""),
-            "15")
+            "33")
 
-    section("ELASTICITY PRIOR -- slides 4, 11, 12; design 8, 9.3")
+    section("ELASTICITY PRIOR -- slides 5, 24, 28; design 8, 9.3")
     # the deck claims "MEAT brackets cleanly, 14/16 fall back". That claim is
     # only true of a specific run -- print the breakdown so it is checked
     # rather than carried forward.
@@ -185,9 +185,9 @@ def main():
     per_cat = g(pj, "per_category", default={}) or {}
     accepted = {c: v for c, v in per_cat.items()
                 if isinstance(v, dict) and v.get("source") == "bracket"}
-    row("categories with a prior", len(per_cat), "4, 11, 12")
-    row("bracket ACCEPTED", f"{len(accepted)} {sorted(accepted) or ''}", "4, 11, 12")
-    row("fell back to wide prior", len(per_cat) - len(accepted), "4, 11, 12")
+    row("categories with a prior", len(per_cat), "5, 24, 28")
+    row("bracket ACCEPTED", f"{len(accepted)} {sorted(accepted) or ''}", "5, 24, 28")
+    row("fell back to wide prior", len(per_cat) - len(accepted), "5, 24, 28")
     row("global prior source", g(pj, "source", default=g(pj, "prior_source")))
 
     section("VERSIONS -- design appendix")
