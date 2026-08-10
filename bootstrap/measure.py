@@ -203,7 +203,7 @@ def m6_il_pct(d):
     ep["denom"] = ep.original_price * ep.units_sold      # ENDOGENOUS denominator
 
     zero_denom_share = float((ep.denom <= 0).mean())
-    excluded = {"episodes_excluded_unknown_scrap": dropped,
+    excluded = {"episodes_excluded_not_closed": dropped,
                 "excluded_share": round(dropped / max(dropped + len(ep), 1), 4)}
 
     def ratio_of_sums(g):
@@ -277,23 +277,22 @@ def m8_entry_hour(d):
 def m11_episode_endings(d):
     """How episodes end, and how much scrap that leaves genuinely unknown.
 
-    An episode ends when its listing ends. `hours_remaining` is nominal and is
-    usually still positive at that point, so it is NOT the end-of-window
-    signal -- keying scrap to it excluded almost all real waste. A last row
-    with stock on hand means those units were disposed of; only a last row
-    sitting at the extract boundary has an outcome we do not have.
+    Two endings and one non-ending. Scrap is the leftover on the last row:
+    zero if the episode sold out, the leftover itself if it ended holding
+    stock. `not_closed` is not a third way to end -- it is an episode that has
+    not finished, which offline is empty and live is the in-flight ones.
 
     Watch `share_last_row_counter_at_zero`. If it is near zero -- it was
-    ~0.001 on production -- any rule written against the counter is measuring
-    a rounding error.
+    ~0.001 on production -- any rule written against `hours_remaining` is
+    measuring a rounding error, which is exactly the bug this replaced.
     """
     if not d.episode_id.nunique():
         return "NOT RUN -- no episodes"
     out = episodes.ending_summary(d)
     last = episodes.last_rows(d).set_index("episode_id")
     kind = episodes.classify(d)
-    trunc = last.loc[kind.index[kind == episodes.TRUNCATED]]
-    out["median_hours_unrecorded_when_truncated"] = float(
+    trunc = last.loc[kind.index[kind == episodes.NOT_CLOSED]]
+    out["median_hours_unrecorded_when_not_closed"] = float(
         trunc.hours_remaining.median()) if len(trunc) else 0.0
     return out
 

@@ -333,7 +333,7 @@ def test_scrap_is_keyed_to_the_closure_sentinel_not_the_nominal_counter():
     assert kind["counter-zero"] == episodes.COMPLETED
     assert kind["early-leftover"] == episodes.COMPLETED     # the fix
     assert kind["sold-out"] == episodes.SOLD_OUT_EARLY
-    assert kind["still-open"] == episodes.TRUNCATED
+    assert kind["still-open"] == episodes.NOT_CLOSED
 
     scrap = episodes.scrap_units(d)
     assert scrap["counter-zero"] == 7
@@ -355,7 +355,7 @@ def test_missing_write_off_convention_does_not_empty_every_scrap_figure():
     honest = _last_row_frame([("a", 3, 9, 4, 5), ("b", 2, 6, 6, 0)])
     assert not episodes.write_off_convention(honest)
     kind = episodes.classify(honest)
-    assert kind["a"] == episodes.COMPLETED       # not TRUNCATED
+    assert kind["a"] == episodes.COMPLETED       # not NOT_CLOSED
     assert kind["b"] == episodes.SOLD_OUT_EARLY
     assert episodes.scrap_units(honest)["a"] == 5
 
@@ -363,7 +363,7 @@ def test_missing_write_off_convention_does_not_empty_every_scrap_figure():
     # row still reporting inventory genuinely means "not closed"
     mixed = _last_row_frame([("a", 3, 9, 4, 5), ("w", 1, 8, 2, 0)])
     assert episodes.write_off_convention(mixed)
-    assert episodes.classify(mixed)["a"] == episodes.TRUNCATED
+    assert episodes.classify(mixed)["a"] == episodes.NOT_CLOSED
     assert pd.isna(episodes.scrap_units(mixed)["a"])
 
 

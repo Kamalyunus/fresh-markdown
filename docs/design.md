@@ -1229,15 +1229,22 @@ because across a data gap the inventory jump would read as a restock.
 
 ### An episode is not as long as its window
 
-Rows stop at the window end **or at zero inventory, whichever comes first**,
-so an episode's row count is not its window length. Three endings, and they
-are economically opposite:
+**Two endings, and one state that is not an ending.** For any episode that has
+finished, the scrap rule is as simple as the data:
+
+    leftover = max(0, starting_inventory − units_sold)   on the last row
 
 | Ending | Test on the last row | Scrap |
 | --- | --- | --- |
-| `sold_out_early` | leftover 0 | none, by construction — tested first, it is unambiguous |
-| `completed` | leftover > 0 **and the closure sentinel is present** | leftover **is** disposed of — this is where essentially all scrap lives |
-| `truncated` | leftover > 0 **and no sentinel** | **unknown** — the episode is still open, or the feed cut it |
+| `sold_out_early` | leftover 0 | **none** — nothing left, by fact rather than assumption |
+| `completed` | leftover > 0 | **the leftover** — those units were disposed of |
+
+`hours_remaining` is not consulted, and neither is `ending_inventory`'s value.
+The third state, `not_closed`, is an episode that **has not finished**:
+
+| | Test | Scrap |
+| --- | --- | --- |
+| `not_closed` | leftover > 0 **and no closure sentinel** | **unknown** — excluded, never counted as zero |
 
 **The counter is not the end-of-window signal, and keying scrap to it was a
 serious error.** The first version of this classification tested
@@ -1254,15 +1261,23 @@ Confirmed with the business: **when a listing ends with stock on hand, those
 units are disposed of and counted as scrap**, whatever the nominal counter
 says.
 
-**The closure signal is the source's own write-off sentinel.** Measured on the
-filtered extract, **356,228 of 356,228 final rows carry `ending_inventory = 0`
-— not one reports honest inventory.** The source zeroes the field when a
-listing closes, so the zero *is* the statement "this episode ended here", and
-its **absence** is the only thing that marks an episode as still open or cut
-by the feed. That is the source's own fact, and it needs no timestamp
-heuristic and no tolerance constant. (An intermediate version of this fix
-inferred closure from proximity to the extract's last timestamp; the sentinel
-supersedes it, and handles per-FC feed lag for free.)
+**Offline, `not_closed` is empty and the rule really is the two lines above.**
+Measured on the filtered extract, **356,228 of 356,228 final rows carry
+`ending_inventory = 0` — not one reports honest inventory.** Every episode in
+the extract has finished, so the split is purely on leftover: 48,280 (13.55%)
+ended holding stock, 307,948 (86.45%) sold out.
+
+**The third state exists for production, not for the extract.** Live, the
+monitor reads events while episodes are still in flight, and an in-flight
+episode's most recent row is *not* a final row — it carries an honest,
+non-zero `ending_inventory`. Its leftover is stock **on the shelf, not in the
+bin**. Booking it as scrap would count it today and count a different number
+for the same episode tomorrow. The source's write-off sentinel — the zero it
+writes when a listing closes — is what separates "finished" from "still
+running", and `pipeline.monitor` calls the *same* classifier rather than a
+rule of its own. (An intermediate version inferred closure from proximity to
+the extract's last timestamp; the sentinel supersedes it and handles per-FC
+feed lag for free.)
 
 The sentinel is **detected, not assumed**. A final row reporting
 `ending_inventory = 0` while stock remained can only be a write-off, so one

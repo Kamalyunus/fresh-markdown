@@ -34,14 +34,16 @@ def _arm(sku_id, fc, allocation):
 def _still_running(ep):
     """Episodes with stock on hand and no closure sentinel -- still open.
 
-    The live counterpart of truncation in common.episodes, and literally the
-    same function: an episode that has not closed has leftover on the shelf,
-    not scrap in the bin. Counting it as scrap makes the monitor's series
-    disagree with the series the noise floors were measured on, which is how a
-    guardrail ends up graded against a yardstick nothing uses.
+    This is the ONLY reason common.episodes has a third state: offline every
+    episode has finished, so scrap is just "leftover on the last row". Live,
+    an in-flight episode's latest row is not a final row and its leftover is
+    stock on the shelf, not scrap in the bin -- booking it would count it today
+    and count something different tomorrow. Same function in both worlds, which
+    is also what keeps this series on the population the noise floors were
+    measured on.
     """
     kind = episodes.classify_last(ep)
-    return set(kind.index[kind == episodes.TRUNCATED])
+    return set(kind.index[kind == episodes.NOT_CLOSED])
 
 
 def business_metrics(decisions, outcomes, cfg):

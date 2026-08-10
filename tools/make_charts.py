@@ -102,10 +102,11 @@ def chart_episode_endings(phase0, out, written):
     if not isinstance(e, dict):
         return
     shares = e["shares"]
-    labels = ["completed\n(window ran out)", "sold out early",
-              "truncated\n(outcome not in data)"]
-    vals = [shares["completed"], shares["sold_out_early"], shares["truncated"]]
-    colors = [ACCENT, GOOD, MUTED]
+    labels = ["sold out\n(nothing left)", "ended with stock\n(scrap)",
+              "not closed\n(still running)"]
+    vals = [shares["sold_out_early"], shares["completed"],
+            shares["not_closed"]]
+    colors = [GOOD, ACCENT, MUTED]
 
     fig, ax = plt.subplots(figsize=(8, 3.8))
     bars = ax.barh(labels, vals, color=colors, height=0.55)
@@ -114,9 +115,10 @@ def chart_episode_endings(phase0, out, written):
                 va="center", fontsize=10, color=INK)
     ax.set_xlim(0, max(vals) * 1.25)
     ax.invert_yaxis()
-    _style(ax, "Episode endings — only one of them scraps anything",
-           "Scrap comes from `completed` alone. `sold_out_early` has none by "
-           "construction; `truncated` is UNKNOWN, not zero.")
+    _style(ax, "Two endings, and one state that is not an ending",
+           "Scrap is the leftover on the last row: zero if it sold out, the "
+           "leftover if it ended holding stock. `not_closed` is an unfinished "
+           "episode -- UNKNOWN, not zero -- and is empty on a closed extract.")
     _save(fig, out, "02_episode_endings.png", written)
 
 

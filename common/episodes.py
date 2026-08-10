@@ -1,9 +1,14 @@
-"""Episode endings and what each one means for scrap.
+"""How an episode ends, and what that means for scrap.
 
-An episode does not necessarily run the length of its window. `hours_remaining`
-(source `flc_window`) counts the window down; rows stop either when the window
-ends or when inventory reaches zero, whichever comes first. Those two endings
-are economically opposite and must not be pooled.
+TWO ENDINGS, ONE ELIGIBILITY CHECK. The scrap rule is as simple as the data:
+
+    leftover = max(0, starting_inventory - units_sold)   on the LAST row
+
+    leftover == 0  ->  sold out          scrap = 0
+    leftover  > 0  ->  ended with stock  scrap = leftover
+
+That is the whole of it for any episode that has FINISHED. The third state
+below is not a third way to end -- it is "this episode is not finished yet".
 
 DATA QUIRK -- `ending_inventory` IS ZEROED ON AN EPISODE'S LAST ROW.
 The source writes off whatever remains when a listing closes, so the last hour
@@ -20,40 +25,39 @@ missed:
     discards essentially all the genuine waste, keeping only guaranteed
     sellouts -- the exact opposite of the sample a scrap-cost signal needs.
 
-True leftover at the window close is therefore `max(0, starting_inventory -
-units_sold)` on the last row, never `ending_inventory`. That formula is also
-correct where the chain is honest, so it is the only one used here.
+So leftover is COMPUTED, never read. Note that the zero is on EVERY final row,
+sold-out and leftover alike, which makes it useless as a scrap figure and
+useless for telling the two endings apart. Only `leftover` does that.
 
-WHAT ENDS AN EPISODE IS THE LISTING DISAPPEARING, NOT THE COUNTER REACHING
-ZERO. `hours_remaining` (`flc_window`) is a NOMINAL countdown and is usually
-still positive on the final row -- measured on production, only ~0.1% of
-episodes have a last row at zero while ~13% end with stock on hand and time
-nominally left. An earlier version of this module treated "counter reached
-zero" as the end-of-window signal, which classified ~99% of all leftover as
-UNKNOWN and excluded it from every scrap aggregate. Confirmed with the
-business: when a listing ends with stock on hand, those units are DISPOSED
-and counted as scrap, whatever the nominal counter says.
+DO NOT KEY ANY OF THIS TO `hours_remaining`. The counter (`flc_window`) is
+NOMINAL and is still positive on ~99.9% of final rows. An earlier version
+treated "counter reached zero" as the end-of-window signal; it fired on ~0.1%
+of episodes and pushed ~99% of all real leftover into the unknown bucket,
+emptying every scrap aggregate in the system. Confirmed with the business:
+when a listing ends with stock on hand, those units are DISPOSED and counted
+as scrap, whatever the counter says.
 
-THE ZERO IS THE CLOSURE SIGNAL, so the test is the source's own fact rather
-than an inference of ours. A final row that still reports honest inventory did
-NOT close inside this data -- that episode is the only kind whose outcome is
-unknown. Read the sentinel; never read its value as scrap.
+WHERE THE ELIGIBILITY CHECK EARNS ITS PLACE: live monitoring. Offline every
+episode in the extract has finished, so the two cases above are the whole
+story. In production, episodes are still in flight -- and an in-flight
+episode's most recent row is not a final row, so it carries an honest,
+non-zero `ending_inventory`. Its leftover is stock ON THE SHELF, not in the
+bin. Booking it as scrap would count it today and count something different
+tomorrow. The closure sentinel -- the source's own zero -- is what separates
+"finished" from "still running", and it is the same test in both worlds.
 
-  sold_out_early   leftover is zero. Scrap is zero because there is nothing
-                   left, not by assumption. Tested first: it is unambiguous
-                   whatever the sentinel says.
-  completed        leftover > 0 and the closure sentinel is present. Those
-                   units were disposed of, and this is where essentially all
-                   scrap lives.
-  truncated        leftover > 0 and NO sentinel -- the episode is still open,
-                   or the feed cut it. Scrap is unknown and these are excluded
-                   from scrap aggregates rather than counted as zero. On a
-                   closed extract this is empty; live, it is the episodes
-                   still running.
+  sold_out_early   leftover is zero. Nothing left to scrap, by fact rather
+                   than assumption. Tested first: unambiguous either way.
+  completed        leftover > 0 on a closed episode. Those units were
+                   disposed of; this is where essentially all scrap lives.
+  not_closed       leftover > 0 and NO closure sentinel. NOT an ending --
+                   the episode is still running (or the feed cut it), so
+                   scrap is unknown and it is excluded from scrap aggregates
+                   rather than counted as zero. Empty on a closed extract.
 
 The sentinel is DETECTED, not assumed (`write_off_convention`): a feed that
 reports honest ending_inventory throughout has no sentinel to read, and
-treating every episode as unclosed would move all scrap into UNKNOWN -- the
+treating every episode as unfinished would move all scrap into UNKNOWN -- the
 same silent emptying this module already suffered once. `ending_summary`
 reports whether the convention was found.
 """
@@ -63,7 +67,7 @@ import pandas as pd
 
 COMPLETED = "completed"
 SOLD_OUT_EARLY = "sold_out_early"
-TRUNCATED = "truncated"
+NOT_CLOSED = "not_closed"
 
 
 def last_rows(d, order=("date", "hour_of_day")):
@@ -116,7 +120,7 @@ def classify_last(last):
         closed = np.ones(len(last), dtype=bool)
     return pd.Series(
         np.where(left <= 0, SOLD_OUT_EARLY,
-                 np.where(closed, COMPLETED, TRUNCATED)),
+                 np.where(closed, COMPLETED, NOT_CLOSED)),
         index=last.episode_id.to_numpy() if "episode_id" in last else last.index)
 
 
@@ -128,8 +132,8 @@ def classify(d):
 def scrap_units(d):
     """Units scrapped per episode, NaN where the episode did not close here.
 
-    NaN propagates: a sum over a frame containing truncated episodes must be
-    taken with the truncated ones dropped, not silently treated as zero.
+    NaN propagates: a sum over a frame containing unfinished episodes must be
+    taken with those dropped, not silently treated as zero.
     """
     return scrap_units_last(last_rows(d))
 
@@ -160,14 +164,14 @@ def ending_summary(d):
         "episodes": int(len(last)),
         # if this is false the source is NOT marking closure, so truncation is
         # undetectable and every episode is treated as closed. Read it before
-        # trusting the truncated share.
+        # trusting the not_closed share.
         "write_off_convention_in_force": write_off_convention(last),
         "final_rows_without_closure_sentinel": int(
             (last.ending_inventory.to_numpy() != 0).sum()),
         "shares": {k: round(float(counts.get(k, 0)) / n, 4)
-                   for k in (COMPLETED, SOLD_OUT_EARLY, TRUNCATED)},
+                   for k in (SOLD_OUT_EARLY, COMPLETED, NOT_CLOSED)},
         "scrap_units_completed": int(left[kind == COMPLETED].sum()),
-        "scrap_units_unknown_truncated": int(left[kind == TRUNCATED].sum()),
+        "scrap_units_unknown_not_closed": int(left[kind == NOT_CLOSED].sum()),
         "share_episodes_ending_by_write_off": round(float(
             ((kind == COMPLETED) & (left > 0)).mean()), 4),
         # the diagnostic that caught the original misclassification: if the

@@ -362,7 +362,7 @@ def fidelity(d, cfg, model, prior, r_lookup):
     return block, d_full
 
 
-def _episode_frame(g, truncated=frozenset()):
+def _episode_frame(g, unfinished=frozenset()):
     g = g.sort_values(["date", "hour_of_day"])
     obs = g.is_observed.to_numpy() if "is_observed" in g else np.ones(len(g), bool)
     # legacy's price for the hours the data does not cover: hold the last
@@ -375,10 +375,10 @@ def _episode_frame(g, truncated=frozenset()):
     return {
         "n_observed": int(obs.sum()),
         # the listing ending IS the disposal, whatever the nominal counter
-        # says; only an episode cut off at the extract boundary has an outcome
-        # we do not have. Keying this to hours_remaining <= 0 charged scrap on
-        # ~0.1% of episodes and silently emptied the observed-world baseline.
-        "outcome_known": bool(g.episode_id.iloc[0] not in truncated),
+        # says; only an episode that has not closed has an outcome we do not
+        # have. Keying this to hours_remaining <= 0 charged scrap on ~0.1% of
+        # episodes and silently emptied the observed-world baseline.
+        "outcome_known": bool(g.episode_id.iloc[0] not in unfinished),
         "original_price": float(g.original_price.iloc[0]),
         "cost": float(g.cost.iloc[0]),
         "d_ref": float(g.d_ref.iloc[0]),
@@ -406,12 +406,12 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0):
     pcfg = cfg["pricing"]
     max_k = pcfg["negbin_max_k"]
 
-    # classify on OBSERVED rows only: the synthetic window extension would
-    # push the extract boundary past the real one and hide every truncation
+    # classify on OBSERVED rows only: the synthetic window extension carries no
+    # closure sentinel and would make every episode look unfinished
     obs = (d_pred[d_pred.is_observed] if "is_observed" in d_pred
            else d_pred)
     kind = episodes.classify(obs)
-    truncated = frozenset(kind.index[kind == episodes.TRUNCATED])
+    unfinished = frozenset(kind.index[kind == episodes.NOT_CLOSED])
 
     eps_ids = d_pred.episode_id.unique()
     if len(eps_ids) > max_episodes:
@@ -420,7 +420,7 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0):
 
     rows, spreads = [], []
     for eid, g in sub.groupby("episode_id"):
-        e = _episode_frame(g, truncated)
+        e = _episode_frame(g, unfinished)
         if e["q0"] <= 0 or e["hours"] < 1:
             continue
         p0, cost = e["original_price"], e["cost"]
@@ -431,9 +431,9 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0):
         # ---- actual path economics (observed world, legacy prices)
         a_sold = e["actual_sold"]
         a_disc_cost = float(np.sum(p0 * e["actual_discounts"] * a_sold))
-        # an episode that ended holding stock disposed of it. Only one cut
-        # off at the extract boundary has no recorded ending, and charging
-        # that to scrap would overstate the baseline the policy is compared to.
+        # an episode that ended holding stock disposed of it. Only an
+        # unfinished one has no recorded ending, and charging that to scrap
+        # would overstate the baseline the policy is compared to.
         a_scrap = cost * max(e["end_inv"], 0) if e["outcome_known"] else 0.0
         a_denom = p0 * float(a_sold.sum())
 
