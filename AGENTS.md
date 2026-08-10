@@ -304,7 +304,7 @@ which is worse than losing the episode.
 | `null_category_dropped` | rows | missing category/subcategory (no reference discount, no dispersion cell) |
 | `zero_base_price_dropped` | rows | `original_price` still null/zero after ffill+bfill within the episode |
 | `negative_window_dropped` | episode | any `hours_remaining < 0` |
-| `window_too_long_dropped` | episode | `hours_remaining` above `data.max_window_hours` (48) — flc_window carries very large values from upstream data issues |
+| `window_too_long_dropped` | episode | `hours_remaining` above `data.max_window_hours` (**120**) — flc_window carries very large values from upstream data issues. Raised from 48 by the owner: 48 was cutting legitimate multi-day windows, not only defects |
 | `below_cost_dropped` | episode | any hour whose OFFERED price is under cost — legacy already violated the floor, so the episode is not evidence about a system that cannot. Test `original_price × (1 − discount)`, NEVER `applied_price`: the source zeroes that on zero-sale rows (~78% of rows), so a filter reading it is blind on exactly those and below-cost hours survive to be rejected one-by-one at decision time |
 | `non_priceable_dropped` | episode | `cost >= original_price`, i.e. `d_max <= 0`: no feasible tier exists |
 | `units_gt_inventory_dropped` | episode | sales exceed the inventory on hand |

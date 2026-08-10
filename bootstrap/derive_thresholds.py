@@ -113,14 +113,13 @@ def _daily_series(d):
     ep = d.sort_values(["date", "hour_of_day"]).groupby("episode_id").agg(
         date=("date", "first"),
         start_inv=("starting_inventory", "first"),
-        end_start_inv=("starting_inventory", "last"),
-        end_sold=("units_sold", "last"),
-        end_hours_remaining=("hours_remaining", "last"),
         sold=("units_sold", "sum"))
-    # scrap only where the window ran out; a truncated episode's leftover is
-    # unknown, and the noise floor must not be measured on an invented number
-    ep["end_inv"] = episodes.scrap_units(
-        ep.end_hours_remaining, ep.end_start_inv, ep.end_sold)
+    # An episode that ended with stock on hand disposed of it. Only the ones
+    # sitting at the extract boundary have an unknown outcome, and the noise
+    # floor must not be measured on an invented number -- but it must not be
+    # measured on a sliver of the population either, which is what keying
+    # scrap to the nominal counter did.
+    ep["end_inv"] = episodes.scrap_units(d)
     ep = ep[ep.end_inv.notna()]
     rev = ((d.offered_price * d.units_sold).groupby(d.episode_id).sum()
            .rename("revenue"))
@@ -202,12 +201,8 @@ def control_arm_noise(d, cfg):
 
     ep = d.sort_values(["date", "hour_of_day"]).groupby("episode_id").agg(
         date=("date", "first"), sku_id=("sku_id", "first"), fc=("fc", "first"),
-        start_inv=("starting_inventory", "first"),
-        end_start_inv=("starting_inventory", "last"),
-        end_sold=("units_sold", "last"),
-        end_hours_remaining=("hours_remaining", "last"))
-    ep["scrap"] = episodes.scrap_units(ep.end_hours_remaining,
-                                       ep.end_start_inv, ep.end_sold)
+        start_inv=("starting_inventory", "first"))
+    ep["scrap"] = episodes.scrap_units(d)
     ep = ep[ep.scrap.notna()]
     rev = ((d.offered_price * d.units_sold).groupby(d.episode_id).sum()
            .rename("revenue"))

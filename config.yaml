@@ -31,7 +31,7 @@ data:
     # elapsed hour -- see prepare_data.assign_episode_ids, which is the
     # authoritative definition. NOT keyed by calendar date: 36-hour windows
     # are common and a date key splits one economic episode into three.
-  max_window_hours: 48                 # SET  upper bound on a plausible FLC
+  max_window_hours: 120                # SET  upper bound on a plausible FLC
     # window. flc_window carries occasional very large values from upstream
     # data issues; an episode claiming a window longer than this is not
     # trusted and is dropped whole (window_too_long_dropped in the waterfall).
@@ -39,6 +39,17 @@ data:
     # window before mu_ref prediction, so an unbounded counter would generate
     # unbounded synthetic rows. extend_to_window raises rather than hanging if
     # a frame ever reaches it above this bound.
+    # Raised 48 -> 120 by the owner: 48 was cutting legitimate multi-day
+    # windows, not just defects. Note the cost -- this bound also sizes the
+    # synthetic tail, so the widest window drives DP horizon and prediction
+    # work per episode.
+    # NOT a dial here: the boundary tolerance that decides which episodes have
+    # an UNKNOWN outcome is common.episodes.BOUNDARY_TOLERANCE_HOURS, a
+    # structural constant rather than a tuning surface. An episode whose last
+    # row sits within that of the extract's final hour may have been cut
+    # mid-window; every other episode that ends holding stock disposed of it,
+    # so its leftover IS scrap. Never key that rule to hours_remaining -- the
+    # counter is nominal and still positive on ~99.9% of final rows.
 
 reassessment_gates:                    # SET  section 8.1 phase-0 review gates
   max_share_non_explorable: 0.30       # above this, narrow the MVP to the

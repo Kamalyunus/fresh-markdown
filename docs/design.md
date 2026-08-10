@@ -276,7 +276,7 @@ a spurious short episode, which loses more than the episode does.
 | `null_category_dropped` | no category/subcategory — no reference discount, no dispersion cell |
 | `zero_base_price_dropped` | `original_price` still absent after fill-within-episode |
 | `negative_window_dropped` | any `hours_remaining < 0` |
-| `window_too_long_dropped` | window above `data.max_window_hours` (48) — the counter carries very large values from upstream data issues |
+| `window_too_long_dropped` | window above `data.max_window_hours` (**120**, raised from 48 — the shorter bound was cutting legitimate multi-day windows) — the counter carries very large values from upstream data issues |
 | `below_cost_dropped` | any hour whose **offered** price is under cost — tested on `original_price × (1 − discount)`, never `applied_price`, which the source zeroes on zero-sale rows |
 | `non_priceable_dropped` | `cost >= original_price`, so `d_max <= 0` and no tier is feasible |
 | `units_gt_inventory_dropped` | sales exceeding inventory on hand |
@@ -1183,8 +1183,9 @@ over-counted, which was the anti-conservative direction.
 window closes the source writes off whatever remains, so the last hour breaks
 the inventory chain by design: `ending_inventory == 0` regardless of whether
 it equals `starting_inventory − units_sold`. Verified upstream across 953K
-episodes — never positive there — and **~49.5% of episodes end by write-off**
-rather than clean sellout.
+episodes — never positive there. On the corrected extract **~13.5% of
+episodes end holding stock** (the rest sell out); an earlier ~49.5% figure
+came from a different extract and should not be quoted.
 
 Two failure modes follow, and both are silent:
 
@@ -1229,26 +1230,54 @@ because across a data gap the inventory jump would read as a restock.
 ### An episode is not as long as its window
 
 Rows stop at the window end **or at zero inventory, whichever comes first**,
-so an episode's row count is not its window length and a last row carrying
-`hours_remaining > 0` is usually a **sell-out**, not missing data. Three
-endings, and they are economically opposite:
+so an episode's row count is not its window length. Three endings, and they
+are economically opposite:
 
-| Ending | Test on the last row | Scrap | Measured share |
-| --- | --- | --- | --- |
-| `completed` | `hours_remaining == 0` | leftover inventory **is** scrapped | 85.4% |
-| `sold_out_early` | `hours_remaining > 0`, inventory 0 | none, by construction | 10.9% |
-| `truncated` | `hours_remaining > 0`, inventory left | **unknown** — no recorded window end | 3.7% |
+| Ending | Test on the last row | Scrap |
+| --- | --- | --- |
+| `completed` | stock on hand, and the row is **before the extract boundary** | leftover **is** disposed of — this is where essentially all scrap lives |
+| `sold_out_early` | inventory 0 | none, by construction |
+| `truncated` | stock on hand, and the row sits **at the extract boundary** | **unknown** — the episode may have been cut mid-window |
 
-Every scrap figure in the system used to take the last row's
-`ending_inventory` regardless, which charges the truncated episodes' unsold
-units to scrap on no evidence. `common.episodes` now classifies the ending
-once and returns scrap as **NaN** for truncated episodes, so a sum cannot
-silently treat unknown as zero; those episodes are excluded from scrap and IL
-aggregates and the excluded share is reported. This corrects `m6_il_pct` (the
-IL baseline), the replay's observed-world scrap, and `derive_thresholds` —
-which was measuring the guardrail noise floors on the contaminated series.
-`m11_episode_endings` reports the split and how much a naive scrap figure
-would have overstated.
+**The counter is not the end-of-window signal, and keying scrap to it was a
+serious error.** The first version of this classification tested
+`hours_remaining == 0` for `completed`. On production data that fires on
+**~0.1% of episodes**: `flc_window` is a *nominal* countdown and is still
+positive on essentially every final row. Measured across ~356K episodes,
+**13.4% end holding stock with the counter still positive** — and under the
+counter-keyed rule every one of them was classified `truncated` and dropped.
+The result was that **~99% of all real leftover was excluded from every
+scrap-bearing statistic**, with only a few hundred episodes contributing
+scrap at all.
+
+Confirmed with the business: **when a listing ends with stock on hand, those
+units are disposed of and counted as scrap**, whatever the nominal counter
+says. So the signal that an episode ended is its *listing ending* — the row
+stream stopping — and the only genuine uncertainty is at the **extract
+boundary**, where an episode may simply have been cut. `classify()` therefore
+takes the whole frame and derives the boundary from it, rather than accepting
+a caller's idea of where the data stops; truncation is now a sliver of the
+population rather than most of it.
+
+Two consequences worth being explicit about. First, the old rule's effect was
+**anti-conservative in measurement and conservative in reporting**: the
+observed-world IL baseline was missing nearly all of its scrap term, which
+understated the target the policy has to beat. Second, and worse, the two
+halves of the system disagreed — `bootstrap.measure` and `derive_thresholds`
+excluded those episodes while `pipeline.monitor` counted every one of them.
+The scrap noise floor was therefore measured on a few hundred episodes while
+the live monitor triggers on tens of thousands, which is the most likely
+explanation for the absurd 480%/153% daily floor and for the fact that no
+sane scrap threshold could be found. **A population mismatch between the
+floor and the trigger is the same class of defect as a smoothing mismatch,
+and both are now closed:** the monitor excludes episodes still running at the
+report edge, using the same tolerance constant.
+
+`m11_episode_endings` reports the split, plus
+`share_last_row_counter_at_zero` and
+`share_completed_with_counter_still_positive` — the two diagnostics that make
+this failure visible on any new extract instead of requiring someone to
+notice it.
 
 `validate_state` rejects any decision whose `mu_ref_path` length disagrees
 with `hours_remaining`, so a truncated planning horizon fails loudly instead

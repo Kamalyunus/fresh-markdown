@@ -192,11 +192,11 @@ def m6_il_pct(d):
         discount_cost=("discount_cost", "sum"),
         units_sold=("units_sold", "sum"),
     )
-    # scrap only where the window actually ran out. An episode that sold out
-    # early scrapped nothing; a truncated one has no recorded window end, so
-    # its leftover units are unknown -- charging them to scrap overstates IL.
-    ep["scrap_units"] = episodes.scrap_units(
-        ep.end_hours_remaining, ep.end_start_inv, ep.end_sold)
+    # An episode that sold out early scrapped nothing. One that ended with
+    # stock on hand disposed of it -- the listing ending IS the disposal,
+    # whatever the nominal counter says. Only an episode sitting at the
+    # extract boundary has an outcome we genuinely do not have.
+    ep["scrap_units"] = episodes.scrap_units(d)
     dropped = int(ep.scrap_units.isna().sum())
     ep = ep[ep.scrap_units.notna()]
     ep["il"] = ep.discount_cost + ep.cost * ep.scrap_units
@@ -277,18 +277,22 @@ def m8_entry_hour(d):
 def m11_episode_endings(d):
     """How episodes end, and how much scrap that leaves genuinely unknown.
 
-    Rows stop either when the window runs out or when inventory hits zero,
-    whichever comes first -- so a last row with hours_remaining > 0 is usually
-    a SELL-OUT, not missing data. The two must not be pooled: one scrapped
-    nothing by construction, the other has an unrecorded window end whose
-    leftover units are unknown. Only completed windows contribute scrap.
+    An episode ends when its listing ends. `hours_remaining` is nominal and is
+    usually still positive at that point, so it is NOT the end-of-window
+    signal -- keying scrap to it excluded almost all real waste. A last row
+    with stock on hand means those units were disposed of; only a last row
+    sitting at the extract boundary has an outcome we do not have.
+
+    Watch `share_last_row_counter_at_zero`. If it is near zero -- it was
+    ~0.001 on production -- any rule written against the counter is measuring
+    a rounding error.
     """
     if not d.episode_id.nunique():
         return "NOT RUN -- no episodes"
     out = episodes.ending_summary(d)
-    last = episodes.last_rows(d)
-    trunc = last[episodes.classify(last.hours_remaining, last.starting_inventory,
-                                   last.units_sold) == episodes.TRUNCATED]
+    last = episodes.last_rows(d).set_index("episode_id")
+    kind = episodes.classify(d)
+    trunc = last.loc[kind.index[kind == episodes.TRUNCATED]]
     out["median_hours_unrecorded_when_truncated"] = float(
         trunc.hours_remaining.median()) if len(trunc) else 0.0
     return out

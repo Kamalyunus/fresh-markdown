@@ -24,15 +24,30 @@ True leftover at the window close is therefore `max(0, starting_inventory -
 units_sold)` on the last row, never `ending_inventory`. That formula is also
 correct where the chain is honest, so it is the only one used here.
 
-  completed        hours_remaining reached 0. The window is over and the
-                   leftover IS scrapped. The only ending that contributes
-                   scrap.
-  sold_out_early   inventory hit zero with window time left. Scrap is zero
-                   because there is nothing left, not by assumption.
-  truncated        window time left AND stock left, but no more rows. The
-                   window's outcome is NOT IN THE DATA, so scrap is unknown
-                   and those episodes are excluded from scrap aggregates
-                   rather than counted as zero.
+WHAT ENDS AN EPISODE IS THE LISTING DISAPPEARING, NOT THE COUNTER REACHING
+ZERO. `hours_remaining` (`flc_window`) is a NOMINAL countdown and is usually
+still positive on the final row -- measured on production, only ~0.1% of
+episodes have a last row at zero while ~13% end with stock on hand and time
+nominally left. An earlier version of this module treated "counter reached
+zero" as the end-of-window signal, which classified ~99% of all leftover as
+UNKNOWN and excluded it from every scrap aggregate. Confirmed with the
+business: when a listing ends with stock on hand, those units are DISPOSED
+and counted as scrap, whatever the nominal counter says.
+
+So the row stream stopping is the end of the episode, and the only genuine
+uncertainty is at the EXTRACT BOUNDARY: an episode whose last row is the last
+hour in the data may simply have been cut mid-window.
+
+  completed        the listing ended with stock on hand, before the extract
+                   boundary. The leftover IS disposed of, and this is where
+                   essentially all scrap lives.
+  sold_out_early   inventory hit zero. Scrap is zero because there is nothing
+                   left, not by assumption.
+  truncated        stock left AND the last row sits at the extract boundary.
+                   The outcome is NOT IN THE DATA, so scrap is unknown and
+                   those episodes are excluded from scrap aggregates rather
+                   than counted as zero. This is now a boundary effect, a
+                   sliver of the population rather than most of it.
 """
 
 import numpy as np
@@ -61,53 +76,94 @@ def leftover_units(starting_inventory, units_sold):
     return pd.Series(out, index=idx)
 
 
-def classify(hours_remaining, starting_inventory, units_sold):
-    """Ending type per row of a last-rows frame."""
-    hr = np.asarray(hours_remaining, dtype=float)
-    left = leftover_units(starting_inventory, units_sold)
+BOUNDARY_TOLERANCE_HOURS = 1.0
+
+
+def timestamps(d):
+    """Row timestamps. date + hour_of_day, because a window crosses midnight."""
+    return pd.to_datetime(d.date) + pd.to_timedelta(d.hour_of_day, unit="h")
+
+
+def extract_boundary(d):
+    """Last hour present in the extract -- the only place truncation can hide.
+
+    Computed from the frame rather than passed in, so a caller cannot measure
+    one population's endings against another population's edge.
+    """
+    return timestamps(d).max()
+
+
+def classify(d, boundary=None, tolerance_hours=BOUNDARY_TOLERANCE_HOURS):
+    """Ending type per episode, indexed by episode_id.
+
+    Takes the WHOLE frame, not a last-rows frame: the boundary test needs the
+    extract's last timestamp, and deriving it inside removes the chance of
+    grading one population against another's edge.
+    """
+    last = last_rows(d)
+    boundary = extract_boundary(d) if boundary is None else boundary
+    left = leftover_units(last.starting_inventory, last.units_sold).to_numpy()
+    gap = (boundary - timestamps(last)).dt.total_seconds().to_numpy() / 3600.0
+    at_edge = gap <= tolerance_hours
     return pd.Series(
-        np.where(hr <= 0, COMPLETED,
-                 np.where(left.to_numpy() <= 0, SOLD_OUT_EARLY, TRUNCATED)),
-        index=left.index)
+        np.where(left <= 0, SOLD_OUT_EARLY,
+                 np.where(at_edge, TRUNCATED, COMPLETED)),
+        index=last.episode_id.to_numpy())
 
 
-def scrap_units(hours_remaining, starting_inventory, units_sold):
-    """Units scrapped, NaN where the window's outcome is not in the data.
+def scrap_units(d, boundary=None, tolerance_hours=BOUNDARY_TOLERANCE_HOURS):
+    """Units scrapped per episode, NaN where the outcome is not in the data.
 
     NaN propagates: a sum over a frame containing truncated episodes must be
     taken with the truncated ones dropped, not silently treated as zero.
     """
-    kind = classify(hours_remaining, starting_inventory, units_sold)
-    left = leftover_units(starting_inventory, units_sold)
+    last = last_rows(d)
+    kind = classify(d, boundary, tolerance_hours)
+    left = pd.Series(
+        leftover_units(last.starting_inventory, last.units_sold).to_numpy(),
+        index=last.episode_id.to_numpy())
     return left.where(kind == COMPLETED,
                       pd.Series(np.where(kind == SOLD_OUT_EARLY, 0.0, np.nan),
                                 index=kind.index))
 
 
-def ending_summary(d):
+def ending_summary(d, tolerance_hours=BOUNDARY_TOLERANCE_HOURS):
     """Share of each ending type, and the scrap at stake in the unknown one."""
     last = last_rows(d)
-    kind = classify(last.hours_remaining, last.starting_inventory,
-                    last.units_sold)
-    left = leftover_units(last.starting_inventory, last.units_sold)
+    boundary = extract_boundary(d)
+    kind = classify(d, boundary, tolerance_hours)
+    left = pd.Series(
+        leftover_units(last.starting_inventory, last.units_sold).to_numpy(),
+        index=last.episode_id.to_numpy())
+    hr = pd.Series(last.hours_remaining.to_numpy(),
+                   index=last.episode_id.to_numpy())
     counts = kind.value_counts()
     n = max(len(last), 1)
     return {
         "episodes": int(len(last)),
+        "extract_boundary": str(boundary),
+        "boundary_tolerance_hours": tolerance_hours,
         "shares": {k: round(float(counts.get(k, 0)) / n, 4)
                    for k in (COMPLETED, SOLD_OUT_EARLY, TRUNCATED)},
         "scrap_units_completed": int(left[kind == COMPLETED].sum()),
         "scrap_units_unknown_truncated": int(left[kind == TRUNCATED].sum()),
         "share_episodes_ending_by_write_off": round(float(
             ((kind == COMPLETED) & (left > 0)).mean()), 4),
+        # the diagnostic that caught the original misclassification: if the
+        # counter almost never reaches zero, any rule keyed to it is wrong
+        "share_last_row_counter_at_zero": round(float((hr <= 0).mean()), 4),
+        "share_completed_with_counter_still_positive": round(float(
+            ((kind == COMPLETED) & (hr > 0)).mean()), 4),
         "last_row_ending_inventory_ever_positive": bool(
             (last.ending_inventory > 0).any()),
         "note": ("Scrap is max(0, starting_inventory - units_sold) on the last "
                  "row, NOT ending_inventory, which the source zeroes when it "
-                 "writes off the remainder. If "
-                 "last_row_ending_inventory_ever_positive is false, the "
-                 "write-off convention is in force and any metric reading "
-                 "ending_inventory directly is reporting zero scrap."),
+                 "writes off the remainder. An episode ends when its listing "
+                 "ends, NOT when hours_remaining reaches zero -- the counter is "
+                 "nominal and usually still positive, so "
+                 "share_completed_with_counter_still_positive is expected to be "
+                 "large. Only episodes sitting at the extract boundary have an "
+                 "unknown outcome."),
     }
 
 
