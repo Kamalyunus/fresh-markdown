@@ -285,11 +285,15 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
         # rather than letting "0 violations" read as a proof over the window.
         gate["sampling_caveat"] = (
             f"gate measured on {len(groups):,} of {len(population):,} episodes "
-            f"(seed {seed}). The rates are sample estimates; the zero "
-            "cost-floor violation count is zero OVER THE SAMPLE, not a proof "
-            "over the window. Cost-floor safety is structural (the action set "
-            "cannot express a below-cost price) and separately unit-tested -- "
-            "this gate confirms it end-to-end, it does not establish it.")
+            f"({len(groups) / max(len(population), 1):.1%}, seed {seed}). The "
+            "rates are sample estimates -- at this size the standard error on "
+            "a rate near 0.99 is "
+            f"{(0.99 * 0.01 / max(len(groups), 1)) ** 0.5:.4f}, against the "
+            "0.01 the gate discriminates on. The zero cost-floor violation "
+            "count is zero OVER THE SAMPLE, not a proof over the window. "
+            "Cost-floor safety is structural (the action set cannot express a "
+            "below-cost price) and separately unit-tested -- this gate "
+            "confirms it end-to-end, it does not establish it.")
     gate["verdict"] = ("PASS -- proceed to exploit-only pilot (section 19)"
                        if all(g["pass"] for g in gate.values()
                               if isinstance(g, dict))

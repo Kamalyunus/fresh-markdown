@@ -241,18 +241,25 @@ monitoring:
   shadow_gate:                         # SET  section 19 phase-1 exit gate
     min_event_completeness: 0.99
     min_matched_decision_rate: 0.99
-    sample_episodes: 10000             # SET  0 = every episode. The gate reads
+    sample_episodes: 3000              # SET  0 = every episode. The gate reads
       # three rates and a violation count; a uniform episode sample estimates
-      # all of them, and at 10k episodes (~66k decisions on the production
-      # extract) the standard error on a rate near 0.99 is well under the
-      # 0.01 the gate discriminates on. Sampling happens BEFORE mu_ref
-      # prediction, so the cost scales with the sample, not the extract.
+      # all of them. Treating each EPISODE as one observation (conservative --
+      # decisions within an episode are correlated, so this understates the
+      # sample), the standard error on a rate near 0.99 is 0.18pp at 3,000 and
+      # 0.10pp at 10,000, against the 1.00pp the gate discriminates on. Both
+      # clear it by a wide margin, so 3,000 was chosen for run time: 10,000
+      # took long enough to discourage re-running after a change, and a gate
+      # nobody re-runs is worse than a slightly wider interval.
+      # Sampling happens BEFORE mu_ref prediction, so the cost scales with the
+      # sample, not the extract.
       # What it does NOT buy: "zero cost-floor violations" becomes zero over
       # the sample rather than over the window. That is acceptable because
       # cost-floor safety is structural -- the feasible action set cannot
       # express a below-cost price -- and separately unit-tested; the gate
-      # confirms the property end-to-end, it does not establish it. Set to 0
-      # for the final pre-launch run if a full sweep is wanted on the record.
+      # confirms the property end-to-end, it does not establish it. At 3,000
+      # the sample covers ~0.9% of the extract, so that caveat carries more
+      # weight than it did at 10,000 -- run `--max-episodes 0` once for the
+      # pre-launch record, where the full sweep is worth the wall clock.
   stop_conditions:
     duplicate_or_unmatched_rate: 0.01  # SET
     price_mismatch_rate: 0.01          # SET

@@ -1399,7 +1399,7 @@ python3 -m bootstrap.derive_thresholds --input data/prepared.parquet --mde 0.075
 # launch
 python3 -m bootstrap.init_posterior
 python3 -m pipeline.shadow --input data/prepared.parquet --out reports/shadow.json
-#   samples monitoring.shadow_gate.sample_episodes episodes (default 10k);
+#   samples monitoring.shadow_gate.sample_episodes episodes (default 3,000);
 #   --max-episodes 0 sweeps everything, for the final pre-launch record
 
 # daily production loop
