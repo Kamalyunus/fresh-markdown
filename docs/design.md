@@ -604,9 +604,9 @@ IL cost of a perturbation both scale as `mu × (log price ratio)²`, so
 **information per won is approximately constant** — there is no clever
 targeting to do, only a budget to respect. High-volume SKUs automatically
 receive small perturbations because their loss curve is steeper. Measured
-starting point on production data: `tau` = ₩409.87 (the 11.4th percentile of
-the Q-value spread), implying ₩1,271/day of exploration spend against a
-₩1,271/day budget on the replay sample.
+starting point on production data: `tau` = **₩447.78**, derived from the
+gate-passing calibrated backtest as the Q-spread quantile whose implied daily
+spend matches the budget.
 
 ### 5.9 Posterior store — small, atomic, exactly-once
 
@@ -859,10 +859,10 @@ direction those corrections predicted.
 | DP vs legacy mean discount | 0.1285 vs 0.2935 — the DP opens far shallower and holds |
 | Intra-episode deepening | 0% of episodes; median \|ε\| needed 2.429 against 1.0 in use |
 | Correlation `rho` / forced hours / implied deff | 0.3103 / 8.563 / **3.347** (fitted-residual basis, `artifacts/rho.json`) |
-| IL% clustered SE | **0.000875** |
-| A/B minimum detectable effect | **3.05% at 2 weeks** (9 blocks); every candidate duration clears 7.5% |
+| IL% clustered SE | **0.002915** (SKU × FC, 71,559 units) |
+| A/B minimum detectable effect | **6.75% at 2 weeks** (9 blocks); the duration curve is flat — 6 weeks reaches only 5.74% |
 | Elasticity prior | **fallback −1.0 ± 0.6 for all 16 categories — 0 brackets accepted** |
-| Exploration `tau` | ₩409.87 (11.4th percentile of the Q-spread); implied spend ₩1,230.9/day against a ₩1,230.2 budget |
+| Exploration `tau` | ₩447.78, pasted from the gate-passing calibrated backtest |
 | Would-be learning yield (shadow) | 1.09 bounded updates from the window; 1,837 episodes per update |
 | Guardrail 3σ noise, trailing-mean basis | realised margin **13.63%** (robust 14.94%, well behaved); scrap **480%** raw / **153%** robust — outlier-dominated and unusable, see section 12 |
 
@@ -1024,28 +1024,38 @@ a 2-week duration.** The tool measures the SE **empirically on actual T-week
 blocks of history** rather than scaling by √T (which is optimistic under
 unit-level clustering). On the corrected extract:
 
-| Duration | Detectable MDE (relative) | Blocks measured |
-| --- | --- | --- |
-| **2 weeks** | **3.05%** | 9 |
-| 3 weeks | 2.74% | 6 |
-| 4 weeks | 3.03% | 4 |
-| 5 weeks | 2.79% | 4 |
-| 6 weeks | 1.99% | 3 |
-| 8 weeks | 2.34% | 2 |
-| 10 weeks | 2.12% | 2 |
-| 12 weeks | 1.89% | 1 |
+| Duration | Detectable MDE (relative) | √T would predict | Blocks measured |
+| --- | --- | --- | --- |
+| **2 weeks** | **6.75%** | — | **9** |
+| 3 weeks | 6.17% | 5.51% | 6 |
+| 4 weeks | 6.31% | 4.77% | 4 |
+| 5 weeks | 6.04% | 4.27% | 4 |
+| 6 weeks | 5.74% | 3.90% | 3 |
+| 8 weeks | 7.62% | 3.38% | 2 |
+| 10 weeks | 5.89% | 3.02% | 2 |
+| 12 weeks | 7.36% | 2.76% | 1 |
 
-**A/B power is no longer a constraint.** Every candidate duration clears
-7.5%, and two weeks detects 3.05%. This reverses the earlier reading, in
-which the clustered SE looked 6× the original assumption and the experiment
-looked marginal; the corrected extract measures **0.000875**, and the
-difference is the same section 12a fixes — IL that counts scrap is a larger
-and more stable quantity than IL that silently did not. Trust the 2–4 week
-rows, which rest on 4–9 blocks; from 6 weeks on the block count collapses to
-1–3 and those rows are mostly noise. Recommend committing to **7.5% at 2
-weeks (14 days)**, which leaves real headroom rather than sitting on the
-detection limit, and take the extra precision as insurance against a smaller
-true effect.
+**The striking result is that the curve is flat.** Two weeks detects 6.75%;
+six weeks — three times the calendar — reaches 5.74%, where √T promised 3.90%.
+Duration buys almost nothing here. The variance is dominated by spread
+*between* the 71,559 SKU × FC units, and those same units recur every week, so
+extra weeks add correlated observations rather than new clusters. Past six
+weeks the block count falls to 1–3 and the rows are noise: eight weeks
+measures **worse** than two. Trust the 2–4 week rows only.
+
+**Power is adequate, but not by the margin an earlier draft of this document
+claimed.** That draft read the clustered SE as 0.000875 and called the
+experiment comfortable. It measures **0.002915** once scrap is counted
+properly — IL that carries a real scrap term is *noisier*, not more stable,
+because scrap is large and lumpy per episode. The earlier low variance was an
+artifact of a metric that was silently dropping ~99% of its own scrap.
+
+Recommend committing to **7.5% at 2 weeks (14 days)**. It is met with 0.75pp
+to spare, which is thin against the stated target — but the target is ours to
+choose, and the number that matters is the comparison to the effect: the
+replay measures a **38%** policy effect against a **6.75%** detection limit, a
+**5.6× margin**. Waiting is not the lever; if more power were genuinely
+needed, the answer would be more SKU × FC units in the pilot, not more weeks.
 
 **Scrap-deterioration stop threshold — the daily basis has no usable
 threshold; set it against the control arm instead.** The intent is unchanged:
@@ -1345,8 +1355,9 @@ comparison stays like-for-like.
 
 **Every figure in section 8 is from the bootstrap re-run after these
 corrections**, and they moved as predicted. The IL baseline fell to 32.3% and
-became far more stable once scrap was counted properly (clustered SE 0.002383
-→ 0.000875, which is what turned the A/B from marginal into comfortable);
+moved with it; the clustered SE went the OTHER way once scrap was counted in
+full — 0.000875 → **0.002915**, because a real scrap term is lumpy — so the
+A/B is adequately powered rather than comfortable;
 `deff` fell to 3.347 as whole windows replaced fragments; and the DP's
 measured advantage tripled to 38.0% once the planner stopped being handed a
 horizon shortened by each episode's own realised sellout. One moved against
@@ -1359,17 +1370,20 @@ previously accepted MEAT, now fails for all 16 categories.
 | --- | --- | --- | --- | --- |
 | 1 | **Learning throughput** — and the deepening bar in risk 6 sets how far the posterior must travel, not just how fast | Per-outcome information is small (demand ~0.5–1/hr × squared log-price-ratio ~0.01–0.04, ÷ deff 3.347); prior is wide fallback for **all 16** categories; monotonicity concentrates identification at entry | Shadow now emits `learning_yield_would_be` — effective information per episode, episodes per bounded update — so weeks-to-convergence is read off before the pilot, not guessed. Two floors bind separately: evidence (episodes needed) and calendar (the 0.15 step cap with one human-gated update per day means ≥6 days to move the mean 1.0 → 1.9 however much evidence arrives). Levers: raise the budget share, coarser cells. A 21-day flat-posterior alert catches a dead loop | Eng + owner |
 | 2 | **Frozen-model drift over Sep–Dec** (seasonality incl. Chuseok; no trend features) | Drift already measured: 1.144 → 0.990 → 1.095 across windows; every economic quantity is denominated in the demand prediction | Final retrain immediately before the launch freeze (gate re-checked); daily drift ratio in shadow and production; pre-register a mid-window recalibration rule now so a drift response is not improvised | Eng |
-| 3 | **A/B power** — no longer the binding constraint | Corrected extract measures SE 0.000875 (was 0.002383 pre-correction, against an original assumption of 0.000383); 3.05% detectable at 2 weeks, every candidate duration clears 7.5% | Empirical duration table from the derivation tool; owner commits to a feasible (effect, duration) pair before launch | Owner |
+| 3 | **A/B power** — adequate, and duration is not the lever | SE 0.002915 once scrap is counted in full; 6.75% detectable at 2 weeks against a measured 38% effect (5.6×). The duration curve is nearly flat — 6 weeks reaches only 5.74% where √T promised 3.90%, because variance is between-unit and the same units recur weekly | Empirical duration table from the derivation tool; owner commits to a feasible (effect, duration) pair before launch. If more power is ever needed the lever is more SKU × FC units, not more weeks | Owner |
 | 4 | **Metric divergence at readout** — planner optimises IL, business reads IL% | Worked example in 2.3; likeliest A/B outcome is the escalation row | Both metrics + denominators in every cut; divergence flag monitored; decision table pre-committed | Owner |
 | 5 | **Single-elasticity misspecification** — threshold-shaped price response averaged into one exponent | Discount-gap diagnostics are noisy/non-monotonic | Residuals logged by discount region so the failure is visible before it is modelled; piecewise response in phase 2 | Eng |
 | 6 | **Enter-and-hold at the launch prior** — deepening pays only when \|ε\| > (1−d)/(γ−d), measured median **2.429**, against a prior of 1.0 | Backtest `intra_episode_deepening`: 0% of episodes clear the bar, DP deepens in none of them; mean discount 0.1285 vs legacy 0.2935; clearance −0.97pp | The gap is WIDER than first measured (2.429, not 1.89), so the posterior must travel further before the policy changes shape. Correct behaviour given the prior, not a bug — but pre-brief the pilot on lower clearance and higher scrap, and track the threshold gap every run. Exploration is the only thing that closes it; a wider action set cannot | Eng + owner |
 | 7 | **Multi-day episode fix invalidates the measured baseline** (section 12a) — 36-hour windows are common, so every episode-terminal figure was measured under a broken key | Monotonicity reset mid-window; DP terminal value fired 2-3x per window; carried inventory counted as scrap at each seam | Fixed at the source: episodes are now maximal runs with a consistent `hours_remaining` countdown, split assignment and the feature leakage guard follow the episode. **Full bootstrap must be re-run before any number is quoted** | Eng |
-| 8 | **Model under-prediction from censored training labels** | Anchor under-prediction with median starting inventory ~2 and ~12.6% stocked-out hours | First phase-2 priority: censored-count training | Eng |
+| 8 | **Episode fragmentation from missing source hours** — a single absent hour splits one economic episode into two | Worked example: a BABY FOOD episode runs 06:00–15:00, hour 16 is absent, and the feed resumes at 17:00 with `flc_window` stepping 33→31. The clock and the counter still AGREE (both step 2), but `assign_episode_ids` requires both to step exactly 1, so it starts a new episode. Measured: **2.61% of episodes (8,711) end with no closure sentinel**, holding **27,105 units of ambiguous scrap** against 111,694 counted; median 21 hours nominally unrecorded | Conservative today — ambiguous leftover is excluded rather than invented, and the later fragment usually carries the real outcome, so scrap TOTALS are close to right. What is distorted: episode counts are inflated, and the second fragment's first hour looks like an entry hour when it is mid-episode, which is dirt in exactly the rows section 9.5 identification depends on. Fix is to stitch where clock and counter agree (capped), with interior synthetic rows so `validate_state`'s horizon invariant still holds — deferred to after the launch decision because it changes the analysis population again | Eng |
+| 9 | **Model under-prediction from censored training labels** | Anchor under-prediction with median starting inventory ~2 and ~12.6% stocked-out hours | First phase-2 priority: censored-count training | Eng |
 
 ## 14. Phase 2 (deferred until the loop demonstrably works)
 
 Priority-ordered by what bootstrap revealed: censored-count model training
-(risk 6); per-category prior acceptance (currently any failure falls the
+(risk 9); episode stitching across missing source hours (risk 8 — relax the
+contiguity rule from "both step exactly one" to "clock and counter agree",
+capped, with interior synthetic rows); per-category prior acceptance (currently any failure falls the
 whole prior back, the conservative reading — and on the corrected extract
 every category fails, so nothing is lost by it today); subcategory learning cells with leave-one-out
 pooling; automated posterior updates with criteria drafted from observed
