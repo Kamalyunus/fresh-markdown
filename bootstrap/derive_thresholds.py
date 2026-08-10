@@ -137,6 +137,44 @@ def _daily_series(d):
     return day
 
 
+def _sigma_summary(rel):
+    """3-sigma and robust 3-sigma of a relative-deviation series.
+
+    Shared by both bases so the two floors are computed identically and cannot
+    drift apart. `outlier_dominated` marks a raw sigma inflated by a handful of
+    low-denominator days; where it is set, the robust figure is the one to set
+    a threshold against.
+    """
+    sigma = float(rel.std(ddof=1))
+    mad = float(np.median(np.abs(rel - np.median(rel))))
+    sigma_robust = 1.4826 * mad
+    return {
+        "daily_rel_dev_sigma": round(sigma, 4),
+        "three_sigma": round(3 * sigma, 4),
+        "daily_rel_dev_sigma_robust": round(sigma_robust, 4),
+        "three_sigma_robust": round(3 * sigma_robust, 4),
+        "outlier_dominated": bool(sigma_robust > 0 and sigma > 2 * sigma_robust),
+    }
+
+
+def _floor_of(block):
+    """The floor a threshold must clear: robust where the raw sigma is
+    outlier-dominated, otherwise the raw one. Returns (floor, label)."""
+    if "three_sigma" not in block:
+        return None, None
+    if block.get("outlier_dominated"):
+        return block["three_sigma_robust"], "robust 3-sigma"
+    return block["three_sigma"], "3-sigma"
+
+
+def _smooth(series, days):
+    """Average `days` days before comparing -- the same transform
+    pipeline.monitor.deterioration applies. On a low-base series the daily
+    relative swing can exceed the failure the stop condition must detect."""
+    s = series.dropna()
+    return (s.rolling(days, min_periods=days).mean().dropna() if days > 1 else s)
+
+
 def control_arm_noise(d, cfg):
     """Same-day treatment-vs-control noise -- the basis the monitor actually
     uses once the A/B is live.
@@ -147,6 +185,15 @@ def control_arm_noise(d, cfg):
     common day effect entirely. On a series as volatile as daily scrap the two
     floors are not comparable, and setting an A/B threshold from the trailing
     figure grades against the wrong yardstick.
+
+    Both arms are SMOOTHED over deterioration_smoothing_days BEFORE they are
+    differenced, in that order, because that is exactly what
+    pipeline.monitor.deterioration does on this basis. Measuring the floor on
+    an unsmoothed daily difference and then evaluating the threshold against a
+    7-day-smoothed one overstates the floor by up to ~sqrt(7): a scrap
+    threshold set that way sits several times above its true operating noise
+    and, with the persistence rule on top, cannot fire at all. Smoothing must
+    be applied on BOTH sides or the guardrail is inert.
 
     Arm assignment uses the same stable SKU x FC hash as the monitor, so the
     split measured here is the split that will run.
@@ -183,27 +230,100 @@ def control_arm_noise(d, cfg):
     if set(arms) < {"treatment", "control"}:
         return {"note": "one arm empty -- cannot measure a same-day basis"}
 
-    out = {"basis": "same-day treatment vs control, arm hash as in monitor",
+    sm = cfg["monitoring"]["stop_conditions"]["deterioration_smoothing_days"]
+    out = {"basis": ("same-day treatment vs control, each arm smoothed over "
+                     "deterioration_smoothing_days before differencing, "
+                     "arm hash as in monitor"),
            "allocation": alloc}
-    for metric, worse_high in (("scrap_rate", True), ("margin_rate", False)):
-        t, c = arms["treatment"][metric], arms["control"][metric]
+    for metric, worse_high, key in (("scrap_rate", True, "scrap"),
+                                    ("margin_rate", False, "margin")):
+        smooth = sm[key]
+        # smooth each arm FIRST, then intersect and difference -- the order
+        # pipeline.monitor.deterioration uses. Reversing it, or skipping the
+        # smoothing, measures a floor the live comparison never sees.
+        t = _smooth(arms["treatment"][metric], smooth)
+        c = _smooth(arms["control"][metric], smooth)
         common = t.index.intersection(c.index)
         t, c = t.loc[common], c.loc[common]
         rel = ((t / c - 1) if worse_high else (1 - t / c))
         rel = rel.replace([np.inf, -np.inf], np.nan).dropna()
         if len(rel) < 8:
-            out[metric] = {"days": int(len(rel)), "note": "too few paired days"}
+            out[metric] = {"days": int(len(rel)), "smoothing_days": smooth,
+                           "note": f"too few paired days after {smooth}-day "
+                                   "smoothing"}
             continue
-        mad = float(np.median(np.abs(rel - np.median(rel))))
         out[metric] = {
             "days": int(len(rel)),
-            "three_sigma": round(3 * float(rel.std(ddof=1)), 4),
-            "three_sigma_robust": round(3 * 1.4826 * mad, 4),
+            "smoothing_days": smooth,
+            **_sigma_summary(rel),
             "median_gap": round(float(np.median(rel)), 4),
         }
     out["note"] = ("Set the A/B-phase threshold against THIS floor. The "
                    "trailing-mean floor in guardrail_noise applies only "
-                   "before an A/B is running, where no control arm exists.")
+                   "before an A/B is running, where no control arm exists. "
+                   "One config value serves both phases, so it must clear the "
+                   "LARGER of the two -- see guardrail_threshold_recommendation.")
+    return out
+
+
+def recommend_thresholds(trailing, control_arm, cfg):
+    """Per metric: the floor from each basis, which one binds, and whether the
+    configured threshold clears it.
+
+    A single config value is evaluated against the trailing basis before the
+    A/B and the control-arm basis during it, so it must sit above BOTH. Grading
+    it against only one is how a threshold ends up either false-firing in the
+    pilot or sitting inert through the A/B.
+    """
+    sc = cfg["monitoring"]["stop_conditions"]
+    out = {}
+    for metric, key in (("scrap_rate", "scrap_deterioration_pct"),
+                        ("margin_rate", "margin_deterioration_pct")):
+        t_floor, t_label = _floor_of(trailing.get(metric, {}))
+        c_floor, c_label = _floor_of((control_arm or {}).get(metric, {})
+                                     if isinstance(control_arm, dict) else {})
+        known = [(f, lab, basis) for f, lab, basis in
+                 ((t_floor, t_label, "trailing"),
+                  (c_floor, c_label, "control_arm")) if f is not None]
+        threshold = sc[key]
+        rec = {"config_key": f"monitoring.stop_conditions.{key}",
+               "current_threshold": threshold,
+               "trailing_floor": t_floor,
+               "control_arm_floor": c_floor}
+        if not known:
+            rec["verdict"] = "insufficient history on either basis"
+            out[metric] = rec
+            continue
+        binding, label, basis = max(known, key=lambda x: x[0])
+        rec.update(binding_floor=binding, binding_basis=basis,
+                   binding_label=label)
+        if c_floor is None:
+            rec["caveat"] = ("control-arm floor not measurable yet; re-derive "
+                             "before the A/B starts -- the binding floor can "
+                             "change basis once both arms carry data")
+        if threshold is None:
+            rec["verdict"] = (f"null -- owner should set it at or above the "
+                              f"{label} {basis} floor {binding}")
+        elif threshold < binding:
+            rec["verdict"] = (f"TOO TIGHT -- {threshold} is below the {label} "
+                              f"{basis} floor {binding}; it will false-fire "
+                              "and silently suspend exploration")
+        elif binding > 0 and threshold > 3 * binding:
+            # clearing the floor is necessary, not sufficient: a threshold far
+            # above it cannot fire either, and the persistence rule raises the
+            # bar further. Say so rather than printing OK.
+            rec["verdict"] = (
+                f"CLEARS THE FLOOR BUT LIKELY INERT -- {threshold} is "
+                f"{round(threshold / binding, 1)}x the {label} {basis} floor "
+                f"{binding}, and the {sc['persistence_days']}-day persistence "
+                "rule sits on top. A guardrail this loose will not fire; "
+                "consider a different metric or an absolute floor instead")
+        else:
+            rec["verdict"] = (f"OK -- above the {label} {basis} floor {binding}")
+        out[metric] = rec
+    out["note"] = ("The binding floor is the LARGER of the two bases because "
+                   "one config value is graded against the trailing mean "
+                   "before the A/B and against the control arm during it.")
     return out
 
 
@@ -214,13 +334,11 @@ def guardrail_noise(d, cfg):
     day = _daily_series(d)
 
     def noise(series, smooth=1):
-        s = series.dropna()
         # average `smooth` days BEFORE comparing. On a low-base series the
         # daily relative swing can exceed the failure it must detect; sigma
         # falls ~1/sqrt(smooth), and the trailing baseline is shifted by the
         # same amount so the two windows never overlap.
-        if smooth > 1:
-            s = s.rolling(smooth, min_periods=smooth).mean().dropna()
+        s = _smooth(series, smooth)
         if len(s) < window + 7:
             return {"days": int(len(s)),
                     "note": f"needs at least {window + 7} days"}
@@ -230,31 +348,26 @@ def guardrail_noise(d, cfg):
         # of the estimator rather than a property of the series
         trailing = s.rolling(window, min_periods=window).mean().shift(smooth)
         rel_dev = (s / trailing - 1).dropna()
-        sigma = float(rel_dev.std(ddof=1))
         # a plain std over a ratio series is dominated by any day whose
         # denominator is small -- a single low-volume day can move it by an
         # order of magnitude. The MAD-based estimate is the one to set a
         # threshold against when the two disagree.
-        mad = float(np.median(np.abs(rel_dev - np.median(rel_dev))))
-        sigma_robust = 1.4826 * mad
+        #
+        # units: these are RELATIVE deviations, so 0.1336 means 13.36% and
+        # 9.1386 means 914%. A value above 1.0 is not a percentage point --
+        # it is a series whose daily swing exceeds its own level.
         out = {
             "days": int(len(s)),
             "days_scored": int(len(rel_dev)),
             "smoothing_days": smooth,
             "mean_level": round(float(s.mean()), 4),
-            "daily_rel_dev_sigma": round(sigma, 4),
-            "three_sigma": round(3 * sigma, 4),
-            "daily_rel_dev_sigma_robust": round(sigma_robust, 4),
-            "three_sigma_robust": round(3 * sigma_robust, 4),
+            **_sigma_summary(rel_dev),
             "p95_abs_rel_dev": round(float(np.percentile(np.abs(rel_dev), 95)), 4),
             "worst_observed_rel_dev": round(float(rel_dev.abs().max()), 4),
         }
-        # units: these are RELATIVE deviations, so 0.1336 means 13.36% and
-        # 9.1386 means 914%. A value above 1.0 is not a percentage point --
-        # it is a series whose daily swing exceeds its own level.
-        out["outlier_dominated"] = bool(sigma_robust > 0
-                                        and sigma > 2 * sigma_robust)
         if out["outlier_dominated"]:
+            sigma = out["daily_rel_dev_sigma"]
+            sigma_robust = out["daily_rel_dev_sigma_robust"]
             out["note"] = (
                 f"raw 3-sigma ({out['three_sigma']}) is "
                 f"{round(sigma / sigma_robust, 1)}x the robust estimate "
@@ -269,25 +382,32 @@ def guardrail_noise(d, cfg):
     margin = noise(day.margin_rate, sm["margin"])
 
     def verdict(block, key):
+        """Grades against the TRAILING floor only -- the basis that applies
+        before an A/B is running. Clearing it is necessary, not sufficient:
+        the same config value is graded against the control arm once the A/B
+        starts, so the sign-off number is the one in
+        guardrail_threshold_recommendation, not this line."""
         threshold = sc[key]
-        if "three_sigma" not in block:
+        floor, basis = _floor_of(block)
+        if floor is None:
             return "insufficient history to validate"
-        # against the robust floor where the raw one is outlier-dominated,
-        # otherwise they are the same number
-        floor = (block["three_sigma_robust"] if block.get("outlier_dominated")
-                 else block["three_sigma"])
-        basis = "robust 3-sigma" if block.get("outlier_dominated") else "3-sigma"
         if threshold is None:
             return (f"{key} is null -- owner should set it at or above the "
-                    f"{basis} floor {floor}")
+                    f"trailing-basis {basis} floor {floor}, then check it "
+                    "against the control-arm floor too")
         if threshold >= floor:
-            return f"OK -- threshold above the {basis} daily noise floor {floor}"
-        return (f"TOO TIGHT -- {threshold} is below the {basis} noise floor "
-                f"{floor}; it will false-fire and silently suspend exploration")
+            return (f"clears the trailing-basis {basis} floor {floor} -- see "
+                    "guardrail_threshold_recommendation for the binding one")
+        return (f"TOO TIGHT -- {threshold} is below the trailing-basis {basis} "
+                f"floor {floor}; it will false-fire and silently suspend "
+                "exploration")
 
     return {
-        "basis": ("daily ratio-of-sums series over all episodes; relative "
-                  f"deviation vs trailing {window}-day mean"),
+        "basis": ("daily ratio-of-sums series over all episodes, smoothed over "
+                  "deterioration_smoothing_days; relative deviation vs "
+                  f"trailing {window}-day mean. Applies BEFORE the A/B; once "
+                  "both arms carry data the monitor switches to the control-arm "
+                  "basis and so must the threshold"),
         "scrap_rate": {**scrap,
                        "config_key": "monitoring.stop_conditions.scrap_deterioration_pct",
                        "verdict": verdict(scrap, "scrap_deterioration_pct")},
@@ -322,10 +442,14 @@ def main():
     d = pd.read_parquet(args.input)
 
     se_by_T = empirical_se_by_duration(d, cfg)
+    trailing = guardrail_noise(d, cfg)
+    control = control_arm_noise(d, cfg)
     report = {
         "ab_duration": duration_table(se_by_T, cfg, mde),
-        "guardrail_noise": guardrail_noise(d, cfg),
-        "guardrail_noise_control_arm_basis": control_arm_noise(d, cfg),
+        "guardrail_noise": trailing,
+        "guardrail_noise_control_arm_basis": control,
+        "guardrail_threshold_recommendation": recommend_thresholds(
+            trailing, control, cfg),
     }
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
@@ -349,11 +473,19 @@ def main():
     for key in ("scrap_rate", "margin_rate"):
         block = gn[key]
         sigma3 = block.get("three_sigma", "n/a")
-        line = f"{key:12s}: 3-sigma daily noise {sigma3}"
+        line = f"{key:12s}: trailing 3-sigma {sigma3}"
         if block.get("outlier_dominated"):
             line += (f" (OUTLIER-DOMINATED; robust "
                      f"{block['three_sigma_robust']})")
-        print(f"{line} -> {block['verdict']}")
+        print(line)
+    # the sign-off line: both floors side by side and which one binds
+    for key, rec in report["guardrail_threshold_recommendation"].items():
+        if not isinstance(rec, dict):
+            continue
+        print(f"{key:12s}: trailing {rec.get('trailing_floor')} | "
+              f"control-arm {rec.get('control_arm_floor')} | "
+              f"binding {rec.get('binding_floor')} "
+              f"({rec.get('binding_basis')}) -> {rec['verdict']}")
     print(f"wrote {args.out}")
 
 

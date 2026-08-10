@@ -1070,6 +1070,28 @@ the yardstick the monitor will actually apply. **Set
 extract, and treat the pre-A/B phases as guarded by the scrap *level* review
 in the pilot readout rather than by an automatic daily trigger.**
 
+Two corrections to how that floor is read, both of which change the number:
+
+**The control-arm floor is measured on the smoothed series.** The monitor
+averages each arm over `deterioration_smoothing_days` (7 for scrap) and only
+then differences them. The first version of `control_arm_noise` differenced
+raw daily arms, which measures a floor up to ~√7 wider than the comparison
+the monitor performs — so a threshold set from it sits several times above
+its true operating noise, and with the 2-day persistence rule on top it
+cannot fire at all. Both arms are now smoothed before differencing, in that
+order.
+
+**One config value serves both phases, so it must clear the larger of the
+two floors.** `guardrail_threshold_recommendation` reports the trailing floor,
+the control-arm floor, which one binds, and the verdict. It also stamps
+`CLEARS THE FLOOR BUT LIKELY INERT` on anything more than 3× the binding
+floor — because clearing the floor is necessary, not sufficient, and a
+guardrail that cannot fire is an absent one rather than a conservative one.
+If the re-derived scrap number is still large enough to trip that verdict,
+the honest response is a different instrument — a longer smoothing window, an
+absolute scrap-unit floor, or monitored-and-escalated rather than
+auto-stopped — not a number that technically passes.
+
 **Margin-deterioration stop threshold — recommend 15% relative** vs control,
 with a 2-day persistence rule. This series is well behaved: 3σ noise
 **13.63%**, robust **14.94%**, *not* outlier-dominated. 15% clears the raw

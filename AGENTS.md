@@ -261,13 +261,31 @@ report carries two:
   its own level — **no scrap threshold on this basis is both safe and
   useful**, and quoting one is a mistake.
 - `guardrail_noise_control_arm_basis` — **same-day treatment vs control**,
-  using the identical arm hash as `pipeline.monitor`. This is what the
-  monitor uses once both arms are populated, and it cancels the day effect
-  that dominates the scrap series. Set the A/B-phase thresholds from here.
+  using the identical arm hash as `pipeline.monitor`, and each arm smoothed
+  over `deterioration_smoothing_days` **before** the two are differenced,
+  exactly as the monitor does it. This is what the monitor uses once both
+  arms are populated, and it cancels the day effect that dominates the scrap
+  series.
 
-A margin threshold under ~0.136 fires on ordinary days and silently suspends
-exploration, which is the product. Buy sensitivity back with
-`persistence_days`, never by going under the floor.
+Both bases are smoothed the same way the monitor smooths, and both must be
+consulted: **one config value is graded against the trailing mean before the
+A/B and against the control arm during it, so it has to clear the larger of
+the two floors.** Read that off
+`guardrail_threshold_recommendation`, which reports both floors, names the
+binding one, and stamps the verdict. Do not sign a threshold off the
+`guardrail_noise` line alone — it only speaks for the pre-A/B phase.
+
+Two verdicts are blocking, not advisory:
+
+- `TOO TIGHT` — below the binding floor. Fires on ordinary days and silently
+  suspends exploration, which is the product. A margin threshold under ~0.136
+  is in this band. Buy sensitivity back with `persistence_days`, never by
+  going under the floor.
+- `CLEARS THE FLOOR BUT LIKELY INERT` — more than 3× the binding floor. Such
+  a threshold passes every check and still cannot fire, especially with the
+  persistence rule on top. A guardrail that cannot fire is not a conservative
+  setting, it is an absent one: change the metric or add an absolute floor
+  instead of accepting the number.
 
 ## What counts as a usable episode
 

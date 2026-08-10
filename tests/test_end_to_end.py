@@ -420,6 +420,13 @@ def test_derive_thresholds_cli(workspace):
         assert row["se_arm_difference"] > row["se_pooled"]
     assert "scrap_rate" in report["guardrail_noise"]
     assert "margin_rate" in report["guardrail_noise"]
+    # the sign-off block: both bases side by side, so a threshold can never be
+    # signed off against the trailing floor alone
+    rec = report["guardrail_threshold_recommendation"]
+    for metric in ("scrap_rate", "margin_rate"):
+        assert "trailing_floor" in rec[metric]
+        assert "control_arm_floor" in rec[metric]
+        assert rec[metric]["verdict"]
 
 
 def test_state_rejected_not_priced(workspace):

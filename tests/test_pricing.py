@@ -473,3 +473,85 @@ def test_noise_floor_and_monitor_use_the_same_smoothing():
     # windows never overlap
     assert ".shift(smooth)" in inspect.getsource(dt.guardrail_noise)
     assert ".shift(smooth)" in inspect.getsource(monitor.guardrail_series)
+
+    # the CONTROL-ARM basis needs the same treatment: the monitor smooths each
+    # arm before differencing whenever both are populated, so a floor measured
+    # on unsmoothed daily differences grades the threshold against noise the
+    # live comparison never sees -- and overstates it by up to ~sqrt(smooth)
+    assert "deterioration_smoothing_days" in inspect.getsource(dt.control_arm_noise)
+
+
+def _paired_arm_frame(days=70, skus=60, seed=0):
+    """Episode-hour rows spanning both A/B arms, with a common day effect so
+    the same-day comparison has something to cancel."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for i, day in enumerate(pd.date_range("2026-01-01", periods=days)):
+        day_effect = 1.0 + 0.35 * np.sin(i / 3.0)      # shared by both arms
+        for sku in range(skus):
+            sold = int(np.clip(rng.poisson(9 * day_effect), 0, 20))
+            rows.append(dict(episode_id=f"{day.date()}|{sku}", date=day.date(),
+                             hour_of_day=10, sku_id=sku, fc="FC1",
+                             starting_inventory=20, units_sold=sold,
+                             hours_remaining=0, offered_price=1000.0,
+                             cost=600.0))
+    return pd.DataFrame(rows)
+
+
+def test_control_arm_floor_is_measured_on_the_smoothed_series():
+    """Smoothing must actually be applied, not just mentioned. Measuring the
+    same data at smoothing 1 must give a strictly wider floor -- if the two
+    agree, the smoothing is being ignored and a threshold set from this floor
+    sits several times above its true operating noise."""
+    import copy
+    from bootstrap import derive_thresholds as dt
+
+    d = _paired_arm_frame()
+    cfg_smoothed = copy.deepcopy(CFG)
+    cfg_flat = copy.deepcopy(CFG)
+    cfg_flat["monitoring"]["stop_conditions"]["deterioration_smoothing_days"] \
+        ["scrap"] = 1
+
+    smoothed = dt.control_arm_noise(d, cfg_smoothed)["scrap_rate"]
+    flat = dt.control_arm_noise(d, cfg_flat)["scrap_rate"]
+
+    assert smoothed["smoothing_days"] == \
+        CFG["monitoring"]["stop_conditions"]["deterioration_smoothing_days"]["scrap"]
+    assert flat["smoothing_days"] == 1
+    assert smoothed["three_sigma"] < flat["three_sigma"]
+    # smoothing consumes the leading window
+    assert smoothed["days"] < flat["days"]
+
+
+def test_threshold_recommendation_binds_on_the_larger_floor():
+    """One config value is graded against the trailing mean before the A/B and
+    the control arm during it, so it must clear both -- and a value far above
+    the binding floor is called out rather than blessed."""
+    import copy
+    from bootstrap import derive_thresholds as dt
+
+    d = _paired_arm_frame()
+    cfg = copy.deepcopy(CFG)
+    trailing = dt.guardrail_noise(d, cfg)
+    control = dt.control_arm_noise(d, cfg)
+
+    rec = dt.recommend_thresholds(trailing, control, cfg)["scrap_rate"]
+    floors = [f for f in (rec["trailing_floor"], rec["control_arm_floor"])
+              if f is not None]
+    assert rec["binding_floor"] == max(floors)
+
+    binding = rec["binding_floor"]
+    sc = cfg["monitoring"]["stop_conditions"]
+
+    sc["scrap_deterioration_pct"] = binding / 2
+    assert "TOO TIGHT" in dt.recommend_thresholds(
+        trailing, control, cfg)["scrap_rate"]["verdict"]
+
+    sc["scrap_deterioration_pct"] = binding * 1.5
+    assert dt.recommend_thresholds(
+        trailing, control, cfg)["scrap_rate"]["verdict"].startswith("OK")
+
+    # a guardrail that cannot fire is a failure mode of its own, not a pass
+    sc["scrap_deterioration_pct"] = binding * 20
+    assert "INERT" in dt.recommend_thresholds(
+        trailing, control, cfg)["scrap_rate"]["verdict"]
