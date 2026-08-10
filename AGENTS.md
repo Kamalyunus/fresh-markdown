@@ -452,6 +452,90 @@ Slide tags refer to the 34-slide deck. If slides are inserted or reordered,
 re-map the tags in `tools/deck_numbers.py` in the same change — a stale tag
 sends the next person to the wrong slide, which is worse than no tag.
 
+### Writing the refreshed numbers back into the deck
+
+Do **not** hand-edit the `.pptx`. Unzipping it, editing slide XML and zipping
+it back is easy to get subtly wrong, and a mis-zipped archive still contains
+the right bytes — it simply will not open. Use `tools.deck_text`, which does
+the whole round trip and verifies the rebuilt archive before replacing the
+original.
+
+**Step 1 — get the new numbers.** Run `tools.deck_numbers` as above. Each row
+prints `[slide, slide, ...]`; those are 1-based positions in the deck as
+presented, not `slideN.xml` file numbers (they diverge as soon as slides move).
+
+**Step 2 — find the exact string on the slide.**
+
+```bash
+python3 -m tools.deck_text --list --slide 18
+```
+
+This dumps every text run with its shape name. Copy the run text verbatim —
+including the currency sign, thin spaces and em dashes — because the patch
+matches exact substrings.
+
+**Step 3 — write a patch file.** A JSON list of `{slide, old, new}`:
+
+```json
+[
+  {"slide": 18, "old": "₩1,271 / day", "new": "₩1,231 / day"},
+  {"slide": 2,  "old": "₩14.7M",       "new": "₩14.27M"}
+]
+```
+
+**Step 4 — dry-run, then apply.**
+
+```bash
+python3 -m tools.deck_text --patch refresh.json --dry-run
+python3 -m tools.deck_text --patch refresh.json
+```
+
+Every entry must match **exactly once** on its slide. Zero matches or two
+matches refuses the whole patch and writes nothing — deliberately. A silent
+no-op would leave a stale number on the slide while the run log claims the
+refresh succeeded, which is precisely the failure this tool exists to prevent.
+If an entry refuses because the string appears twice, lengthen `old` until it
+is unique on that slide rather than reaching for a different tool.
+
+**Step 5 — check it still renders.** Numbers change length, and a longer
+string can overflow a stat card or push a table row into the footer:
+
+```bash
+soffice --headless --convert-to pdf docs/perishable_markdown_tech_deck.pptx
+pdftoppm -jpeg -r 80 perishable_markdown_tech_deck.pdf slide
+```
+
+Look at the slides you touched. If a replacement overflows, shorten the
+surrounding caption — never shrink the font, which breaks the deck's type
+scale.
+
+### Rules for the refresh
+
+- **Never invent a number.** If a report is missing, `deck_numbers` prints
+  `--`; leave the slide alone and say which slides could not be refreshed.
+  A plausible-looking wrong number on a leadership slide is the worst
+  possible output of this task.
+- **Only a gate-passing backtest.** The same rule that governs pasting
+  `tau_initial`. A number from a failing run must not reach the deck.
+- **Refresh `docs/design.md` in the same change.** The same quantities appear
+  in §8 and §12; `deck_numbers` tags the design sections alongside the slides.
+- **Report what moved.** List every slide changed and the old → new value, so
+  the next reader can tell a refresh from a rewrite.
+
+### Currently known stale (as of the 34-slide deck)
+
+These were carried over from an earlier run and could not be verified against
+the latest production reports. Check each against fresh `deck_numbers` output
+and correct or confirm it:
+
+| Slide | Shows | Suspected correct |
+| --- | --- | --- |
+| 2 | `₩14.7M` IL on the 2,000-episode sample | `₩14.27M` |
+| 18 | implied spend / budget `₩1,271 / day` (twice) | `₩1,230.9` vs `₩1,230.2` |
+| 24 | uncalibrated window sold ratios and `MAE 0.405 → 0.373` | confirm against the current model |
+| 31 | shadow line | refresh if the full-population run replaces the 3,000-episode sample |
+| 33 | the three owner thresholds framed as open decisions | they are now set — restate as decided, and re-derive `scrap_deterioration_pct` against the corrected control-arm floor first |
+
 ## Repo conventions
 
 - Modules are run as `python3 -m package.module` from the repo root.

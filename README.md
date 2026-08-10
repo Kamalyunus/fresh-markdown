@@ -35,6 +35,7 @@ randomized exploration.
 | `tools/make_dummy_flc.py` | — | Synthetic FLC generator (legacy + randomized policies, known ground-truth elasticity). |
 | `tools/make_charts.py` | — | One diagnostic chart per component, generated from the report artifacts into `reports/charts/`. |
 | `tools/deck_numbers.py` | — | Every figure the design doc and deck quote, in one pasteable block, tagged with the slide that carries it. |
+| `tools/deck_text.py` | — | Lists and patches the deck's text runs. Refuses any replacement that does not match exactly once, so a stale number cannot survive a "successful" refresh. |
 
 ## Running the bootstrap (PRD §1a order)
 
