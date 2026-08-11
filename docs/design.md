@@ -126,6 +126,44 @@ is the evidence; replay is a sanity check).
 
 ## 3. The identification problem
 
+**History predicts demand. It cannot identify price response.** Those are
+different jobs, and the distinction is the reason this system exists in the
+shape it does.
+
+Almost everything the planner needs comes from history and transfers cleanly:
+demand level by SKU, category and FC; hour-of-day shape; day-of-week and
+seasonality; per-SKU velocity; the negative-binomial dispersion `r`; the
+intra-episode correlation `rho`. All of it is fit offline, frozen, and used in
+production. Section 5 is largely an account of *what history can support*.
+
+Exactly one quantity does not transfer: the **price → demand slope**. Not
+because the data is small or dirty, but because **price was never a free
+variable in it**. Every price in the history was produced by the legacy rule —
+enter at the reference discount, ramp ~1pp/hour to a cap — so price is a
+deterministic function of the clock, and a deep-discount row exists only
+because earlier hours failed to sell. Price, hour, and "this episode is
+already failing" are the same column of numbers.
+
+This is the standard distinction between **prediction** and **causal
+identification**. History is excellent at predicting what happens *under the
+policy that generated it*. It is silent about what happens under a *different*
+policy, unless the policy variable was varied independently of everything
+else. We are proposing a different policy, so that is exactly the question it
+cannot answer.
+
+Two consequences follow, and both matter operationally:
+
+- **More history does not help.** The bias is a property of how the data was
+  generated, not of the sample size. Ten years of the same ramp is ten years
+  of the same confound, so "collect more data first" is not a route to an
+  answer.
+- **Randomisation is the only route.** Prices chosen independently of state
+  break the rule's grip on the price column. One day of randomised prices
+  identifies ε better than five months of history, because it is the only data
+  in which price was not set by a rule. That is why exploration is a budgeted
+  P&L line rather than a nice-to-have: it is the sole supply of the one number
+  the planner needs and history structurally cannot provide.
+
 ### 3.1 The clock confound
 
 Under the legacy ramp, the discount deepens as the evening demand peak
