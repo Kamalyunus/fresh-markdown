@@ -654,9 +654,37 @@ IDs, in a single atomically-written file. **Why a Normal summary rather than
 a stored distribution grid:** the grid exists only inside the update
 computation; persisting moments keeps storage trivial and makes the bounded
 step well-defined, and the pricing path reads two floats. **Why ~10 category
-cells plus one pooled global cell:** learning time scales with cell count;
-categories above 250 episodes/week earn their own cell, everything below
-reads and feeds the global cell, assignment fixed at launch. **Why the
+cells plus one pooled global cell, and not subcategory cells:** three
+reasons, in order of force.
+
+1. **A finer ε would change no price.** The policy is insensitive to the
+   posterior mean anywhere below the deepening bar (~2.43) — measured, not
+   asserted: a full re-run at a −1.5 prior produced identical prices to −1.0.
+   Behaviour only changes when a cell's posterior crosses the bar, and
+   splitting cells makes every cell slower to get there. At launch, finer
+   grain is not neutral; it is counterproductive.
+2. **Evidence divides proportionally.** Learning time scales with cell count.
+   Split a category into three subcategories and each receives roughly a
+   third of the forced outcomes, so each takes about three times the calendar
+   to travel the same distance — against a throughput that is already risk 1.
+3. **There is no finer-grained prior to preserve.** The bracket was rejected
+   for all 16 categories, so every cell starts at the same −1.0 ± 0.6.
+   Subcategory cells would begin identical and learn slower: dilution bought
+   for nothing. And history cannot identify ε per category, so it certainly
+   cannot per subcategory — the same confound with less data behind it.
+
+Categories above 250 episodes/week earn their own cell, everything below
+reads and feeds the global cell, assignment fixed at launch. The honest
+counter-argument is that if elasticity genuinely varies *within* a category,
+pooling biases every subcategory in it. That is real — but it is undetectable
+until the cells have moved at all, which is why the fix belongs in phase 2
+and why it should be **partial pooling rather than a threshold ladder**: a
+hard "use the subcategory if it clears N episodes/week, otherwise the
+category" rule discards the category signal the moment it is crossed and puts
+a cliff at the boundary, where 251 episodes/week buys a noisy standalone
+estimate and 249 buys the category's. Shrinking each subcategory toward its
+category mean in proportion to its own precision uses all the data, has no
+discontinuity, and collapses to the right answer at both extremes. **Why the
 ledger lives inside the posterior file:** exactly-once learning requires
 "revision applied" and "outcomes consumed" to commit together; two files
 cannot be renamed atomically, one can. A crash between learning and marking
@@ -1424,7 +1452,9 @@ contiguity rule from "both step exactly one" to "clock and counter agree",
 capped, with interior synthetic rows); per-category prior acceptance (currently any failure falls the
 whole prior back, the conservative reading — and on the corrected extract
 every category fails, so nothing is lost by it today); subcategory learning cells with leave-one-out
-pooling; automated posterior updates with criteria drafted from observed
+pooling (deferred, not dismissed — see 5.9: finer cells change no price below
+the deepening bar and dilute evidence, so the gain only exists once cells have
+moved); automated posterior updates with criteria drafted from observed
 operator-gate behaviour; episode-level random effects replacing the deff
 deflation; off-policy correction to recover the majority of outcomes
 currently discarded as exploitation.
