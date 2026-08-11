@@ -89,6 +89,22 @@ python3 -m pipeline.monitor
    both reports. `--fit-calibration` does NOT retrain; plain
    `train_baseline` and `run_bootstrap.sh` DO.
 
+1a. **Changing `posterior.prior.fallback_mean` invalidates `rho`, and the
+   calibration factor with it.** `fit_dispersion` measures residual
+   correlation using the fallback as its *working* elasticity when scaling
+   `mu_ref` to actual prices, so a different prior gives a different `rho`
+   and `deff`. Measured: −1.0 → −1.5 moved `rho` 0.3103 → 0.4236 and `deff`
+   3.347 → 4.204, and the level-calibration factor from 1.4779 to 1.6222.
+   Re-run steps 4 onward and re-paste the mirrors, or strict start-up will
+   refuse on `ARTIFACT_MIRRORS` drift — which is the check working, not a
+   nuisance.
+
+   Also worth knowing before anyone proposes a "better" prior: **the policy
+   is insensitive to the prior mean anywhere below the deepening bar
+   (~2.43)**. The −1.5 re-run chose identical prices — mean discount 0.1285,
+   0% deepened — while costing 26% of the learning rate. A larger \|ε\| guess
+   buys no behaviour change and slows the loop that would find the real one.
+
 2. **`posterior.epsilon_max` (−0.05) is a sign constraint, never a bound to
    widen** (§10.4). An estimate pinned at the UPPER bound means the estimator
    found no negative price response — an artifact of confounded data, not
