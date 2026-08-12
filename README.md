@@ -36,6 +36,9 @@ randomized exploration.
 | `tools/make_charts.py` | — | One diagnostic chart per component, generated from the report artifacts into `reports/charts/`. |
 | `tools/deck_numbers.py` | — | Every figure the design doc and deck quote, in one pasteable block, tagged with the slide that carries it. |
 | `tools/deck_text.py` | — | Lists and patches the deck's text runs. Refuses any replacement that does not match exactly once, so a stale number cannot survive a "successful" refresh. |
+| `tools/deck_diff.py` | — | Regression check between two versions of the deck: what is new, what was dropped, and any reused slide whose text changed unintentionally. Exits non-zero on either. |
+| `tools/deckkit.py` | — | Slide-package surgery — duplicate, reorder, and set text without a PowerPoint install. |
+| `tools/build_v2.py` | — | Reproducible build of the v2 deck from the v1 slides plus seven new ones. |
 
 ## Running the bootstrap (PRD §1a order)
 

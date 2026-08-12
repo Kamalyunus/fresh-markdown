@@ -453,9 +453,19 @@ deliberately.
 
 ## Refreshing the numbers in the docs and deck
 
-`docs/design.md` and `docs/perishable_markdown_tech_deck.pptx` (34 slides)
-quote ~25 measured quantities that go stale on every re-run (the launch-freeze
-retrain changes most of them). Do not hunt through the JSON:
+There are two decks. **`docs/perishable_markdown_deck_v2.pptx` (41 slides) is
+the current one** — problem → solution → novelty → components → results → A/B
+and path to production. `docs/perishable_markdown_tech_deck.pptx` (34 slides)
+is the earlier design-argument ordering, kept as a reference; every one of its
+slides is reused in v2, so **fix a number in both or neither**.
+
+`tools.deck_diff` is the guard for that: it pairs slides by eyebrow + title
+and exits non-zero if a slide was dropped or a reused slide changed for a
+reason not on its INTENDED list. Run it after any structural edit.
+
+Those decks and `docs/design.md` quote ~25 measured quantities that go stale on
+every re-run (the launch-freeze retrain changes most of them). Do not hunt
+through the JSON:
 
 ```bash
 python3 -m tools.deck_numbers --backtest reports/<gate-passing>.json \
