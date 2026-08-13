@@ -493,8 +493,8 @@ presented setting: the numbers are identical, the sentences around them are
 not, so patch by the number rather than by a whole-sentence match.
 
 `docs/system_walkthrough.html` is the leadership-facing walkthrough — one tab
-per frozen artifact, plus the hourly decision and the learning loop. It is
-built, not hand-edited:
+per frozen artifact, plus the hourly decision, the learning loop, and the
+replay evidence. It is built, not hand-edited:
 
 ```bash
 python3 -m tools.walkthrough.build      # writes docs/system_walkthrough.html

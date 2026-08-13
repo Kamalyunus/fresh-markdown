@@ -1305,3 +1305,146 @@ budget  =  1% of IL × clip( posterior std ⁄ 0.40, 0.25, 1 )   shrinks as beli
 
 PANELS = {"map": P_MAP, "data": P_DATA, "model": P_MODEL, "calib": P_CALIB,
           "var": P_VAR, "prior": P_PRIOR, "learn": P_LEARN}
+
+
+# ================================================================== 7 · replay
+P_REPLAY = f"""
+<section class="prose" style="padding-top:34px">
+  <div class="step-head"><h2>Replaying five months, to see what the agent would have done</h2></div>
+  <p class="lede">
+    Before any real price moves, we re-run history: take each episode as it actually
+    happened — the same SKU, the same stock, the same window — and step through it hour by
+    hour, asking the agent what it would have priced. Then compare.
+  </p>
+  <p>
+    The comparison is where almost everyone goes wrong, so it is worth being slow about it.
+    Replay produces <strong>three different quantities</strong>, and only one pairing of them
+    is a statement about the policy.
+  </p>
+</section>
+
+<figure style="margin-top:20px">
+  <div class="scroller"><table class="tl">
+    <caption>Three numbers replay produces, and what each one is</caption>
+    <thead><tr><th>Quantity</th><th>What it is</th><th>What it can be used for</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>observed</strong><br><code>actual_*</code></td>
+        <td>What really happened in the world, under the legacy rule. Real sales, real scrap,
+            real money</td>
+        <td class="loss">Fidelity only — is our demand model a decent description of reality?
+            <strong>Never a policy statement</strong></td>
+      </tr>
+      <tr>
+        <td><strong>legacy, simulated</strong><br><code>legacy_model_*</code></td>
+        <td>The legacy rule's prices, replayed through our demand model instead of the world</td>
+        <td class="good">The control arm</td>
+      </tr>
+      <tr>
+        <td><strong>agent, simulated</strong><br><code>dp_*</code></td>
+        <td>The agent's prices, replayed through the <em>same</em> demand model</td>
+        <td class="good">The treatment arm</td>
+      </tr>
+    </tbody>
+  </table></div>
+  <figcaption>
+    The tempting comparison is agent-simulated against observed — our new system against what
+    actually happened. It is wrong, and badly so: it charges <em>every</em> error in the
+    demand model to the agent's account. A model that over-predicts demand would make the
+    agent look brilliant against reality while telling us nothing about its pricing.
+  </figcaption>
+</figure>
+
+<div class="callout">
+  <h3>The only honest comparison is like-for-like</h3>
+  <div class="math" style="margin-top:0">legacy-under-model IL   vs   agent-under-model IL
+
+same μ_ref · same r · same ε  →  model bias hits both arms and cancels</div>
+  <p style="margin-top:16px">
+    Both arms are simulated by the identical demand generator. Whatever our model gets wrong,
+    it gets wrong for the legacy rule too, so the difference between the arms is attributable
+    to the <em>decisions</em> and to nothing else. That difference is the only number in this
+    tab that says anything about the policy.
+  </p>
+</div>
+
+<section class="prose">
+  <h3 style="margin-top:34px">What it says</h3>
+</section>
+
+<ul class="chips" style="margin-top:18px">
+  <li><span class="k">Observed IL%</span><span class="v">36.68%</span></li>
+  <li><span class="k">Observed IL</span><span class="v">₩17.11M</span></li>
+  <li><span class="k">Episodes</span><span class="v">2,000</span></li>
+  <li><span class="k">Agent vs legacy</span><span class="v">−38.0%</span></li>
+</ul>
+
+<section class="prose">
+  <p style="margin-top:18px">
+    The first three describe the world as it is: across 2,000 replayed episodes, Inventory
+    Loss ran at <strong>36.68%</strong> of the full-price value of what sold —
+    <strong>₩17.11M</strong>. That is the bar, and it is what the legacy rule currently
+    delivers. The fourth is the like-for-like result: <strong>38% less Inventory Loss</strong>.
+  </p>
+
+  <h3 style="margin-top:34px">And here is the part to say out loud first</h3>
+  <p>
+    A markdown system that reduces loss by <em>discounting less</em> is not what most people
+    expect, and it is what the numbers say. The agent does not clear more stock. It clears
+    slightly <strong>less</strong>, and scraps slightly <strong>more</strong>:
+  </p>
+</section>
+
+<figure style="margin-top:18px">
+  <div class="scroller"><table>
+    <caption>Like-for-like · both arms under the same demand model</caption>
+    <thead><tr><th>Measure</th><th>Legacy rule</th><th>The agent</th><th>Difference</th></tr></thead>
+    <tbody>
+      <tr><td>Inventory Loss</td><td>—</td><td>—</td><td class="win">−38.0%</td></tr>
+      <tr><td>Mean discount</td><td>0.2935</td><td class="good">0.1285</td><td>opens far shallower, and holds</td></tr>
+      <tr><td>Clearance</td><td>77.58%</td><td class="loss">76.61%</td><td class="loss">−0.97pp</td></tr>
+      <tr><td>Scrap cost</td><td>₩6.24M</td><td class="loss">₩6.84M</td><td class="loss">+₩0.59M</td></tr>
+    </tbody>
+  </table></div>
+  <figcaption>
+    The whole gain comes from the second row. The legacy ramp buys its extra clearance at a
+    price well above what the units are worth — it discounts ₩0.29 on the won where the agent
+    discounts ₩0.13, and the margin it gives away exceeds the scrap it avoids. The agent
+    accepts a little more scrap and keeps far more margin, and the trade nets out at −38%.
+  </figcaption>
+</figure>
+
+<section class="prose">
+  <p style="margin-top:26px">
+    Because that trade is real, the pilot reports <strong>clearance and scrap beside IL from
+    day one</strong>. A system that improved its headline metric while quietly scrapping more
+    food is a system whose reporting should show it, not hide it.
+  </p>
+</section>
+
+<div class="callout">
+  <h3>What replay cannot tell us — and this is the important limit</h3>
+  <p>
+    The agent chooses its prices by minimising expected loss under a particular set of
+    assumptions: μ_ref for the demand level, r for the spread, ε for price response. The
+    replay then simulates the outcome using <strong>those same assumptions</strong>. The agent
+    is therefore playing against exactly its own model of the world — and in that world it is
+    optimal <em>by construction</em>.
+  </p>
+  <p style="margin-top:14px">
+    So a −38% result confirms something worth confirming: the solver is correct, the action
+    set is safe, the plumbing works end to end, and the legacy rule really is a poor policy
+    <em>for the world we believe in</em>. What it cannot do is test whether we believe in the
+    right world. If real price response differs from the ε we assumed, both arms are wrong
+    together, the comparison still cancels neatly, and the number on this page would not move
+    at all.
+  </p>
+  <p style="margin-top:14px">
+    <strong>Replay is a sanity check on the machine, never evidence that the policy wins in
+    the market.</strong> Only the live A/B can say that, and it is designed on the assumption
+    that this number might not survive contact.
+  </p>
+</div>
+"""
+
+PANELS["replay"] = P_REPLAY

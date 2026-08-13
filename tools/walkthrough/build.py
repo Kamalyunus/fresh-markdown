@@ -141,13 +141,14 @@ PAGE_HEADER = """<header>
 
 TABS = [
     ("map",   "The split",        "Frozen vs learned"),
-    ("data",  "Data foundation",  "split_manifest.json"),
+    ("data",  "Data",             "split_manifest.json"),
     ("model", "Demand model",     "baseline_model.txt"),
     ("calib", "Calibration",      "calibration.json"),
     ("var",   "Variance",         "r_lookup · rho"),
-    ("prior", "Elasticity prior", "prior.json"),
+    ("prior", "Elasticity",       "prior.json"),
     ("dp",    "The decision",     "pricing/dp.py"),
     ("learn", "Learning",         "posterior.json"),
+    ("replay","Replay",           "what we measured"),
 ]
 
 
