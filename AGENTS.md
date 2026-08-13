@@ -483,7 +483,14 @@ not, so patch by the number rather than by a whole-sentence match.
 the `.pptx`.** A hand-edited deck cannot be rebuilt, and the rebuild is what
 the next agent will do. `tools.deck_diff` is the guard: it pairs slides by
 eyebrow + title and exits non-zero if a slide was dropped or a reused slide
-changed for a reason not on its INTENDED list. v3's appendix index quotes
+changed for a reason not on its INTENDED list.
+
+When you make a deliberate edit, add its authorising phrase to that list —
+and take the phrase **from the text being replaced**, not from the replacement.
+A token matching only the new wording authorises nothing, because a deleted
+line would then be waved through by the allowed rewrite sitting next to it. A
+phrase that exists only in the new text is the right entry for a run you
+genuinely **added**. v3's appendix index quotes
 slide RANGES, and `build_v3` asserts every one of them against the order it
 just wrote, so a reorder that makes the index lie fails the build instead of
 shipping.

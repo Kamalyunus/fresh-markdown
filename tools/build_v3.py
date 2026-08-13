@@ -85,6 +85,23 @@ k.sub_in_slide(f(40), [
      "Well behaved throughout: binding 3σ floor 13.94%, not outlier-dominated. 15% clears it by 7.6%, so the 2-day persistence rule is covering the gap rather than headroom. A breach suspends exploration only — pricing continues."),
 ])
 
+# 20 · THE DECISION CORE -- the recursion as the solver actually evaluates it.
+# The old line, m(p)·E[min(D,q)] + V(q', t-1), collapsed the demand distribution
+# to its mean and then carried ONE next state. The solver does neither: it sums
+# over every sales count, and V is non-linear in the leftover, so the mean-field
+# form is not equal to it. It also hid the exact step this deck is asked about
+# most -- where dispersion enters.
+k.Slide(f(20)).paras("Text 6", [
+    "V(q, 0)   =  − cost × q     ← scrap the rest",
+    "Q(q,t,p)  =  Σₖ P(D=k)·[ m(p)·min(k,q)",
+    "             + V(q−min(k,q), t−1) ]",
+    "V(q, t)   =  max over feasible p of Q(q,t,p)",
+]).save()
+k.sub_in_slide(f(20), [
+    ("Demand enters as the censored expectation E[min(D, q)], never the raw mean. At a median starting inventory of two units the two differ substantially, and every place that confused them produced a real bug.",
+     "Demand enters as a distribution, never an average. The sum runs over every sales count, so censoring — an hour cannot sell more than the shelf holds — and the non-linear value of the leftover both sit inside it, rather than being applied to a mean afterwards."),
+])
+
 # ================================================================ new slides
 N = {}
 for key, tmpl in [("results", f(2)), ("divider", f(13)), ("index", f(12))]:

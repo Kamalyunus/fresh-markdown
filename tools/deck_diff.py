@@ -12,7 +12,7 @@ Usage:
 The defaults compare the original deck against the one we present, which is
 the comparison that matters now that the intermediate v2 is not checked in.
 """
-import re, sys, zipfile
+import difflib, re, sys, zipfile
 
 RUN = re.compile(r"<a:t>([^<]*)</a:t>")
 
@@ -58,6 +58,9 @@ INTENDED = {  # substrings whose change is a deliberate number refresh
     "explained rather than observed", "recommendations, with evidence",
     "Measured on nine real 2-week blocks", "Once the floor was measured",
     "on the trailing basis, not outlier-dominated",
+    # v3: the decision-core recursion, corrected to what the solver evaluates
+    "m(p)·E[min(D,q)]", "the censored expectation E[min(D, q)], never the raw mean",
+    "Σₖ P(D=k)", "V(q−min(k,q), t−1)", "Demand enters as a distribution",
 }
 
 v1_by_key = {tuple(s[:2]): (i, s) for i, s in enumerate(v1, 1)}
@@ -72,11 +75,28 @@ for j, s in enumerate(v2, 1):
     i, old = v1_by_key[key]
     seen.add(key)
     if old != s:
-        diffs = [(a, b) for a, b in zip(old, s) if a != b]
-        extra = abs(len(old) - len(s))
-        ok = all(any(t in a or t in b for t in INTENDED) for a, b in diffs)
-        if not ok or extra:
-            changed.append((i, j, diffs, extra))
+        # Align the two run lists before judging them. A straight zip would
+        # treat one inserted line as "everything after it changed"; aligning
+        # first separates a rewritten run (a pair -- either side may carry the
+        # INTENDED phrase) from a run that was genuinely added or deleted
+        # (which must carry one itself, since that is the case worth catching).
+        pairs, gone, came = [], [], []
+        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+                None, old, s, autojunk=False).get_opcodes():
+            if tag == "equal":
+                continue
+            n = min(i2 - i1, j2 - j1)
+            pairs += list(zip(old[i1:i1 + n], s[j1:j1 + n]))
+            gone += old[i1 + n:i2]
+            came += s[j1 + n:j2]
+        # A rewritten run is authorised by a phrase from the text being
+        # REPLACED, not from its replacement. Accepting a match on either side
+        # lets a deleted line hide behind the allowed rewrite next to it --
+        # the tool then passes exactly the case it exists to catch.
+        ok = (all(any(x in a for x in INTENDED) for a, _ in pairs)
+              and all(any(x in t for x in INTENDED) for t in gone + came))
+        if not ok:
+            changed.append((i, j, pairs, gone, came))
 
 for key, (i, s) in v1_by_key.items():
     if key not in seen:
@@ -90,8 +110,12 @@ print(f"\nDROPPED from v1 ({len(missing)}):")
 for i, t in missing:
     print(f"  was {i:>2}  {t[:70]}")
 print(f"\nUNINTENDED CHANGES ({len(changed)}):")
-for i, j, diffs, extra in changed:
-    print(f"  v1 {i} -> v2 {j}  extra_runs={extra}")
-    for a, b in diffs[:4]:
-        print(f"      - {a[:80]}\n      + {b[:80]}")
+for i, j, pairs, gone, came in changed:
+    print(f"  v1 {i} -> v2 {j}")
+    for a, b in pairs[:4]:
+        print(f"      ~ {a[:86]}\n        {b[:86]}")
+    for t in gone[:4]:
+        print(f"      - {t[:88]}")
+    for t in came[:4]:
+        print(f"      + {t[:88]}")
 sys.exit(1 if (changed or missing) else 0)
