@@ -453,15 +453,34 @@ deliberately.
 
 ## Refreshing the numbers in the docs and deck
 
-There are two decks. **`docs/perishable_markdown_deck_v2.pptx` (41 slides) is
-the current one** — problem → solution → novelty → components → results → A/B
-and path to production. `docs/perishable_markdown_tech_deck.pptx` (34 slides)
-is the earlier design-argument ordering, kept as a reference; every one of its
-slides is reused in v2, so **fix a number in both or neither**.
+There are three decks, and each is a strict superset of the one before it:
 
-`tools.deck_diff` is the guard for that: it pairs slides by eyebrow + title
-and exits non-zero if a slide was dropped or a reused slide changed for a
-reason not on its INTENDED list. Run it after any structural edit.
+| Deck | Slides | Status |
+| --- | --- | --- |
+| `docs/perishable_markdown_deck_v3.pptx` | 44 | **The one to present.** 17 presented, then an appendix divider, an index, and the other 25. |
+| `docs/perishable_markdown_deck_v2.pptx` | 41 | Every slide in reading order, no appendix split. Kept as the full narrative. |
+| `docs/perishable_markdown_tech_deck.pptx` | 34 | The original design-argument ordering. Reference only. |
+
+Every slide of an earlier deck is reused in the later ones, so **fix a number
+in all three or in none**. v3's core slides 6, 7, 8 and 16 carry tightened
+wording; the number is the same, the sentence around it is not, so patch by
+the number rather than by a whole-sentence match.
+
+`tools.deck_diff` is the guard: it pairs slides by eyebrow + title and exits
+non-zero if a slide was dropped or a reused slide changed for a reason not on
+its INTENDED list. Run it after any structural edit, in both directions:
+
+```bash
+python3 -m tools.deck_diff                     # v1 -> v2
+python3 -m tools.deck_diff --old docs/perishable_markdown_deck_v2.pptx \
+                           --new docs/perishable_markdown_deck_v3.pptx
+```
+
+v2 and v3 are reproducible from their builders (`tools/build_v2.py`,
+`tools/build_v3.py`) — a structural change belongs in the builder and a
+re-run, never in the `.pptx`. v3's appendix index quotes slide RANGES, and
+`build_v3` asserts every one of them against the order it just wrote, so a
+reorder that invalidates the index fails the build instead of shipping.
 
 Those decks and `docs/design.md` quote ~25 measured quantities that go stale on
 every re-run (the launch-freeze retrain changes most of them). Do not hunt

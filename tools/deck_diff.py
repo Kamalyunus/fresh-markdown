@@ -45,6 +45,16 @@ INTENDED = {  # substrings whose change is a deliberate number refresh
     "32.27%", "36.68%", "₩14.27M", "₩17.11M", "409.87", "447.78",
     "18 weeks", "71,559", "0.000875", "0.002915", "6× the original",
     "3× the pre-scrap-fix", "measured before any price was applied",
+    # v2 -> v3: the four core slides tightened for a presented setting. Each
+    # entry is a phrase unique to the v2 wording, so a change these do not
+    # cover still fails the check.
+    "(LightGBM / Tweedie)", "splitting cells divides the same evidence",
+    "The two metrics can disagree by design", "Original price 10,000",
+    "Stated now, before the experiment", "Deliberately blind to price",
+    "constructs the actions", "budget; nobody can sign",
+    "explained rather than observed", "recommendations, with evidence",
+    "Measured on nine real 2-week blocks", "Once the floor was measured",
+    "on the trailing basis, not outlier-dominated",
 }
 
 v1_by_key = {tuple(s[:2]): (i, s) for i, s in enumerate(v1, 1)}

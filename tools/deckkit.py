@@ -14,6 +14,8 @@ SLIDE_REL = ("http://schemas.openxmlformats.org/officeDocument/2006/"
              "relationships/slide")
 NOTES_REL = ("http://schemas.openxmlformats.org/officeDocument/2006/"
              "relationships/notesSlide")
+NOTES_CT = ("application/vnd.openxmlformats-officedocument."
+            "presentationml.notesSlide+xml")
 
 
 def esc(t):
@@ -84,6 +86,49 @@ def dup(template_n, keep_notes=False):
     return n
 
 
+def notes(slide_n, text, template=None):
+    """Attach speaker notes to a slide that has none.
+
+    A duplicated slide cannot simply share its template's notes part: a notes
+    slide carries a back-reference to the slide it belongs to, so the part is
+    cloned and rewired rather than reused.
+    """
+    d = os.path.join(UNP, "ppt", "notesSlides")
+    nums = sorted(int(re.search(r"\d+", f).group()) for f in os.listdir(d)
+                  if f.startswith("notesSlide") and f.endswith(".xml"))
+    src, n = template or nums[0], max(nums) + 1
+
+    x = _read(f"ppt/notesSlides/notesSlide{src}.xml")
+    body = re.compile(r'(<p:ph type="body".*?<a:lstStyle/>).*?(</p:txBody>)', re.S)
+    if not body.search(x):
+        raise SystemExit(f"notesSlide{src}: no body placeholder to write into")
+    x = body.sub(lambda m: (m.group(1) + "<a:p><a:r><a:t>" + esc(text)
+                            + "</a:t></a:r></a:p>" + m.group(2)), x, count=1)
+    _write(f"ppt/notesSlides/notesSlide{n}.xml", x)
+
+    r = _read(f"ppt/notesSlides/_rels/notesSlide{src}.xml.rels")
+    r = re.sub(r'Target="\.\./slides/slide\d+\.xml"',
+               f'Target="../slides/slide{slide_n}.xml"', r)
+    _write(f"ppt/notesSlides/_rels/notesSlide{n}.xml.rels", r)
+
+    ct = _read("[Content_Types].xml")
+    ct = ct.replace("</Types>",
+                    f'<Override PartName="/ppt/notesSlides/notesSlide{n}.xml" '
+                    f'ContentType="{NOTES_CT}"/></Types>')
+    _write("[Content_Types].xml", ct)
+
+    p = f"ppt/slides/_rels/slide{slide_n}.xml.rels"
+    sr = _read(p)
+    if NOTES_REL in sr:
+        raise SystemExit(f"slide{slide_n} already has notes")
+    rid = "rId" + str(max(int(m) for m in re.findall(r'Id="rId(\d+)"', sr)) + 1)
+    sr = sr.replace("</Relationships>",
+                    f'<Relationship Id="{rid}" Type="{NOTES_REL}" '
+                    f'Target="../notesSlides/notesSlide{n}.xml"/></Relationships>')
+    _write(p, sr)
+    return n
+
+
 def set_order(seq):
     pres = _read("ppt/presentation.xml")
     rels = _read("ppt/_rels/presentation.xml.rels")
@@ -133,6 +178,17 @@ class Slide:
         self.x = self.x[:m.start()] + body + self.x[m.end():]
         return self
 
+    def colour(self, name, old, new):
+        """Recolour one shape. A duplicated card keeps its template's palette,
+        and the template's red 'this is what it costs us' number is the wrong
+        signal on a slide where the same figure is the win."""
+        m = self._shape(name); body = m.group(0)
+        if f'val="{old}"' not in body:
+            raise KeyError(f"{self.p} {name}: no {old} to recolour")
+        body = body.replace(f'val="{old}"', f'val="{new}"')
+        self.x = self.x[:m.start()] + body + self.x[m.end():]
+        return self
+
     def table(self, name, cells):
         return self.runs(name, cells)
 
@@ -141,6 +197,7 @@ class Slide:
 
 
 def pack(out):
+    out = os.path.abspath(out)   # zip runs from the unpacked tree, not the cwd
     if os.path.exists(out):
         os.remove(out)
     subprocess.run(["zip", "-Xrq", out, "."], cwd=UNP, check=True)
