@@ -9,7 +9,10 @@ import os
 
 from tools import deckkit as k
 
-SRC = "docs/perishable_markdown_tech_deck.pptx"
+# The original 34-slide deck. It is no longer a deliverable -- v3 is the only
+# deck we present -- but it is still the SOURCE every reused slide is lifted
+# from, so it lives in tools/ rather than docs/ and must not be deleted.
+SRC = "tools/deck_source.pptx"
 
 # v2 is now an intermediate rather than a deliverable: v3 is the deck to
 # present, and it is built from v2's slides. Retiring v2 as a file must not
@@ -119,7 +122,10 @@ k.Slide(N["demand"]) \
  .paras("Text 7", [
      "Units sold in the next hour at the REFERENCE discount — one number, mu_ref",
      "LightGBM on a Tweedie objective, fit on 2.07M hourly rows and frozen at launch",
-     "Features: SKU and FC velocity, hour, day of week, recent 1h and 3h sales, category, price level",
+     # NOT "recent 1h/3h sales": within-episode lags are post-treatment
+     # mediators of the episode's own price path and are excluded by design
+     # (design 5.4). The slide claimed a feature set the model does not have.
+     "Features: SKU × FC velocity measured at the reference price, hour, day of week, category, FC — no within-episode lags",
      "Every economic quantity the planner computes is denominated in this prediction"]) \
  .runs("Text 10", ["WHY IT MUST NOT SEE PRICE"]) \
  .runs("Text 11", ["✕"]) \

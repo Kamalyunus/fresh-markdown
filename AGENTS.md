@@ -464,20 +464,22 @@ deliberately.
 
 ## Refreshing the numbers in the docs and deck
 
-Two decks are checked in:
+**One deck ships.** `docs/perishable_markdown_deck_v3.pptx` — 44 slides, of
+which only the first 17 are presented; then an appendix divider, an index, and
+the other 25 for the questions that get asked.
 
-| Deck | Slides | Status |
+| File | Slides | Status |
 | --- | --- | --- |
-| `docs/perishable_markdown_deck_v3.pptx` | 44 | **The deck.** 17 presented, then an appendix divider, an index, and the other 25. |
-| `docs/perishable_markdown_tech_deck.pptx` | 34 | The original design-argument ordering. It is the SOURCE the builders read; it is not reproducible from anything else, so do not delete it. |
+| `docs/perishable_markdown_deck_v3.pptx` | 44 | **The deliverable.** The only deck in `docs/`. |
+| `tools/deck_source.pptx` | 34 | **Build input, not a deliverable.** The original design-argument ordering; every reused slide is lifted from it, keeping its vetted layout and speaker notes. It is not reproducible from anything else — deleting it breaks every future rebuild, and hand-editing the v3 `.pptx` is not an alternative. It lives in `tools/` so that `docs/` holds exactly one deck. |
 
 v2 has been retired as a file. It is still a build stage — v3 is assembled
 from its slides — but it is an intermediate now, written to `build/`
 (gitignored) by `tools.build_v3`, which runs `tools.build_v2` itself. So:
 
 ```bash
-python3 -m tools.build_v3     # v1 -> v2 (build/) -> v3 (docs/), one command
-python3 -m tools.deck_diff    # defaults to v1 -> v3; must exit 0
+python3 -m tools.build_v3     # source -> v2 (build/) -> v3 (docs/), one command
+python3 -m tools.deck_diff    # defaults to source -> v3; must exit 0
 ```
 
 Retiring it was not cosmetic. The checked-in v2 had drifted from
@@ -597,8 +599,8 @@ is unique on that slide rather than reaching for a different tool.
 string can overflow a stat card or push a table row into the footer:
 
 ```bash
-soffice --headless --convert-to pdf docs/perishable_markdown_tech_deck.pptx
-pdftoppm -jpeg -r 80 perishable_markdown_tech_deck.pdf slide
+soffice --headless --convert-to pdf docs/perishable_markdown_deck_v3.pptx
+pdftoppm -jpeg -r 80 perishable_markdown_deck_v3.pdf slide
 ```
 
 Look at the slides you touched. If a replacement overflows, shorten the

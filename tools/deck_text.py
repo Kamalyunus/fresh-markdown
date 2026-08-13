@@ -40,7 +40,7 @@ import shutil
 import tempfile
 import zipfile
 
-DECK = "docs/perishable_markdown_tech_deck.pptx"
+DECK = "tools/deck_source.pptx"
 
 RUN_RE = re.compile(r"<a:t>([^<]*)</a:t>")
 SHAPE_RE = re.compile(r'<p:(sp|graphicFrame)>.*?</p:\1>', re.S)

@@ -9,8 +9,10 @@ so it can gate a rebuild.
 Usage:
     python3 -m tools.deck_diff [--old A.pptx] [--new B.pptx]
 
-The defaults compare the original deck against the one we present, which is
-the comparison that matters now that the intermediate v2 is not checked in.
+The defaults compare the build source (tools/deck_source.pptx, the original
+34-slide deck) against the one deck we present. That is the comparison that
+matters: v3 is a restructure of those slides, so anything dropped or mangled
+on the way through shows up here.
 """
 import difflib, re, sys, zipfile
 
@@ -35,7 +37,7 @@ def slides(path):
 
 import argparse
 ap = argparse.ArgumentParser(prog="tools.deck_diff", description=__doc__)
-ap.add_argument("--old", default="docs/perishable_markdown_tech_deck.pptx")
+ap.add_argument("--old", default="tools/deck_source.pptx")
 ap.add_argument("--new", default="docs/perishable_markdown_deck_v3.pptx")
 args = ap.parse_args()
 v1, v2 = slides(args.old), slides(args.new)
@@ -61,6 +63,8 @@ INTENDED = {  # substrings whose change is a deliberate number refresh
     # v3: the decision-core recursion, corrected to what the solver evaluates
     "m(p)·E[min(D,q)]", "the censored expectation E[min(D, q)], never the raw mean",
     "Σₖ P(D=k)", "V(q−min(k,q), t−1)", "Demand enters as a distribution",
+    # v3: the demand-model slide listed lag features the model has never had
+    "recent 1h and 3h sales", "no within-episode lags",
 }
 
 v1_by_key = {tuple(s[:2]): (i, s) for i, s in enumerate(v1, 1)}
