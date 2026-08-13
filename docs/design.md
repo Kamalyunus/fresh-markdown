@@ -374,7 +374,10 @@ confound to leak. **Why frozen for the whole MVP window:** if the model
 retrains while the posterior learns, posterior movement cannot be
 attributed — it could be learning or drift. Freezing buys attribution and
 costs drift risk, which is accepted, monitored daily (section 5.11), and
-bounded by the window end date. A per-category multiplicative correction
+bounded by the window end date. Freezing is a phase, not a posture: once the
+experiment has read out there is nothing left to attribute, and the baseline
+returns to an ordinary retraining cadence with the level factors tracking
+drift between retrains. A per-category multiplicative correction
 factor is *fitted* unconditionally on the calibration weeks but *applied*
 only behind an explicit config decision, because the diagnostic in section
 9.2 shows the correction is right for level errors and actively harmful for
@@ -851,7 +854,7 @@ light).
 **The replay's headline result comes with a caveat that must travel with
 it.** The DP arm shows **38.0% less IL** than the legacy arm, and it gets
 there by opening far shallower — mean discount 0.1285 against legacy's 0.2935
-— and holding. The cost is **0.97pp of clearance** (77.58% → 77.61% under the
+— and holding. The cost is **0.97pp of clearance** (77.58% → 76.61% under the
 model, +9.5% scrap cost), so the trade is real but small: the DP gives up
 about a twentieth of the unsold-unit base to save nearly two fifths of the
 loss.
@@ -863,6 +866,33 @@ shortened by each episode's own realised sellout, which pulled the terminal
 scrap penalty forward and made it discount harder than warranted; and scrap
 was read as zero, which mispriced the very trade-off it was optimising. Both
 now corrected.
+
+All three quantities the replay produces, on the calibrated run over 2,000
+episodes, with IL split into its two components because the split *is* the
+result:
+
+| | Observed | Legacy under model | DP under model |
+| --- | --- | --- | --- |
+| Inventory Loss | ₩17.11M | ₩19.51M | **₩12.09M** |
+| — discount given away | ₩13.96M | ₩13.27M | ₩5.26M |
+| — scrap | ₩3.15M | ₩6.24M | ₩6.84M |
+| IL% | 38.68% | 45.14% | 28.77% |
+| Clearance | 93.28% | 77.58% | 76.61% |
+| Mean discount | 0.3094 | 0.2935 | 0.1285 |
+
+Like-for-like: **−₩7.42M, −38.02% of the legacy arm**, clearance −0.97pp.
+Scrap rises ₩0.59M, so the entire gain comes out of a discount line that falls
+₩8.01M — the DP buys the result by not over-discounting, which is precisely
+what section 5.7 predicts of an enter-and-hold policy.
+
+The observed column is here only so the middle column can be judged against
+it, and that judgement is worth stating: the model expects legacy to lose
+₩19.51M where it actually lost ₩17.11M (**14% pessimistic**) and clears 77.58%
+where the world cleared 93.28%. That gap is the model bias the like-for-like
+comparison cancels. It also shows why the naive framing is not merely wrong in
+principle but wrong in magnitude — DP-under-model against observed reality
+gives **−29.3%**, nine points from −38.0%, and nothing about the size or the
+direction of that error is predictable in advance.
 
 ![IL and clearance, like-for-like](../reports/charts/05_policy_il_and_clearance.png)
 
@@ -953,7 +983,7 @@ direction those corrections predicted.
 | Share of selling hours with a sale | 24.1% — three in four hours sell nothing |
 | Shadow gate | **PASS** — 12,771 decisions, completeness 0.9974, matched 0.9974, cost-floor violations 0, drift ratio 1.0225, solver p95 102 ms |
 | Actual IL% (replay sample, 2,000 episodes) | **32.27%** (IL ≈ ₩14.27M), clearance 93.3% |
-| DP vs legacy (like-for-like, same demand model) | **−38.0% IL** at **−0.97pp clearance** (77.58% → 77.61% … see section 5.7) |
+| DP vs legacy (like-for-like, same demand model) | **−38.0% IL** at **−0.97pp clearance** (77.58% → 76.61% … see section 5.7) |
 | DP vs legacy mean discount | 0.1285 vs 0.2935 — the DP opens far shallower and holds |
 | Intra-episode deepening | 0% of episodes; median \|ε\| needed 2.429 against 1.0 in use |
 | Correlation `rho` / forced hours / implied deff | 0.3103 / 8.563 / **3.347** (fitted-residual basis, `artifacts/rho.json`) |
