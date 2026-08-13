@@ -406,6 +406,38 @@ target itself carries. The residual caveat is a slow cross-day feedback
 loop (in production these rates are computed from sales under our own
 pricing); the anchor restriction is what keeps it tame.
 
+**The training label is censored, and that is a priced trade.**
+
+The target is `units_sold`, which stops at the shelf: an hour that sold out
+records what fitted, not what customers wanted. Three options, one chosen:
+
+- *Drop the censored hours.* Rejected — it selects on the outcome. Sell-outs
+  are **14% of rows** and they concentrate in the later hours of a window,
+  which is exactly when the selling happens. Training on what is left means
+  training on a population reweighted toward the quiet part of the window.
+- *Fit a censored likelihood* (a sold-out hour entering as `D >= q`). This is
+  the principled answer and is what every other estimator here already does —
+  `fit_dispersion`, `estimate_prior`, and the posterior update all carry the
+  survival term. It is **not off-the-shelf under a Tweedie objective**:
+  custom likelihood work plus its own validation, which the MVP did not buy.
+- *Keep the label and correct the level.* Chosen. The bias is real and
+  measurable — on the pre-calibration model the hourly bias runs −0.09 across
+  uncensored hours against −0.21 once censored hours are counted, so the
+  under-prediction roughly doubles when the unobservable hours are the busy
+  ones.
+
+What makes that trade safe is the feature exclusion below: with no inventory
+or stockout indicator, the model cannot learn *"the shelf was empty"* and so
+the censoring bias arrives smooth rather than structured — which is precisely
+the shape a single multiplicative level factor can remove. **Section 5.4's
+level calibration is therefore not housekeeping; it is the second half of
+this decision**, and it is why that factor must be solved on the censored
+basis (§9.3) rather than divided out: a correction for censoring cannot be
+found on a basis that ignores censoring.
+
+Revisiting it is a phase-2 item: a proper censored objective removes the need
+for the level factor to carry this particular load.
+
 **What is deliberately NOT a feature — and why.**
 
 - *Hours remaining* is planner state, not demand context: the customer sees

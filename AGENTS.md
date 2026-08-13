@@ -135,6 +135,17 @@ python3 -m pipeline.monitor
    *solved* on that basis, not divided out, because scaling mu before
    censoring moves the censored total by less than the factor.
 
+5b. **The baseline's training label is censored on purpose, and the level
+   factor is what pays for it.** `units_sold` stops at the shelf. Training on
+   uncensored rows only was tried and rejected: it drops 14% of rows,
+   concentrated in the later hours where the selling happens, so it selects on
+   the outcome. A censored likelihood is the right fix but is not off-the-shelf
+   under Tweedie and was not bought for the MVP. Measured cost of the trade:
+   pre-calibration hourly bias −0.09 on uncensored hours vs −0.21 with censored
+   hours included. Do NOT "fix" this by filtering the training set, and do not
+   treat the level factor as optional cleanup — it is the second half of this
+   decision (design 5.4).
+
 5. **Level-calibration factors are fit on anchor rows only**, over the
    `calibration_fit_window` (default train+calib — measured weekly demand
    swings ±8%, so a factor fit on one fortnight inherits that fortnight's
@@ -478,6 +489,23 @@ Every v1 slide survives into v3, so **a number fixed in one must be fixed in
 both**. v3's core slides 6, 7, 8 and 16 carry wording tightened for a
 presented setting: the numbers are identical, the sentences around them are
 not, so patch by the number rather than by a whole-sentence match.
+
+`docs/system_walkthrough.html` is the leadership-facing walkthrough — one tab
+per frozen artifact, plus the hourly decision and the learning loop. It is
+built, not hand-edited:
+
+```bash
+python3 -m tools.walkthrough.build      # writes docs/system_walkthrough.html
+```
+
+Tab prose lives in `tools/walkthrough/panels.py`; `_source.html` is the
+original single-topic decision-core page and its sections are lifted verbatim,
+so edit the panels rather than the output. Figures on the artifact tabs are
+quoted from the v3 deck and this design doc (the `baseline-20260811043259`
+run) so the page holds one vintage throughout; the decision tab is a
+self-contained solve whose inputs are printed on it. It is published as a
+claude.ai artifact — deploy the built file with the existing artifact URL so
+the same link updates rather than a second page appearing.
 
 **A structural or wording change belongs in the builder and a re-run, never in
 the `.pptx`.** A hand-edited deck cannot be rebuilt, and the rebuild is what

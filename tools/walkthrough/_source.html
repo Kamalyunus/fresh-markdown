@@ -1,0 +1,876 @@
+<title>Inside the Markdown Agent</title>
+<style>
+  :root {
+    --paper:   #FAFAF6;
+    --surface: #F1F3EC;
+    --sunk:    #E9EDE2;
+    --ink:     #17201A;
+    --muted:   #6A7266;
+    --rule:    #DCE2D4;
+    --green:   #2C5F2D;
+    --green-w: #E4EDE0;
+    --loss:    #B3402A;
+  
+    --display: Georgia, "Iowan Old Style", "Palatino Linotype", Palatino, serif;
+    --body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --data: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:   #0F1310;
+      --surface: #182018;
+      --sunk:    #131A14;
+      --ink:     #E6EADF;
+      --muted:   #97A292;
+      --rule:    #2B352C;
+      --green:   #86B96F;
+      --green-w: #1D2A1C;
+      --loss:    #E58A6E;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper:   #0F1310;
+    --surface: #182018;
+    --sunk:    #131A14;
+    --ink:     #E6EADF;
+    --muted:   #97A292;
+    --rule:    #2B352C;
+    --green:   #86B96F;
+    --green-w: #1D2A1C;
+    --loss:    #E58A6E;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16.5px;
+    line-height: 1.62;
+    margin: 0;
+    padding: 0 clamp(18px, 5vw, 56px) 96px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 940px; margin: 0 auto; }
+  .prose { max-width: 66ch; }
+
+  /* ---------------------------------------------------------------- header */
+  header { padding: clamp(48px, 9vw, 92px) 0 0; }
+  .kicker {
+    font-size: 11.5px; letter-spacing: .16em; text-transform: uppercase;
+    font-weight: 650; color: var(--green); margin: 0 0 18px;
+  }
+  h1 {
+    font-family: var(--display); font-weight: 400;
+    font-size: clamp(34px, 6vw, 54px); line-height: 1.06;
+    letter-spacing: -.015em; text-wrap: balance; margin: 0 0 20px;
+  }
+  .standfirst {
+    font-size: clamp(17px, 2.1vw, 20px); line-height: 1.55;
+    color: var(--muted); max-width: 60ch; margin: 0;
+  }
+  .standfirst strong { color: var(--ink); font-weight: 600; }
+
+  /* ---------------------------------------------------------------- blocks */
+  section { padding-top: clamp(44px, 6vw, 68px); }
+
+  .step-head { display: flex; align-items: baseline; gap: 14px; margin: 0 0 6px; }
+  .step-n {
+    font-family: var(--data); font-size: 12px; font-weight: 600;
+    color: var(--green); background: var(--green-w);
+    border-radius: 3px; padding: 3px 8px; flex: none;
+    letter-spacing: .04em;
+  }
+  h2 {
+    font-family: var(--display); font-weight: 400;
+    font-size: clamp(23px, 3.2vw, 30px); line-height: 1.2;
+    letter-spacing: -.01em; margin: 0; text-wrap: balance;
+  }
+  h3 {
+    font-size: 13px; letter-spacing: .1em; text-transform: uppercase;
+    font-weight: 650; color: var(--muted); margin: 0 0 10px;
+  }
+  p { margin: 0 0 16px; }
+  p:last-child { margin-bottom: 0; }
+  .lede { margin-top: 14px; }
+
+  em.term { font-style: normal; font-weight: 600; }
+  code {
+    font-family: var(--data); font-size: .88em;
+    background: var(--sunk); padding: 1px 5px; border-radius: 3px;
+  }
+  .num { font-family: var(--data); font-variant-numeric: tabular-nums; }
+  .loss { color: var(--loss); }
+  .good { color: var(--green); }
+
+  /* ------------------------------------------------------------ state rail */
+  .chips {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    margin: 26px 0 0; padding: 0; list-style: none;
+  }
+  .chips li {
+    background: var(--surface); border: 1px solid var(--rule);
+    border-radius: 6px; padding: 10px 14px; min-width: 132px;
+  }
+  .chips .k {
+    display: block; font-size: 11px; letter-spacing: .09em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 3px;
+  }
+  .chips .v {
+    font-family: var(--data); font-size: 17px; font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* --------------------------------------------------------------- figures */
+  figure { margin: 26px 0 0; }
+  figcaption {
+    font-size: 14px; color: var(--muted); line-height: 1.5;
+    margin-top: 12px; max-width: 68ch;
+  }
+  .scroller { overflow-x: auto; }
+
+  .fan { width: 100%; height: auto; display: block; color: var(--ink); }
+  .fan .box { fill: var(--surface); stroke: var(--rule); stroke-width: 1; }
+  .fan .box-act { fill: var(--green-w); stroke: var(--green); stroke-width: 1.25; }
+  .fan .lbl { font-family: var(--body); font-size: 13px; fill: currentColor; }
+  .fan .lbl-s { font-family: var(--body); font-size: 11.5px; fill: var(--muted); }
+  .fan .lbl-cap {
+    font-family: var(--body); font-size: 10.5px; letter-spacing: .1em;
+    text-transform: uppercase; fill: var(--muted);
+  }
+  .fan .val {
+    font-family: var(--data); font-size: 13.5px; font-weight: 600;
+    fill: var(--loss);
+  }
+  .fan .wire { fill: none; stroke: currentColor; stroke-width: 1.25; opacity: .34; }
+  .fan .prob {
+    font-family: var(--data); font-size: 12px; fill: var(--muted);
+  }
+  .fan .branch { transition: opacity .13s ease; }
+  .fan.dim .branch { opacity: .26; }
+  .fan.dim .branch.on { opacity: 1; }
+  .fan .branch.on .wire { opacity: 1; stroke: var(--green); stroke-width: 2; }
+  .fan .branch.on .box { stroke: var(--green); }
+  @media (prefers-reduced-motion: reduce) {
+    .fan .branch { transition: none; }
+  }
+
+  /* ---------------------------------------------------------------- tables */
+  table {
+    border-collapse: collapse; width: 100%;
+    font-size: 14.5px; font-variant-numeric: tabular-nums;
+  }
+  caption {
+    text-align: left; font-size: 13px; letter-spacing: .1em;
+    text-transform: uppercase; font-weight: 650; color: var(--muted);
+    padding-bottom: 9px;
+  }
+  th, td { padding: 8px 12px; text-align: right; border-bottom: 1px solid var(--rule); }
+  th:first-child, td:first-child { text-align: left; }
+  thead th {
+    font-size: 11.5px; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--muted); font-weight: 650; white-space: nowrap;
+    border-bottom: 1px solid var(--ink);
+  }
+  tbody td { font-family: var(--data); }
+  tbody td:first-child { font-family: var(--body); white-space: nowrap; }
+  tr.total td {
+    border-bottom: none; border-top: 2px solid var(--ink);
+    font-weight: 700; padding-top: 11px;
+  }
+  tbody tr[data-k] { cursor: default; }
+  tbody tr[data-k]:hover, tbody tr[data-k].on { background: var(--green-w); }
+
+  .win { color: var(--green); font-weight: 700; }
+  .win-tag {
+    font-family: var(--body); font-size: 11px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--green); font-weight: 650;
+  }
+
+  /* ------------------------------------------------------------- grid table */
+  .grid td, .grid th { text-align: right; padding: 9px 14px; }
+  .grid .terminal { background: var(--sunk); color: var(--muted); }
+  .grid .hi {
+    background: var(--green-w); color: var(--green);
+    font-weight: 700; box-shadow: inset 0 0 0 1.5px var(--green);
+  }
+  .grid tbody th { font-weight: 600; color: var(--muted); font-size: 13px; }
+  .flow { width: 100%; height: auto; display: block; color: var(--muted); margin-bottom: 4px; }
+  .flow text {
+    font-family: var(--body); font-size: 11px; letter-spacing: .09em;
+    text-transform: uppercase; fill: currentColor;
+  }
+  .flow line, .flow polygon { stroke: currentColor; fill: currentColor; }
+
+  /* ----------------------------------------------------------------- bars */
+  .bars { display: grid; gap: 9px; margin: 4px 0 0; }
+  .bars .row { display: grid; grid-template-columns: 74px 1fr; align-items: center; gap: 12px; }
+  .bars .row > span:first-child { font-size: 13px; color: var(--muted); }
+  .bar-pair { display: grid; gap: 3px; min-width: 0; }
+  .track { display: flex; align-items: center; gap: 9px; }
+  .bar { height: 13px; border-radius: 2px; flex: 0 0 auto; }
+  .track b {
+    font-family: var(--data); font-size: 11.5px; font-weight: 500;
+    font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap;
+  }
+  .bar.nb { background: var(--green); }
+  .bar.po { background: var(--rule); border: 1px solid var(--muted); height: 11px; }
+  .key { display: flex; gap: 18px; font-size: 13px; color: var(--muted); margin: 0 0 14px; }
+  .key i { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 6px; }
+  .key .nb { background: var(--green); }
+  .key .po { background: var(--rule); }
+
+  /* ----------------------------------------------------------------- notes */
+  .callout {
+    background: var(--surface); border-left: 3px solid var(--green);
+    border-radius: 0 6px 6px 0; padding: 18px 22px; margin: 26px 0 0;
+  }
+  .callout h3 { color: var(--green); }
+  .callout p { max-width: 64ch; }
+
+  .math {
+    font-family: var(--data); font-size: 14px; line-height: 1.85;
+    background: var(--sunk); border: 1px solid var(--rule);
+    border-radius: 6px; padding: 16px 20px; margin: 22px 0 0;
+    overflow-x: auto; white-space: pre;
+  }
+
+  .cols { display: grid; gap: 30px; grid-template-columns: 1fr; }
+  @media (min-width: 760px) { .cols.two { grid-template-columns: 1fr 1fr; } }
+
+  footer {
+    margin-top: clamp(56px, 8vw, 88px); padding-top: 22px;
+    border-top: 1px solid var(--rule); font-size: 13.5px; color: var(--muted);
+  }
+  footer code { background: none; padding: 0; color: var(--ink); }
+</style>
+
+<div class="wrap">
+
+<header>
+  <p class="kicker">Perishable Markdown MVP · the decision core</p>
+  <h1>Every hour, the agent solves a small problem exactly</h1>
+  <p class="standfirst">
+    It is a <strong>Markov Decision Process</strong>, solved as a
+    <strong>dynamic program</strong>. The decision itself is arithmetic rather than a
+    model — every step of it is on this page, and it can be checked by hand. What
+    makes it interesting is the one uncertain input: <em>how many units will sell in
+    the next hour</em>, which arrives as a probability for every possible answer
+    rather than as a single guess.
+  </p>
+
+  <ul class="chips">
+    <li><span class="k">Original price</span><span class="v">₩10,000</span></li>
+    <li><span class="k">Unit cost</span><span class="v">₩4,000</span></li>
+    <li><span class="k">On hand</span><span class="v">3 units</span></li>
+    <li><span class="k">Window left</span><span class="v">4 hours</span></li>
+    <li><span class="k">Discount in force</span><span class="v">0%</span></li>
+  </ul>
+  <p class="prose lede" style="font-size:14px;color:var(--muted);margin-top:14px">
+    One worked episode, carried the whole way through. Every figure below is the real
+    solver’s output for this state, not an illustration.
+  </p>
+</header>
+
+<!-- ========================================================= 0 · the statement -->
+<section>
+  <div class="prose">
+    <div class="step-head"><h2>The problem, stated once</h2></div>
+    <p class="lede">
+      Formally this is a <em class="term">finite-horizon Markov Decision Process</em>.
+      <em>Markov</em> is a claim about what matters: the three numbers in the state
+      below are a <strong>sufficient</strong> description of the situation, so given
+      them, nothing else about how the episode arrived here changes the right price.
+      <em>Finite horizon</em> is the expiry clock — the episode ends, and it ends at a
+      known hour.
+    </p>
+  </div>
+
+  <div class="prose">
+    <h3 style="margin-top:30px">What it minimises</h3>
+    <p style="margin-bottom:0">
+      One number, in won. Not a ratio, not a score — the actual money the episode
+      loses, which is additive across hours and so can be carried straight into the
+      recursion with no transformation:
+    </p>
+  </div>
+  <div class="math">IL  =  Σ over hours ( P₀ − price ) × units sold      ← discount given away
+    +               cost × units left at expiry     ← scrap</div>
+  <div class="prose">
+    <p style="margin-top:14px">
+      Both terms are losses, so every figure on this page is negative and less
+      negative is better. Reporting later divides IL by the full-price value of what
+      sold to get IL%, but the agent never optimises that ratio — its denominator
+      moves when the price moves, which makes it the wrong thing to hand an optimiser.
+    </p>
+  </div>
+
+  <div class="prose">
+    <h3 style="margin-top:30px">The state, the actions, and the recursion</h3>
+  </div>
+  <div class="math">state     s = (a, q, t)      a = discount in force,  q = units on hand,  t = hours left
+actions   A(a) = { d on the 2.5pp grid  :  a ≤ d ≤ d_max }        d_max = 1 − cost ⁄ P₀
+
+V(a, q, 0)     =  − cost × q
+Q(a, q, t, d)  =  Σₖ P(D = k | μ(d), r) · [ −P₀·d·min(k, q) + V(d, q − min(k, q), t−1) ]
+V(a, q, t)     =  max over d ∈ A(a) of  Q(a, q, t, d)</div>
+  <div class="prose">
+    <p style="margin-top:16px">
+      Read the middle line slowly, because the rest of this page is just that line
+      worked by hand. For a candidate discount <code>d</code>, every possible sales
+      count <code>k</code> is weighted by its probability. Each one settles money now
+      — <code>−P₀·d</code> per unit actually sold — and leaves a different position for
+      the next hour, whose value is already known. Note what sits in the first slot of
+      that <code>V</code>: <code>d</code>, not <code>a</code>. <strong>The price you
+      choose becomes the ceiling you inherit.</strong>
+    </p>
+    <p>
+      Only one term is not arithmetic: <code>P(D = k)</code>, the chance of selling
+      exactly <code>k</code> units. Where that comes from is the subject of section two.
+    </p>
+  </div>
+
+  <div class="callout">
+    <h3>Bellman’s equation — and why this one is solved exactly</h3>
+    <p>
+      Those last two lines are <em class="term">Bellman’s equation</em>, the standard
+      statement of any sequential decision under uncertainty: the value of a position
+      is the best available combination of what you collect now and what you are worth
+      afterwards. Writing it down is the easy part. Solving it as written usually is
+      not — in most problems the states cannot be enumerated, so the equation is
+      attacked <strong>approximately</strong>: sample part of it, fit a function to the
+      rest, learn from experience and hope the estimate settles near the truth. That is
+      what reinforcement learning is for, and it is the normal way this equation gets
+      handled.
+    </p>
+    <p>
+      None of that is needed here. Inventory runs under thirty units, the horizon under
+      twelve hours, and the ladder holds at most forty rungs — a state space small
+      enough to write out in full. So we solve Bellman’s equation
+      <strong>exactly</strong>, by dynamic programming, in a fraction of a second: no
+      sampling, no function approximation, no training loop, and no convergence to take
+      on faith. What the agent returns is <em>the</em> optimum for the inputs it was
+      given, not an estimate of it — and the same inputs will return it again tomorrow.
+    </p>
+  </div>
+</section>
+
+<!-- ============================================================ 1 · the ladder    -->
+<section>
+  <div class="prose">
+    <div class="step-head"><h2>Where the 25 rungs come from</h2></div>
+    <p class="lede">
+      The agent never picks a price freely. It picks a rung off a fixed ladder of
+      2.5-percentage-point steps, so <strong>every price it can ever quote is
+      P₀ × (1 − k × 2.5%)</strong> — there is no continuous optimisation and no
+      rounding afterwards. Two things decide how long that ladder is.
+    </p>
+    <p>
+      First the <em class="term">cost floor</em>. The deepest legal discount is the one
+      that reaches unit cost, and it is computed before any arithmetic runs, so a
+      below-cost price is not evaluated and rejected — it is never constructed:
+    </p>
+  </div>
+  <div class="math">d_max   =  1 − cost ⁄ P₀  =  1 − 4,000 ⁄ 10,000  =  60% off
+rungs   =  60 ⁄ 2.5 + 1  =  25          (the “+ 1” is the 0% rung — holding)
+        →  0%, 2.5%, 5%, 7.5%, … , 55%, 57.5%, 60%
+prices  →  ₩10,000, ₩9,750, ₩9,500, ₩9,250, … , ₩4,500, ₩4,250, ₩4,000</div>
+
+  <div class="prose">
+    <p style="margin-top:16px">
+      Second, <em class="term">monotonicity</em>: price may hold or deepen, never go
+      back up. So the 25 rungs are the ladder at the start of the episode, when nothing
+      has been discounted yet. Once a discount is in force, the rungs above it are gone
+      for good — which is exactly why the discount carried in from the previous hour
+      has to be part of the state rather than a note in a log.
+    </p>
+  </div>
+
+  <figure>
+    <div class="scroller"><table>
+      <caption>The action set, as the previous hour leaves it</caption>
+      <thead>
+        <tr>
+          <th>Discount in force</th><th>Prices still available</th><th>Rungs</th>
+          <th>Best move now</th><th>Episode value</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>0% &nbsp;<span class="win-tag">this episode</span></td><td>₩10,000 → ₩4,000</td><td>25</td><td class="good">hold ₩10,000</td><td class="loss">−4,881</td></tr>
+        <tr><td>10%</td><td>₩9,000 → ₩4,000</td><td>21</td><td>hold ₩9,000</td><td class="loss">−6,304</td></tr>
+        <tr><td>20%</td><td>₩8,000 → ₩4,000</td><td>17</td><td>hold ₩8,000</td><td class="loss">−7,942</td></tr>
+        <tr><td>30%</td><td>₩7,000 → ₩4,000</td><td>13</td><td>hold ₩7,000</td><td class="loss">−9,829</td></tr>
+        <tr><td>40%</td><td>₩6,000 → ₩4,000</td><td>9</td><td>hold ₩6,000</td><td class="loss">−12,000</td></tr>
+        <tr><td>50%</td><td>₩5,000 → ₩4,000</td><td>5</td><td>hold ₩5,000</td><td class="loss">−14,485</td></tr>
+        <tr><td>60% — the floor</td><td>₩4,000 only</td><td>1</td><td>forced</td><td class="loss">−17,296</td></tr>
+      </tbody>
+    </table></div>
+    <figcaption>
+      Same three units, same four hours, same demand — only the discount inherited from
+      the previous hour differs. The ladder shortens as it deepens, and the episode is
+      worth less at every step down, because the discount already in force applies to
+      every unit still to sell. That column is the cost of a markdown made too early,
+      and it is the reason the anchor sits in the state. Two things to notice in the
+      fourth column: the best move is a rung, never a number in between, and at the
+      price response we measure today the agent holds at each anchor rather than
+      deepening further.
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ========================================================== 2 · last hour     -->
+<section>
+  <div class="prose">
+    <div class="step-head"><span class="step-n">solved 1st</span><h2>Start at the end, where the answer is obvious</h2></div>
+    <p class="lede">
+      A dynamic program is solved backwards, because the last hour is the only one
+      with no future to reason about. When the window closes, whatever is left is
+      scrapped at cost. No decision, no uncertainty — just a bill.
+    </p>
+  </div>
+  <div class="math">Value of finishing with 0 units   =        ₩0
+Value of finishing with 1 unit    =   −₩4,000
+Value of finishing with 2 units   =   −₩8,000
+Value of finishing with 3 units   =  −₩12,000</div>
+  <p class="prose" style="margin-top:16px">
+    That is the whole terminal condition. Every other number on this page is built
+    out of it by stepping backwards one hour at a time.
+  </p>
+</section>
+
+<!-- ======================================================= 3 · distribution  -->
+<section>
+  <div class="prose">
+    <div class="step-head"><h2>One hour earlier: a price buys a distribution, not a number</h2></div>
+    <p class="lede">
+      Now go back one hour. Three units, sixty minutes, and a price to pick. Demand
+      arrives in two pieces, and it is worth keeping them apart.
+    </p>
+    <p>
+      The machine-learned model supplies a <em class="term">base demand</em> —
+      <code>μ_ref</code>, the average units this SKU moves in this hour <em>at the
+      category’s reference discount</em>, here 0.80 at 30% off. That model is blind to
+      price by construction; it is never asked what a different price would do. Moving
+      off the reference is the job of a single parametric term, and the two together
+      are what make the demand model semi-parametric:
+    </p>
+  </div>
+  <div class="math">μ(d)  =  μ_ref · ( (1 − d) ⁄ (1 − d_ref) ) ^ ε          ε is the price response
+                                                       (constrained negative,
+at d = 0      μ = 0.80 · (1.00 ⁄ 0.70) ^ −1  =  0.56    measured at −1.0 today)
+at d = 0.30   μ = 0.80                        ← the reference itself
+at d = 0.60   μ = 0.80 · (0.40 ⁄ 0.70) ^ −1  =  1.40</div>
+  <div class="prose">
+    <p style="margin-top:16px">
+      So the ML model is consulted <strong>once per hour</strong>, and that one number is
+      then swung across all 25 rungs by the exponent — 0.56 at full price, 1.40 at the
+      cost floor. Every price effect in this system lives in <code>ε</code>, which is
+      the reason a single number is worth running experiments to learn.
+    </p>
+    <p>
+      But you never sell 0.56 of anything. What the agent needs is the chance of selling
+      exactly none, exactly one, exactly two — and that is what the second frozen input
+      is for. Alongside the average we measured how <em class="term">spread out</em>
+      hourly demand is around it: the dispersion. Average and spread together define the
+      full distribution, and that distribution is what enters the arithmetic.
+    </p>
+  </div>
+
+  <div class="callout">
+    <h3>Why the spread is not a detail</h3>
+    <div class="key" style="margin-top:2px">
+      <span><i class="nb"></i>measured spread</span>
+      <span><i class="po"></i>if demand were “well behaved”</span>
+    </div>
+    <div class="bars">
+      <div class="row"><span>sells 0</span><div class="bar-pair">
+        <div class="track"><div class="bar nb" style="width:64.6%"></div><b>64.6%</b></div>
+        <div class="track"><div class="bar po" style="width:57.1%"></div><b>57.1%</b></div></div></div>
+      <div class="row"><span>sells 1</span><div class="bar-pair">
+        <div class="track"><div class="bar nb" style="width:22.5%"></div><b>22.5%</b></div>
+        <div class="track"><div class="bar po" style="width:32.0%"></div><b>32.0%</b></div></div></div>
+      <div class="row"><span>sells 2</span><div class="bar-pair">
+        <div class="track"><div class="bar nb" style="width:8.2%"></div><b>8.2%</b></div>
+        <div class="track"><div class="bar po" style="width:9.0%"></div><b>9.0%</b></div></div></div>
+      <div class="row"><span>sells 3+</span><div class="bar-pair">
+        <div class="track"><div class="bar nb" style="width:4.8%"></div><b>4.8%</b></div>
+        <div class="track"><div class="bar po" style="width:1.9%"></div><b>1.9%</b></div></div></div>
+    </div>
+    <p style="margin-top:16px">
+      Both columns have the same average, 0.56 units. Real perishable demand is
+      lumpier: more hours where nothing at all happens, and a fatter tail where a
+      basket shopper clears the shelf. Assume it away and the agent values this
+      episode at <span class="num">−₩4,254</span> when the honest answer is
+      <span class="num">−₩4,881</span> — <strong>13% too optimistic</strong>, every
+      hour, in the direction of doing nothing.
+    </p>
+  </div>
+</section>
+
+<!-- ============================================================== 4 · the fan       -->
+<section>
+  <div class="prose">
+    <div class="step-head"><span class="step-n">solved 2nd</span><h2>Every outcome has a payoff and a destination</h2></div>
+    <p class="lede">
+      Take one candidate — 30% off, ₩7,000 — in that second-to-last hour. Each
+      possible sales count does two things at once: it settles some money now, and it
+      hands the agent a different starting position for the final hour. And the
+      value of every final-hour position is already known, from the box above.
+    </p>
+  </div>
+
+  <figure>
+    <div class="scroller">
+      <svg class="fan" id="fan" viewBox="0 0 820 336" role="img"
+           aria-label="One candidate price at 30 percent off branches into four possible sales outcomes, each with a probability, a discount cost settled this hour, and a remaining inventory whose end-of-window scrap value is already known.">
+        <text class="lbl-cap" x="6" y="14">State now</text>
+        <rect class="box" x="6" y="138" width="132" height="62" rx="6"/>
+        <text class="lbl" x="72" y="163" text-anchor="middle">3 units left</text>
+        <text class="lbl-s" x="72" y="182" text-anchor="middle">1 hour to go</text>
+
+        <path class="wire" d="M138 169 H172" style="opacity:.55"/>
+        <polygon points="172,169 165,165.5 165,172.5" fill="currentColor" opacity=".55"/>
+
+        <text class="lbl-cap" x="180" y="14">Candidate action</text>
+        <rect class="box-act" x="180" y="138" width="150" height="62" rx="6"/>
+        <text class="lbl" x="255" y="163" text-anchor="middle">Price at ₩7,000</text>
+        <text class="lbl-s" x="255" y="182" text-anchor="middle">30% off · average 0.80</text>
+
+        <text class="lbl-cap" x="498" y="14">Where that leaves it</text>
+
+        <g class="branch" data-k="0">
+          <path class="wire" d="M330 169 C 400 169, 410 46, 494 46"/>
+          <rect class="box" x="498" y="20" width="316" height="52" rx="6"/>
+          <text class="lbl" x="514" y="41">Sells nothing</text>
+          <text class="lbl-s" x="514" y="60">₩0 discount · 3 units scrapped</text>
+          <text class="val" x="798" y="52" text-anchor="end">−₩12,000</text>
+          <text class="prob" x="486" y="50" text-anchor="end">56.3%</text>
+        </g>
+        <g class="branch" data-k="1">
+          <path class="wire" d="M330 169 C 400 169, 410 128, 494 128"/>
+          <rect class="box" x="498" y="102" width="316" height="52" rx="6"/>
+          <text class="lbl" x="514" y="123">Sells 1</text>
+          <text class="lbl-s" x="514" y="142">−₩3,000 discount · 2 units scrapped</text>
+          <text class="val" x="798" y="134" text-anchor="end">−₩11,000</text>
+          <text class="prob" x="486" y="132" text-anchor="end">24.1%</text>
+        </g>
+        <g class="branch" data-k="2">
+          <path class="wire" d="M330 169 C 400 169, 410 210, 494 210"/>
+          <rect class="box" x="498" y="184" width="316" height="52" rx="6"/>
+          <text class="lbl" x="514" y="205">Sells 2</text>
+          <text class="lbl-s" x="514" y="224">−₩6,000 discount · 1 unit scrapped</text>
+          <text class="val" x="798" y="216" text-anchor="end">−₩10,000</text>
+          <text class="prob" x="486" y="214" text-anchor="end">10.7%</text>
+        </g>
+        <g class="branch" data-k="3">
+          <path class="wire" d="M330 169 C 400 169, 410 292, 494 292"/>
+          <rect class="box" x="498" y="266" width="316" height="52" rx="6"/>
+          <text class="lbl" x="514" y="287">Sells out</text>
+          <text class="lbl-s" x="514" y="306">−₩9,000 discount · nothing scrapped</text>
+          <text class="val" x="798" y="298" text-anchor="end">−₩9,000</text>
+          <text class="prob" x="486" y="296" text-anchor="end">9.0%</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>
+      One price, four outcomes. Selling out is the best branch and the least likely;
+      selling nothing is the worst and the most likely. The agent’s score for this
+      price is the average of the right-hand column, weighted by those probabilities.
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ 5 · the sum       -->
+<section>
+  <div class="prose">
+    <div class="step-head"><h2>Weigh, add, then do it again for every rung</h2></div>
+    <p class="lede">
+      Multiply each outcome by its probability and add them up. That single number is
+      the price’s score. Then repeat for all 25 rungs and keep the best. Below are
+      two of them side by side — the 30% discount from the diagram, and simply holding
+      at full price.
+    </p>
+  </div>
+
+  <div class="cols two">
+    <figure style="margin-top:20px">
+      <div class="scroller"><table>
+        <caption>30% off · ₩7,000</caption>
+        <thead><tr><th>Outcome</th><th>Chance</th><th>Value</th><th>Weighted</th></tr></thead>
+        <tbody>
+          <tr data-k="0"><td>sells 0</td><td>56.3%</td><td class="loss">−12,000</td><td class="loss">−6,750</td></tr>
+          <tr data-k="1"><td>sells 1</td><td>24.1%</td><td class="loss">−11,000</td><td class="loss">−2,646</td></tr>
+          <tr data-k="2"><td>sells 2</td><td>10.7%</td><td class="loss">−10,000</td><td class="loss">−1,074</td></tr>
+          <tr data-k="3"><td>sells out</td><td>9.0%</td><td class="loss">−9,000</td><td class="loss">−806</td></tr>
+          <tr class="total"><td>Score</td><td></td><td></td><td class="loss">−11,276</td></tr>
+        </tbody>
+      </table></div>
+    </figure>
+
+    <figure style="margin-top:20px">
+      <div class="scroller"><table>
+        <caption>Hold at ₩10,000 <span class="win-tag">— chosen</span></caption>
+        <thead><tr><th>Outcome</th><th>Chance</th><th>Value</th><th>Weighted</th></tr></thead>
+        <tbody>
+          <tr><td>sells 0</td><td>64.6%</td><td class="loss">−12,000</td><td class="loss">−7,750</td></tr>
+          <tr><td>sells 1</td><td>22.5%</td><td class="loss">−8,000</td><td class="loss">−1,798</td></tr>
+          <tr><td>sells 2</td><td>8.2%</td><td class="loss">−4,000</td><td class="loss">−326</td></tr>
+          <tr><td>sells out</td><td>4.8%</td><td>0</td><td>0</td></tr>
+          <tr class="total"><td>Score</td><td></td><td></td><td class="win">−9,874</td></tr>
+        </tbody>
+      </table></div>
+    </figure>
+  </div>
+
+  <p class="prose" style="margin-top:22px">
+    Holding wins by <strong>₩1,402</strong>, and the two columns show exactly why.
+    Discounting 30% lifts expected sales from 0.56 units to 0.80 — a real lift. But
+    it hands ₩3,000 to <em class="term">every</em> unit that sells, including the
+    0.56 units that were going to sell anyway. At these numbers the giveaway is
+    larger than the rescue. That is not a rule anyone wrote down; it fell out of the
+    arithmetic, and at a different cost, price or hour it comes out the other way.
+  </p>
+</section>
+
+<!-- =========================================================== 6 · the grid      -->
+<section>
+  <div class="prose">
+    <div class="step-head"><span class="step-n">solved 3rd → last</span><h2>Now step back another hour, and another</h2></div>
+    <p class="lede">
+      The winning score for “3 units, 1 hour left” is <span class="num">−₩9,874</span>.
+      Write it down. It is now a known value, exactly like the scrap figures were —
+      so the same fan can be drawn one hour further back, landing on <em>it</em>
+      instead of on the scrap bill. Repeat until you reach the present.
+    </p>
+  </div>
+
+  <figure>
+    <svg class="flow" viewBox="0 0 700 26" role="img" aria-label="The table is filled from the right-hand column leftwards, from the end of the window back to the present hour.">
+      <line x1="548" y1="17" x2="120" y2="17" stroke-width="1"/>
+      <polygon points="112,17 121,13 121,21"/>
+      <text x="698" y="21" text-anchor="end">filled from here</text>
+    </svg>
+    <div class="scroller"><table class="grid">
+      <thead>
+        <tr>
+          <th>Units on hand</th>
+          <th>4 hrs left</th><th>3 hrs</th><th>2 hrs</th><th>1 hr</th><th>window closed</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><th>3 units</th>
+          <td class="hi">−4,881</td><td>−6,281</td><td>−7,950</td>
+          <td class="hi">−9,874</td><td class="terminal">−12,000</td></tr>
+        <tr><th>2 units</th>
+          <td>−2,360</td><td>−3,279</td><td>−4,497</td><td>−6,065</td>
+          <td class="terminal">−8,000</td></tr>
+        <tr><th>1 unit</th>
+          <td>−696</td><td>−1,077</td><td>−1,668</td><td>−2,583</td>
+          <td class="terminal">−4,000</td></tr>
+        <tr><th>0 units</th>
+          <td>0</td><td>0</td><td>0</td><td>0</td><td class="terminal">0</td></tr>
+      </tbody>
+    </table></div>
+    <figcaption>
+      Expected Inventory Loss, in won, for every position the episode could be in.
+      The right-hand column is the scrap bill — free. Every other cell is one fan of
+      the kind drawn above, resolved against the column to its right. The two
+      highlighted cells are the ones this page worked out by hand.
+    </figcaption>
+  </figure>
+
+  <div class="prose" style="margin-top:26px">
+    <p>
+      The top-left cell, <span class="num">−₩4,881</span>, is the answer: what this
+      episode is expected to cost under the best available plan. It is 16% of the
+      ₩30,000 of stock at stake, and it is the number the agent is minimising when
+      it chooses a price.
+    </p>
+    <p>
+      Read the table across and the mechanism is visible without any mathematics. The
+      same three units are worth <span class="num">−₩4,881</span> with four hours
+      ahead of them and <span class="num">−₩12,000</span> with none. <strong>Time is
+      the asset.</strong> The agent discounts when it is running out of time, not
+      because the clock says so — which is precisely what the rule it replaces does.
+    </p>
+  </div>
+</section>
+
+<!-- ======================================================= 7 · which hours     -->
+<section>
+  <div class="prose">
+    <div class="step-head"><h2>Which hours — not just how many</h2></div>
+    <p class="lede">
+      The ML model does not hand over a single number for the episode. It predicts
+      <strong>one base demand per remaining hour</strong> and passes the whole path,
+      because hour of day is one of its features — a 7pm hour and a 3pm hour arrive
+      carrying different <code>μ_ref</code>. The price-response term then swings each of
+      those hours across the rungs independently.
+    </p>
+    <p>
+      The DP consumes that path element by element: the hour being priced uses the first
+      entry, the hour after it the second, and the terminal scrap bill lands at the end
+      of the last one. So <em>“2 hours left”</em> is never a quantity of time on its own
+      — it is two specific hours, each with its own demand, and the agent knows which
+      two.
+    </p>
+    <p>
+      Which is worth a great deal. Below, three episodes hold identical stock with an
+      identical number of hours on the clock. Only the hours themselves differ:
+    </p>
+  </div>
+
+  <figure>
+    <div class="scroller"><table>
+      <caption>Three units, two hours left — but which two</caption>
+      <thead>
+        <tr><th>The hours that remain</th><th>Base demand <span style="text-transform:none">μ_ref</span></th><th>What the position is worth</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>climbing into an evening rush</td><td>1.0 → 1.2</td><td class="loss">−6,823</td></tr>
+        <tr><td>steady, as worked above</td><td>0.8 → 0.8</td><td class="loss">−7,950</td></tr>
+        <tr><td>fading into a dead tail</td><td>0.6 → 0.4</td><td class="loss">−9,315</td></tr>
+      </tbody>
+    </table></div>
+    <figcaption>
+      <strong>₩2,492</strong> between the top row and the bottom one, with the same
+      three units and the same two hours of clock time. Time is the asset — but hours
+      are not interchangeable units of it, and the agent prices the ones it actually
+      has rather than an average hour.
+    </figcaption>
+  </figure>
+
+  <div class="prose" style="margin-top:26px">
+    <p>
+      The forecast path and the horizon have to describe the same window, and the system
+      verifies that rather than trusting it: if the path does not carry exactly one entry
+      per remaining hour, the decision is rejected and no price is returned at all. An
+      episode whose window was truncated at a date boundary looks identical to a valid
+      request in every other respect, and would quietly optimise the wrong stretch of
+      time.
+    </p>
+  </div>
+</section>
+
+<!-- ========================================================= 8 · the next hour  -->
+<section>
+  <div class="prose">
+    <div class="step-head"><h2>And in an hour, all of it is thrown away</h2></div>
+    <p class="lede">
+      Only the first decision is ever executed. Everything else the solve produced —
+      the price it would set at every other position in that grid — is never committed
+      to anything. It exists so the first decision can be priced correctly, and then it
+      is discarded. An hour later the whole calculation runs again from the beginning.
+    </p>
+    <p>
+      That is not waste, it is the point. In the intervening hour reality picks a
+      branch, and the agent finds out which one:
+    </p>
+  </div>
+
+  <figure>
+    <div class="scroller"><table>
+      <caption>One hour later, from “3 units · 4 hrs · holding at ₩10,000”</caption>
+      <thead>
+        <tr><th>What happened</th><th>Chance</th><th>New state</th><th>Re-solved decision</th><th>New value</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>sold nothing</td><td>64.6%</td><td>3 units · 3 hrs</td><td>hold ₩10,000</td><td class="loss">−6,281</td></tr>
+        <tr><td>sold 1</td><td>22.5%</td><td>2 units · 3 hrs</td><td>hold ₩10,000</td><td class="loss">−3,279</td></tr>
+        <tr><td>sold 2</td><td>8.2%</td><td>1 unit · 3 hrs</td><td>hold ₩10,000</td><td class="loss">−1,077</td></tr>
+        <tr><td>sold out</td><td>4.8%</td><td>0 units</td><td>nothing to price</td><td class="win">0</td></tr>
+      </tbody>
+    </table></div>
+    <figcaption>
+      Those values are not new arithmetic — they are the “3 hrs” column of the grid
+      further up the page, which is exactly why the first decision could be made
+      without knowing which row would come true.
+    </figcaption>
+  </figure>
+
+  <div class="prose" style="margin-top:26px">
+    <p>
+      Three things change before the next solve, and each can move the answer. The
+      <em class="term">inventory</em> is whatever actually sold, not what was forecast.
+      The <em class="term">horizon</em> is one hour shorter, so every remaining unit has
+      less time to find a buyer. And the <em class="term">anchor</em> is the price just
+      used, which permanently removes every rung above it.
+    </p>
+    <p>
+      A fourth thing changes quietly: the forecast itself is refreshed each hour, so the
+      base demand feeding the next solve need not be the one that fed this one. A shopper
+      surge, a quiet afternoon, a neighbouring store's promotion — none of that is
+      predicted, and none of it needs to be. It shows up as a different state and a
+      different forecast an hour later, and the agent re-derives its answer from
+      whatever it finds.
+    </p>
+    <p>
+      This is why <strong>the agent never follows a plan</strong>. It holds no position
+      between hours and carries no commitment forward. Ask it what it will do at
+      2 hours left and the honest answer is a question back: <em>with how many units on
+      hand?</em> Everything on this page is recomputed, from scratch, sixty minutes
+      from now.
+    </p>
+  </div>
+</section>
+
+<!-- ============================================================ 9 · scale         -->
+<section>
+  <div class="prose">
+    <div class="step-head"><h2>How much arithmetic that is</h2></div>
+    <p class="lede">
+      Four hours × 25 price rungs × 4 inventory levels (3, 2, 1, 0) =
+      <strong>400 state–action values</strong>, each one a weighted sum over 26 possible
+      sales counts — <strong>10,400 terms</strong> for this episode. Those are terms of
+      arithmetic, not routes through the window: the agent is not enumerating futures,
+      it is filling in a small table. No search, no approximation, no training loop —
+      every cell is computed, so the answer is exact and the same state always produces
+      the same price.
+    </p>
+    <p>
+      The anchor does not multiply that. Every rung is scored once, and the value under
+      a given anchor is a running maximum taken across those same scores — deepest rung
+      upward — rather than a fresh enumeration per anchor. That is what makes the
+      monotonicity constraint free rather than expensive. Real episodes carry more
+      hours and more units and still finish inside <strong>0.09 seconds</strong> at the
+      95th percentile, measured on production state in shadow mode. The hourly
+      repricing budget has room to spare.
+    </p>
+  </div>
+</section>
+
+<footer class="prose">
+  <p>
+    The solver is <code>pricing/dp.py</code>; the demand distribution is
+    <code>pricing/demand.py</code>. Worked episode: ₩10,000 original price, ₩4,000
+    cost, 3 units, a 4-hour window, and a mid-velocity SKU forecast at 0.8 units in each
+    of the four hours at the category reference discount of 30%. Dispersion 0.919 and price response
+    1.0 are the measured production values. Every figure above is this solver’s
+    output for that state — reproducible, and it moves when the inputs do.
+  </p>
+</footer>
+
+</div>
+
+<script>
+  (function () {
+    var fan = document.getElementById("fan");
+    if (!fan) return;
+    var branches = {};
+    fan.querySelectorAll(".branch").forEach(function (g) { branches[g.dataset.k] = g; });
+
+    function set(k) {
+      fan.classList.toggle("dim", k !== null);
+      Object.keys(branches).forEach(function (j) {
+        branches[j].classList.toggle("on", j === k);
+      });
+    }
+
+    document.querySelectorAll("tbody tr[data-k]").forEach(function (tr) {
+      tr.addEventListener("mouseenter", function () { set(tr.dataset.k); });
+      tr.addEventListener("mouseleave", function () { set(null); });
+    });
+  })();
+</script>
