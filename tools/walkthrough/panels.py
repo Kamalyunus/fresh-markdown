@@ -1400,17 +1400,25 @@ same μ_ref · same r · same ε  →  model bias hits both arms and cancels</di
     <caption>Like-for-like · both arms under the same demand model</caption>
     <thead><tr><th>Measure</th><th>Legacy rule</th><th>The agent</th><th>Difference</th></tr></thead>
     <tbody>
-      <tr><td>Inventory Loss</td><td>—</td><td>—</td><td class="win">−38.0%</td></tr>
+      <tr><td>Inventory Loss · indexed</td><td>100</td><td class="win">62</td><td class="win">−38.0%</td></tr>
+      <tr><td>— of which scrap</td><td>₩6.24M</td><td class="loss">₩6.84M</td><td class="loss">+₩0.59M</td></tr>
+      <tr><td>— of which discount given away</td><td colspan="3" style="text-align:left;font-family:var(--body);color:var(--muted)">the balance, and where the entire win sits — see the discount row below</td></tr>
       <tr><td>Mean discount</td><td>0.2935</td><td class="good">0.1285</td><td>opens far shallower, and holds</td></tr>
       <tr><td>Clearance</td><td>77.58%</td><td class="loss">76.61%</td><td class="loss">−0.97pp</td></tr>
-      <tr><td>Scrap cost</td><td>₩6.24M</td><td class="loss">₩6.84M</td><td class="loss">+₩0.59M</td></tr>
     </tbody>
   </table></div>
   <figcaption>
-    The whole gain comes from the second row. The legacy ramp buys its extra clearance at a
-    price well above what the units are worth — it discounts ₩0.29 on the won where the agent
-    discounts ₩0.13, and the margin it gives away exceeds the scrap it avoids. The agent
-    accepts a little more scrap and keeps far more margin, and the trade nets out at −38%.
+    Inventory Loss is <strong>indexed to the legacy arm</strong> rather than shown in won:
+    the like-for-like result is reported as a ratio, and both arms are simulated quantities
+    rather than money that changed hands. The real-money anchor is the observed figure above
+    — <strong>₩17.11M</strong> of Inventory Loss actually incurred across the same 2,000
+    episodes.
+    <br><br>
+    IL is discount given away plus scrap, and the table shows why the index moves. Scrap goes
+    <em>up</em> ₩0.59M under the agent. Every won of the −38% therefore comes out of the
+    discount half: the legacy ramp gives away ₩0.29 on the won where the agent gives away
+    ₩0.13, and what it buys with that — a further 0.97pp of clearance — is worth far less
+    than it costs.
   </figcaption>
 </figure>
 
