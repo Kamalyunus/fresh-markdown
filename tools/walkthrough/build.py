@@ -111,6 +111,31 @@ TAB_CSS = """
   .bar.lumpy { background: var(--loss); }
   .key i.lumpy { background: var(--loss); }
 
+  /* the architecture diagram on the first tab */
+  .arch { width: 100%; min-width: 720px; height: auto; display: block; color: var(--ink); }
+  .arch .box { fill: var(--surface); stroke: var(--rule); stroke-width: 1; }
+  .arch .box-key { fill: var(--green-w); stroke: var(--green); stroke-width: 1.5; }
+  .arch .frozen .box { fill: var(--sunk); }
+  .arch .t {
+    font-family: var(--body); font-size: 13px; font-weight: 600;
+    fill: currentColor; text-anchor: middle;
+  }
+  .arch .s {
+    font-family: var(--body); font-size: 11px; fill: var(--muted); text-anchor: middle;
+  }
+  .arch .band {
+    font-family: var(--body); font-size: 10.5px; letter-spacing: .1em;
+    text-transform: uppercase; font-weight: 650; fill: var(--muted);
+  }
+  .arch .wire { fill: none; stroke: var(--muted); stroke-width: 1.4; }
+  .arch .head { fill: var(--muted); }
+  .arch .loop { stroke: var(--green); stroke-width: 1.8; }
+  .arch .head-key { fill: var(--green); }
+  .arch .note {
+    font-family: var(--body); font-size: 11px; font-style: italic;
+    fill: var(--green); text-anchor: middle;
+  }
+
   /* the level-vs-slope diagnostic pair */
   .diag { width: 100%; height: auto; display: block; color: var(--ink); }
   .diag .ax { stroke: var(--rule); stroke-width: 1; }

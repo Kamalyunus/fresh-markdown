@@ -314,6 +314,31 @@
   .bar.lumpy { background: var(--loss); }
   .key i.lumpy { background: var(--loss); }
 
+  /* the architecture diagram on the first tab */
+  .arch { width: 100%; min-width: 720px; height: auto; display: block; color: var(--ink); }
+  .arch .box { fill: var(--surface); stroke: var(--rule); stroke-width: 1; }
+  .arch .box-key { fill: var(--green-w); stroke: var(--green); stroke-width: 1.5; }
+  .arch .frozen .box { fill: var(--sunk); }
+  .arch .t {
+    font-family: var(--body); font-size: 13px; font-weight: 600;
+    fill: currentColor; text-anchor: middle;
+  }
+  .arch .s {
+    font-family: var(--body); font-size: 11px; fill: var(--muted); text-anchor: middle;
+  }
+  .arch .band {
+    font-family: var(--body); font-size: 10.5px; letter-spacing: .1em;
+    text-transform: uppercase; font-weight: 650; fill: var(--muted);
+  }
+  .arch .wire { fill: none; stroke: var(--muted); stroke-width: 1.4; }
+  .arch .head { fill: var(--muted); }
+  .arch .loop { stroke: var(--green); stroke-width: 1.8; }
+  .arch .head-key { fill: var(--green); }
+  .arch .note {
+    font-family: var(--body); font-size: 11px; font-style: italic;
+    fill: var(--green); text-anchor: middle;
+  }
+
   /* the level-vs-slope diagnostic pair */
   .diag { width: 100%; height: auto; display: block; color: var(--ink); }
   .diag .ax { stroke: var(--rule); stroke-width: 1; }
@@ -364,7 +389,131 @@
 <div class="panel" id="p-map" role="tabpanel" aria-labelledby="t-map">
 
 <section class="prose" style="padding-top:34px">
-  <div class="step-head"><h2>Freeze what history can support. Learn the one thing it cannot.</h2></div>
+  <div class="step-head"><h2>The whole system, on one page</h2></div>
+  <p class="lede">
+    An item enters its clearance window. Every hour until it expires, the system re-reads
+    the shelf and sets a price; when the window closes, whatever is left is scrapped at
+    cost. The job is to give away as little as possible — in discount and in scrap
+    together.
+  </p>
+  <p>
+    Three things run at three different speeds, and keeping them separate is most of the
+    design.
+  </p>
+</section>
+
+
+<figure style="margin-top:26px">
+  <div class="scroller"><svg class="arch" viewBox="0 0 960 348" role="img"
+       aria-label="Architecture. A frozen band of five artifacts is read by the hourly decision path: state, validate, action set, exact DP, price. The price produces an outcome, which feeds a bounded daily update, which moves the posterior, which feeds back into the DP.">
+
+    <text class="band" x="0" y="11">FROZEN · FITTED ONCE, THEN ONLY READ</text>
+    <g class="frozen">
+      <rect class="box" x="0"   y="19" width="180" height="56" rx="6"/>
+      <text class="t" x="90"  y="42">Demand model</text><text class="s" x="90"  y="60">μ_ref for this hour</text>
+      <rect class="box" x="195" y="19" width="180" height="56" rx="6"/>
+      <text class="t" x="285" y="42">Level factors</text><text class="s" x="285" y="60">one per subcategory</text>
+      <rect class="box" x="390" y="19" width="180" height="56" rx="6"/>
+      <text class="t" x="480" y="42">Dispersion r</text><text class="s" x="480" y="60">how lumpy demand is</text>
+      <rect class="box" x="585" y="19" width="180" height="56" rx="6"/>
+      <text class="t" x="675" y="42">Correlation ρ</text><text class="s" x="675" y="60">→ deff 3.347</text>
+      <rect class="box" x="780" y="19" width="180" height="56" rx="6"/>
+      <text class="t" x="870" y="42">Elasticity prior</text><text class="s" x="870" y="60">−1.0 ± 0.6, the start</text>
+    </g>
+
+    <path class="wire" d="M677 75 V 112"/><polygon class="head" points="677,120 672,110 682,110"/>
+
+    <text class="band" x="0" y="106">EVERY HOUR · ONE DECISION</text>
+    <rect class="box" x="0"   y="120" width="172" height="72" rx="6"/>
+    <text class="t" x="86"  y="148">State</text><text class="s" x="86"  y="166">units · hours left</text><text class="s" x="86" y="181">· price in force</text>
+    <rect class="box" x="197" y="120" width="172" height="72" rx="6"/>
+    <text class="t" x="283" y="148">Validate</text><text class="s" x="283" y="166">reject, never guess</text>
+    <rect class="box" x="394" y="120" width="172" height="72" rx="6"/>
+    <text class="t" x="480" y="148">Action set</text><text class="s" x="480" y="166">tiers down to</text><text class="s" x="480" y="181">the cost floor</text>
+    <rect class="box-key" x="591" y="120" width="172" height="72" rx="6"/>
+    <text class="t" x="677" y="148">Exact DP</text><text class="s" x="677" y="166">score every tier,</text><text class="s" x="677" y="181">pick the best</text>
+    <rect class="box" x="788" y="120" width="172" height="72" rx="6"/>
+    <text class="t" x="874" y="148">Price</text><text class="s" x="874" y="166">the best one, or a</text><text class="s" x="874" y="181">costed experiment</text>
+
+    <path class="wire" d="M172 156 H 189"/><polygon class="head" points="197,156 187,151 187,161"/>
+    <path class="wire" d="M369 156 H 386"/><polygon class="head" points="394,156 384,151 384,161"/>
+    <path class="wire" d="M566 156 H 583"/><polygon class="head" points="591,156 581,151 581,161"/>
+    <path class="wire" d="M763 156 H 780"/><polygon class="head" points="788,156 778,151 778,161"/>
+
+    <path class="wire" d="M874 192 V 242"/><polygon class="head" points="874,250 869,240 879,240"/>
+
+    <path class="wire loop" d="M86 250 V 224 H 677 V 200"/><polygon class="head-key" points="677,192 672,202 682,202"/>
+    <text class="note" x="430" y="241">what we learned yesterday prices today</text>
+
+    <text class="band" x="0" y="212">EVERY DAY · ONE BOUNDED STEP</text>
+    <rect class="box-key" x="0"   y="250" width="172" height="72" rx="6"/>
+    <text class="t" x="86"  y="278">Posterior</text><text class="s" x="86"  y="296">belief about</text><text class="s" x="86" y="311">price response</text>
+    <rect class="box" x="250" y="250" width="430" height="72" rx="6"/>
+    <text class="t" x="465" y="278">Bounded update</text><text class="s" x="465" y="296">randomised outcomes only · censored likelihood ÷ deff</text>
+    <text class="s" x="465" y="311">· step ≤ 0.15 · human-gated · spent exactly once</text>
+    <rect class="box" x="788" y="250" width="172" height="72" rx="6"/>
+    <text class="t" x="874" y="278">Outcome</text><text class="s" x="874" y="296">what actually sold</text><text class="s" x="874" y="311">in that hour</text>
+
+    <path class="wire" d="M788 286 H 692"/><polygon class="head" points="684,286 694,281 694,291"/>
+    <path class="wire" d="M250 286 H 184"/><polygon class="head" points="176,286 186,281 186,291"/>
+  </svg></div>
+  <figcaption>
+    Three loops at three speeds. The top band is fitted once and then only read. The middle
+    band runs every hour and holds no state between runs. The bottom band runs once a day,
+    behind a human, and touches exactly one file.
+  </figcaption>
+</figure>
+
+
+<section class="prose">
+  <h3 style="margin-top:34px">Reading it in three passes</h3>
+  <p>
+    <strong>Once, before launch — the top band.</strong> Five quantities are measured from
+    five months of history and written to files: how much a thing sells at the reference
+    price, a level correction, how lumpy demand is, how much the hours inside one window
+    repeat each other, and a starting guess at price response. During the MVP these are
+    read on every decision and written by nothing.
+  </p>
+  <p>
+    <strong>Every hour — the middle band.</strong> The state is three numbers: units on
+    hand, hours left, and the discount already in force. It is validated rather than
+    repaired — an implausible state returns no price at all. Then the legal prices are
+    <em>constructed</em> from the cost floor, so a below-cost price is never considered
+    rather than considered and rejected. The DP scores every one of them exactly and takes
+    the best. Occasionally, and within a budget, it takes a deliberately different one.
+  </p>
+  <p>
+    <strong>Once a day — the bottom band.</strong> Only the deliberately-randomised prices
+    teach us anything, and only those outcomes enter the update. Evidence is discounted for
+    the fact that hours within an episode repeat each other, the step is capped, a human
+    approves it, and each outcome is spent exactly once. What changes is one number: the
+    belief about price response. Which then feeds tomorrow's prices — the arrow back up to
+    the DP is the entire product.
+  </p>
+</section>
+
+<div class="callout">
+  <h3>Three properties worth stating before anything else</h3>
+  <p>
+    <strong>Safety is structural, not checked.</strong> The action set is built from the
+    cost floor and from the price already in force, so a below-cost price and a price rise
+    are <em>unrepresentable</em> — on every path, including forced exploration. There is no
+    validation step to forget.
+  </p>
+  <p style="margin-top:14px">
+    <strong>The decision holds no state.</strong> The hourly path reads the shelf and the
+    files, computes, emits a price, and forgets. Nothing is carried between hours, so there
+    is no accumulated state to drift or to reconcile after a restart.
+  </p>
+  <p style="margin-top:14px">
+    <strong>Exactly one thing learns.</strong> Everything else is frozen precisely so that
+    when the belief moves, we know it moved because of evidence and not because something
+    else shifted underneath it.
+  </p>
+</div>
+
+<section class="prose">
+  <h3 style="margin-top:34px">Why the system is split this way</h3>
   <p class="lede">
     Five months of history tells us accurately <em class="term">how much of a thing sells
     in a given hour</em>. It cannot tell us <em class="term">what happens if we change the
