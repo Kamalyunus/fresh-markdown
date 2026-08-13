@@ -11,17 +11,32 @@ Same principle as build_v2 -- restructure, never retype. Every slide here is a
 v2 slide; the three genuinely new ones are a headline-results slide and the two
 navigation slides. Nothing is dropped, which tools.deck_diff enforces.
 
-In v2 the slide FILE number equals its presentation position, so the numbers
-below read the same either way.
+Every slide below is named by its POSITION in v2 -- slide 8 means the eighth
+slide of the deck everyone reviewed. Slide FILE numbers do not track positions
+and are resolved once, at the top, through v2's own slide-id list.
 
 Usage:  python3 -m tools.build_v3
 """
 from tools import deckkit as k
 
-SRC = "docs/perishable_markdown_deck_v2.pptx"
+SRC = "build/perishable_markdown_deck_v2.pptx"
 OUT = "docs/perishable_markdown_deck_v3.pptx"
 
+# v2 is no longer checked in -- v3 contains all of it, and two decks to keep
+# in sync is how a number goes stale in one of them. It is still the stage
+# this build reads from, so importing build_v2 RUNS it: the whole chain is
+# v1 -> v2 (build/) -> v3, from one command, with no leftover to go stale.
+from tools.build_v2 import V1_TO_V2
+
 k.unpack(SRC)
+
+_V2 = k.order()          # v2 presentation order, as slide-file numbers
+
+
+def f(pos):
+    """v2 position -> slide file number."""
+    return _V2[pos - 1]
+
 
 # ========================================================= tighten for a room
 # Four core slides carry a second clause on every line -- right for a reader,
@@ -29,7 +44,7 @@ k.unpack(SRC)
 # these lines carried is still on the appendix slide that owns it.
 
 # 8 · DESIGN THESIS -- the cell-count reasoning belongs to the learning section
-k.sub_in_slide(8, [
+k.sub_in_slide(f(8), [
     ("Baseline demand at the reference discount (LightGBM / Tweedie) — its price gradient is never queried",
      "Baseline demand at the reference discount — its price gradient is never queried"),
     ("~10 learning cells: high-volume categories plus one pooled cell. NOT subcategory — a finer ε changes no price until a cell crosses the deepening bar (2.43), and splitting cells divides the same evidence, so finer grain would only slow the one thing that gets us there",
@@ -37,7 +52,7 @@ k.sub_in_slide(8, [
 ])
 
 # 10 · OBJECTIVE & METRIC -- the worked table carries it; the prose can halve
-k.sub_in_slide(10, [
+k.sub_in_slide(f(10), [
     ("IL% has an endogenous denominator: deeper markdowns sell more units and grow it. The two metrics can disagree by design:",
      "IL% has an endogenous denominator — deeper markdowns sell more units and grow it. So the two can disagree by design:"),
     ("Original price 10,000 · cost 2,000 · 10 units. The planner picks A — 16,000 of loss beats 28,000. IL% prefers B because its own denominator grew. A ratio objective can be gamed by discounting harder; the planner optimises the currency amount instead.",
@@ -47,7 +62,7 @@ k.sub_in_slide(10, [
 ])
 
 # 12 · NOVELTY -- same seven rows, cells short enough to read from a seat
-k.sub_in_slide(12, [
+k.sub_in_slide(f(12), [
     ("Deliberately blind to price — its one price feature is overwritten at inference",
      "Blind to price by construction — its price feature is overwritten at inference"),
     ("The cost floor constructs the actions; unsafe prices are unrepresentable",
@@ -59,7 +74,7 @@ k.sub_in_slide(12, [
 ])
 
 # 40 · DECISIONS NEEDED -- keep the recommendation and the one fact behind it
-k.sub_in_slide(40, [
+k.sub_in_slide(f(40), [
     ("Three thresholds block launch — recommendations, with evidence",
      "Three thresholds block launch — and the floor each clears"),
     ("Measured on nine real 2-week blocks: 6.75% detectable, so 7.5% is met with 0.75pp to spare. Thin against the target — but the target is ours to choose and the measured policy effect is 38%, a 5.6× margin. Duration barely helps: six weeks only reaches 5.74% where √T promised 3.90%, and past six weeks the block count collapses to 1–3.",
@@ -72,7 +87,7 @@ k.sub_in_slide(40, [
 
 # ================================================================ new slides
 N = {}
-for key, tmpl in [("results", 2), ("divider", 13), ("index", 12)]:
+for key, tmpl in [("results", f(2)), ("divider", f(13)), ("index", f(12))]:
     N[key] = k.dup(tmpl)
 
 # --- 11 · Headline results ------------------------------- [T2: four figures]
@@ -194,33 +209,33 @@ k.notes(N["index"],
 
 # ==================================================================== order
 CORE = [
-    1,                # title
-    2,                # THE PROBLEM
-    3,                # THE POLICY TODAY
-    4,                # THE CORE DIFFICULTY -- prediction vs identification
-    6,                # THE SYSTEM IN ONE SLIDE
-    8,                # DESIGN THESIS
-    10,               # OBJECTIVE & METRIC
-    12,               # NOVELTY
-    21,               # SAFETY
-    25,               # EXPLORATION
+    f(1),                # title
+    f(2),                # THE PROBLEM
+    f(3),                # THE POLICY TODAY
+    f(4),                # THE CORE DIFFICULTY -- prediction vs identification
+    f(6),                # THE SYSTEM IN ONE SLIDE
+    f(8),                # DESIGN THESIS
+    f(10),               # OBJECTIVE & METRIC
+    f(12),               # NOVELTY
+    f(21),               # SAFETY
+    f(25),               # EXPLORATION
     N["results"],     # WHERE WE ARE
-    34,               # READING THE RESULT
-    36,               # HOW WE WILL KNOW -- A/B design
-    38,               # LAUNCH PLAN
-    39,               # RISK REGISTER
-    40,               # DECISIONS NEEDED
-    41,               # close
+    f(34),               # READING THE RESULT
+    f(36),               # HOW WE WILL KNOW -- A/B design
+    f(38),               # LAUNCH PLAN
+    f(39),               # RISK REGISTER
+    f(40),               # DECISIONS NEEDED
+    f(41),               # close
 ]
 
 APPENDIX = [
     N["divider"], N["index"],
-    5, 7, 11,                       # why not history, what problem class, why not RL
-    13, 14, 15, 16,                 # scope and the data
-    9, 17, 18, 19,                  # architecture and the demand model
-    20, 22, 23, 24,                 # the decision core
-    26, 27, 28, 29, 30,             # exploration and learning
-    31, 32, 33, 35, 37,             # measurement, validation, shadow, experiment
+    f(5), f(7), f(11),              # why not history, what problem class, why not RL
+    f(13), f(14), f(15), f(16),     # scope and the data
+    f(9), f(17), f(18), f(19),      # architecture and the demand model
+    f(20), f(22), f(23), f(24),     # the decision core
+    f(26), f(27), f(28), f(29), f(30),  # exploration and learning
+    f(31), f(32), f(33), f(35), f(37),  # measurement, validation, shadow, experiment
 ]
 
 ORDER = CORE + APPENDIX
@@ -235,7 +250,7 @@ INDEX_CLAIMS = {"20–22": [5, 7, 11], "23–26": [13, 14, 15, 16],
 pos = {n: i for i, n in enumerate(ORDER, start=1)}
 for rng, files in INDEX_CLAIMS.items():
     lo, hi = (int(x) for x in rng.split("–"))
-    got = [pos[f] for f in files]
+    got = [pos[f(v2pos)] for v2pos in files]
     assert got == list(range(lo, hi + 1)), f"index says {rng}, slides land at {got}"
 assert pos[N["index"]] == 19, "the results slide points at slide 19 for the index"
 
@@ -243,7 +258,7 @@ k.set_order(ORDER)
 
 # page numbers follow the new positions; the title and the close carry none
 for p, n in enumerate(ORDER, start=1):
-    if n in (1, 41):
+    if n in (f(1), f(41)):
         continue
     k.Slide(n).runs("Text 1", [str(p)]).save()
 
@@ -251,3 +266,7 @@ k.pack(OUT)
 print(f"built {OUT}: {len(CORE)} presented + {len(APPENDIX)} appendix "
       f"= {len(ORDER)} slides")
 print("new slides:", N)
+
+# deck_numbers tags slides by v1 position; this is how to find them here.
+print("v1 -> v3 position map:")
+print("  " + "  ".join(f"{a}->{pos[f(b)]}" for a, b in sorted(V1_TO_V2.items())))

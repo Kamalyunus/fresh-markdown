@@ -453,34 +453,44 @@ deliberately.
 
 ## Refreshing the numbers in the docs and deck
 
-There are three decks, and each is a strict superset of the one before it:
+Two decks are checked in:
 
 | Deck | Slides | Status |
 | --- | --- | --- |
-| `docs/perishable_markdown_deck_v3.pptx` | 44 | **The one to present.** 17 presented, then an appendix divider, an index, and the other 25. |
-| `docs/perishable_markdown_deck_v2.pptx` | 41 | Every slide in reading order, no appendix split. Kept as the full narrative. |
-| `docs/perishable_markdown_tech_deck.pptx` | 34 | The original design-argument ordering. Reference only. |
+| `docs/perishable_markdown_deck_v3.pptx` | 44 | **The deck.** 17 presented, then an appendix divider, an index, and the other 25. |
+| `docs/perishable_markdown_tech_deck.pptx` | 34 | The original design-argument ordering. It is the SOURCE the builders read; it is not reproducible from anything else, so do not delete it. |
 
-Every slide of an earlier deck is reused in the later ones, so **fix a number
-in all three or in none**. v3's core slides 6, 7, 8 and 16 carry tightened
-wording; the number is the same, the sentence around it is not, so patch by
-the number rather than by a whole-sentence match.
-
-`tools.deck_diff` is the guard: it pairs slides by eyebrow + title and exits
-non-zero if a slide was dropped or a reused slide changed for a reason not on
-its INTENDED list. Run it after any structural edit, in both directions:
+v2 has been retired as a file. It is still a build stage — v3 is assembled
+from its slides — but it is an intermediate now, written to `build/`
+(gitignored) by `tools.build_v3`, which runs `tools.build_v2` itself. So:
 
 ```bash
-python3 -m tools.deck_diff                     # v1 -> v2
-python3 -m tools.deck_diff --old docs/perishable_markdown_deck_v2.pptx \
-                           --new docs/perishable_markdown_deck_v3.pptx
+python3 -m tools.build_v3     # v1 -> v2 (build/) -> v3 (docs/), one command
+python3 -m tools.deck_diff    # defaults to v1 -> v3; must exit 0
 ```
 
-v2 and v3 are reproducible from their builders (`tools/build_v2.py`,
-`tools/build_v3.py`) — a structural change belongs in the builder and a
-re-run, never in the `.pptx`. v3's appendix index quotes slide RANGES, and
-`build_v3` asserts every one of them against the order it just wrote, so a
-reorder that invalidates the index fails the build instead of shipping.
+Retiring it was not cosmetic. The checked-in v2 had drifted from
+`tools/build_v2.py` in two ways nobody noticed — one slide title, and the
+speaker notes on all seven of its new slides. Two decks to keep in sync is how
+a number goes stale in one of them.
+
+Every v1 slide survives into v3, so **a number fixed in one must be fixed in
+both**. v3's core slides 6, 7, 8 and 16 carry wording tightened for a
+presented setting: the numbers are identical, the sentences around them are
+not, so patch by the number rather than by a whole-sentence match.
+
+**A structural or wording change belongs in the builder and a re-run, never in
+the `.pptx`.** A hand-edited deck cannot be rebuilt, and the rebuild is what
+the next agent will do. `tools.deck_diff` is the guard: it pairs slides by
+eyebrow + title and exits non-zero if a slide was dropped or a reused slide
+changed for a reason not on its INTENDED list. v3's appendix index quotes
+slide RANGES, and `build_v3` asserts every one of them against the order it
+just wrote, so a reorder that makes the index lie fails the build instead of
+shipping.
+
+`build_v3` names every slide by its POSITION in v2 and resolves file numbers
+through v2's own slide-id list. Slide file numbers do not track positions —
+address slides by position and the mapping stays honest.
 
 Those decks and `docs/design.md` quote ~25 measured quantities that go stale on
 every re-run (the launch-freeze retrain changes most of them). Do not hunt
@@ -496,9 +506,12 @@ It prints each quantity tagged with the slide(s) and design-doc sections that
 carry it. Missing reports print `--` rather than failing. Only ever quote a
 **gate-passing** backtest — the same rule that governs pasting `tau_initial`.
 
-Slide tags refer to the 34-slide deck. If slides are inserted or reordered,
-re-map the tags in `tools/deck_numbers.py` in the same change — a stale tag
-sends the next person to the wrong slide, which is worse than no tag.
+Slide tags refer to the 34-slide deck, which is still the build source, so
+they have not gone stale. To find the same slide in v3, `tools.build_v3`
+prints a `v1 -> v3` position map at the end of every run. If slides are
+inserted or reordered, re-map the tags in `tools/deck_numbers.py` in the same
+change — a stale tag sends the next person to the wrong slide, which is worse
+than no tag.
 
 ### Writing the refreshed numbers back into the deck
 

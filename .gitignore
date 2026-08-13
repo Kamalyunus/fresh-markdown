@@ -6,3 +6,4 @@ reports/
 artifacts/
 events_store*/
 tools/unpacked/
+build/

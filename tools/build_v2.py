@@ -5,10 +5,18 @@ scratch: every reused slide keeps its vetted content, layout and speaker
 notes, so the restructure cannot reintroduce a fixed error. Seven new slides
 fill genuine gaps. All figures refreshed from the latest deck_numbers run.
 """
+import os
+
 from tools import deckkit as k
 
 SRC = "docs/perishable_markdown_tech_deck.pptx"
-OUT = "docs/perishable_markdown_deck_v2.pptx"
+
+# v2 is now an intermediate rather than a deliverable: v3 is the deck to
+# present, and it is built from v2's slides. Retiring v2 as a file must not
+# retire the step, so this writes into build/ (gitignored) and tools.build_v3
+# runs it. To look at v2 on its own, run this module and open the result.
+OUT = "build/perishable_markdown_deck_v2.pptx"
+os.makedirs("build", exist_ok=True)
 
 k.unpack(SRC)
 
@@ -225,6 +233,65 @@ k.Slide(N["abdesign"]) \
      "the treatment arm, and it stops LEARNING, never pricing."]) \
  .save()
 
+
+# Speaker notes for the seven new slides. dup() deliberately does not
+# inherit its template's notes, so each gets its own.
+for key, text in [
+    ("legacy",
+     "Sets up the whole argument. The rule is legible and safe, which is "
+     "why it has survived -- but it prices on the clock and never looks at "
+     "demand, stock or the cost floor. Two things to land: it is the "
+     "baseline the -38% is measured against, and it is the REASON history "
+     "cannot identify elasticity, because it makes price a deterministic "
+     "function of the hour."),
+    ("system",
+     "The plain-language product, before any mechanism. If someone leaves "
+     "after one slide, this is the one. Three verbs: choose, pay to learn, "
+     "update. The footer is the attribution argument -- everything else is "
+     "frozen, so a change in behaviour IS learning, not drift. Do not go "
+     "into the DP or tau here; both come later."),
+    ("demand",
+     "The component most people assume must use price, and the one where "
+     "NOT using it is the novelty. The model predicts demand at the "
+     "reference discount only; its single price feature is overwritten at "
+     "inference so the gradient is never queried. If it could use price it "
+     "would learn the legacy clock ramp and report it as elasticity. Model "
+     "owns the LEVEL, posterior owns the SLOPE -- neither is allowed the "
+     "other's job."),
+    ("calib",
+     "The most-debugged part of the system: five successive gate failures, "
+     "each a distinct cause. The one worth telling is the basis bug -- the "
+     "factor must be solved against the CENSORED expectation, not raw mu. A "
+     "true correction of 1.45 fit as 0.68 on the raw basis, the wrong side "
+     "of 1, which is why calibration used to make the gate worse. Also "
+     "state the rule: level may be corrected multiplicatively, slope never."),
+    ("variance",
+     "Two frozen numbers most audiences will not ask about, but they set "
+     "how fast we are allowed to believe anything. Negative binomial "
+     "because Poisson would make every update overconfident. r per "
+     "subcategory because dispersion genuinely differs and the data "
+     "supports it; rho as one global scalar because per-cell it would be "
+     "noise. deff = 3.347 is the honesty tax: ten forced hours in one "
+     "episode are worth about three independent ones."),
+    ("result",
+     "Say this before someone finds it in the table. The DP does not clear "
+     "more -- it clears slightly less and scraps more. The entire gain is "
+     "not over-discounting: 0.1285 mean discount against legacy's 0.2935. A "
+     "markdown system that cuts loss by discounting LESS is the correct "
+     "answer here and it is not what people expect, so lead with it rather "
+     "than letting it be discovered. Also flag that both arms run under the "
+     "same demand model, which is what makes the comparison honest."),
+    ("abdesign",
+     "The design, not the power -- power is the next slide. Three things: "
+     "randomisation is on SKU x FC because consecutive episodes of the same "
+     "unit share inventory carryover; the estimator is a ratio of sums with "
+     "clustered errors, never a mean of per-episode ratios; and the A/B "
+     "CANNOT measure elasticity, because both arms are policies. Elasticity "
+     "learning happens inside the treatment arm from forced exploration. "
+     "Two mechanisms, two questions."),
+]:
+    k.notes(N[key], text)
+
 # ------------------------------------------------------------------- order
 ORDER = [
     1, 2, N["legacy"], 4, 5,                       # 1 problem
@@ -249,5 +316,9 @@ for pos, n in enumerate(ORDER, start=1):
     k.Slide(n).runs("Text 1", [str(pos)]).save()
 
 k.pack(OUT)
+# v1 file numbers equal v1 positions, so ORDER is also the v1 -> v2 position
+# map. build_v3 composes it with its own to keep deck_numbers' slide tags --
+# which are v1 positions -- usable against the deck people actually read.
+V1_TO_V2 = {n: i for i, n in enumerate(ORDER, start=1) if n <= 34}
 print(f"built {OUT} with {len(ORDER)} slides")
 print("new slides:", {kk: vv for kk, vv in N.items()})

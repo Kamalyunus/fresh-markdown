@@ -38,8 +38,8 @@ randomized exploration.
 | `tools/deck_text.py` | — | Lists and patches the deck's text runs. Refuses any replacement that does not match exactly once, so a stale number cannot survive a "successful" refresh. |
 | `tools/deck_diff.py` | — | Regression check between two versions of the deck: what is new, what was dropped, and any reused slide whose text changed unintentionally. Exits non-zero on either. |
 | `tools/deckkit.py` | — | Slide-package surgery — duplicate, reorder, recolour, set text and attach notes without a PowerPoint install. |
-| `tools/build_v2.py` | — | Reproducible build of the v2 deck (41 slides) from the v1 slides plus seven new ones. |
-| `tools/build_v3.py` | — | Reproducible build of the v3 deck: 17 presented slides, then the other 25 behind an appendix divider and an index keyed by question. Asserts the index's slide ranges against the order it writes. |
+| `tools/build_v2.py` | — | The v2 restructure: the v1 slides plus seven new ones. An intermediate now — it writes to `build/`, and `build_v3` runs it. |
+| `tools/build_v3.py` | — | Builds the deck (`docs/perishable_markdown_deck_v3.pptx`) end to end from v1: 17 presented slides, then the other 25 behind an appendix divider and an index keyed by question. Asserts the index's slide ranges against the order it writes. |
 
 ## Running the bootstrap (PRD §1a order)
 

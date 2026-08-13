@@ -8,6 +8,9 @@ so it can gate a rebuild.
 
 Usage:
     python3 -m tools.deck_diff [--old A.pptx] [--new B.pptx]
+
+The defaults compare the original deck against the one we present, which is
+the comparison that matters now that the intermediate v2 is not checked in.
 """
 import re, sys, zipfile
 
@@ -33,7 +36,7 @@ def slides(path):
 import argparse
 ap = argparse.ArgumentParser(prog="tools.deck_diff", description=__doc__)
 ap.add_argument("--old", default="docs/perishable_markdown_tech_deck.pptx")
-ap.add_argument("--new", default="docs/perishable_markdown_deck_v2.pptx")
+ap.add_argument("--new", default="docs/perishable_markdown_deck_v3.pptx")
 args = ap.parse_args()
 v1, v2 = slides(args.old), slides(args.new)
 
