@@ -1369,64 +1369,87 @@ same μ_ref · same r · same ε  →  model bias hits both arms and cancels</di
 </div>
 
 <section class="prose">
-  <h3 style="margin-top:34px">What it says</h3>
-</section>
-
-<ul class="chips" style="margin-top:18px">
-  <li><span class="k">Observed IL%</span><span class="v">36.68%</span></li>
-  <li><span class="k">Observed IL</span><span class="v">₩17.11M</span></li>
-  <li><span class="k">Episodes</span><span class="v">2,000</span></li>
-  <li><span class="k">Agent vs legacy</span><span class="v">−38.0%</span></li>
-</ul>
-
-<section class="prose">
-  <p style="margin-top:18px">
-    The first three describe the world as it is: across 2,000 replayed episodes, Inventory
-    Loss ran at <strong>36.68%</strong> of the full-price value of what sold —
-    <strong>₩17.11M</strong>. That is the bar, and it is what the legacy rule currently
-    delivers. The fourth is the like-for-like result: <strong>38% less Inventory Loss</strong>.
-  </p>
-
-  <h3 style="margin-top:34px">And here is the part to say out loud first</h3>
+  <h3 style="margin-top:34px">Say this part out loud, before someone finds it</h3>
   <p>
     A markdown system that reduces loss by <em>discounting less</em> is not what most people
-    expect, and it is what the numbers say. The agent does not clear more stock. It clears
-    slightly <strong>less</strong>, and scraps slightly <strong>more</strong>:
+    expect. It is what the numbers say. The agent does not clear more stock — it clears
+    slightly <strong>less</strong>, and scraps slightly <strong>more</strong>.
+  </p>
+
+  <h3 style="margin-top:34px">All three, side by side</h3>
+  <p>
+    Across <strong>2,000 replayed episodes</strong>. Inventory Loss is discount given away
+    plus scrap, so each column is shown split — the split is where the argument lives.
   </p>
 </section>
 
 <figure style="margin-top:18px">
   <div class="scroller"><table>
-    <caption>Like-for-like · both arms under the same demand model</caption>
-    <thead><tr><th>Measure</th><th>Legacy rule</th><th>The agent</th><th>Difference</th></tr></thead>
+    <caption>Replay · 2,000 episodes</caption>
+    <thead>
+      <tr>
+        <th>Measure</th>
+        <th>Observed<br><span style="font-weight:400">what actually happened</span></th>
+        <th>Legacy<br><span style="font-weight:400">under model</span></th>
+        <th>Agent<br><span style="font-weight:400">under model</span></th>
+      </tr>
+    </thead>
     <tbody>
-      <tr><td>Inventory Loss · indexed</td><td>100</td><td class="win">62</td><td class="win">−38.0%</td></tr>
-      <tr><td>— of which scrap</td><td>₩6.24M</td><td class="loss">₩6.84M</td><td class="loss">+₩0.59M</td></tr>
-      <tr><td>— of which discount given away</td><td colspan="3" style="text-align:left;font-family:var(--body);color:var(--muted)">the balance, and where the entire win sits — see the discount row below</td></tr>
-      <tr><td>Mean discount</td><td>0.2935</td><td class="good">0.1285</td><td>opens far shallower, and holds</td></tr>
-      <tr><td>Clearance</td><td>77.58%</td><td class="loss">76.61%</td><td class="loss">−0.97pp</td></tr>
+      <tr><td><strong>Inventory Loss</strong></td><td>₩17.11M</td><td>₩19.51M</td><td class="win">₩12.09M</td></tr>
+      <tr><td>— discount given away</td><td>₩13.96M</td><td>₩13.27M</td><td class="good">₩5.26M</td></tr>
+      <tr><td>— scrap</td><td>₩3.15M</td><td>₩6.24M</td><td class="loss">₩6.84M</td></tr>
+      <tr><td>IL%</td><td>38.68%</td><td>45.14%</td><td class="win">28.77%</td></tr>
+      <tr><td>Clearance</td><td>93.28%</td><td>77.58%</td><td class="loss">76.61%</td></tr>
+      <tr><td>Mean discount</td><td>0.3094</td><td>0.2935</td><td class="good">0.1285</td></tr>
     </tbody>
   </table></div>
   <figcaption>
-    Inventory Loss is <strong>indexed to the legacy arm</strong> rather than shown in won:
-    the like-for-like result is reported as a ratio, and both arms are simulated quantities
-    rather than money that changed hands. The real-money anchor is the observed figure above
-    — <strong>₩17.11M</strong> of Inventory Loss actually incurred across the same 2,000
-    episodes.
-    <br><br>
-    IL is discount given away plus scrap, and the table shows why the index moves. Scrap goes
-    <em>up</em> ₩0.59M under the agent. Every won of the −38% therefore comes out of the
-    discount half: the legacy ramp gives away ₩0.29 on the won where the agent gives away
-    ₩0.13, and what it buys with that — a further 0.97pp of clearance — is worth far less
-    than it costs.
+    Only the last two columns may be compared with each other. The first is the world, and it
+    is in the table so that the second column can be judged against it — which is a question
+    about the demand model, not about pricing.
   </figcaption>
 </figure>
 
 <section class="prose">
-  <p style="margin-top:26px">
+  <h3 style="margin-top:34px">The verdict, from the two comparable columns</h3>
+</section>
+
+<div class="math">legacy under model   ₩19.51M
+agent  under model   ₩12.09M
+                   ──────────
+difference           −₩7.42M      =  −38.02% of the legacy arm
+                                     clearance −0.97pp</div>
+
+<section class="prose">
+  <p style="margin-top:16px">
+    <strong>₩7.42M less loss on 2,000 episodes.</strong> And the split says where every won
+    of it came from: scrap went <em>up</em> ₩0.59M, so the entire gain — and more — came out
+    of the discount line, which fell from ₩13.27M to ₩5.26M. The agent gave away
+    <strong>₩8.01M less in markdown</strong> and paid ₩0.59M more in scrap to do it.
+  </p>
+
+  <p>
     Because that trade is real, the pilot reports <strong>clearance and scrap beside IL from
-    day one</strong>. A system that improved its headline metric while quietly scrapping more
+    day one</strong>. A system that improves its headline metric while quietly scrapping more
     food is a system whose reporting should show it, not hide it.
+  </p>
+
+  <h3 style="margin-top:34px">Why the tempting comparison would have misled us</h3>
+  <p>
+    Put the agent's ₩12.09M against the observed ₩17.11M and you get a
+    <strong>−29.3%</strong> improvement. It is the comparison everyone reaches for, and it is
+    not −38%. The two numbers differ because the demand model is not reality: it thinks the
+    legacy rule would have lost ₩19.51M where the world actually lost ₩17.11M, and it clears
+    77.58% where the world cleared 93.28%. Our model is pessimistic — by about
+    <strong>14%</strong> on legacy's loss.
+  </p>
+  <p>
+    That pessimism has nothing to do with the agent, and in the like-for-like comparison it
+    cancels: both arms are penalised by it equally. Charge it to the agent instead and you
+    are measuring a mixture of policy and model error, in a direction and size nobody can
+    predict in advance — here it happens to <em>understate</em> the agent by nine points, but
+    it could as easily have flattered it. That is why the rule is structural rather than a
+    judgement call.
   </p>
 </section>
 
