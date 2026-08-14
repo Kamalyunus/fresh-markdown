@@ -153,19 +153,21 @@ TAB_CSS = """
 
 PAGE_HEADER = """<header>
   <p class="kicker">Perishable Markdown MVP · how the system works</p>
-  <h1>What we freeze, what we solve, and the one thing that learns</h1>
+  <h1>Every hour, one price — and everything standing behind it</h1>
   <p class="standfirst">
-    Everything history can honestly support is <strong>measured once and frozen</strong> —
-    the population, the demand level, its variance, the cold-start guess at price
-    response. On top of that sits <strong>one exact calculation</strong>, run fresh every
-    hour. And underneath both, <strong>one number is learned in production</strong>, from
-    prices we randomise on purpose. Each tab is one of those pieces: what it holds, why it
-    is allowed to hold it, and what breaks if it moves.
+    Fresh stock enters a clearance window with a clock on it, and whatever does not sell is
+    thrown away at cost. This is the whole of what we built to price it: the
+    <strong>architecture</strong> first, then <strong>each frozen input</strong> in turn,
+    the <strong>exact calculation</strong> that turns them into a price, the
+    <strong>one number learned in production</strong>, and what five months of
+    <strong>replayed history</strong> says it would have done. Read the tabs in order, or
+    jump to the one you are being asked about.
   </p>
 </header>"""
 
 TABS = [
-    ("map",   "The split",        "Frozen vs learned"),
+    # key stays "map" so any shared #map link keeps working
+    ("map",   "Architecture",     "the whole system"),
     ("data",  "Data",             "split_manifest.json"),
     ("model", "Demand model",     "baseline_model.txt"),
     ("calib", "Calibration",      "calibration.json"),
