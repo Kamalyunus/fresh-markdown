@@ -196,6 +196,7 @@ def test_decision_loop_and_exactly_once_update(workspace):
     tau = 5000.0
 
     n = 0
+    replayed = []
     for eid, g in list(d.groupby("episode_id"))[:80]:
         g = g.sort_values("hour_of_day")
         q = int(g.starting_inventory.iloc[0])
@@ -219,6 +220,10 @@ def test_decision_loop_and_exactly_once_update(workspace):
             n += 1
 
             assert all(f in evt for f in DECISION_REQUIRED)
+            # the contract must be sufficient, not merely complete: a decision
+            # has to be recomputable from its own event, or pipeline.assurance
+            # cannot tell a drifted artifact from a correct one
+            replayed.append(evt)
             # safety invariants: cost floor and monotonicity on every path
             assert evt["applied_price"] >= evt["cost"] - 1e-6
             if anchor is not None:
@@ -238,6 +243,16 @@ def test_decision_loop_and_exactly_once_update(workspace):
             })
             q -= sold
     assert n > 50
+
+    # Every decision the real path just emitted must re-solve to itself. This
+    # is the production check running against production events, and it is the
+    # test that would fail if the event contract ever stopped carrying enough
+    # to recompute a price.
+    from pipeline import assurance
+    repro = assurance.reproduction(replayed, cfg)
+    assert repro["verdict"] == "PASS", repro
+    assert repro["decisions_checked"] == len(replayed)
+    assert repro["decisions_skipped_no_inputs"] == 0
 
     report = update_run(cfg, apply=True)
     assert all(g["pass"] for g in report["event_quality_gates"].values())

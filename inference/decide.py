@@ -131,6 +131,14 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
         "epsilon_posterior_std": float(cell["std"]),
         "reference_discount": float(d_ref),
         "reference_mu": float(s["mu_ref_path"][0]),
+        # The FULL forecast path and the anchor, not just this hour's mu. Q at
+        # every tier depends on the whole remaining path, and the action set
+        # depends on the anchor, so without these two an event records what was
+        # decided but not enough to recompute it -- and pipeline.assurance
+        # exists to recompute it. Keep them: they are the difference between a
+        # log and an audit trail.
+        "mu_ref_path": [float(m) for m in s["mu_ref_path"]],
+        "anchor_discount": None if entry else float(anchor),
         "dispersion_r": float(s["r"]),
         "baseline_model_version": baseline_version,
         "posterior_version": int(cell["version"]),

@@ -883,10 +883,19 @@ affordable_set_size
 tau_current
 epsilon_posterior_mean, epsilon_posterior_std
 reference_discount, reference_mu
+mu_ref_path                the FULL forecast, one entry per remaining hour
+anchor_discount            discount in force entering this decision (null at entry)
 dispersion_r
 baseline_model_version, posterior_version, config_version
 timestamp                  UTC with offset
 ```
+
+`mu_ref_path` and `anchor_discount` are what make the event *sufficient* rather
+than merely complete: Q at every tier depends on the whole remaining forecast and
+the action set depends on the anchor, so without them an event records what was
+decided but not enough to recompute it. `pipeline.assurance` recomputes it
+(section 15.5), which is the check that separates a drifted artifact from a
+correct one.
 
 `is_entry` marks the episode's first decision. The IL% denominator comes from realised `units_sold` on the outcome events, not from the decision, so both event streams are required to compute IL%.
 

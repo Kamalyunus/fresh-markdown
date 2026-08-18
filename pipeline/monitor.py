@@ -20,6 +20,7 @@ import pandas as pd
 from common.config import load_config, deff
 from events.store import EventStore
 from pricing.posterior import PosteriorStore
+from pipeline import assurance as assurance_mod
 from pricing import explore
 from common import episodes
 
@@ -399,11 +400,17 @@ def main():
 
     business = business_metrics(decisions, outcomes, cfg)
     guardrail = guardrail_series(decisions, outcomes, cfg)
+    # Section 15 answers "is the business ok". Assurance answers the prior
+    # question nothing else asks: are the frozen artifacts still a description
+    # of the world we are pricing in. Same cadence, same report, separate
+    # verdict -- it informs the operator gate, it does not suspend pricing.
+    assurance = assurance_mod.run(decisions, outcomes, cfg)
     report = {
         "business": business,
         "guardrails": guardrail,
         "learning": learning,
         "safety": safety,
+        "assurance": assurance,
     }
     report["stop_conditions"] = stop_conditions(
         safety, learning, business, guardrail, cfg)
@@ -412,6 +419,8 @@ def main():
     with open(args.out, "w") as f:
         json.dump(report, f, indent=2, default=str)
     print(json.dumps(report["stop_conditions"], indent=2))
+    print("assurance: " + ("PASS" if assurance["verdict"] == "PASS"
+                           else "FAIL -> " + ", ".join(assurance["failing"])))
     print(f"wrote {args.out}")
 
 

@@ -236,6 +236,29 @@ events:
   store_dir: "events_store"            # SET  decision/outcome event log location
   shadow_store_dir: "events_store_shadow"  # SET  shadow-phase events kept separate
 
+assurance:                             # pipeline.assurance -- live-data checks
+  # 1 · reproduction: re-solve logged decisions from their own event payload
+  reproduction_sample: 500             # SET  most RECENT decisions re-solved
+  reproduction_discount_tol: 1.0e-9    # SET  tier grid is exact; this is float noise
+  reproduction_il_tol_abs: 0.01        # SET  currency, absolute
+  reproduction_il_tol_rel: 1.0e-6      # SET  relative, for large IL values
+  reproduction_report_max: 10          # SET  failures listed in the report
+  # 2 · dispersion: is live demand as lumpy as the frozen r claims
+  dispersion_min_outcomes: 500         # SET  below this the bins are noise
+  dispersion_bins: 4                   # SET  predicted-mu quantile bins
+  dispersion_min_bin: 100              # SET  bins thinner than this are skipped
+  dispersion_alert_z: 3.0              # SET  |z| on the binomial null
+  # 3 · correlation: re-measure rho against the frozen artifact
+  rho_min_episodes: 200                # SET  below this, do not re-measure
+  rho_min_hours_per_episode: 3         # SET  matches bootstrap.fit_dispersion
+  rho_drift_alert: 0.10                # SET  absolute drift in rho that alerts.
+    # rho 0.3103 -> 0.41 moves deff 3.35 -> 4.1, ~22% of the learning rate.
+    # Tighter than this fires on ordinary sampling noise at 200 episodes.
+  # 4 · exploration: is the applied price a uniform draw from the affordable set
+  uniformity_bins: 5                   # SET  chi-square bins on the mapped rank
+  uniformity_min_draws: 100            # SET  below this, report insufficient
+  uniformity_alert_p: 0.01             # SET  chi-square p-value floor
+
 monitoring:
   guardrail_noise_window_days: 28      # SET  trailing baseline for threshold calibration
   shadow_gate:                         # SET  section 19 phase-1 exit gate

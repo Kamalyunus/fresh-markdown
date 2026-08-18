@@ -909,6 +909,52 @@ against measured evidence (section 12).
 
 ---
 
+### 5.15 Production assurance — testing the assumptions, not the code
+
+The unit suite checks logic against fixtures. It cannot check the thing that has
+actually broken this system every time: an assumption about real data. The
+censoring basis, the horizon taken from a row count, scrap read as zero, a stale
+`rho` paste — none were logic bugs, and a test that supplies its own inputs
+could not have caught any of them. `pipeline.assurance` runs beside section 15
+on the same daily cadence and tests the frozen artifacts against the live world.
+Each check is built for a failure that would otherwise be **silent**.
+
+| Check | Question | Why nothing else catches it |
+| --- | --- | --- |
+| `reproduction` | Do logged decisions re-solve to themselves? | The DP is deterministic, so a mismatch means something moved underneath it — config edit, artifact swap, bad deploy, library upgrade. One check, four causes |
+| `dispersion` | Is live demand as lumpy as the frozen `r` claims? | Every bounded update assumes it. Demand burstier than `r` says makes each one overconfident, and no business metric moves |
+| `correlation` | Is `rho` still the frozen 0.3103? | It divides all accumulated evidence through `deff`. Drift silently rescales every update; the loop looks healthy while being wrong about how much it knows |
+| `exploration` | Is the applied price a uniform draw from the affordable set? | The causal claim rests on it entirely. A biased draw keeps prices legal and IL reported — it only stops the evidence being evidence |
+
+Three details carry most of the value.
+
+**Reproduction needs the event to be sufficient, not just complete.** Q at every
+tier depends on the whole remaining forecast and the action set depends on the
+anchor, so the decision event now carries `mu_ref_path` and `anchor_discount`
+(section 16.1). Without them an event says what was decided but not enough to
+recompute it, and "the price we logged no longer follows from the inputs we
+logged" is the one failure that is never benign.
+
+**The dispersion check uses the two statistics that survive censoring exactly.**
+With at least one unit on the shelf, `P(sold = 0) = P(D = 0)` — selling nothing
+is never censored — and `P(sold >= q) = P(D >= q)` — selling out *is* the tail.
+Both compare against the negative binomial directly, with no correction and no
+bias, which a variance comparison could not do. Binned by predicted demand,
+because miscalibration flat in `mu` is a level problem and miscalibration that
+grows with `mu` is a shape problem, and only the second indicts `r`.
+
+**`rho` is re-measured on the basis it was frozen on** — residuals against raw
+`mu` at the *working* elasticity (the prior fallback), never at the posterior
+mean. Measuring at a moved posterior would make `rho` drift for a reason that has
+nothing to do with the world, and the number would stop being comparable to the
+one `deff` came from.
+
+None of these suspend pricing. They report beside the section 15 families with
+their own verdict and are read at the operator gate, because the right response
+to "the world stopped matching the model" is a human decision. Thin windows
+report `INSUFFICIENT` rather than `PASS`: a check that cannot see enough data
+must not be mistaken for one that looked and found nothing.
+
 ## 6. Data foundation
 
 **Source:** hourly FLC snapshots (date, hour, SKU, FC, inventory, discount,

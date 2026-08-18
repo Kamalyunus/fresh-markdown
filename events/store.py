@@ -16,7 +16,8 @@ DECISION_REQUIRED = [
     "applied_price", "applied_discount", "is_exploration", "exploration_cost",
     "affordable_set_size", "tau_current",
     "epsilon_posterior_mean", "epsilon_posterior_std",
-    "reference_discount", "reference_mu", "dispersion_r",
+    "reference_discount", "reference_mu", "mu_ref_path", "anchor_discount",
+    "dispersion_r",
     "baseline_model_version", "posterior_version", "config_version",
     "timestamp",
 ]

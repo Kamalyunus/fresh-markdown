@@ -78,8 +78,35 @@ Production loop (after the shadow gate passes):
 ```bash
 python3 -m pipeline.update             # monitor only, always safe
 python3 -m pipeline.update --apply     # operator gate; refuses on failed event-quality gates
-python3 -m pipeline.monitor
+python3 -m pipeline.monitor            # section 15 families + assurance
+python3 -m pipeline.assurance          # the same checks, standalone
 ```
+
+`pipeline.assurance` (design 5.15) tests the FROZEN ARTIFACTS against live data,
+which is the thing the unit suite structurally cannot do — every production
+failure this system has had was an assumption failure, not a logic bug. Four
+checks, each aimed at something that would otherwise be silent:
+
+- `reproduction` re-solves logged decisions from their own event payload. The
+  DP is deterministic, so a mismatch means config, artifact, code or a library
+  moved underneath it. **This is why `mu_ref_path` and `anchor_discount` are on
+  the decision event** — without them a decision cannot be recomputed, and the
+  check cannot tell a drifted artifact from a correct one. Do not remove event
+  fields because "nothing reads them": the event is the audit surface, and
+  `test_end_to_end` asserts every emitted decision re-solves to itself.
+- `dispersion` compares realised zero-sale and stockout rates against
+  `NB(mu, r)`. Both are exact under censoring; a variance comparison is not.
+- `correlation` re-measures `rho` on live residuals **at the working elasticity**
+  (`posterior.prior.fallback_mean`), the same basis `bootstrap.fit_dispersion`
+  used. Measuring at the posterior mean would show drift that is not there.
+- `exploration` reconstructs the affordable set and tests that the applied tier
+  is a uniform draw from it, plus the invariant that a non-empty affordable set
+  always produced an exploration.
+
+Verdicts are `PASS` / `FAIL` / `INSUFFICIENT`, and thin windows report
+`INSUFFICIENT` rather than `PASS`. Nothing here suspends pricing: it is read at
+the operator gate, because "the world stopped matching the model" is a human
+decision. Thresholds live in `config.yaml` under `assurance:`.
 
 ## Hard rules — violating these has already caused wrong conclusions
 
