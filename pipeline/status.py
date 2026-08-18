@@ -24,8 +24,8 @@ import argparse
 import json
 import os
 
-from common.config import (RUNTIME_REQUIRED, artifact_mirror_drift, _get,
-                           load_config)
+from common.config import (RUNTIME_REQUIRED, artifact_mirror_drift,
+                           config_get, load_config)
 
 PASS, FAIL, WARN, NONE = "PASS", "FAIL", "WARN", "not run"
 
@@ -46,7 +46,7 @@ def _launch_blockers(cfg):
     missing = []
     for path in RUNTIME_REQUIRED:
         try:
-            if _get(cfg, path) is None:
+            if config_get(cfg, path) is None:
                 missing.append(".".join(path))
         except KeyError:
             missing.append(".".join(path))

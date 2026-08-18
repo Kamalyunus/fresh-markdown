@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
+from common.ab import arm
 from common.config import load_config
 from common import episodes
 from bootstrap.measure import m6_il_pct
@@ -194,10 +195,9 @@ def control_arm_noise(d, cfg):
     and, with the persistence rule on top, cannot fire at all. Smoothing must
     be applied on BOTH sides or the guardrail is inert.
 
-    Arm assignment uses the same stable SKU x FC hash as the monitor, so the
+    Arm assignment uses common.ab.arm -- the same function the monitor uses, so
     split measured here is the split that will run.
     """
-    from pipeline.monitor import _arm
 
     ep = d.sort_values(["date", "hour_of_day"]).groupby("episode_id").agg(
         date=("date", "first"), sku_id=("sku_id", "first"), fc=("fc", "first"),
@@ -210,7 +210,7 @@ def control_arm_noise(d, cfg):
            .groupby(d.episode_id).sum().rename("margin"))
     ep = ep.join(rev).join(mar)
     alloc = cfg["ab_test"]["allocation"]
-    ep["arm"] = [_arm(s, f, alloc) for s, f in zip(ep.sku_id, ep.fc)]
+    ep["arm"] = [arm(s, f, alloc) for s, f in zip(ep.sku_id, ep.fc)]
 
     def daily(g):
         day = g.groupby("date").agg(start_inv=("start_inv", "sum"),

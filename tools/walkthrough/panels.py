@@ -1435,7 +1435,7 @@ PANELS = {"map": P_MAP, "data": P_DATA, "model": P_MODEL, "calib": P_CALIB,
 
 
 # ================================================================== 7 · replay
-P_REPLAY = f"""
+P_REPLAY = """
 <section class="prose" style="padding-top:34px">
   <div class="step-head"><h2>Replaying five months, to see what the agent would have done</h2></div>
   <p class="lede">

@@ -46,9 +46,10 @@ import numpy as np
 from scipy.stats import chi2 as chi2_dist
 from scipy.stats import nbinom
 
-from common.config import load_config, deff
+from common.config import load_config, deff, design_effect
 from events.store import EventStore
 from pricing import dp as dp_mod
+from pricing.explore import affordable_set
 from pricing.demand import mu_at
 
 
@@ -263,7 +264,7 @@ def correlation_drift(decisions, outcomes, cfg):
 
     moved = [v for v in usable.values() if len({round(dd, 6) for _, dd in v}) > 1]
     hours = float(np.mean([len(v) for v in (moved or list(usable.values()))]))
-    deff_live = 1 + (hours - 1) * rho_live
+    deff_live = design_effect(rho_live, hours)
 
     rho_frozen = cfg["dispersion"]["rho"]
     drift = abs(rho_live - rho_frozen)
@@ -309,10 +310,8 @@ def exploration_uniformity(decisions, cfg):
         except Exception:
             unreconstructed += 1
             continue
-        star = res.optimal_index
-        costs = {j: res.q_by_tier[star] - res.q_by_tier[j] for j in res.q_by_tier}
-        affordable = [j for j in res.q_by_tier
-                      if j != star and costs[j] <= evt["tau_current"]]
+        # the SAME function the chooser used, so this cannot drift from it
+        affordable, _ = affordable_set(res, evt["tau_current"])
         j_applied = _tier_index(res.tiers, evt["applied_discount"], step)
         if j_applied is None or j_applied not in affordable or len(affordable) < 2:
             # size-1 sets carry no information about uniformity: the draw was

@@ -18,6 +18,20 @@ std.
 """
 
 
+def affordable_set(dp_result, tau):
+    """Tier indices a perturbation may legally land on, and their costs.
+
+    Public because `pipeline.assurance` has to reconstruct EXACTLY what this
+    chose in order to test that the draw was uniform. Two copies of this rule
+    that drift apart would leave the check quietly testing the wrong set, and
+    the failure it exists to catch is already silent.
+    """
+    q = dp_result.q_by_tier
+    star = dp_result.optimal_index
+    costs = {j: q[star] - q[j] for j in q}
+    return [j for j in q if j != star and costs[j] <= tau], costs
+
+
 def select(dp_result, tau, rng, explorable=True):
     """Returns a dict describing the chosen action.
 
@@ -25,10 +39,7 @@ def select(dp_result, tau, rng, explorable=True):
     min_feasible_tiers): it is priced by the DP as normal but excluded from
     the exploration budget and never logged as a blocked attempt.
     """
-    q = dp_result.q_by_tier
     star = dp_result.optimal_index
-    costs = {j: q[star] - q[j] for j in q}
-
     choice = {
         "optimal_index": star,
         "chosen_index": star,
@@ -39,7 +50,7 @@ def select(dp_result, tau, rng, explorable=True):
     if not explorable or tau is None:
         return choice
 
-    affordable = [j for j in q if j != star and costs[j] <= tau]
+    affordable, costs = affordable_set(dp_result, tau)
     choice["affordable_set_size"] = len(affordable)
     if affordable:
         j = affordable[int(rng.integers(0, len(affordable)))]

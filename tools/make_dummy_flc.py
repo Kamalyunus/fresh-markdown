@@ -276,7 +276,6 @@ def main():
     pq.write_table(table, args.out)
 
     excl = df[(df.date >= EXCLUSION_START) & (df.date <= EXCLUSION_END)]
-    sold = df[df.units_sold > 0]
     print(f"policy            : {args.policy}")
     print(f"rows              : {len(df):,}")
     print(f"skus              : {df.skuseq.nunique():,}")

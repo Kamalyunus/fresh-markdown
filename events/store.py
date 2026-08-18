@@ -12,6 +12,10 @@ DECISION_REQUIRED = [
     "decision_id", "episode_id", "is_entry", "sku_id", "fc", "category",
     "subcategory", "hour_of_day", "hours_remaining", "q_remaining",
     "original_price", "cost", "d_max", "feasible_tier_count",
+    # actions allowed at THIS decision -- what explorability is judged on, and
+    # distinct from the grid size. Required, because a decision that did not
+    # explore is unauditable without it.
+    "action_set_size",
     "optimal_price", "optimal_discount", "expected_il", "expected_denominator",
     "applied_price", "applied_discount", "is_exploration", "exploration_cost",
     "affordable_set_size", "tau_current",

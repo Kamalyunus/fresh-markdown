@@ -269,11 +269,8 @@ DECISION PATH
 ```yaml
 meta:
   config_version: "1.0.0"
-  mvp_window_start: "2026-09-01"      # SET  baseline frozen from here
-  mvp_window_end:   "2026-12-01"      # SET  drift risk grows beyond this
 
 data:
-  source_table: "sb_scm.fresh_flc_detail"
   exclusion_window:                    # SET  known demand-issue period
     start: "2026-04-25"
     end:   "2026-06-03"
@@ -284,7 +281,6 @@ data:
     calib_end:   "2026-07-27"
     test_start:  "2026-07-28"
     test_end:    "2026-08-03"
-  episode_key: ["sku_id", "fc", "date"]
 
 baseline_model:
   objective: "tweedie"                 # SET
@@ -306,7 +302,6 @@ dispersion:
   mean_forced_hours_per_episode: 9.278 # MEASURED  phase 0 -> deff = 3.941
 
 posterior:
-  cell_level: "category"               # SET  MVP learns at category only
   min_episodes_per_week_for_cell: 250  # SET  below this -> read the global cell
   epsilon_min: -4.00                   # SET  grid bound
   epsilon_max: -0.05                   # SET  sign constraint
@@ -351,12 +346,9 @@ monitoring:
   alert_posterior_std_flat_days: 21    # SET  learning-loop health
 
 ab_test:
-  unit: "sku_fc"                       # SET
   allocation: 0.50                     # SET
-  primary_metric: "il_pct"             # SET
   min_detectable_effect_pct: null      # SET BY OWNER
   il_pct_ratio_se_clustered: 0.000383  # MEASURED  phase 0; 84,792 SKU x FC units
-  duration_days: null                  # DERIVED   from the two above
 ```
 
 ---
@@ -434,7 +426,7 @@ Three load-bearing properties:
 
 1. **`discount` is in percent.** Every formula here uses a fraction. Convert at load. A missed conversion will not fail loudly.
 2. **`final_price` is a realised transaction price, zero when nothing sold.** Offered price is always `original_price × (1 - d)`. Using `final_price` to reconstruct offered price silently drops every zero-sale hour — the population carrying the signal at shallow discounts.
-3. **There is no `episode_id` in the source.** Build it from `episode_key` as contiguous selling hours and persist the rule with the split manifest, so production and evaluation derive identical boundaries.
+3. **There is no `episode_id` in the source.** Build it from `sku_id x fc x window start` as contiguous selling hours and persist the rule with the split manifest, so production and evaluation derive identical boundaries.
 
 ### 9.2 Filter chain
 
@@ -1473,7 +1465,6 @@ def main():
         "m6_il_pct": m6_il_pct(d),
         "m7_learning_rate": m7_learning_rate(d),
         "m8_entry_hour": m8_entry_hour(d),
-        "m9_controller_replay": "NOT RUN -- requires fitted baseline model",
         "m10_fidelity_decomposition": m10_fidelity_decomposition(d),
     }
     res["reassessment_gates"] = gates(res)

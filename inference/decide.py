@@ -114,7 +114,6 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
         # tiers at/deeper than the anchor. Distinct from the grid size, and
         # the quantity explorability is judged on
         "action_set_size": len(result.q_by_tier),
-        "entry_offset_applied": round(d_applied - d_ref, 6) if entry else None,
         "optimal_price": float(s["original_price"] * (1 - d_opt)),
         "optimal_discount": float(d_opt),
         # absolute IL under the chosen policy -- the objective (section 3.1)

@@ -29,7 +29,7 @@ import pandas as pd
 from scipy.optimize import minimize_scalar
 from scipy.stats import nbinom
 
-from common.config import load_config
+from common.config import load_config, design_effect
 from bootstrap.prepare_data import split_frames
 from bootstrap.train_baseline import BaselineModel
 
@@ -119,7 +119,7 @@ def fit_dispersion(d, cfg):
     rho_out = {"rho": round(rho, 4),
                "rho_method": "variance_decomposition_on_fitted_mu_residuals",
                "mean_forced_hours_per_episode": round(h_forced, 3),
-               "implied_deff": round(1 + (h_forced - 1) * rho, 3)}
+               "implied_deff": round(design_effect(rho, h_forced), 3)}
     return r_lookup, rho_out
 
 

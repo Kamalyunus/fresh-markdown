@@ -28,7 +28,7 @@ import json
 import numpy as np
 import pandas as pd
 
-from common.config import load_config
+from common.config import load_config, design_effect
 from bootstrap.prepare_data import load_and_filter
 from common import episodes
 
@@ -125,7 +125,7 @@ def m3_intra_episode_correlation(d):
         "mean_forced_hours_per_episode": round(h_forced, 3),
         # deff uses FORCED hours -- these are the correlated observations that
         # actually enter the likelihood. Using all-episode hours understates it.
-        "implied_deff": round(1 + (h_forced - 1) * rho, 3),
+        "implied_deff": round(design_effect(rho, h_forced), 3),
         "note": "re-run against fitted mu_ref residuals; that value is authoritative",
     }
 

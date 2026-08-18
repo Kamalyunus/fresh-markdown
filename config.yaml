@@ -10,11 +10,8 @@
 
 meta:
   config_version: "1.0.0"
-  mvp_window_start: "2026-09-01"      # SET  baseline frozen from here
-  mvp_window_end:   "2026-12-01"      # SET  drift risk grows beyond this
 
 data:
-  source_table: "sb_scm.fresh_flc_detail"
   exclusion_window:                    # SET  known demand-issue period
     start: "2026-04-25"
     end:   "2026-06-03"
@@ -25,7 +22,6 @@ data:
     calib_end:   "2026-07-27"
     test_start:  "2026-07-28"
     test_end:    "2026-08-03"
-  episode_key: ["sku_id", "fc", "window_start_hour"]   # SET  DESCRIPTIVE ONLY.
     # An episode is a maximal run of consecutive hourly rows for one sku x fc
     # over which flc_window (hours_remaining) ticks down exactly one per
     # elapsed hour -- see prepare_data.assign_episode_ids, which is the
@@ -162,7 +158,6 @@ dispersion:
   mean_forced_hours_per_episode: 8.563 # MEASURED  ditto -> deff = 3.347
 
 posterior:
-  cell_level: "category"               # SET  DESCRIPTIVE ONLY in the MVP.
     # The cell map is frozen into artifacts/posterior.json by
     # bootstrap.init_posterior and read from there at runtime; changing this
     # string alone has no effect. Subcategory cells are phase 2 (section 14).
@@ -332,9 +327,7 @@ monitoring:
   alert_posterior_std_flat_days: 21    # SET  learning-loop health
 
 ab_test:
-  unit: "sku_fc"                       # SET
   allocation: 0.50                     # SET
-  primary_metric: "il_pct"             # SET
   power: 0.80                          # SET  for duration derivation
   alpha: 0.05                          # SET  two-sided
   candidate_durations_weeks: [2, 3, 4, 5, 6, 8, 10, 12]  # SET  windows tested
@@ -345,4 +338,3 @@ ab_test:
     # pre-measurement placeholder and sat here mislabelled as MEASURED.
     # Not consumed for power: derive_thresholds re-measures the SE on actual
     # T-week blocks, since sqrt-T scaling is optimistic under clustering.
-  duration_days: null                  # DERIVED   bootstrap.derive_thresholds

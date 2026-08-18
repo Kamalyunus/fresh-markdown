@@ -10,26 +10,19 @@ Usage:
 """
 
 import argparse
-import hashlib
 import json
 import os
 
 import numpy as np
 import pandas as pd
 
+from common.ab import arm
 from common.config import load_config, deff
 from events.store import EventStore
 from pricing.posterior import PosteriorStore
 from pipeline import assurance as assurance_mod
 from pricing import explore
 from common import episodes
-
-
-def _arm(sku_id, fc, allocation):
-    """Stable-hash A/B assignment at the SKU x FC unit (section 18)."""
-    h = hashlib.md5(f"{sku_id}|{fc}".encode()).digest()
-    return "treatment" if int.from_bytes(h[:4], "big") / 2 ** 32 < allocation \
-        else "control"
 
 
 def _still_running(ep):
@@ -67,7 +60,7 @@ def business_metrics(decisions, outcomes, cfg):
             "ending_inventory": o["ending_inventory"],
             "discount_cost": (d["original_price"] - o["applied_price"])
                              * o["units_sold"],
-            "arm": _arm(d["sku_id"], d["fc"], cfg["ab_test"]["allocation"]),
+            "arm": arm(d["sku_id"], d["fc"], cfg["ab_test"]["allocation"]),
         })
     df = pd.DataFrame(rows)
 
@@ -134,7 +127,7 @@ def guardrail_series(decisions, outcomes, cfg):
             "date": pd.Timestamp(d["timestamp"]).date(),
             "timestamp": d["timestamp"],
             "episode_id": d["episode_id"],
-            "arm": _arm(d["sku_id"], d["fc"], cfg["ab_test"]["allocation"]),
+            "arm": arm(d["sku_id"], d["fc"], cfg["ab_test"]["allocation"]),
             "hours_remaining": d["hours_remaining"],
             "cost": d["cost"],
             "start_inv": o["starting_inventory"],

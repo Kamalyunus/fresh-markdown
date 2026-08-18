@@ -17,15 +17,11 @@ Usage:
     python3 -m backtest --input data/prepared.parquet --out reports/backtest.json
 """
 
-import json
 
 import numpy as np
 import pandas as pd
-from scipy.stats import nbinom
 
-from common.config import load_config
 from bootstrap.prepare_data import split_frames
-from bootstrap.train_baseline import BaselineModel
 from bootstrap.fit_dispersion import lookup_r
 from bootstrap.measure import m10_fidelity_decomposition
 from common import episodes

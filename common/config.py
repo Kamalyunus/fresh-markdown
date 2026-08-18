@@ -47,7 +47,7 @@ ARTIFACT_MIRRORS = [
 ]
 
 
-def _get(cfg, path):
+def config_get(cfg, path):
     node = cfg
     for key in path:
         node = node[key]
@@ -62,14 +62,14 @@ def artifact_mirror_drift(cfg, tol=5e-4):
     """
     drift = []
     for path_key, field, cfg_path in ARTIFACT_MIRRORS:
-        path = _get(cfg, path_key)
+        path = config_get(cfg, path_key)
         if not os.path.exists(path):
             continue
         with open(path) as f:
             artifact = json.load(f)
         if field not in artifact:
             continue
-        pasted, frozen = _get(cfg, cfg_path), artifact[field]
+        pasted, frozen = config_get(cfg, cfg_path), artifact[field]
         if pasted is None or abs(float(pasted) - float(frozen)) > tol:
             drift.append(f"{'.'.join(cfg_path)}={pasted} but "
                          f"{path}:{field}={frozen}")
@@ -87,7 +87,8 @@ def load_config(path="config.yaml", strict=False):
             "(PRD section 9.5: a bound tighter than epsilon_min is a defect)")
 
     if strict:
-        missing = [".".join(p) for p in RUNTIME_REQUIRED if _get(cfg, p) is None]
+        missing = [".".join(p) for p in RUNTIME_REQUIRED
+                   if config_get(cfg, p) is None]
         if cfg["posterior"]["prior"]["source"] == "bracket" \
                 and cfg["posterior"]["prior"]["per_category"] is None \
                 and not os.path.exists(cfg["posterior"]["prior"]["path"]):
@@ -114,8 +115,18 @@ def reference_discount(cfg, category):
     return float(table.get(key, table["_default"]))
 
 
+def design_effect(rho, forced_hours):
+    """Cluster design effect: 1 + (m - 1) * rho, floored at 1 (PRD 13.3).
+
+    The single definition. It was written out by hand in three other places --
+    fit_dispersion, measure and assurance -- and only this one carried the
+    floor, so a negative rho would have DIVIDED information rather than
+    deflating it. Import it; do not retype it.
+    """
+    return max(1.0, 1.0 + (forced_hours - 1.0) * rho)
+
+
 def deff(cfg):
-    """Design effect from frozen rho and forced-hours (PRD section 13.3)."""
-    rho = cfg["dispersion"]["rho"]
-    h = cfg["dispersion"]["mean_forced_hours_per_episode"]
-    return max(1.0, 1.0 + (h - 1.0) * rho)
+    """Design effect from the frozen rho and forced-hours in config."""
+    return design_effect(cfg["dispersion"]["rho"],
+                         cfg["dispersion"]["mean_forced_hours_per_episode"])
