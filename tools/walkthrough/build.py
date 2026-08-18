@@ -160,8 +160,9 @@ PAGE_HEADER = """<header>
     <strong>architecture</strong> first, then <strong>each frozen input</strong> in turn,
     the <strong>exact calculation</strong> that turns them into a price, the
     <strong>one number learned in production</strong>, and what five months of
-    <strong>replayed history</strong> says it would have done. Read the tabs in order, or
-    jump to the one you are being asked about.
+    <strong>replayed history</strong> says it would have done — and how we will know it is
+    still working once real prices start moving. Read the tabs in order, or jump to the one
+    you are being asked about.
   </p>
 </header>"""
 
@@ -169,13 +170,14 @@ TABS = [
     # key stays "map" so any shared #map link keeps working
     ("map",   "Architecture",     "the whole system"),
     ("data",  "Data",             "split_manifest.json"),
-    ("model", "Demand model",     "baseline_model.txt"),
+    ("model", "Demand",           "baseline_model.txt"),
     ("calib", "Calibration",      "calibration.json"),
     ("var",   "Variance",         "r_lookup · rho"),
     ("prior", "Elasticity",       "prior.json"),
-    ("dp",    "The decision",     "pricing/dp.py"),
+    ("dp",    "Decision",         "pricing/dp.py"),
     ("learn", "Learning",         "posterior.json"),
     ("replay","Replay",           "what we measured"),
+    ("assure","Assurance",        "how we know it keeps working"),
 ]
 
 

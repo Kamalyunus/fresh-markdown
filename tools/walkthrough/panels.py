@@ -1606,3 +1606,167 @@ difference           −₩7.42M      =  −38.02% of the legacy arm
 """
 
 PANELS["replay"] = P_REPLAY
+
+
+# =============================================================== 8 · assurance
+P_ASSURE = f"""
+<section class="prose" style="padding-top:34px">
+  <div class="step-head"><h2>How we will know it is still working, once it is live</h2></div>
+  <p class="lede">
+    The tests that ship with the code check the code. They cannot check the thing that has
+    actually broken this system every time — an <strong>assumption about real data</strong>.
+    Every defect worth remembering here was one of those, and not one of them would have
+    been caught by a test that supplies its own inputs.
+  </p>
+</section>
+
+<figure style="margin-top:18px">
+  <div class="scroller"><table class="tl">
+    <caption>The four defects that cost us the most, and what kind they were</caption>
+    <thead><tr><th>What went wrong</th><th>Kind</th></tr></thead>
+    <tbody>
+      <tr><td>The level factor was fitted against raw demand instead of censored demand — so it pointed the wrong way</td><td>an assumption about the data</td></tr>
+      <tr><td>The horizon was taken from how many rows an episode happened to have, not from its window</td><td>an assumption about the data</td></tr>
+      <tr><td>Scrap was read as zero, so the agent optimised a trade-off with one side missing</td><td>an assumption about the data</td></tr>
+      <tr><td>A correlation figure left over from a previous model quietly mis-weighted every learning step</td><td>an assumption about the data</td></tr>
+    </tbody>
+  </table></div>
+  <figcaption>
+    Four for four. The code was doing exactly what it was written to do in every case, which
+    is precisely why more unit tests would not have helped. So production gets a different
+    kind of test: <strong>the frozen artifacts, checked against the live world, every
+    day</strong>.
+  </figcaption>
+</figure>
+
+{filecard("pipeline/assurance.py", "four daily checks on the frozen artifacts", "runs beside the business metrics", "the operator, at the daily gate")}
+
+<figure style="margin-top:26px">
+  <div class="scroller"><table class="tl">
+    <caption>What each check asks, and why nothing else would notice</caption>
+    <thead><tr><th>Check</th><th>The question</th><th>What it catches that nothing else does</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>Reproduction</strong></td>
+        <td>Do yesterday's decisions still come out the same?</td>
+        <td>A config edit, a swapped artifact, a bad deploy, a library upgrade — four ways the system can start doing something other than what it was signed off to do, all caught by one check</td>
+      </tr>
+      <tr>
+        <td><strong>Dispersion</strong></td>
+        <td>Is real demand as lumpy as we assumed?</td>
+        <td>If demand is burstier than the frozen figure says, every learning step is overconfident — and no business metric moves at all</td>
+      </tr>
+      <tr>
+        <td><strong>Correlation</strong></td>
+        <td>Do hours within an episode still repeat each other as much?</td>
+        <td>This number divides all accumulated evidence. Drift here means the system is wrong about how much it has learned, while looking perfectly healthy</td>
+      </tr>
+      <tr>
+        <td><strong>Exploration</strong></td>
+        <td>Is the experiment still random?</td>
+        <td>A biased draw keeps prices legal and IL reported. It only stops the evidence being evidence — silently, and forever</td>
+      </tr>
+    </tbody>
+  </table></div>
+</figure>
+
+<section class="prose">
+  <h3 style="margin-top:34px">The one that earns its place first</h3>
+  <p>
+    <strong>Reproduction</strong> is the simplest idea here and the most powerful. The agent
+    is deterministic: the same inputs must always produce the same price. So every day we
+    take real decisions the system made, feed each one <em>its own recorded inputs</em> back
+    through the solver, and require the same answer.
+  </p>
+</section>
+
+<div class="math">logged decision:   3 units · 4 hours left · this forecast · these frozen inputs
+                   → priced at ₩10,000, expected loss −4,881
+
+re-solve it today: same inputs in  →  must be ₩10,000 and −4,881 out
+                   anything else  →  something moved underneath the solver</div>
+
+<section class="prose">
+  <p style="margin-top:16px">
+    That single check covers four different failures at once, and none of them announce
+    themselves: someone edits a threshold, an artifact gets replaced with a newer one, a
+    deployment ships a change nobody meant to price with, a library rounds differently after
+    an upgrade. In every case the prices keep flowing and every dashboard stays green.
+  </p>
+  <p>
+    Making it possible required one change to what we record. The decision log stored the
+    demand forecast <em>for the hour being priced</em>, which is enough to explain a
+    decision but not enough to <em>recompute</em> one — the calculation reads the forecast
+    for every remaining hour, and the price ceiling carried in from before. Both are now on
+    the record. It is the difference between a log and an audit trail, and the test suite
+    now checks that every decision the live path produces can be re-derived from its own
+    entry.
+  </p>
+
+  <h3 style="margin-top:34px">Testing a distribution without being fooled by the shelf</h3>
+  <p>
+    Checking the dispersion assumption is harder than it sounds, because we never see demand
+    — only sales, which stop when the shelf is empty. Comparing the spread of sales against
+    the spread of demand would compare two different things and fail for the wrong reason.
+  </p>
+  <p>
+    Two quantities escape that problem exactly, and the check uses only those two:
+  </p>
+</section>
+
+<div class="math">an hour that sells NOTHING is never limited by stock
+    → the chance of selling zero is exactly the chance demand was zero
+
+an hour that SELLS OUT is exactly the case demand reached the shelf
+    → the chance of selling out is exactly the chance demand was that high</div>
+
+<section class="prose">
+  <p style="margin-top:16px">
+    So we compare the realised rate of empty hours and of sell-outs against what the frozen
+    figure predicts — no correction, no approximation. Grouped by how much demand was
+    expected, because being wrong by the same amount everywhere is a level problem, while
+    being wrong <em>more as demand grows</em> is a shape problem, and only the second one
+    means the dispersion figure itself is stale.
+  </p>
+
+  <h3 style="margin-top:34px">The silent one</h3>
+  <p>
+    The correlation check exists because its failure mode produces no symptom at all. That
+    number decides how much a day of evidence is worth — hours inside one episode repeat
+    each other, so the system deliberately counts eight and a half of them as about two and
+    a half. If the real world moves and that figure does not, nothing visible changes: prices
+    look fine, the loop keeps committing updates, the belief keeps moving. It is simply
+    moving on the wrong amount of evidence, and it would keep doing so indefinitely. So it is
+    re-measured on live data and compared against the frozen value.
+  </p>
+
+  <h3 style="margin-top:34px">The one that protects the argument</h3>
+  <p>
+    Everything the system learns rests on the experimental price being a genuinely random
+    pick from the affordable set. A bug that skewed that pick — always the shallowest, say —
+    would break nothing you could see. Prices stay legal, the budget is still respected, the
+    reports still balance. The only casualty is the reason we are allowed to call the result
+    causal. So the check reconstructs what the affordable choices were at each experiment,
+    looks at where the applied price actually landed among them, and tests that the pattern
+    is flat.
+  </p>
+</section>
+
+<div class="callout">
+  <h3>Three verdicts, not two</h3>
+  <p>
+    Each check returns <strong>pass</strong>, <strong>fail</strong>, or
+    <strong>not enough data</strong> — and the third one matters. A check that quietly
+    returns “pass” when it had almost nothing to look at is worse than no check, because it
+    buys false confidence at exactly the moment the pilot is smallest. A thin window says so.
+  </p>
+  <p style="margin-top:14px">
+    And none of these stop pricing on their own. They report next to the business metrics
+    with their own verdict, and a person reads them at the daily gate — because “the world
+    has stopped matching our model” is a judgement, and the right response depends on which
+    assumption moved and how far.
+  </p>
+</div>
+"""
+
+PANELS["assure"] = P_ASSURE
