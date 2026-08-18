@@ -80,7 +80,22 @@ python3 -m pipeline.update             # monitor only, always safe
 python3 -m pipeline.update --apply     # operator gate; refuses on failed event-quality gates
 python3 -m pipeline.monitor            # section 15 families + assurance
 python3 -m pipeline.assurance          # the same checks, standalone
+python3 -m pipeline.status             # the dozen numbers that decide something
 ```
+
+**Start with `python3 -m pipeline.status`.** The four reports carry ~200 fields
+between them, which is the right number to write and the wrong number to read.
+`status` prints only the checks that gate a decision — launch blockers, artifact
+mirrors, calibration gate, prior, tau, shadow gate, guardrail floors, stop
+conditions, assurance — each with the figure behind it and, when red, which
+diagnostic block to open next. It computes nothing; every line is read from a
+report some other step wrote. Exit code 1 on any FAIL, so it can gate a script.
+
+A check that did not run reports `not run`, never `PASS`: an unrun check and a
+passing check must never look the same, and `tests/test_status.py` asserts it.
+Everything below `status` is tier two — read it when a gate goes red, not
+routinely. The gate decision tree further down maps each failure to the blocks
+worth opening.
 
 `pipeline.assurance` (design 5.15) tests the FROZEN ARTIFACTS against live data,
 which is the thing the unit suite structurally cannot do — every production

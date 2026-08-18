@@ -392,7 +392,6 @@ def run_all(d, cfg):
         "m7_learning_rate": m7_learning_rate(d),
         "m8_entry_hour": m8_entry_hour(d),
         "m11_episode_endings": m11_episode_endings(d),
-        "m9_controller_replay": "NOT RUN -- requires fitted baseline model (backtest)",
         "m10_fidelity_decomposition": m10_fidelity_decomposition(d, cfg),
     }
     res["reassessment_gates"] = gates(res, cfg)
