@@ -528,18 +528,24 @@ rho/deff, guardrail noise floors, replay IL. Re-run the full bootstrap.
 python3 -m tools.make_charts        # -> reports/charts/*.png
 ```
 
-One chart per component, every one generated from a report artifact — never
-hand-drawn, so a chart that disagrees with the pipeline cannot exist. Missing
-reports are skipped with a note rather than failing, so it is safe to run at
-any stage. `docs/design.md` embeds several of them by relative path, so
-**re-run this after any bootstrap or the document shows the previous run's
-pictures beside the current run's numbers.** Process diagrams (architecture,
-episode construction, gate sequence) are Mermaid inside the design doc and
-need no regeneration.
+Seven charts — exactly the ones `docs/design.md` embeds — every one generated
+from a report artifact, never hand-drawn, so a chart that disagrees with the
+pipeline cannot exist. **Re-run this after any bootstrap or the document shows
+the previous run's pictures beside the current run's numbers.** Process
+diagrams (architecture, episode construction, gate sequence) are Mermaid inside
+the design doc and need no regeneration.
+
+A missing report is skipped with a note rather than failing, and so is a report
+that exists but predates a field a chart reads — the note names the field. One
+stale report must not cost the other six pictures.
+
+**The filenames have gaps (`02`–`06`, `08`, `09`) and must keep them.**
+`design.md` embeds these by name, so renumbering blanks the images it shows.
+Five further charts were generated for a while and nothing ever referenced
+them; they are gone, and adding a chart means embedding it in the same change
+or it will go the same way.
 
 `reports/` is gitignored, so the PNGs are build output, not tracked files.
-Anything that must survive — a chart in the deck — gets pasted in
-deliberately.
 
 ## Refreshing the numbers in the docs
 
@@ -551,9 +557,22 @@ the production assurance. It is built, not hand-edited:
 python3 -m tools.walkthrough.build      # writes docs/system_walkthrough.html
 ```
 
-Tab prose lives in `tools/walkthrough/panels.py`; `_source.html` is the
-original single-topic decision-core page and its sections are lifted verbatim,
-so edit the panels rather than the output. Figures on the artifact tabs are
+**Tab prose lives in `tools/walkthrough/panels/<tab>.html` — one file per tab,
+plain HTML.** Edit those, never the built output. `panels.py` is now only a
+loader: it reads each file verbatim and expands the two fragments that carry
+values which must not be typed twice —
+
+```html
+<x-filecard path=… holds=… state=… reader=… [moves="1"]></x-filecard>
+<x-pmfbars></x-pmfbars>
+```
+
+— and `_source.html` is the original single-topic decision-core page, whose
+sections the builder lifts verbatim for the Decision tab. The panels were
+Python f-strings until every literal brace in them had to be doubled, which
+broke the page twice; they are files now so that markup is just markup.
+
+Figures on the artifact tabs are
 quoted from `docs/design.md` (the `baseline-20260811043259` run) so the page
 holds one vintage throughout; the decision tab is a self-contained solve whose
 inputs are printed on it. It is published as a claude.ai artifact — deploy the

@@ -1,0 +1,195 @@
+
+<section class="prose" style="padding-top:34px">
+  <div class="step-head"><h2>The one number history could not give us</h2></div>
+  <p class="lede">
+    Price response is the quantity the whole system turns on, and it is the one thing we do
+    not know. We tried to estimate it from history, in the most defensible form we could
+    construct. <strong>The attempt failed, and understanding exactly how it failed is the
+    argument for everything else on this page.</strong>
+  </p>
+</section>
+
+<x-filecard path="artifacts/prior.json" holds="the cold-start price response: −1.0 ± 0.6, every category" state="frozen cold start" reader="the DP, until production learns better"></x-filecard>
+
+<section class="prose">
+  <h3 style="margin-top:30px">First: what ε actually does</h3>
+  <p>
+    One exponent moves the demand model's answer from the reference price to any other
+    price. It is the entire price mechanism in the system:
+  </p>
+</section>
+
+<div class="math">μ(d)  =  μ_ref · ( (1 − d) ⁄ (1 − d_ref) ) ^ ε        ε constrained negative
+
+at d = 0     μ = 0.80 · (1.00 ⁄ 0.70) ^ −1  =  0.56     full price
+at d = 0.30  μ = 0.80                                   the reference itself
+at d = 0.60  μ = 0.80 · (0.40 ⁄ 0.70) ^ −1  =  1.40     at the cost floor</div>
+
+<section class="prose">
+  <p style="margin-top:16px">
+    The ML model is consulted once per hour and that single number is swung across the whole
+    price ladder by this exponent. Get ε wrong and every price the agent considers is
+    mispriced — not by a little, and in a direction that compounds over a window.
+  </p>
+
+  <h3 style="margin-top:34px">What we tried</h3>
+  <p>
+    The procedure — the <em class="term">bracket</em> — was built around the two confounds
+    rather than in spite of them. If we cannot get one unbiased estimate, we can try to get
+    <strong>two biased ones that we know lean opposite ways</strong>, and let them fence the
+    answer in.
+  </p>
+</section>
+
+<section class="prose">
+  <p>
+    Both estimates come from the same likelihood — we score every candidate ε on a grid across
+    the whole feasible range and keep the one that makes the observed sales most probable:
+  </p>
+</section>
+
+<div class="math">for each candidate ε on a grid across [−4.00, −0.05]:
+
+    μ_i(ε)  =  μ_ref,i · exp( ε · L_i )         L_i = log( (1 − d_i) ⁄ (1 − d_ref) )
+
+    log L(ε)  =  Σ  log P( D = k_i | μ_i(ε), r_i )     hours that did not sell out
+              +  Σ  log P( D ≥ q_i | μ_i(ε), r_i )     hours that did
+
+    ε̂  =  argmax  log L(ε)</div>
+
+<section class="prose">
+  <p style="margin-top:16px">
+    The two versions differ in exactly one place, and that difference is the whole experiment:
+  </p>
+</section>
+
+<figure style="margin-top:18px">
+  <div class="scroller"><table class="tl">
+    <caption>Two estimates per category, one likelihood, one difference</caption>
+    <thead><tr><th>Estimate</th><th>What it does to the likelihood</th><th>Which way it is wrong</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>ε_naive</code></td>
+        <td>nothing — μ_i(ε) is used exactly as written above</td>
+        <td>every hour-of-day effect the model did not already capture is left for ε to
+            explain, and since deep discounts happen in busy hours, ε absorbs the evening
+            lift → <strong>too elastic</strong></td>
+      </tr>
+      <tr>
+        <td><code>ε_controlled</code></td>
+        <td>multiplies μ_i(ε) by an hour-of-day factor <code>h(hour)</code>, re-estimated at
+            every candidate ε by moment matching on uncensored rows:
+            <code>h = Σ sold ⁄ Σ μ</code> within each hour</td>
+        <td>the hour factors soak up the confound — but they also soak up most of the genuine
+            price variation, which under a clock-driven policy is nearly collinear with hour
+            → <strong>biased toward zero</strong></td>
+      </tr>
+    </tbody>
+  </table></div>
+  <figcaption>
+    The controlled version is the honest attempt, and its weakness is structural rather than
+    fixable: when price is a function of the hour, controlling for the hour removes the price
+    signal along with the confound. Profiling the hour factors <em>at each candidate ε</em>
+    rather than fixing them once is what makes it a fair fight — the control adapts to
+    whatever ε is being tested.
+  </figcaption>
+</figure>
+
+<section class="prose">
+  <p style="margin-top:26px">
+    If both are honest, the truth lies between them. So the prior becomes the midpoint and
+    the gap becomes the uncertainty:
+  </p>
+</section>
+
+<div class="math">prior mean  =  ( ε_naive + ε_controlled ) ⁄ 2
+prior std   =  max( | ε_naive − ε_controlled | ⁄ 2 , floor )
+
+accept only if:   ε_naive  ≤  ε_controlled  <  0        ← orientation holds
+                  neither estimate sits on a search bound</div>
+
+<section class="prose">
+  <p style="margin-top:16px">
+    The orientation check is the clever part and the one that failed. We know in advance which
+    way each estimate must lean — naive more elastic, controlled less. If that ordering comes
+    back reversed, the two biases are not behaving as theory says they must, which means
+    something else is driving the fit and neither number can be trusted. It is a test the
+    procedure can fail on its own terms, without anyone judging whether a number looks
+    plausible.
+  </p>
+</section>
+
+<section class="prose">
+  <p style="margin-top:26px">
+    Both estimates run on <strong>entry-hour rows only</strong> — the first priced hour of
+    each episode, compared across episodes rather than within one. That restriction is the
+    survivorship confound made operational: within an episode, a row at a deep discount
+    exists <em>because</em> the earlier hours did not sell, so those rows are drawn from the
+    slow tail by construction. Entry rows carry genuine cross-episode variation (different
+    start hours, different cost floors) without that selection.
+  </p>
+  <p>
+    Both also search the full support, <code>[−4.0, −0.05]</code>. An earlier run searched a
+    narrower range and pinned five categories at its edge, which looks like agreement and is
+    actually a cage.
+  </p>
+
+  <h3 style="margin-top:34px">What came back</h3>
+</section>
+
+<figure style="margin-top:16px">
+  <div class="scroller"><table class="tl">
+    <thead><tr><th>What we found</th><th>What it means</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><span class="num">−0.10</span> vs <span class="num">−3.05</span></td>
+        <td>one category's two estimates — <strong>30× apart</strong>. The bracket is not a
+            bracket; it spans nearly the whole feasible range, and its midpoint is an
+            artifact of where two biases happened to land</td>
+      </tr>
+      <tr>
+        <td>pinned at the search bound</td>
+        <td>another category's estimate sat on the edge of the grid. A boundary solution is
+            not an estimate — it is an optimiser reporting its cage, and it is rejected
+            outright rather than read as “very elastic”</td>
+      </tr>
+    </tbody>
+  </table></div>
+  <figcaption>
+    Acceptance was never about whether the number looked plausible. It rested on orientation
+    (do the two estimates lean the way theory says they must?) and sufficiency (is there
+    enough identifying variation to believe either?). <strong>No category cleared both.</strong>
+    The instability is the fingerprint: the fitted optimum is set by whatever variation
+    dominates the data — the clock, survivorship, weekly shocks — not by customer price
+    response.
+  </figcaption>
+</figure>
+
+<div class="callout">
+  <h3>Why a fitted number would have been worse than an honest guess</h3>
+  <p>
+    A fitted ε makes the offline replay look excellent, because it fits the residual by
+    construction. What it teaches the agent is the confound: <em>hold price, burn scrap</em>
+    — the very behaviour the legacy rule already produces. The dashboard would smile while
+    the system failed, and we would have no instrument capable of noticing.
+  </p>
+</div>
+
+<section class="prose">
+  <h3 style="margin-top:34px">Why −1.0, specifically</h3>
+  <p>
+    Having rejected the estimates, we still have to start somewhere. −1.0 is chosen to be
+    <strong>conservative in the direction that matters</strong>: it is a modest belief in
+    price response, so the agent discounts sparingly and holds price where it is unsure.
+    A larger guess — say −2.5 — would have the agent marking down aggressively on day one on
+    the strength of a number we just finished arguing we do not know.
+  </p>
+  <p>
+    That asymmetry is deliberate because <strong>clearance is not the problem</strong>.
+    Clearance already runs around <strong>91%</strong>; the business is not losing money for
+    want of selling the stock. It is losing money on the terms of the sale. The objective is
+    Inventory Loss, and the cheapest mistake to recover from is holding price a little too
+    long. Discounting too hard gives away margin that no later decision can win back.
+  </p>
+</section>
+

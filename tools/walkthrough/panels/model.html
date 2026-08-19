@@ -1,0 +1,175 @@
+
+<section class="prose" style="padding-top:34px">
+  <div class="step-head"><h2>A demand model deliberately blind to price</h2></div>
+  <p class="lede">
+    This is the only machine-learned component in the system, and it answers exactly one
+    question.
+  </p>
+</section>
+
+<div class="math">μ_ref(x)  =  E[ units sold in the next hour | features x, discount = d_ref ]
+
+           gradient-boosted trees, Tweedie objective, fit on 2.07M hourly rows
+           d_ref = the category's reference discount (30% in the worked episode)</div>
+
+<section class="prose">
+  <p style="margin-top:16px">
+    One number per SKU per hour, at <em>one</em> price — the category reference. Every
+    economic quantity the agent computes is denominated in it. A Tweedie objective is the
+    right family here: hourly perishable demand is mostly zero with an occasional burst,
+    which is precisely what Tweedie is for.
+  </p>
+</section>
+
+<x-filecard path="artifacts/baseline_model.txt" holds="μ_ref — expected units next hour at the reference discount" state="frozen at launch" reader="the DP, every hour"></x-filecard>
+
+<figure style="margin-top:26px">
+  <div class="scroller"><table class="tl">
+    <caption>The ten features, and why each is allowed</caption>
+    <thead><tr><th>Feature</th><th>What it carries</th></tr></thead>
+    <tbody>
+      <tr><td><code>sku_ref_sales_rate_30d</code></td><td>how fast this SKU normally moves — a trailing 30-day rate built <strong>only from anchor hours</strong>, and point-in-time so it never sees the future</td></tr>
+      <tr><td><code>prior_episode_ref_sales_rate</code></td><td>the same signal from this SKU's previous clearance window, again anchor hours only</td></tr>
+      <tr><td><code>hour_of_day</code></td><td>the daily demand shape — the evening rush, explicitly</td></tr>
+      <tr><td><code>dow</code>, <code>day_of_month</code></td><td>weekly and monthly seasonality</td></tr>
+      <tr><td><code>category</code>, <code>subcategory</code></td><td>product type</td></tr>
+      <tr><td><code>fc</code></td><td>which facility — footfall differs</td></tr>
+      <tr><td><code>original_price</code></td><td>price <em>level</em>: a ₩30,000 steak and a ₩3,000 lettuce sell differently</td></tr>
+      <tr><td><code>total_discount</code></td><td>the one price feature — <strong>overwritten to d_ref at inference, always</strong></td></tr>
+    </tbody>
+  </table></div>
+  <figcaption>
+    The two velocity features are the ones doing most of the work, and they are built
+    deliberately: an <em class="term">anchor hour</em> is one priced within ±2.5pp of the
+    category reference, so both rates measure <strong>how fast this SKU sells at roughly the
+    reference price</strong> — not at whatever discount the legacy rule happened to apply.
+    A velocity feature averaged over all discounts would smuggle the price effect back in
+    through the side door, which is precisely what the overwritten price feature is there to
+    prevent.
+  </figcaption>
+</figure>
+
+<div class="callout">
+  <h3>Why there is no “sales in the last hour” feature</h3>
+  <p>
+    It is the obvious feature to add, it would sharply improve offline accuracy, and it is
+    excluded on purpose. Recent within-episode sales are a <strong>mediator of the
+    episode's own price path</strong>: last hour's sales are partly the result of last
+    hour's discount. Feed that back in and the model absorbs the price effect through the
+    lag term, leaving the elasticity we are trying to learn understated — and it would do
+    so invisibly, while every accuracy metric improved.
+  </p>
+  <p style="margin-top:14px">
+    <code>hours_remaining</code> is excluded for a related reason: it is the agent's own
+    state, and a model that knows how much clock is left will rediscover the legacy rule.
+    The standing constraint is that <strong>one overwritten price feature is the auditable
+    maximum</strong> — anything more and the level/slope split stops being checkable.
+  </p>
+</div>
+
+<section class="prose">
+  <h3 style="margin-top:34px">The unusual part</h3>
+  <p>
+    The model has a price feature and that feature is <strong>overwritten at inference
+    time</strong>, always, to the reference discount. The model is therefore never asked
+    what a different price would do; its price gradient is never queried. In the history it
+    learns from, price was set by the clock — so a model free to use price would learn that
+    correlation and report it back as price response. Blinding the model is what stops a
+    confound from becoming a pricing decision.
+  </p>
+  <p>
+    The demand model owns the <em class="term">level</em>. The learned posterior owns the
+    <em class="term">slope</em>. Neither is permitted the other's job.
+  </p>
+
+  <h3 style="margin-top:34px">Demand is censored, and every comparison knows it</h3>
+  <p>
+    We never observe demand. We observe <em>sales</em>, which stop when the shelf is empty:
+    “sold 2 of 2” means demand was <strong>at least</strong> 2. μ_ref is a statement about
+    demand, so it can never be compared directly against a censored count.
+  </p>
+</section>
+
+<div class="math">every prediction-vs-actual comparison uses  E[ min(D, q) ],  not μ
+
+   D ~ NegBin(μ, r)      q = units on the shelf
+   raw μ  ≥  E[min(D, q)]  always — so mixing the two reads systematically low</div>
+
+<section class="prose">
+  <p style="margin-top:16px">
+    Fidelity, the calibration gate, and the level factors all run on that censored basis,
+    and the DP applies the same <code>min(k, q)</code> inside its recursion.
+  </p>
+
+  <h3 style="margin-top:30px">What that means for training — where we made a trade</h3>
+  <p>
+    The model is trained on <code>units_sold</code>, and that label is itself censored. On an
+    hour where the shelf emptied, the label records what fitted on the shelf, not what
+    customers wanted. So μ_ref is fit toward something below true demand.
+  </p>
+  <p>
+    The obvious response is to train only on hours that did not sell out. We tried it, and it
+    is worse:
+  </p>
+</section>
+
+<figure style="margin-top:18px">
+  <div class="scroller"><table class="tl">
+    <caption>Three ways to handle a censored label</caption>
+    <thead><tr><th>Option</th><th>What happens</th><th>Verdict</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Drop the censored hours</td>
+        <td>Removes <strong>14% of rows</strong> — and not at random. Sell-outs concentrate in
+            the later hours of a window, which is exactly when the selling actually happens.
+            Training would be left with a reshaped population weighted toward the quiet part
+            of the window</td>
+        <td class="loss">rejected — selects on the outcome</td>
+      </tr>
+      <tr>
+        <td>Fit a censored likelihood</td>
+        <td>The principled fix: a sold-out hour enters as “demand ≥ q” rather than as a count.
+            It is what we do everywhere else — fitting r, estimating the prior, every
+            posterior update. But a <strong>censored label is not off-the-shelf under a
+            Tweedie objective</strong>; it needs custom likelihood work and the validation to
+            go with it</td>
+        <td class="loss">right answer, out of scope for the MVP</td>
+      </tr>
+      <tr>
+        <td>Keep the label, correct the level</td>
+        <td>Accept a known downward bias in μ_ref, then measure and remove it in one place</td>
+        <td class="good">chosen</td>
+      </tr>
+    </tbody>
+  </table></div>
+  <figcaption>
+    The censoring signature is measurable rather than assumed. On the pre-calibration model
+    the hourly bias runs at <strong>−0.09</strong> across uncensored hours and
+    <strong>−0.21</strong> once censored hours are counted — the under-prediction more than
+    doubles, which is what it looks like when the hours you cannot fully observe are the busy
+    ones.
+  </figcaption>
+</figure>
+
+<section class="prose">
+  <p style="margin-top:26px">
+    One thing makes that trade safe to take. <strong>Inventory and stockout indicators are
+    deliberately not features.</strong> A model given them would learn to predict “the shelf
+    was empty” — a statement about supply, not demand — and would carry it into every price
+    the agent considers. Denied them, the model fits an average across stocked and stocked-out
+    hours: biased low, but biased <em>smoothly</em>, which is precisely the kind of error a
+    single level correction can remove.
+  </p>
+  <p>
+    <strong>So the calibration step is not housekeeping — it is the other half of this
+    decision.</strong> Having chosen to live with a censored label, we owe the system a
+    measured correction for what that costs; and because the bias comes from censoring, the
+    correction has to be solved on the censored basis to find it at all. The
+    <strong>Calibration</strong> tab is that step.
+  </p>
+  <p>
+    On the job it is given, the model does well: a measured sold ratio of
+    <strong>0.9940</strong> across 2.07M rows, hourly error 0.4399 units. Accurate at the
+    level, and never asked about the slope.
+  </p>
+</section>

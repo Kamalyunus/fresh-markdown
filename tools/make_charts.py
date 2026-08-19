@@ -8,12 +8,16 @@ note rather than failing, so the tool is useful at any stage of the pipeline.
 Each chart answers ONE question about ONE component, and the question is the
 title. Charts are deliberately plain -- no gridline decoration, no dual axes,
 no colour carrying information a label could carry -- because these go into a
-design document and a leadership deck where a misread costs more than a dull
-picture.
+design document where a misread costs more than a dull picture.
+
+Exactly the seven charts `docs/design.md` embeds are generated. Five others
+existed and nothing referenced them; a picture nobody looks at still has to be
+kept true. **The numbering has gaps (02-06, 08, 09) and must keep them** --
+design.md embeds these by filename, so renumbering would silently blank the
+images it shows.
 
 Usage:
-    python3 -m tools.make_charts [--reports reports] [--artifacts artifacts]
-                                 [--out reports/charts]
+    python3 -m tools.make_charts [--reports reports] [--out reports/charts]
 """
 
 import argparse
@@ -65,35 +69,6 @@ def _save(fig, out, name, written):
     fig.savefig(path, dpi=160, facecolor="white")
     plt.close(fig)
     written.append(name)
-
-
-# ------------------------------------------------------------------ charts
-
-def chart_filter_chain(manifest, out, written):
-    """prepare_data -- what the filter chain removes, and where."""
-    wf = manifest["data_quality_waterfall"]
-    steps = [s["step"] for s in wf]
-    eps = [s["episodes"] for s in wf]
-
-    fig, ax = plt.subplots(figsize=(9.5, 5.4))
-    x = np.arange(len(steps))
-    ax.step(x, eps, where="mid", color=INK, lw=1.6)
-    ax.fill_between(x, eps, step="mid", color=FILL, alpha=0.6)
-    # re-segmentation is not a filter and can RAISE the count -- mark it
-    for i, s in enumerate(steps):
-        if s == "contiguous_episodes_built":
-            ax.scatter([i], [eps[i]], color=ACCENT, zorder=3, s=28)
-            ax.annotate("re-segmentation\n(not a filter: count can rise)",
-                        (i, eps[i]), textcoords="offset points",
-                        xytext=(-8, 18), fontsize=8, color=ACCENT, ha="right")
-    ax.set_xticks(x)
-    ax.set_xticklabels(steps, fontsize=7.5, rotation=38, ha="right")
-    kept = eps[-1] / eps[0] if eps[0] else 0
-    _style(ax, "Filter chain: episodes surviving each step",
-           f"{eps[0]:,} raw -> {eps[-1]:,} usable ({kept:.0%} kept). "
-           "Almost every filter drops the WHOLE episode.",
-           ylabel="episodes")
-    _save(fig, out, "01_filter_chain.png", written)
 
 
 def chart_episode_endings(phase0, out, written):
@@ -242,30 +217,6 @@ def chart_deepening(pol, out, written):
     _save(fig, out, "06_deepening_threshold.png", written)
 
 
-def chart_tau(bt, out, written):
-    """pricing.explore -- the exploration currency and what it buys."""
-    tau = bt.get("tau_initial_derivation") or {}
-    q = (bt.get("policy_deltas") or {}).get("q_spread_distribution") or {}
-    if not tau.get("tau_initial") or not q:
-        return
-    pcts = [k for k in ("p10", "p25", "p50", "p75", "p90", "p95", "p99") if k in q]
-    vals = [q[k] for k in pcts]
-
-    fig, ax = plt.subplots(figsize=(8.5, 4.2))
-    ax.plot(range(len(pcts)), vals, color=INK, lw=1.5, marker="o", ms=4)
-    ax.axhline(tau["tau_initial"], color=ACCENT, lw=1.6)
-    ax.text(0, tau["tau_initial"], f"  τ = {tau['tau_initial']:,.0f}",
-            color=ACCENT, fontsize=10, va="bottom")
-    ax.set_xticks(range(len(pcts))); ax.set_xticklabels(pcts)
-    ax.set_yscale("log")
-    _style(ax, "Exploration threshold τ against the cost of perturbing",
-           f"τ sits at the {tau.get('cost_distribution_quantile', 0):.1%} "
-           f"quantile: implied spend {tau.get('implied_daily_spend', 0):,.0f}/day "
-           f"against a {tau.get('daily_budget', 0):,.0f} budget.",
-           xlabel="percentile of Q(p*) − Q(p)", ylabel="currency given up (log)")
-    _save(fig, out, "07_exploration_tau.png", written)
-
-
 def chart_ab_duration(th, out, written):
     """derive_thresholds -- how long the A/B must run."""
     ab = th.get("ab_duration") or {}
@@ -332,105 +283,9 @@ def chart_guardrail_noise(th, cfg, out, written):
     _save(fig, out, "09_guardrail_noise.png", written)
 
 
-def chart_learning_yield(sh, cfg, out, written):
-    """pipeline.shadow -- how long until the posterior moves."""
-    ly = sh.get("learning_yield_would_be") or {}
-    per = ly.get("episodes_per_bounded_update")
-    if not per:
-        return
-    step = cfg["learning"]["max_mean_step"]
-    # calendar floor: one human-gated update per day
-    shifts = np.arange(0.15, 1.51, 0.15)
-    days = np.ceil(shifts / step)
-
-    fig, ax = plt.subplots(figsize=(8.5, 4.2))
-    ax.step(shifts, days, where="mid", color=INK, lw=1.6)
-    ax.fill_between(shifts, days, step="mid", color=FILL, alpha=0.6)
-    ax.axvline(0.9, color=ACCENT, lw=1.5)
-    ax.text(0.92, max(days) * 0.85, "1.0 → 1.9,\nthe deepening bar",
-            color=ACCENT, fontsize=9)
-    _style(ax, "Calendar floor on moving the posterior",
-           f"Each update moves the mean at most {step} and at most one commits "
-           f"per day. Evidence side: {per:,.0f} episodes per update "
-           f"({ly.get('bounded_updates_supported', 0):.2f} from the shadow "
-           "window). Whichever floor is larger binds.",
-           xlabel="required shift in |ε|", ylabel="minimum days")
-    _save(fig, out, "10_learning_yield.png", written)
-
-
-def chart_shadow_gate(sh, cfg, out, written):
-    """pipeline.shadow -- the phase-1 exit gate against its thresholds."""
-    g = sh.get("shadow_gate") or {}
-    rows = [(k, v) for k, v in g.items() if isinstance(v, dict)]
-    if not rows:
-        return
-    fig, ax = plt.subplots(figsize=(8.5, 3.6))
-    labels = [k.replace("_", " ") for k, _ in rows]
-    y = np.arange(len(rows))
-    for i, (_, v) in enumerate(rows):
-        val, thr = v["value"], v["threshold"]
-        ok = v["pass"]
-        scale = max(val, thr, 1e-9)
-        col = GOOD if ok else ACCENT
-        # a genuine zero (the violation count) must look like a rendered zero,
-        # not like a chart that failed to draw
-        if val == 0:
-            ax.plot([0], [i], marker="|", ms=14, color=col, mew=2)
-        else:
-            ax.barh(i, val / scale, color=col, height=0.45)
-        ax.text(1.02, i, f"{val}  (threshold {thr})  "
-                f"{'PASS' if ok else 'FAIL'}", va="center", fontsize=9,
-                color=col)
-    ax.set_yticks(y); ax.set_yticklabels(labels, fontsize=9)
-    ax.set_xlim(0, 2.4); ax.set_xticks([])
-    ax.invert_yaxis()
-    _style(ax, "Shadow gate — decisions logged, no prices applied",
-           f"{sh.get('decision_count', 0):,} decisions, "
-           f"{sh.get('quarantined_event_count', 0)} quarantined. "
-           "Cost-floor safety is structural; this confirms it end to end.")
-    _save(fig, out, "11_shadow_gate.png", written)
-
-
-def chart_prior(prior, out, written):
-    """estimate_prior -- the bracket, and why it is rejected."""
-    per = (prior or {}).get("per_category") or {}
-    if not per:
-        return
-    cats = sorted(per, key=lambda c: per[c].get("epsilon_controlled", 0))
-    naive = [per[c].get("epsilon_naive") for c in cats]
-    ctrl = [per[c].get("epsilon_controlled") for c in cats]
-    lo, hi = prior.get("search_bounds", [-4.0, -0.05])
-
-    fig, ax = plt.subplots(figsize=(9, max(3.4, 0.3 * len(cats) + 1.6)))
-    y = np.arange(len(cats))
-    ax.hlines(y, naive, ctrl, color=MUTED, lw=1)
-    ax.scatter(naive, y, color=MUTED, s=18, label="naive")
-    ax.scatter(ctrl, y, color=ACCENT, s=22, label="hour-controlled")
-    ax.axvline(lo, color=INK, ls=":", lw=1)
-    ax.axvline(hi, color=INK, ls=":", lw=1)
-    ax.text(hi, len(cats) - 0.5, " sign constraint", fontsize=8, color=INK)
-    ax.set_yticks(y); ax.set_yticklabels(cats, fontsize=8)
-    ax.legend(frameon=False, fontsize=8, loc="lower left")
-    accepted = sum(1 for c in cats if per[c].get("source") == "bracket")
-    _style(ax, "Elasticity bracket by category",
-           f"{accepted}/{len(cats)} accepted; the rest fall back to "
-           f"{prior.get('source', 'fallback')} −1.0 ± 0.6. A bracket that "
-           "fails its checks is not an estimate.",
-           xlabel="ε")
-    _save(fig, out, "12_elasticity_prior.png", written)
-
-
-CHARTS = [
-    ("split_manifest", chart_filter_chain),
-    ("phase0", chart_episode_endings),
-    ("prior", chart_prior),
-]
-
-
 def main():
     ap = argparse.ArgumentParser(prog="tools.make_charts")
     ap.add_argument("--reports", default="reports")
-    ap.add_argument("--artifacts", default="artifacts")
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--out", default="reports/charts")
     args = ap.parse_args()
@@ -448,32 +303,32 @@ def main():
 
     bt = load(f"{args.reports}/backtest.json")
     th = load(f"{args.reports}/thresholds.json")
-    sh = load(f"{args.reports}/shadow.json")
     p0 = load(f"{args.reports}/phase0.json")
-    mf = load(f"{args.artifacts}/split_manifest.json")
-    pr = load(f"{args.artifacts}/prior.json")
 
     written, skipped = [], []
     jobs = [
-        ("filter chain", mf, lambda: chart_filter_chain(mf, args.out, written)),
         ("episode endings", p0, lambda: chart_episode_endings(p0, args.out, written)),
         ("calibration gate", bt, lambda: chart_gate(bt["fidelity"], args.out, written)),
         ("weekly fidelity", bt, lambda: chart_weekly_fidelity(bt["fidelity"], args.out, written)),
         ("policy", bt, lambda: chart_policy(bt["policy_deltas"], args.out, written)),
         ("deepening", bt, lambda: chart_deepening(bt["policy_deltas"], args.out, written)),
-        ("exploration tau", bt, lambda: chart_tau(bt, args.out, written)),
         ("A/B duration", th, lambda: chart_ab_duration(th, args.out, written)),
         ("guardrail noise", th, lambda: chart_guardrail_noise(th, cfg, args.out, written)),
-        ("learning yield", sh, lambda: chart_learning_yield(sh, cfg, args.out, written)),
-        ("shadow gate", sh, lambda: chart_shadow_gate(sh, cfg, args.out, written)),
-        ("elasticity prior", pr, lambda: chart_prior(pr, args.out, written)),
     ]
     for name, source, fn in jobs:
         if source is None:
             skipped.append(f"{name} (no report)")
             continue
         before = len(written)
-        fn()
+        # a chart that reads a field an OLDER report does not carry raised
+        # straight out of the loop and took the other six down with it, which
+        # contradicts the skip-don't-fail contract above. Name the missing
+        # field and carry on -- one stale report must not cost every picture.
+        try:
+            fn()
+        except KeyError as e:
+            skipped.append(f"{name} (report lacks {e})")
+            continue
         if len(written) == before:
             skipped.append(f"{name} (report lacks the fields)")
 

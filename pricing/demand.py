@@ -30,15 +30,6 @@ def nb_pmf_vector(mu, r, max_k):
     return pmf, tail
 
 
-def nb_logpmf(k, mu, r):
-    return float(nbinom.logpmf(k, r, r / (r + mu)))
-
-
-def nb_logsf_at_least(k, mu, r):
-    """log P(D >= k) = log survival_function(k - 1)."""
-    return float(nbinom.logsf(k - 1, r, r / (r + mu)))
-
-
 def expected_min_demand_inventory(mu, r, q, max_k):
     """E[min(D, q)] under the truncated NB -- deterministic replay transition."""
     if q <= 0:
