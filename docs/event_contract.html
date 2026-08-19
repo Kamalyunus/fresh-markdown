@@ -1,0 +1,719 @@
+<title>Markdown Event Contract</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&display=swap">
+
+<style>
+  /* ---------------------------------------------------------------- tokens */
+  :root {
+    --ground:   #F1F5F4;
+    --surface:  #FFFFFF;
+    --sunk:     #E8EEEC;
+    --rule:     #D5DEDB;
+    --rule-firm:#B9C6C2;
+    --ink:      #111A19;
+    --muted:    #5A6B67;
+    --faint:    #7C8D89;
+    --accent:   #0E5C55;
+    --accent-w: #DDECE9;
+    --warn:     #8A5300;
+    --warn-w:   #F7EAD5;
+    --crit:     #9A2B2B;
+    --crit-w:   #F6E0DE;
+
+    --display: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+    --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --data: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:   #0D1413;
+      --surface:  #141D1B;
+      --sunk:     #1A2523;
+      --rule:     #26332F;
+      --rule-firm:#3A4A46;
+      --ink:      #E4EDEA;
+      --muted:    #94A6A1;
+      --faint:    #7A8C88;
+      --accent:   #5CB9AE;
+      --accent-w: #14312D;
+      --warn:     #D9A25A;
+      --warn-w:   #33260F;
+      --crit:     #E08279;
+      --crit-w:   #371B1A;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:   #0D1413;
+    --surface:  #141D1B;
+    --sunk:     #1A2523;
+    --rule:     #26332F;
+    --rule-firm:#3A4A46;
+    --ink:      #E4EDEA;
+    --muted:    #94A6A1;
+    --faint:    #7A8C88;
+    --accent:   #5CB9AE;
+    --accent-w: #14312D;
+    --warn:     #D9A25A;
+    --warn-w:   #33260F;
+    --crit:     #E08279;
+    --crit-w:   #371B1A;
+  }
+
+  /* ----------------------------------------------------------------- frame */
+  * { box-sizing: border-box; }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16px;
+    line-height: 1.62;
+    margin: 0;
+    padding: 0 20px 100px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; }
+  .prose { max-width: 68ch; }
+
+  /* ------------------------------------------------------------------ head */
+  header.masthead {
+    padding: 56px 0 30px;
+    border-bottom: 2px solid var(--rule-firm);
+    margin-bottom: 40px;
+  }
+  .eyebrow {
+    font-family: var(--data);
+    font-size: 11.5px;
+    font-weight: 500;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 18px;
+  }
+  h1 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: clamp(30px, 5vw, 43px);
+    line-height: 1.1;
+    letter-spacing: -.015em;
+    text-wrap: balance;
+    margin: 0 0 20px;
+  }
+  .standfirst {
+    font-size: 18px;
+    line-height: 1.58;
+    color: var(--muted);
+    max-width: 64ch;
+    margin: 0;
+  }
+  .standfirst strong { color: var(--ink); font-weight: 600; }
+
+  /* --------------------------------------------------------------- summary */
+  .ataglance {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(178px, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    overflow: hidden;
+    margin: 34px 0 0;
+  }
+  .ataglance div { background: var(--surface); padding: 16px 18px; }
+  .ataglance b {
+    display: block;
+    font-family: var(--data);
+    font-size: 25px;
+    font-weight: 600;
+    letter-spacing: -.02em;
+    font-variant-numeric: tabular-nums;
+    margin-bottom: 3px;
+  }
+  .ataglance span {
+    display: block;
+    font-size: 12.5px;
+    line-height: 1.45;
+    color: var(--muted);
+  }
+
+  /* --------------------------------------------------------------- section */
+  section { margin-top: 62px; scroll-margin-top: 20px; }
+  h2 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 27px;
+    line-height: 1.2;
+    letter-spacing: -.012em;
+    text-wrap: balance;
+    margin: 0 0 6px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--rule-firm);
+  }
+  h2 .num {
+    font-family: var(--data);
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--accent);
+    margin-right: 12px;
+    letter-spacing: 0;
+  }
+  h3 {
+    font-family: var(--body);
+    font-weight: 600;
+    font-size: 15px;
+    letter-spacing: .02em;
+    margin: 38px 0 10px;
+  }
+  p { margin: 0 0 15px; }
+  section > p:first-of-type { margin-top: 20px; }
+  a { color: var(--accent); }
+
+  code, .mono { font-family: var(--data); font-size: .875em; }
+  p code, li code, td code {
+    background: var(--sunk);
+    border-radius: 3px;
+    padding: 1px 5px;
+    color: var(--ink);
+  }
+
+  /* ---------------------------------------------------------------- tables */
+  .tscroll {
+    overflow-x: auto;
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    background: var(--surface);
+    margin: 20px 0 0;
+  }
+  table { border-collapse: collapse; width: 100%; min-width: 660px; }
+  caption {
+    caption-side: top;
+    text-align: left;
+    font-size: 12.5px;
+    color: var(--muted);
+    padding: 0 0 9px;
+  }
+  th {
+    font-family: var(--data);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    text-align: left;
+    color: var(--faint);
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--rule-firm);
+    white-space: nowrap;
+    background: var(--sunk);
+  }
+  td {
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.f {
+    font-family: var(--data);
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    color: var(--ink);
+  }
+  td.t { color: var(--muted); font-family: var(--data); font-size: 12.5px; white-space: nowrap; }
+  td.n { font-variant-numeric: tabular-nums; }
+  tbody tr.groupsep td { border-top: 1px solid var(--rule-firm); }
+
+  /* group label rows inside a field table */
+  tr.grouphead td {
+    background: var(--sunk);
+    font-family: var(--data);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--faint);
+    padding: 9px 16px;
+  }
+
+  /* ------------------------------------------------------------------ tags */
+  .tag {
+    display: inline-block;
+    font-family: var(--data);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    padding: 3px 7px;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .tag.you  { background: var(--accent-w); color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .tag.svc  { background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1px var(--rule-firm); }
+  .tag.cond { background: var(--warn-w); color: var(--warn); box-shadow: inset 0 0 0 1px var(--warn); }
+
+  /* --------------------------------------------------------------- callout */
+  .note {
+    border-left: 3px solid var(--accent);
+    background: var(--surface);
+    border-radius: 0 5px 5px 0;
+    padding: 16px 20px;
+    margin: 24px 0 0;
+    max-width: 68ch;
+  }
+  .note.risk { border-left-color: var(--crit); }
+  .note h4 {
+    font-family: var(--body);
+    font-size: 13.5px;
+    font-weight: 600;
+    margin: 0 0 7px;
+    letter-spacing: .01em;
+  }
+  .note p { margin: 0 0 10px; font-size: 14.5px; }
+  .note p:last-child { margin-bottom: 0; }
+
+  /* ------------------------------------------------------------------ flow */
+  .flow {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 14px;
+    margin: 26px 0 0;
+  }
+  .flow > div {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    padding: 15px 17px;
+  }
+  .flow .step {
+    font-family: var(--data);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: block;
+    margin-bottom: 7px;
+  }
+  .flow b { display: block; font-size: 14.5px; font-weight: 600; margin-bottom: 4px; }
+  .flow span.d { font-size: 13.5px; color: var(--muted); line-height: 1.45; }
+
+  /* --------------------------------------------------------------- feasib. */
+  ol.check { list-style: none; counter-reset: c; padding: 0; margin: 24px 0 0; }
+  ol.check > li {
+    counter-increment: c;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    padding: 17px 20px 17px 58px;
+    position: relative;
+    margin-bottom: 10px;
+  }
+  ol.check > li::before {
+    content: counter(c);
+    position: absolute;
+    left: 18px;
+    top: 17px;
+    font-family: var(--data);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+  ol.check b { display: block; font-size: 15px; font-weight: 600; margin-bottom: 5px; }
+  ol.check p { margin: 0; font-size: 14.5px; color: var(--muted); }
+  ol.check p + p { margin-top: 9px; }
+  ol.check .sev {
+    float: right;
+    margin-left: 14px;
+    font-family: var(--data);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    padding: 3px 7px;
+    border-radius: 3px;
+  }
+  .sev.hard { background: var(--crit-w); color: var(--crit); }
+  .sev.med  { background: var(--warn-w); color: var(--warn); }
+
+  ul.plain { padding-left: 20px; margin: 12px 0 0; max-width: 68ch; }
+  ul.plain li { margin-bottom: 8px; font-size: 14.5px; }
+
+  footer {
+    margin-top: 74px;
+    padding-top: 22px;
+    border-top: 1px solid var(--rule);
+    font-size: 13px;
+    color: var(--faint);
+    max-width: 68ch;
+  }
+  footer code { font-family: var(--data); }
+
+  @media (max-width: 620px) {
+    body { padding: 0 15px 70px; }
+    header.masthead { padding-top: 38px; }
+    ol.check > li { padding-left: 20px; padding-top: 42px; }
+    ol.check > li::before { top: 15px; }
+  }
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="eyebrow">Perishable Markdown MVP · production integration</p>
+  <h1>What gets logged every hour, and who has to produce it</h1>
+  <p class="standfirst">
+    The system writes <strong>two event streams</strong>: a decision event when it sets a price,
+    and an outcome event when that hour closes. The decision event is written by the pricing
+    service and needs nothing from you beyond the state you already send to ask for a price.
+    <strong>The outcome event is the real integration ask</strong> — nine required fields per
+    priced hour, one per decision, with inventory that reconciles or says why it doesn't.
+  </p>
+
+  <div class="ataglance">
+    <div><b>11</b><span>fields you send to request a price</span></div>
+    <div><b>36</b><span>fields the service logs per decision</span></div>
+    <div><b>9</b><span>fields you return per outcome</span></div>
+    <div><b>1:1</b><span>outcomes per decision, hourly, exactly once</span></div>
+  </div>
+</header>
+
+<section id="shape">
+  <h2><span class="num">01</span>The shape of it</h2>
+  <div class="prose">
+    <p>
+      One SKU in one fulfilment centre inside a clearance window is an <em>episode</em>. Every
+      hour of that episode is a <em>decision interval</em>: the service is asked for a price,
+      it logs what it decided, the price goes live, the hour ends, and you report what happened.
+    </p>
+    <p>
+      Both streams are append-only JSONL with durable writes and duplicate detection. Nothing is
+      ever silently dropped — an event that fails validation is written to a quarantine file with
+      the reason attached, and the quarantine count is a monitored number.
+    </p>
+  </div>
+
+  <div class="flow">
+    <div>
+      <span class="step">You</span>
+      <b>Price request</b>
+      <span class="d">11 fields of state: what the item is, how much is left, how long it has, what price is in force now.</span>
+    </div>
+    <div>
+      <span class="step">Service</span>
+      <b>Decision event</b>
+      <span class="d">36 fields. The price it chose, everything it chose from, and every input it used — enough to re-solve the decision later.</span>
+    </div>
+    <div>
+      <span class="step">You</span>
+      <b>Price goes live</b>
+      <span class="d">The applied price must be the one the service returned, or the mismatch rate climbs.</span>
+    </div>
+    <div>
+      <span class="step">You</span>
+      <b>Outcome event</b>
+      <span class="d">9 fields when the hour closes: units sold, inventory in and out, the price that was actually in force.</span>
+    </div>
+  </div>
+
+  <div class="note">
+    <h4>Why the decision event is so wide</h4>
+    <p>
+      It is an audit trail, not a log line. <code>pipeline.assurance</code> takes a logged
+      decision, re-runs the solver from the event's own fields, and checks it gets the same
+      price back. That is how a drifted model artifact or a bad config deploy is caught in
+      production — but it only works if the event carries the full demand forecast
+      (<code>mu_ref_path</code>) and the price already in force (<code>anchor_discount</code>),
+      not just this hour's summary. None of those 36 fields is yours to produce.
+    </p>
+  </div>
+</section>
+
+<section id="request">
+  <h2><span class="num">02</span>What you send to request a price</h2>
+  <div class="prose">
+    <p>
+      Eleven fields, once per SKU × FC per hour. The service resolves everything else itself —
+      the demand forecast from the frozen model, the dispersion parameter from its lookup table,
+      the reference discount from config.
+    </p>
+  </div>
+
+  <div class="tscroll">
+    <table>
+      <thead>
+        <tr><th>Field</th><th>Type</th><th>What it is, and the trap in it</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="f">episode_id</td><td class="t">string</td><td>Stable for the whole clearance window. <strong>Not keyed by date</strong> — windows commonly run past midnight, and a date-keyed id splits one episode into two.</td></tr>
+        <tr><td class="f">sku_id</td><td class="t">string</td><td>—</td></tr>
+        <tr><td class="f">fc</td><td class="t">string</td><td>Fulfilment centre. Episodes are per SKU × FC, not per SKU.</td></tr>
+        <tr><td class="f">category</td><td class="t">string</td><td>Selects the reference discount and the learning cell.</td></tr>
+        <tr><td class="f">subcategory</td><td class="t">string</td><td>Selects the dispersion parameter and the level factor.</td></tr>
+        <tr><td class="f">hour_of_day</td><td class="t">int</td><td>—</td></tr>
+        <tr><td class="f">hours_remaining</td><td class="t">int ≥ 1</td><td>Hours left in the window, this one included. Drives the planning horizon; see the trap in §06.</td></tr>
+        <tr><td class="f">q</td><td class="t">int ≥ 0</td><td>Units on hand at the top of the hour.</td></tr>
+        <tr><td class="f">original_price</td><td class="t">float &gt; 0</td><td>Undiscounted price. Must be present — a null or zero rejects the state.</td></tr>
+        <tr><td class="f">cost</td><td class="t">float</td><td>Unit cost, within <code>[0, original_price]</code>. Sets the price floor; no tier below it is ever offered.</td></tr>
+        <tr><td class="f">current_discount</td><td class="t">float | null</td><td><strong>The discount already in force.</strong> <code>null</code> on the episode's first decision, and a fraction (0.15, not 15) on every later one. It constrains the action set — prices never move back up within an episode.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note risk">
+    <h4>The service refuses rather than returning an unsafe price</h4>
+    <p>
+      If the state is inconsistent — negative inventory, cost above list, a horizon that
+      disagrees with itself, no feasible tier at or below the current price — the call raises
+      <code>StateRejected</code> and no price comes back. Your integration needs a defined
+      fallback for that path. It is deliberately not a silent default.
+    </p>
+  </div>
+</section>
+
+<section id="decision">
+  <h2><span class="num">03</span>What the service logs per decision</h2>
+  <div class="prose">
+    <p>
+      Thirty-six required fields, all written by the pricing service. Listed here so you can size
+      storage and know what you can query later — not because you produce any of it. Three more
+      diagnostic fields (<code>event</code>, <code>solver_latency_s</code>,
+      <code>nb_tail_mass_max</code>) are written but not required.
+    </p>
+  </div>
+
+  <div class="tscroll">
+    <table>
+      <caption>Grouped by what the field is for. All 36 are mandatory — an event missing any one of them is quarantined, not written.</caption>
+      <thead>
+        <tr><th>Field</th><th>Purpose</th></tr>
+      </thead>
+      <tbody>
+        <tr class="grouphead"><td colspan="2">Identity — 4</td></tr>
+        <tr><td class="f">decision_id</td><td>Immutable UUID. <strong>You must echo this on the outcome.</strong></td></tr>
+        <tr><td class="f">episode_id</td><td>As supplied.</td></tr>
+        <tr><td class="f">is_entry</td><td>True on the episode's first decision.</td></tr>
+        <tr><td class="f">timestamp</td><td>UTC with offset.</td></tr>
+
+        <tr class="grouphead"><td colspan="2">Entity — 4</td></tr>
+        <tr><td class="f">sku_id · fc · category · subcategory</td><td>As supplied.</td></tr>
+
+        <tr class="grouphead"><td colspan="2">State at decision time — 5</td></tr>
+        <tr><td class="f">hour_of_day · hours_remaining · q_remaining</td><td>As supplied.</td></tr>
+        <tr><td class="f">original_price · cost</td><td>As supplied.</td></tr>
+
+        <tr class="grouphead"><td colspan="2">The action space — 3</td></tr>
+        <tr><td class="f">d_max</td><td>Deepest discount the cost floor permits.</td></tr>
+        <tr><td class="f">feasible_tier_count</td><td>Size of the full price grid.</td></tr>
+        <tr><td class="f">action_set_size</td><td>Actions allowed at <em>this</em> decision, after the no-price-increase constraint. Distinct from the grid, and what explorability is judged on.</td></tr>
+
+        <tr class="grouphead"><td colspan="2">What it recommended — 4</td></tr>
+        <tr><td class="f">optimal_price · optimal_discount</td><td>The cost-minimising choice.</td></tr>
+        <tr><td class="f">expected_il</td><td>Expected inventory loss under the chosen action — the objective.</td></tr>
+        <tr><td class="f">expected_denominator</td><td>Predicted revenue base, for predicted-vs-realised tracking.</td></tr>
+
+        <tr class="grouphead"><td colspan="2">What it applied — 6</td></tr>
+        <tr><td class="f">applied_price · applied_discount</td><td>What actually went out. Differs from optimal only on an exploration.</td></tr>
+        <tr><td class="f">is_exploration</td><td>Whether this hour was a deliberate experiment.</td></tr>
+        <tr><td class="f">exploration_cost</td><td>Expected IL given up to run it.</td></tr>
+        <tr><td class="f">affordable_set_size</td><td>How many alternatives were within budget.</td></tr>
+        <tr><td class="f">tau_current</td><td>The exploration budget in force.</td></tr>
+
+        <tr class="grouphead"><td colspan="2">Inputs that make it reproducible — 7</td></tr>
+        <tr><td class="f">epsilon_posterior_mean · epsilon_posterior_std</td><td>The learned price response and its uncertainty.</td></tr>
+        <tr><td class="f">reference_discount · reference_mu</td><td>The anchor the forecast is quoted at, and the forecast there.</td></tr>
+        <tr><td class="f">mu_ref_path</td><td><strong>The full remaining-hours forecast</strong>, not just this hour. Every tier's value depends on the whole path.</td></tr>
+        <tr><td class="f">anchor_discount</td><td>The price in force, which fixed the action set.</td></tr>
+        <tr><td class="f">dispersion_r</td><td>Demand variance parameter used.</td></tr>
+
+        <tr class="grouphead"><td colspan="2">Versions — 3</td></tr>
+        <tr><td class="f">baseline_model_version</td><td>Which frozen model produced the forecast.</td></tr>
+        <tr><td class="f">posterior_version</td><td>Which learning state was in force.</td></tr>
+        <tr><td class="f">config_version</td><td>Which config the decision ran under.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="outcome">
+  <h2><span class="num">04</span>What you send back per outcome</h2>
+  <div class="prose">
+    <p>
+      This is the integration. Nine required fields, <strong>exactly one finalized outcome per
+      decision interval</strong>. Two further fields are conditional — omitted normally, required
+      in the specific cases below.
+    </p>
+  </div>
+
+  <div class="tscroll">
+    <table>
+      <thead>
+        <tr><th>Field</th><th>Source</th><th>Type</th><th>Rule</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="f">outcome_id</td><td><span class="tag you">you</span></td><td class="t">string</td><td>Immutable and unique. A repeat is counted as a duplicate and ignored, not an error.</td></tr>
+        <tr><td class="f">decision_id</td><td><span class="tag you">you</span></td><td class="t">string</td><td>Must match a decision we wrote. An outcome with no matching decision counts against the safety gate.</td></tr>
+        <tr><td class="f">units_sold</td><td><span class="tag you">you</span></td><td class="t">int ≥ 0</td><td><strong>Zero-sale hours must be sent.</strong> They are roughly three quarters of all hours and they are evidence, not noise.</td></tr>
+        <tr><td class="f">starting_inventory</td><td><span class="tag you">you</span></td><td class="t">int ≥ 0</td><td>Units at the top of the hour. Should equal the decision's <code>q_remaining</code>.</td></tr>
+        <tr><td class="f">ending_inventory</td><td><span class="tag you">you</span></td><td class="t">int ≥ 0</td><td>Units at the close. Must equal <code>starting − sold</code> unless <code>adjustment_reason</code> is set.</td></tr>
+        <tr><td class="f">applied_price</td><td><span class="tag you">you</span></td><td class="t">float</td><td><strong>The price actually in force</strong> for the hour, not the one we recommended. The gap between the two is a monitored number — see §05.</td></tr>
+        <tr><td class="f">is_stockout</td><td><span class="tag you">you</span></td><td class="t">bool</td><td>Whether demand hit the inventory ceiling. Derivable as <code>sold ≥ starting</code>, but the field must be present: <em>any</em> missing rate above zero fires a stop condition.</td></tr>
+        <tr><td class="f">execution_status</td><td><span class="tag you">you</span></td><td class="t">string</td><td>Only <code>"ok"</code>, <code>"success"</code> or absent make the outcome eligible for learning. Anything else is stored and excluded — which is the correct handling of an hour where the price never went live.</td></tr>
+        <tr><td class="f">finalized_at</td><td><span class="tag you">you</span></td><td class="t">timestamp</td><td>UTC with offset.</td></tr>
+        <tr class="groupsep"><td class="f">adjustment_reason</td><td><span class="tag cond">conditional</span></td><td class="t">string</td><td>Required whenever inventory does not reconcile. Exactly two values are legitimate — see the box below.</td></tr>
+        <tr><td class="f">execution_failure_reason</td><td><span class="tag cond">conditional</span></td><td class="t">string</td><td>Free text, when <code>execution_status</code> is not a success value.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note risk">
+    <h4>The one that will bite: <code>episode_close_write_off</code></h4>
+    <p>
+      When a clearance window closes, the source system writes off whatever is left and reports
+      <code>ending_inventory = 0</code> — even though stock remained. That is not a reconciling
+      outcome, so it needs <code>adjustment_reason</code> set or it quarantines. It happens on
+      <strong>about half of all episodes</strong>. An integration that omits it quarantines
+      roughly half its final-hour outcomes and fails the event-completeness gate for what will
+      look like a pipeline defect on our side.
+    </p>
+    <p>
+      The two legitimate values, and how to decide between them, given
+      <code>leftover = max(starting − sold, 0)</code>:
+    </p>
+    <ul class="plain">
+      <li><code>intraday_restock</code> — <code>ending &gt; leftover</code>. Stock was added mid-window.</li>
+      <li><code>episode_close_write_off</code> — <code>ending == 0</code> while <code>leftover &gt; 0</code>.</li>
+    </ul>
+    <p style="margin-top:12px">
+      <strong>Recognise the write-off by the zero, never by position in the episode.</strong> The
+      source zeroes at <em>its own</em> window boundary; once a window is merged across midnight
+      that row sits in the middle of ours. Two earlier implementations keyed it to "the last hour"
+      and quarantined real outcomes in bulk.
+    </p>
+    <p>
+      A partial shortfall — <code>0 &lt; ending &lt; leftover</code> — matches neither, and is
+      left undocumented on purpose so that it quarantines. That is unexplained inventory loss,
+      and the quarantine file is the only place it is visible. Please don't add a catch-all
+      reason to drive the count to zero.
+    </p>
+  </div>
+</section>
+
+<section id="gates">
+  <h2><span class="num">05</span>The thresholds these feed</h2>
+  <div class="prose">
+    <p>
+      Event quality is gated, and two of these gates can suspend the system. Worth knowing before
+      you scope, because they set the reliability bar on the outcome stream.
+    </p>
+  </div>
+
+  <div class="tscroll">
+    <table>
+      <thead>
+        <tr><th>Gate</th><th class="n">Threshold</th><th>What breaches it</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="f">event completeness</td><td class="t n">≥ 99%</td><td>Outcomes landing per decision. Quarantined outcomes don't land, so a missing <code>adjustment_reason</code> shows up here first.</td></tr>
+        <tr><td class="f">matched decision rate</td><td class="t n">≥ 99%</td><td>Decisions that got an outcome back.</td></tr>
+        <tr><td class="f">duplicate or unmatched</td><td class="t n">≤ 1%</td><td>Repeated ids plus outcomes with no matching decision, over finalized outcomes.</td></tr>
+        <tr><td class="f">price mismatch</td><td class="t n">≤ 1%</td><td>Outcomes whose <code>applied_price</code> differs from the decision's by more than <code>1e-6</code>. This is the "did our price actually go live" check.</td></tr>
+        <tr><td class="f">missing stockout field</td><td class="t n">exactly 0</td><td>Any outcome at all without <code>is_stockout</code>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <h4>Exactly-once, on our side</h4>
+    <p>
+      Learning consumes each <code>outcome_id</code> once and records that it did, so a retry
+      that re-sends an outcome is safe: it is counted as a duplicate and ignored. You do not need
+      exactly-once delivery — you need <strong>stable ids</strong>. Re-sending the same outcome
+      under a fresh <code>outcome_id</code> is the failure mode to avoid, because that is
+      indistinguishable from a second real observation.
+    </p>
+  </div>
+</section>
+
+<section id="feasibility">
+  <h2><span class="num">06</span>The parts worth checking first</h2>
+  <div class="prose">
+    <p>
+      Ranked by how much trouble they have caused in replay and shadow. If your team can answer
+      these six, the rest of the contract is routine field plumbing.
+    </p>
+  </div>
+
+  <ol class="check">
+    <li>
+      <span class="sev hard">hard</span>
+      <b>Can you emit the episode-close write-off?</b>
+      <p>
+        About half of episodes end with the source zeroing inventory. If that reason can't be
+        produced, half the outcome stream quarantines and the shadow gate never passes. This is
+        the single most likely blocker.
+      </p>
+    </li>
+    <li>
+      <span class="sev hard">hard</span>
+      <b>Is <code>episode_id</code> stable across midnight?</b>
+      <p>
+        An episode is a maximal run of consecutive hourly rows for one SKU × FC where the window
+        counter ticks down one per elapsed hour. Thirty-six-hour windows are common. If your
+        episode key is derived from a date, it will split one episode into two and every
+        horizon in it will be wrong.
+      </p>
+    </li>
+    <li>
+      <span class="sev hard">hard</span>
+      <b>Does <code>hours_remaining</code> mean hours, reliably?</b>
+      <p>
+        It has to equal the number of hours actually left in the window, this one included. The
+        service plans over exactly that many hours and rejects the state if its forecast path and
+        your counter disagree. Upstream data has historically carried very large values here from
+        defects; anything above 120 hours is treated as bad data, not a long window.
+      </p>
+    </li>
+    <li>
+      <span class="sev med">medium</span>
+      <b>Can you guarantee one finalized outcome per priced hour, including zero-sale hours?</b>
+      <p>
+        Roughly three quarters of hours sell nothing. Those are the observations that identify
+        demand at a price, so a pipeline that only reports sales silently discards most of the
+        evidence and completeness collapses.
+      </p>
+    </li>
+    <li>
+      <span class="sev med">medium</span>
+      <b>Is the applied price observable after the fact?</b>
+      <p>
+        The outcome must carry the price that was genuinely in force, which is not always the one
+        we returned — a failed push, a manual override, a promotion stacked downstream. Reporting
+        our recommendation back to us hides exactly the discrepancy this field exists to surface.
+      </p>
+    </li>
+    <li>
+      <span class="sev med">medium</span>
+      <b>Are <code>cost</code> and <code>original_price</code> available per hour, per FC?</b>
+      <p>
+        Cost sets the price floor, so a stale or missing cost either blocks legal discounts or
+        permits below-cost ones. Both are per-request inputs, not reference data we hold.
+      </p>
+    </li>
+  </ol>
+</section>
+
+<footer>
+  <p>
+    Field lists are read directly from the running system — <code>events/store.py</code>
+    (<code>DECISION_REQUIRED</code>, <code>OUTCOME_REQUIRED</code>),
+    <code>inference/decide.py</code> for what the service emits,
+    <code>pipeline/shadow.py</code> for the reference outcome producer, and
+    <code>config.yaml</code> for every threshold quoted in §05. The shadow harness is a working
+    implementation of the outcome side, including <code>adjustment_reason</code>, and is worth
+    reading before writing a new one.
+  </p>
+</footer>
+
+</div>

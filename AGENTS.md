@@ -579,6 +579,29 @@ inputs are printed on it. It is published as a claude.ai artifact — deploy the
 built file with the EXISTING artifact URL, so the same link updates rather than
 a second page appearing.
 
+### The integration contract
+
+`docs/event_contract.html` is what an integrating engineering team builds
+against: the 11 fields they send to request a price, the 36 the service logs
+per decision, and the 9 (+2 conditional) they return per outcome, with the
+quarantine rules and the event-quality thresholds. Unlike the walkthrough it is
+**hand-authored** — there is no builder — which is why it carries a guard the
+walkthrough does not need.
+
+`tests/test_event_contract_doc.py` checks it against `events/store.py` in both
+directions: every name in `DECISION_REQUIRED` and `OUTCOME_REQUIRED` appears in
+the doc, and every field name the doc prints is one the system knows. **Adding
+a required event field now fails the suite until the contract is updated**,
+which is the point — nothing else in the repo would notice a partner building
+against a field list that had quietly moved. Request-state names that differ
+from their logged counterparts (`q` → `q_remaining`, `current_discount` →
+`anchor_discount`) and the two conditional outcome fields are allow-listed in
+that test; extend the list deliberately, not to make a failure go away.
+
+Its thresholds are quoted from `config.yaml` (§05 of the page) and are NOT
+guarded — re-read them when `monitoring.stop_conditions` or
+`monitoring.shadow_gate` moves.
+
 ### The deck is retired
 
 `docs/perishable_markdown_deck_v3.pptx` (44 slides) and its build input
