@@ -909,6 +909,38 @@ against measured evidence (section 12).
 
 ---
 
+### 5.14a The frozen artifacts are one bundle
+
+Six artifacts are fitted in sequence and frozen together, and they are only
+meaningful together: `rho` deflates evidence measured against one model's
+residuals, the level factors correct that same model, and the prior was
+estimated from that model's predictions and that `r_lookup`. Mixing vintages
+raises no error — the numbers simply stop describing the same world, silently,
+for the whole window. Section 9.2's insistence that only the level multiplier
+tracks the world depends on that coherence holding.
+
+**The bundle id is the baseline model version**, not a separate timestamp.
+Every downstream artifact is fitted *against* a model, so keying on the model
+answers the question that actually arises — "which model was this fitted
+against" — and an artifact naming a different model is by definition not part
+of the bundle. Each artifact carries a `provenance` block: bundle, creation
+time, config version, and the tool that wrote it. Two carry none by design: the
+split manifest precedes the model, and the model file is a LightGBM dump with
+nowhere to put one, so it *is* the id (recorded in `feature_schema.json`).
+
+`bootstrap.seal` then writes `artifacts/bundle.json` — the agreed id plus a
+SHA-256 of every file. This catches what stamps cannot: an artifact edited after
+the fact leaves its provenance intact but not its hash. Sealing refuses an
+inconsistent set, because a sealed mixed bundle is worse than an unsealed one —
+it looks decided.
+
+The practical consequence is that mirror drift (§7) becomes answerable. Before,
+a disagreement between `config.dispersion.rho` and `artifacts/rho.json` told you
+the two differed but not which was stale, and the obvious remedy — re-paste from
+the artifact — is wrong whenever the artifacts on disk are an older bundle than
+the model in force: a smaller `deff` then over-counts every future update.
+`pipeline.status` reports the bundle line above the mirror line for that reason.
+
 ### 5.15 Production assurance — testing the assumptions, not the code
 
 The unit suite checks logic against fixtures. It cannot check the thing that has

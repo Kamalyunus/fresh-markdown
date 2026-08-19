@@ -41,6 +41,7 @@ from scipy.special import gammaln
 from scipy.stats import nbinom
 
 from common.config import load_config
+from common.provenance import stamp
 from bootstrap.prepare_data import split_frames
 from bootstrap.train_baseline import BaselineModel
 from bootstrap.fit_dispersion import lookup_r
@@ -183,6 +184,7 @@ def main():
     d = pd.read_parquet(args.input)
     prior = estimate_prior(d, cfg, seed=args.seed)
 
+    stamp(prior, cfg, BaselineModel(cfg).version, "bootstrap.estimate_prior")
     path = cfg["posterior"]["prior"]["path"]
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:

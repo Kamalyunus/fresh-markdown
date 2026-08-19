@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from common.config import load_config, reference_discount
+from common.provenance import stamp
 
 SOURCE_TO_PRD = {
     "hour": "hour_of_day",
@@ -324,14 +325,14 @@ def split_frames(d, cfg):
 def write_manifest(path, cfg, waterfall):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
-        json.dump({
+        json.dump(stamp({
             "episode_rule": EPISODE_RULE,
             "split": cfg["data"]["split"],
             "exclusion_window": cfg["data"]["exclusion_window"],
             "config_version": cfg["meta"]["config_version"],
             "data_quality_waterfall": [
                 {"step": s, "rows": r, "episodes": e} for s, r, e in waterfall],
-        }, f, indent=2)
+        }, cfg, None, "bootstrap.prepare_data"), f, indent=2)
 
 
 def main():

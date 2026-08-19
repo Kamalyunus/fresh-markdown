@@ -30,6 +30,7 @@ from scipy.optimize import minimize_scalar
 from scipy.stats import nbinom
 
 from common.config import load_config, design_effect
+from common.provenance import stamp
 from bootstrap.prepare_data import split_frames
 from bootstrap.train_baseline import BaselineModel
 
@@ -146,6 +147,9 @@ def main():
 
     dc = cfg["dispersion"]
     os.makedirs(os.path.dirname(dc["r_lookup_path"]) or ".", exist_ok=True)
+    bundle = BaselineModel(cfg).version
+    stamp(r_lookup, cfg, bundle, "bootstrap.fit_dispersion")
+    stamp(rho_out, cfg, bundle, "bootstrap.fit_dispersion")
     with open(dc["r_lookup_path"], "w") as f:
         json.dump(r_lookup, f, indent=2)
     with open(dc["rho_path"], "w") as f:

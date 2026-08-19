@@ -26,6 +26,7 @@ import os
 
 from common.config import (RUNTIME_REQUIRED, artifact_mirror_drift,
                            config_get, load_config)
+from common import provenance
 
 PASS, FAIL, WARN, NONE = "PASS", "FAIL", "WARN", "not run"
 
@@ -58,12 +59,37 @@ def _launch_blockers(cfg):
                 "config.yaml")
 
 
+def _bundle(cfg):
+    """Do the frozen artifacts form one bundle, unedited since sealing?"""
+    state = provenance.verify(cfg, provenance.load_seal(cfg))
+    if state["verdict"] == "INSUFFICIENT":
+        return _row("artifact bundle", NONE, "no stamped artifacts",
+                    "run the bootstrap, then python3 -m bootstrap.seal")
+    if state["problems"]:
+        return _row("artifact bundle", FAIL, "; ".join(state["problems"]),
+                    "python3 -m bootstrap.seal after re-running the bootstrap")
+    detail = f"{state['bundle']}"
+    if not state["sealed_bundle"]:
+        detail += " · unsealed"
+    if state["missing"]:
+        detail += " · absent: " + ", ".join(state["missing"])
+    return _row("artifact bundle", WARN if not state["sealed_bundle"] else PASS,
+                detail,
+                "python3 -m bootstrap.seal" if not state["sealed_bundle"] else "")
+
+
 def _mirrors(cfg):
-    """A stale paste mis-weights every posterior step, silently."""
+    """A stale paste mis-weights every posterior step, silently.
+
+    The remedy is NOT automatically "re-paste": the check says the two
+    disagree, not which is right. Read the bundle line first -- if the
+    artifacts are from an older model than the one in force, pasting their
+    numbers into config walks the system backwards.
+    """
     drift = artifact_mirror_drift(cfg)
     if drift:
         return _row("artifact mirrors", FAIL, "; ".join(drift),
-                    "re-paste from the artifact")
+                    "check the bundle line first, then align the stale side")
     return _row("artifact mirrors", PASS, "config matches the frozen artifacts")
 
 
@@ -192,6 +218,7 @@ def collect(cfg, root="reports"):
     backtest = _read(os.path.join(root, "backtest.json"))
     rows = [
         _launch_blockers(cfg),
+        _bundle(cfg),
         _mirrors(cfg),
         _calibration(cfg, backtest),
         _prior(cfg),

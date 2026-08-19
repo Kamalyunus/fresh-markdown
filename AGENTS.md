@@ -40,6 +40,7 @@ step                                          writes                            
 9. pipeline.shadow --input prepared           reports/shadow.json,                    prepared + all artifacts
                                               events_store_shadow/
 10. tools.make_charts                         reports/charts/*.png                    every report written above
+11. bootstrap.seal                            artifacts/bundle.json                   every frozen artifact
 ```
 
 `scripts/run_bootstrap.sh <raw>` runs 1–6 in order. **It retrains the baseline
@@ -82,6 +83,35 @@ python3 -m pipeline.monitor            # section 15 families + assurance
 python3 -m pipeline.assurance          # the same checks, standalone
 python3 -m pipeline.status             # the dozen numbers that decide something
 ```
+
+## The frozen artifacts are one bundle
+
+Six artifacts are fitted in sequence and frozen together, and they are only
+meaningful together: `rho` deflates evidence measured against one model's
+residuals, the level factors correct that same model, the prior used that
+model's predictions and that `r_lookup`. **Mix vintages and nothing errors** —
+the numbers simply stop describing the same world, silently, for the whole
+window.
+
+Every artifact is therefore stamped with the model version it was fitted
+against — `provenance.bundle` — and the bundle id IS the baseline model
+version, because "which model was this fitted against" is the question that
+matters. After a bootstrap run, seal it:
+
+```bash
+python3 -m bootstrap.seal        # writes artifacts/bundle.json: id + sha256 of each file
+```
+
+Sealing catches what stamps cannot: an artifact edited after the fact leaves
+its stamp intact, but not its hash. `seal` refuses an inconsistent set — a
+sealed mixed bundle is worse than an unsealed one, because it looks decided.
+
+**When `artifact mirrors` fails, read the `artifact bundle` line first.** The
+mirror check says config and an artifact disagree; it does not say which is
+stale, and the answer is not always "re-paste from the artifact". If the
+artifacts on disk are an older bundle than the model in force, pasting their
+numbers into config walks the system backwards — a smaller `deff` over-counts
+every future update. Establish the live bundle, then align the stale side.
 
 **Start with `python3 -m pipeline.status`.** The four reports carry ~200 fields
 between them, which is the right number to write and the wrong number to read.

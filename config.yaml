@@ -11,7 +11,11 @@
 meta:
   config_version: "1.0.0"
 
+artifacts:
+  bundle_path: "artifacts/bundle.json"   # SET  the sealed bundle manifest
+
 data:
+  split_manifest_path: "artifacts/split_manifest.json"   # SET
   exclusion_window:                    # SET  known demand-issue period
     start: "2026-04-25"
     end:   "2026-06-03"

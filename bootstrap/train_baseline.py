@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 
 from common.config import load_config, reference_discount
+from common.provenance import stamp
 from bootstrap.prepare_data import split_frames
 from pricing.demand import expected_min_demand_inventory_vec
 
@@ -327,7 +328,7 @@ def fit_level_calibration(d, cfg):
         # off; wide dispersion is evidence of systematic per-cell model bias
         # -- a training signal, not something to paper over indefinitely
         fv = np.array(list(factors.values()), dtype=float)
-        json.dump({"grain": grain,
+        payload = {"grain": grain,
                    "factor_summary": {
                        "p10": round(float(np.percentile(fv, 10)), 4),
                        "p50": round(float(np.percentile(fv, 50)), 4),
@@ -353,7 +354,9 @@ def fit_level_calibration(d, cfg):
                    "fit_in_sample_share": round(in_sample_share, 4),
                    "split": cfg["data"]["split"],
                    "basis": "anchor rows only; categories below "
-                            "calibration_min_anchor_rows left at 1.0"},
+                            "calibration_min_anchor_rows left at 1.0"}
+        json.dump(stamp(payload, cfg, model.version,
+                        "bootstrap.train_baseline --fit-calibration"),
                   f, indent=2)
     return factors
 
