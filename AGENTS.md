@@ -43,9 +43,16 @@ step                                          writes                            
 11. bootstrap.seal                            artifacts/bundle.json                   every frozen artifact
 ```
 
-`scripts/run_bootstrap.sh <raw>` runs 1–6 in order. **It retrains the baseline
-every time.** To iterate on one step, run that step's module directly — do not
-re-run the whole script.
+`scripts/run_bootstrap.sh <raw>` runs 1–6 in order, then 10 and 11, then prints
+`pipeline.status` so a run ends with where it stands rather than with the last
+step's log. **It retrains the baseline every time.** To iterate on one step, run
+that step's module directly — do not re-run the whole script.
+
+Two things it deliberately does not do. It does not decide the calibration or
+prior gates — those are human reviews, and it stops at their evidence. And if
+you then run `--fit-calibration` (step 7), **re-run `bootstrap.seal`**:
+`calibration.json` is a seventh artifact that did not exist when the set was
+sealed, so the seal taken during the script no longer describes it.
 
 Shadow phase (§19 — after gates clear, before any price is applied):
 
