@@ -222,6 +222,14 @@
   }
   td.t { color: var(--muted); font-family: var(--data); font-size: 12.5px; white-space: nowrap; }
   td.n { font-variant-numeric: tabular-nums; }
+  td.ex {
+    font-family: var(--data);
+    font-size: 12.5px;
+    color: var(--accent);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  td.ex.null { color: var(--faint); }
   tbody tr.groupsep td { border-top: 1px solid var(--rule-firm); }
 
   /* group label rows inside a field table */
@@ -340,6 +348,83 @@
   ul.plain { padding-left: 20px; margin: 12px 0 0; max-width: 68ch; }
   ul.plain li { margin-bottom: 8px; font-size: 14.5px; }
 
+  /* ------------------------------------------------------------ JSON blocks */
+  .payload { margin: 22px 0 0; }
+  .payload > .hd {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 12px;
+    padding: 10px 16px;
+    background: var(--sunk);
+    border: 1px solid var(--rule);
+    border-bottom: 0;
+    border-radius: 5px 5px 0 0;
+  }
+  .payload > .hd b {
+    font-family: var(--data);
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+  .payload > .hd span { font-size: 13px; color: var(--muted); }
+  pre.json {
+    margin: 0;
+    padding: 16px 18px;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 0 0 5px 5px;
+    overflow-x: auto;
+    font-family: var(--data);
+    font-size: 12.5px;
+    line-height: 1.62;
+    color: var(--ink);
+    tab-size: 2;
+  }
+  pre.json .k { color: var(--muted); }
+  pre.json .s { color: var(--accent); }
+  pre.json .b { color: var(--warn); font-weight: 500; }
+  pre.json .c {
+    color: var(--faint);
+    font-style: italic;
+  }
+  pre.json mark {
+    background: var(--accent-w);
+    color: inherit;
+    border-radius: 2px;
+    padding: 0 2px;
+  }
+
+  .hourline {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    overflow: hidden;
+    margin: 24px 0 0;
+  }
+  .hourline > div { background: var(--surface); padding: 14px 16px; }
+  .hourline .h {
+    font-family: var(--data);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: block;
+    margin-bottom: 6px;
+  }
+  .hourline b {
+    display: block;
+    font-family: var(--data);
+    font-size: 17px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    margin-bottom: 3px;
+  }
+  .hourline span.d { font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+
   footer {
     margin-top: 74px;
     padding-top: 22px;
@@ -369,6 +454,8 @@
     service and needs nothing from you beyond the state you already send to ask for a price.
     <strong>The outcome event is the real integration ask</strong> — nine required fields per
     priced hour, one per decision, with inventory that reconciles or says why it doesn't.
+    Every field below carries a real example value, and §05 walks one episode end to end in
+    payloads captured from the running system.
   </p>
 
   <div class="ataglance">
@@ -442,21 +529,22 @@
 
   <div class="tscroll">
     <table>
+      <caption>Example values are the 17:00 entry decision of the worked episode in §05.</caption>
       <thead>
-        <tr><th>Field</th><th>Type</th><th>What it is, and the trap in it</th></tr>
+        <tr><th>Field</th><th>Type</th><th>Example</th><th>What it is, and the trap in it</th></tr>
       </thead>
       <tbody>
-        <tr><td class="f">episode_id</td><td class="t">string</td><td>Stable for the whole clearance window. <strong>Not keyed by date</strong> — windows commonly run past midnight, and a date-keyed id splits one episode into two.</td></tr>
-        <tr><td class="f">sku_id</td><td class="t">string</td><td>—</td></tr>
-        <tr><td class="f">fc</td><td class="t">string</td><td>Fulfilment centre. Episodes are per SKU × FC, not per SKU.</td></tr>
-        <tr><td class="f">category</td><td class="t">string</td><td>Selects the reference discount and the learning cell.</td></tr>
-        <tr><td class="f">subcategory</td><td class="t">string</td><td>Selects the dispersion parameter and the level factor.</td></tr>
-        <tr><td class="f">hour_of_day</td><td class="t">int</td><td>—</td></tr>
-        <tr><td class="f">hours_remaining</td><td class="t">int ≥ 1</td><td>Hours left in the window, this one included. Drives the planning horizon; see the trap in §06.</td></tr>
-        <tr><td class="f">q</td><td class="t">int ≥ 0</td><td>Units on hand at the top of the hour.</td></tr>
-        <tr><td class="f">original_price</td><td class="t">float &gt; 0</td><td>Undiscounted price. Must be present — a null or zero rejects the state.</td></tr>
-        <tr><td class="f">cost</td><td class="t">float</td><td>Unit cost, within <code>[0, original_price]</code>. Sets the price floor; no tier below it is ever offered.</td></tr>
-        <tr><td class="f">current_discount</td><td class="t">float | null</td><td><strong>The discount already in force.</strong> <code>null</code> on the episode's first decision, and a fraction (0.15, not 15) on every later one. It constrains the action set — prices never move back up within an episode.</td></tr>
+        <tr><td class="f">episode_id</td><td class="t">string</td><td class="ex">"EP-88213-4471"</td><td>Stable for the whole clearance window. <strong>Not keyed by date</strong> — windows commonly run past midnight, and a date-keyed id splits one episode into two.</td></tr>
+        <tr><td class="f">sku_id</td><td class="t">string</td><td class="ex">"SKU-88213"</td><td>—</td></tr>
+        <tr><td class="f">fc</td><td class="t">string</td><td class="ex">"FC-04"</td><td>Fulfilment centre. Episodes are per SKU × FC, not per SKU.</td></tr>
+        <tr><td class="f">category</td><td class="t">string</td><td class="ex">"vegetables"</td><td>Selects the reference discount and the learning cell.</td></tr>
+        <tr><td class="f">subcategory</td><td class="t">string</td><td class="ex">"leafy_greens"</td><td>Selects the dispersion parameter and the level factor.</td></tr>
+        <tr><td class="f">hour_of_day</td><td class="t">int</td><td class="ex">17</td><td>—</td></tr>
+        <tr><td class="f">hours_remaining</td><td class="t">int ≥ 1</td><td class="ex">4</td><td>Hours left in the window, this one included. Drives the planning horizon; see the trap in §07.</td></tr>
+        <tr><td class="f">q</td><td class="t">int ≥ 0</td><td class="ex">3</td><td>Units on hand at the top of the hour.</td></tr>
+        <tr><td class="f">original_price</td><td class="t">float &gt; 0</td><td class="ex">10000.0</td><td>Undiscounted price. Must be present — a null or zero rejects the state.</td></tr>
+        <tr><td class="f">cost</td><td class="t">float</td><td class="ex">4000.0</td><td>Unit cost, within <code>[0, original_price]</code>. Sets the price floor; no tier below it is ever offered.</td></tr>
+        <tr><td class="f">current_discount</td><td class="t">float | null</td><td class="ex null">null</td><td><strong>The discount already in force.</strong> <code>null</code> on the episode's first decision, and a fraction (0.15, not 15) on every later one. It constrains the action set — prices never move back up within an episode.</td></tr>
       </tbody>
     </table>
   </div>
@@ -485,52 +573,55 @@
 
   <div class="tscroll">
     <table>
-      <caption>Grouped by what the field is for. All 36 are mandatory — an event missing any one of them is quarantined, not written.</caption>
+      <caption>Grouped by what the field is for. All 36 are mandatory — an event missing any one of them is quarantined, not written. Examples are the same 17:00 entry decision.</caption>
       <thead>
-        <tr><th>Field</th><th>Purpose</th></tr>
+        <tr><th>Field</th><th>Example</th><th>Purpose</th></tr>
       </thead>
       <tbody>
-        <tr class="grouphead"><td colspan="2">Identity — 4</td></tr>
-        <tr><td class="f">decision_id</td><td>Immutable UUID. <strong>You must echo this on the outcome.</strong></td></tr>
-        <tr><td class="f">episode_id</td><td>As supplied.</td></tr>
-        <tr><td class="f">is_entry</td><td>True on the episode's first decision.</td></tr>
-        <tr><td class="f">timestamp</td><td>UTC with offset.</td></tr>
+        <tr class="grouphead"><td colspan="3">Identity — 4</td></tr>
+        <tr><td class="f">decision_id</td><td class="ex">"d7557c60-5fad-…"</td><td>Immutable UUID. <strong>You must echo this on the outcome.</strong></td></tr>
+        <tr><td class="f">episode_id</td><td class="ex">"EP-88213-4471"</td><td>As supplied.</td></tr>
+        <tr><td class="f">is_entry</td><td class="ex">true</td><td>True on the episode's first decision.</td></tr>
+        <tr><td class="f">timestamp</td><td class="ex">"2026-08-19T02:25:12+00:00"</td><td>UTC with offset.</td></tr>
 
-        <tr class="grouphead"><td colspan="2">Entity — 4</td></tr>
-        <tr><td class="f">sku_id · fc · category · subcategory</td><td>As supplied.</td></tr>
+        <tr class="grouphead"><td colspan="3">Entity — 4</td></tr>
+        <tr><td class="f">sku_id · fc</td><td class="ex">"SKU-88213" · "FC-04"</td><td>As supplied.</td></tr>
+        <tr><td class="f">category · subcategory</td><td class="ex">"vegetables" · "leafy_greens"</td><td>As supplied.</td></tr>
 
-        <tr class="grouphead"><td colspan="2">State at decision time — 5</td></tr>
-        <tr><td class="f">hour_of_day · hours_remaining · q_remaining</td><td>As supplied.</td></tr>
-        <tr><td class="f">original_price · cost</td><td>As supplied.</td></tr>
+        <tr class="grouphead"><td colspan="3">State at decision time — 5</td></tr>
+        <tr><td class="f">hour_of_day · hours_remaining</td><td class="ex">17 · 4</td><td>As supplied.</td></tr>
+        <tr><td class="f">q_remaining</td><td class="ex">3</td><td>As supplied (your <code>q</code>).</td></tr>
+        <tr><td class="f">original_price · cost</td><td class="ex">10000.0 · 4000.0</td><td>As supplied.</td></tr>
 
-        <tr class="grouphead"><td colspan="2">The action space — 3</td></tr>
-        <tr><td class="f">d_max</td><td>Deepest discount the cost floor permits.</td></tr>
-        <tr><td class="f">feasible_tier_count</td><td>Size of the full price grid.</td></tr>
-        <tr><td class="f">action_set_size</td><td>Actions allowed at <em>this</em> decision, after the no-price-increase constraint. Distinct from the grid, and what explorability is judged on.</td></tr>
+        <tr class="grouphead"><td colspan="3">The action space — 3</td></tr>
+        <tr><td class="f">d_max</td><td class="ex">0.6</td><td>Deepest discount the cost floor permits. Here ₩4,000 cost against a ₩10,000 list price.</td></tr>
+        <tr><td class="f">feasible_tier_count</td><td class="ex">25</td><td>Size of the full price grid — 0% to 60% in 2.5% steps.</td></tr>
+        <tr><td class="f">action_set_size</td><td class="ex">5</td><td>Actions allowed at <em>this</em> decision. Five here because entry uses a coarse arm set; from the next hour on it is every tier at or below the anchor. Distinct from the grid, and what explorability is judged on.</td></tr>
 
-        <tr class="grouphead"><td colspan="2">What it recommended — 4</td></tr>
-        <tr><td class="f">optimal_price · optimal_discount</td><td>The cost-minimising choice.</td></tr>
-        <tr><td class="f">expected_il</td><td>Expected inventory loss under the chosen action — the objective.</td></tr>
-        <tr><td class="f">expected_denominator</td><td>Predicted revenue base, for predicted-vs-realised tracking.</td></tr>
+        <tr class="grouphead"><td colspan="3">What it recommended — 4</td></tr>
+        <tr><td class="f">optimal_price · optimal_discount</td><td class="ex">8500.0 · 0.15</td><td>The cost-minimising choice.</td></tr>
+        <tr><td class="f">expected_il</td><td class="ex">10048.795016024469</td><td>Expected inventory loss under the <em>applied</em> action, in won — the objective.</td></tr>
+        <tr><td class="f">expected_denominator</td><td class="ex">7242.0524034908485</td><td>Predicted revenue base, for predicted-vs-realised tracking.</td></tr>
 
-        <tr class="grouphead"><td colspan="2">What it applied — 6</td></tr>
-        <tr><td class="f">applied_price · applied_discount</td><td>What actually went out. Differs from optimal only on an exploration.</td></tr>
-        <tr><td class="f">is_exploration</td><td>Whether this hour was a deliberate experiment.</td></tr>
-        <tr><td class="f">exploration_cost</td><td>Expected IL given up to run it.</td></tr>
-        <tr><td class="f">affordable_set_size</td><td>How many alternatives were within budget.</td></tr>
-        <tr><td class="f">tau_current</td><td>The exploration budget in force.</td></tr>
+        <tr class="grouphead"><td colspan="3">What it applied — 6</td></tr>
+        <tr><td class="f">applied_price · applied_discount</td><td class="ex">7000.0 · 0.3</td><td>What actually went out. Differs from optimal only on an exploration — as here.</td></tr>
+        <tr><td class="f">is_exploration</td><td class="ex">true</td><td>Whether this hour was a deliberate experiment.</td></tr>
+        <tr><td class="f">exploration_cost</td><td class="ex">2385.0286259173663</td><td>Expected IL given up to run it. Zero when not exploring.</td></tr>
+        <tr><td class="f">affordable_set_size</td><td class="ex">3</td><td>How many alternatives were within budget.</td></tr>
+        <tr><td class="f">tau_current</td><td class="ex">3202.33</td><td>The exploration budget in force, in won.</td></tr>
 
-        <tr class="grouphead"><td colspan="2">Inputs that make it reproducible — 7</td></tr>
-        <tr><td class="f">epsilon_posterior_mean · epsilon_posterior_std</td><td>The learned price response and its uncertainty.</td></tr>
-        <tr><td class="f">reference_discount · reference_mu</td><td>The anchor the forecast is quoted at, and the forecast there.</td></tr>
-        <tr><td class="f">mu_ref_path</td><td><strong>The full remaining-hours forecast</strong>, not just this hour. Every tier's value depends on the whole path.</td></tr>
-        <tr><td class="f">anchor_discount</td><td>The price in force, which fixed the action set.</td></tr>
-        <tr><td class="f">dispersion_r</td><td>Demand variance parameter used.</td></tr>
+        <tr class="grouphead"><td colspan="3">Inputs that make it reproducible — 7</td></tr>
+        <tr><td class="f">epsilon_posterior_mean</td><td class="ex">-1.0</td><td>The learned price response. Always negative.</td></tr>
+        <tr><td class="f">epsilon_posterior_std</td><td class="ex">0.6</td><td>Its uncertainty. Both are at the cold-start prior here.</td></tr>
+        <tr><td class="f">reference_discount · reference_mu</td><td class="ex">0.3 · 0.8</td><td>The anchor the forecast is quoted at, and the forecast there.</td></tr>
+        <tr><td class="f">mu_ref_path</td><td class="ex">[0.8, 0.8, 0.62, 0.41]</td><td><strong>The full remaining-hours forecast</strong>, not just this hour — one entry per remaining hour, and its length must equal <code>hours_remaining</code>. Every tier's value depends on the whole path.</td></tr>
+        <tr><td class="f">anchor_discount</td><td class="ex null">null</td><td>The price in force, which fixed the action set. <code>null</code> at entry; a fraction thereafter.</td></tr>
+        <tr><td class="f">dispersion_r</td><td class="ex">0.919</td><td>Demand variance parameter used.</td></tr>
 
-        <tr class="grouphead"><td colspan="2">Versions — 3</td></tr>
-        <tr><td class="f">baseline_model_version</td><td>Which frozen model produced the forecast.</td></tr>
-        <tr><td class="f">posterior_version</td><td>Which learning state was in force.</td></tr>
-        <tr><td class="f">config_version</td><td>Which config the decision ran under.</td></tr>
+        <tr class="grouphead"><td colspan="3">Versions — 3</td></tr>
+        <tr><td class="f">baseline_model_version</td><td class="ex">"baseline-20260811043259"</td><td>Which frozen model produced the forecast.</td></tr>
+        <tr><td class="f">posterior_version</td><td class="ex">0</td><td>Which learning state was in force. Increments on every applied update.</td></tr>
+        <tr><td class="f">config_version</td><td class="ex">"1.0.0"</td><td>Which config the decision ran under.</td></tr>
       </tbody>
     </table>
   </div>
@@ -548,21 +639,22 @@
 
   <div class="tscroll">
     <table>
+      <caption>Example values are the 18:00 outcome of the worked episode — a zero-sale hour, which is the common case.</caption>
       <thead>
-        <tr><th>Field</th><th>Source</th><th>Type</th><th>Rule</th></tr>
+        <tr><th>Field</th><th>Source</th><th>Type</th><th>Example</th><th>Rule</th></tr>
       </thead>
       <tbody>
-        <tr><td class="f">outcome_id</td><td><span class="tag you">you</span></td><td class="t">string</td><td>Immutable and unique. A repeat is counted as a duplicate and ignored, not an error.</td></tr>
-        <tr><td class="f">decision_id</td><td><span class="tag you">you</span></td><td class="t">string</td><td>Must match a decision we wrote. An outcome with no matching decision counts against the safety gate.</td></tr>
-        <tr><td class="f">units_sold</td><td><span class="tag you">you</span></td><td class="t">int ≥ 0</td><td><strong>Zero-sale hours must be sent.</strong> They are roughly three quarters of all hours and they are evidence, not noise.</td></tr>
-        <tr><td class="f">starting_inventory</td><td><span class="tag you">you</span></td><td class="t">int ≥ 0</td><td>Units at the top of the hour. Should equal the decision's <code>q_remaining</code>.</td></tr>
-        <tr><td class="f">ending_inventory</td><td><span class="tag you">you</span></td><td class="t">int ≥ 0</td><td>Units at the close. Must equal <code>starting − sold</code> unless <code>adjustment_reason</code> is set.</td></tr>
-        <tr><td class="f">applied_price</td><td><span class="tag you">you</span></td><td class="t">float</td><td><strong>The price actually in force</strong> for the hour, not the one we recommended. The gap between the two is a monitored number — see §05.</td></tr>
-        <tr><td class="f">is_stockout</td><td><span class="tag you">you</span></td><td class="t">bool</td><td>Whether demand hit the inventory ceiling. Derivable as <code>sold ≥ starting</code>, but the field must be present: <em>any</em> missing rate above zero fires a stop condition.</td></tr>
-        <tr><td class="f">execution_status</td><td><span class="tag you">you</span></td><td class="t">string</td><td>Only <code>"ok"</code>, <code>"success"</code> or absent make the outcome eligible for learning. Anything else is stored and excluded — which is the correct handling of an hour where the price never went live.</td></tr>
-        <tr><td class="f">finalized_at</td><td><span class="tag you">you</span></td><td class="t">timestamp</td><td>UTC with offset.</td></tr>
-        <tr class="groupsep"><td class="f">adjustment_reason</td><td><span class="tag cond">conditional</span></td><td class="t">string</td><td>Required whenever inventory does not reconcile. Exactly two values are legitimate — see the box below.</td></tr>
-        <tr><td class="f">execution_failure_reason</td><td><span class="tag cond">conditional</span></td><td class="t">string</td><td>Free text, when <code>execution_status</code> is not a success value.</td></tr>
+        <tr><td class="f">outcome_id</td><td><span class="tag you">you</span></td><td class="t">string</td><td class="ex">"OC-88213-4471-18"</td><td>Immutable and unique. A repeat is counted as a duplicate and ignored, not an error. Yours to shape — ours are UUIDs, but any stable scheme works.</td></tr>
+        <tr><td class="f">decision_id</td><td><span class="tag you">you</span></td><td class="t">string</td><td class="ex">"faf79b6c-fde0-…"</td><td>Must match a decision we wrote. An outcome with no matching decision counts against the safety gate.</td></tr>
+        <tr><td class="f">units_sold</td><td><span class="tag you">you</span></td><td class="t">int ≥ 0</td><td class="ex">0</td><td><strong>Zero-sale hours must be sent.</strong> They are roughly three quarters of all hours and they are evidence, not noise.</td></tr>
+        <tr><td class="f">starting_inventory</td><td><span class="tag you">you</span></td><td class="t">int ≥ 0</td><td class="ex">2</td><td>Units at the top of the hour. Should equal the decision's <code>q_remaining</code>.</td></tr>
+        <tr><td class="f">ending_inventory</td><td><span class="tag you">you</span></td><td class="t">int ≥ 0</td><td class="ex">2</td><td>Units at the close. Must equal <code>starting − sold</code> unless <code>adjustment_reason</code> is set.</td></tr>
+        <tr><td class="f">applied_price</td><td><span class="tag you">you</span></td><td class="t">float</td><td class="ex">5500.0</td><td><strong>The price actually in force</strong> for the hour, not the one we recommended. The gap between the two is a monitored number — see §06.</td></tr>
+        <tr><td class="f">is_stockout</td><td><span class="tag you">you</span></td><td class="t">bool</td><td class="ex">false</td><td>Whether demand hit the inventory ceiling. Derivable as <code>sold ≥ starting</code>, but the field must be present: <em>any</em> missing rate above zero fires a stop condition.</td></tr>
+        <tr><td class="f">execution_status</td><td><span class="tag you">you</span></td><td class="t">string</td><td class="ex">"ok"</td><td>Only <code>"ok"</code>, <code>"success"</code> or absent make the outcome eligible for learning. Anything else is stored and excluded — which is the correct handling of an hour where the price never went live.</td></tr>
+        <tr><td class="f">finalized_at</td><td><span class="tag you">you</span></td><td class="t">timestamp</td><td class="ex">"2026-08-19T19:00:00+00:00"</td><td>UTC with offset.</td></tr>
+        <tr class="groupsep"><td class="f">adjustment_reason</td><td><span class="tag cond">conditional</span></td><td class="t">string</td><td class="ex">"episode_close_write_off"</td><td>Required whenever inventory does not reconcile — omitted entirely otherwise, as in this example. Exactly two values are legitimate; see the box below.</td></tr>
+        <tr><td class="f">execution_failure_reason</td><td><span class="tag cond">conditional</span></td><td class="t">string</td><td class="ex">"price_push_timeout"</td><td>Free text, when <code>execution_status</code> is not a success value.</td></tr>
       </tbody>
     </table>
   </div>
@@ -600,8 +692,286 @@
   </div>
 </section>
 
+<section id="worked">
+  <h2><span class="num">05</span>One episode, end to end</h2>
+  <div class="prose">
+    <p>
+      Every payload below was produced by running the real decision path — not written by hand.
+      One SKU of leafy greens, three units, a four-hour window, ₩10,000 list price against a
+      ₩4,000 unit cost. Three priced hours and three outcomes, including the two shapes that
+      cause integration trouble: a zero-sale hour and an episode-close write-off.
+    </p>
+  </div>
+
+  <div class="hourline">
+    <div>
+      <span class="h">17:00 · entry</span>
+      <b>₩7,000</b>
+      <span class="d">3 units, 4 hours left. Recommended ₩8,500; explored to ₩7,000. One sells.</span>
+    </div>
+    <div>
+      <span class="h">18:00</span>
+      <b>₩5,500</b>
+      <span class="d">2 units, 3 hours left. Recommended ₩7,000; explored to ₩5,500. Nothing sells.</span>
+    </div>
+    <div>
+      <span class="h">20:00 · last hour</span>
+      <b>₩4,250</b>
+      <span class="d">2 units, 1 hour left. Recommended ₩5,500; explored to ₩4,250. One sells; one is written off.</span>
+    </div>
+  </div>
+
+  <h3>The entry decision, in full</h3>
+  <div class="prose">
+    <p>
+      All 39 fields the service writes — the 36 required plus <code>event</code>,
+      <code>solver_latency_s</code> and <code>nb_tail_mass_max</code>. This is the widest payload
+      in the contract, and none of it is yours to produce.
+    </p>
+  </div>
+
+  <div class="payload">
+    <div class="hd"><b>decisions.jsonl</b><span>17:00 — the episode's first price</span></div>
+<pre class="json">{
+  "event": "decision",
+  "decision_id": "d7557c60-5fad-4336-84ac-06775172f3e5",
+  "episode_id": "EP-88213-4471",
+  "is_entry": <mark>true</mark>,
+  "sku_id": "SKU-88213",
+  "fc": "FC-04",
+  "category": "vegetables",
+  "subcategory": "leafy_greens",
+  "hour_of_day": 17,
+  "hours_remaining": 4,
+  "q_remaining": 3,
+  "original_price": 10000.0,
+  "cost": 4000.0,
+  "d_max": 0.6,
+  "feasible_tier_count": 25,
+  "action_set_size": 5,
+  "optimal_price": 8500.0,
+  "optimal_discount": 0.15,
+  "expected_il": 10048.795016024469,
+  "expected_denominator": 7242.0524034908485,
+  "applied_price": <mark>7000.0</mark>,
+  "applied_discount": 0.3,
+  "is_exploration": <mark>true</mark>,
+  "exploration_cost": 2385.0286259173663,
+  "affordable_set_size": 3,
+  "tau_current": 3202.33,
+  "epsilon_posterior_mean": -1.0,
+  "epsilon_posterior_std": 0.6,
+  "reference_discount": 0.3,
+  "reference_mu": 0.8,
+  "mu_ref_path": <mark>[0.8, 0.8, 0.62, 0.41]</mark>,
+  "anchor_discount": <mark>null</mark>,
+  "dispersion_r": 0.919,
+  "baseline_model_version": "baseline-20260811043259",
+  "posterior_version": 0,
+  "config_version": "1.0.0",
+  "solver_latency_s": 0.008332459000030212,
+  "nb_tail_mass_max": 1.563900841383692e-06,
+  "timestamp": "2026-08-19T02:25:12.932987+00:00"
+}</pre>
+  </div>
+
+  <div class="note">
+    <h4>Reading the highlighted fields</h4>
+    <p>
+      <code>is_entry: true</code> and <code>anchor_discount: null</code> go together — this is
+      the first price, so nothing constrains it from above and <code>action_set_size</code> is 5,
+      the coarse entry arms rather than the full 25-tier grid.
+    </p>
+    <p>
+      <code>mu_ref_path</code> has four entries because <code>hours_remaining</code> is 4. That
+      correspondence is enforced: a mismatch rejects the state outright.
+    </p>
+    <p>
+      <code>applied_price</code> is ₩7,000 while <code>optimal_price</code> is ₩8,500, because
+      <code>is_exploration</code> is true. The service gave up ₩2,385 of expected IL to learn
+      something about price response at 30% off. See the note under the next payload — the
+      frequency of this will surprise people.
+    </p>
+  </div>
+
+  <h3>The next two hours</h3>
+  <div class="prose">
+    <p>
+      Same shape, so only the fields that moved are shown. Everything omitted is identical to
+      the entry decision.
+    </p>
+  </div>
+
+  <div class="payload">
+    <div class="hd"><b>decisions.jsonl</b><span>18:00 and 20:00 — abbreviated</span></div>
+<pre class="json">{
+  "decision_id": "faf79b6c-fde0-4f0f-8e19-9c274a0d4d43",
+  "is_entry": false,
+  "hour_of_day": 18,
+  "hours_remaining": 3,
+  "q_remaining": 2,
+  "action_set_size": <mark>13</mark>,          <span class="c">// every tier at or below the anchor</span>
+  "optimal_price": 7000.0,
+  "optimal_discount": 0.3,
+  "expected_il": 8694.450236769328,
+  "expected_denominator": 7487.081079775469,
+  "applied_price": 5500.0,
+  "applied_discount": 0.45,
+  "is_exploration": true,
+  "exploration_cost": 1925.6683304158578,
+  "affordable_set_size": 9,
+  "reference_mu": 0.8,
+  "mu_ref_path": [0.8, 0.62, 0.41],
+  "anchor_discount": <mark>0.3</mark>            <span class="c">// what 17:00 applied</span>
+}
+
+{
+  "decision_id": "d4ab8f32-9533-4896-afe4-976d63d0e68b",
+  "is_entry": false,
+  "hour_of_day": 20,
+  "hours_remaining": 1,
+  "q_remaining": 2,
+  "action_set_size": 7,
+  "optimal_price": 5500.0,
+  "optimal_discount": 0.45,
+  "expected_il": 8979.840326057289,
+  "expected_denominator": 5599.087577470224,
+  "applied_price": 4250.0,
+  "applied_discount": 0.575,
+  "is_exploration": true,
+  "exploration_cost": 751.4162237666824,
+  "affordable_set_size": 6,
+  "reference_mu": <mark>0.41</mark>,             <span class="c">// demand decays toward the window close</span>
+  "mu_ref_path": [0.41],
+  "anchor_discount": 0.45
+}</pre>
+  </div>
+
+  <div class="note risk">
+    <h4>There is no exploration <em>rate</em> — plan for a lot of it</h4>
+    <p>
+      All three hours above explored, and that is not the seed being unlucky. The rule is
+      simply: compute what every alternative price would cost in expected IL, keep the ones
+      costing no more than <code>tau_current</code>, and if that set is non-empty, <strong>draw
+      from it uniformly</strong>. There is no probability schedule, no base rate, no cap.
+    </p>
+    <p>
+      So a large share of priced hours will carry a price that is not the recommended one, and
+      <code>applied_price</code> will differ from <code>optimal_price</code> on all of them.
+      That is the product working, not a bug in the integration — but it is worth knowing before
+      someone builds an alert on the divergence. The budget <code>tau_current</code> is what
+      controls the volume, and it is recalibrated daily from realised spend.
+    </p>
+  </div>
+
+  <h3>What exploitation looks like</h3>
+  <div class="prose">
+    <p>
+      For contrast, a different episode at its price floor. Anchored at 60% off with a ₩4,000
+      cost, exactly one action remains, so the decision is <em>structurally</em> non-explorable
+      and the three exploration fields go quiet.
+    </p>
+  </div>
+
+  <div class="payload">
+    <div class="hd"><b>decisions.jsonl</b><span>a decision with nothing left to explore</span></div>
+<pre class="json">{
+  "decision_id": "30540c38-2b9c-4316-9ed5-92f8604e3cb9",
+  "episode_id": "EP-90114-2280",
+  "hour_of_day": 21,
+  "hours_remaining": 1,
+  "q_remaining": 1,
+  "d_max": 0.6,
+  "action_set_size": <mark>1</mark>,
+  "optimal_price": 4000.0,
+  "optimal_discount": 0.6,
+  "expected_il": 4823.130960570155,
+  "applied_price": <mark>4000.0</mark>,          <span class="c">// == optimal_price</span>
+  "applied_discount": 0.6,
+  "is_exploration": <mark>false</mark>,
+  "exploration_cost": <mark>0.0</mark>,
+  "affordable_set_size": <mark>0</mark>,
+  "anchor_discount": 0.6
+}</pre>
+  </div>
+
+  <h3>The three outcomes</h3>
+  <div class="prose">
+    <p>
+      This is the part you build. Nine fields each; the third one carries the tenth.
+    </p>
+  </div>
+
+  <div class="payload">
+    <div class="hd"><b>outcomes.jsonl</b><span>ordinary · zero-sale · episode-close write-off</span></div>
+<pre class="json"><span class="c">// 17:00 — one unit sells. 3 − 1 = 2, so inventory reconciles and no
+//         adjustment_reason is needed.</span>
+{
+  "event": "outcome",
+  "outcome_id": "OC-88213-4471-17",
+  "decision_id": "d7557c60-5fad-4336-84ac-06775172f3e5",
+  "units_sold": 1,
+  "starting_inventory": 3,
+  "ending_inventory": 2,
+  "applied_price": 7000.0,
+  "is_stockout": false,
+  "execution_status": "ok",
+  "finalized_at": "2026-08-19T18:00:00+00:00"
+}
+
+<span class="c">// 18:00 — nothing sells. This is the MOST COMMON outcome shape, roughly
+//         three hours in four, and it must be sent. It is the observation
+//         that says demand was low at ₩5,500.</span>
+{
+  "event": "outcome",
+  "outcome_id": "OC-88213-4471-18",
+  "decision_id": "faf79b6c-fde0-4f0f-8e19-9c274a0d4d43",
+  "units_sold": <mark>0</mark>,
+  "starting_inventory": 2,
+  "ending_inventory": 2,
+  "applied_price": 5500.0,
+  "is_stockout": false,
+  "execution_status": "ok",
+  "finalized_at": "2026-08-19T19:00:00+00:00"
+}
+
+<span class="c">// 20:00 — the window closes. One unit sells, one remains, and the source
+//         zeroes the field: 2 − 1 = 1 expected, 0 reported. WITHOUT the
+//         adjustment_reason this event is quarantined and never lands.</span>
+{
+  "event": "outcome",
+  "outcome_id": "OC-88213-4471-20",
+  "decision_id": "d4ab8f32-9533-4896-afe4-976d63d0e68b",
+  "units_sold": 1,
+  "starting_inventory": 2,
+  "ending_inventory": <mark>0</mark>,
+  "applied_price": 4250.0,
+  "is_stockout": false,
+  "execution_status": "ok",
+  "finalized_at": "2026-08-19T21:00:00+00:00",
+  "adjustment_reason": <mark>"episode_close_write_off"</mark>
+}</pre>
+  </div>
+
+  <div class="note">
+    <h4>What the third one costs if you get it wrong</h4>
+    <p>
+      Drop <code>adjustment_reason</code> from that last payload and the store writes it to
+      quarantine with <em>"ending_inventory does not reconcile and no adjustment_reason
+      documented"</em>. It never reaches learning, event completeness falls, and — because this
+      shape occurs at the close of roughly half of all episodes — the shadow gate will not pass.
+    </p>
+    <p>
+      Note also that <code>is_stockout</code> is <code>false</code> on all three, including the
+      write-off. Stockout means demand hit the inventory ceiling, which is
+      <code>sold ≥ starting</code>. Stock being written off at the close is a different event
+      and must not be reported as a stockout.
+    </p>
+  </div>
+</section>
+
 <section id="gates">
-  <h2><span class="num">05</span>The thresholds these feed</h2>
+  <h2><span class="num">06</span>The thresholds these feed</h2>
   <div class="prose">
     <p>
       Event quality is gated, and two of these gates can suspend the system. Worth knowing before
@@ -637,7 +1007,7 @@
 </section>
 
 <section id="feasibility">
-  <h2><span class="num">06</span>The parts worth checking first</h2>
+  <h2><span class="num">07</span>The parts worth checking first</h2>
   <div class="prose">
     <p>
       Ranked by how much trouble they have caused in replay and shadow. If your team can answer
@@ -710,9 +1080,15 @@
     (<code>DECISION_REQUIRED</code>, <code>OUTCOME_REQUIRED</code>),
     <code>inference/decide.py</code> for what the service emits,
     <code>pipeline/shadow.py</code> for the reference outcome producer, and
-    <code>config.yaml</code> for every threshold quoted in §05. The shadow harness is a working
+    <code>config.yaml</code> for every threshold quoted in §06. The shadow harness is a working
     implementation of the outcome side, including <code>adjustment_reason</code>, and is worth
     reading before writing a new one.
+  </p>
+  <p>
+    Every payload in §05 was generated by running the real decision path against the frozen
+    artifacts and capturing what it emitted — including the write-off, which was produced by
+    the same <code>adjustment_reason</code> function a production integration should call. The
+    long unrounded floats are shown as they arrive, not tidied.
   </p>
 </footer>
 

@@ -598,9 +598,15 @@ from their logged counterparts (`q` → `q_remaining`, `current_discount` →
 `anchor_discount`) and the two conditional outcome fields are allow-listed in
 that test; extend the list deliberately, not to make a failure go away.
 
-Its thresholds are quoted from `config.yaml` (§05 of the page) and are NOT
+Its thresholds are quoted from `config.yaml` (§06 of the page) and are NOT
 guarded — re-read them when `monitoring.stop_conditions` or
 `monitoring.shadow_gate` moves.
+
+The worked episode in §05 is real output: every payload was produced by running
+`inference.decide` against the frozen artifacts and capturing what it emitted,
+with the write-off outcome built by `pipeline.shadow.adjustment_reason`. If the
+event schema or the solver changes, regenerate it rather than hand-patching the
+numbers — the point of that section is that an integrator can trust the shapes.
 
 ### The deck is retired
 
