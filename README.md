@@ -34,12 +34,7 @@ randomized exploration.
 | `backtest/` | §17 | Fidelity gate, policy deltas, `Q(p*) − Q(p)` spread and `tau_initial` derivation. |
 | `tools/make_dummy_flc.py` | — | Synthetic FLC generator (legacy + randomized policies, known ground-truth elasticity). |
 | `tools/make_charts.py` | — | One diagnostic chart per component, generated from the report artifacts into `reports/charts/`. |
-| `tools/deck_numbers.py` | — | Every figure the design doc and deck quote, in one pasteable block, tagged with the slide that carries it. |
-| `tools/deck_text.py` | — | Lists and patches the deck's text runs. Refuses any replacement that does not match exactly once, so a stale number cannot survive a "successful" refresh. |
-| `tools/deck_diff.py` | — | Regression check between two versions of the deck: what is new, what was dropped, and any reused slide whose text changed unintentionally. Exits non-zero on either. |
-| `tools/deckkit.py` | — | Slide-package surgery — duplicate, reorder, recolour, set text and attach notes without a PowerPoint install. |
-| `tools/build_v2.py` | — | The v2 restructure: the v1 slides plus seven new ones. An intermediate now — it writes to `build/`, and `build_v3` runs it. |
-| `tools/build_v3.py` | — | Builds the deck (`docs/perishable_markdown_deck_v3.pptx`) end to end from v1: 17 presented slides, then the other 25 behind an appendix divider and an index keyed by question. Asserts the index's slide ranges against the order it writes. |
+| `tools/walkthrough/` | — | Builds `docs/system_walkthrough.html`, the leadership-facing walkthrough — one tab per frozen artifact, plus the decision, the learning loop, the replay and the assurance checks. |
 
 ## Running the bootstrap (PRD §1a order)
 

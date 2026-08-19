@@ -541,39 +541,11 @@ need no regeneration.
 Anything that must survive — a chart in the deck — gets pasted in
 deliberately.
 
-## Refreshing the numbers in the docs and deck
+## Refreshing the numbers in the docs
 
-**One deck ships.** `docs/perishable_markdown_deck_v3.pptx` — 44 slides, of
-which only the first 17 are presented; then an appendix divider, an index, and
-the other 25 for the questions that get asked.
-
-| File | Slides | Status |
-| --- | --- | --- |
-| `docs/perishable_markdown_deck_v3.pptx` | 44 | **The deliverable.** The only deck in `docs/`. |
-| `tools/deck_source.pptx` | 34 | **Build input, not a deliverable.** The original design-argument ordering; every reused slide is lifted from it, keeping its vetted layout and speaker notes. It is not reproducible from anything else — deleting it breaks every future rebuild, and hand-editing the v3 `.pptx` is not an alternative. It lives in `tools/` so that `docs/` holds exactly one deck. |
-
-v2 has been retired as a file. It is still a build stage — v3 is assembled
-from its slides — but it is an intermediate now, written to `build/`
-(gitignored) by `tools.build_v3`, which runs `tools.build_v2` itself. So:
-
-```bash
-python3 -m tools.build_v3     # source -> v2 (build/) -> v3 (docs/), one command
-python3 -m tools.deck_diff    # defaults to source -> v3; must exit 0
-```
-
-Retiring it was not cosmetic. The checked-in v2 had drifted from
-`tools/build_v2.py` in two ways nobody noticed — one slide title, and the
-speaker notes on all seven of its new slides. Two decks to keep in sync is how
-a number goes stale in one of them.
-
-Every v1 slide survives into v3, so **a number fixed in one must be fixed in
-both**. v3's core slides 6, 7, 8 and 16 carry wording tightened for a
-presented setting: the numbers are identical, the sentences around them are
-not, so patch by the number rather than by a whole-sentence match.
-
-`docs/system_walkthrough.html` is the leadership-facing walkthrough — one tab
-per frozen artifact, plus the hourly decision, the learning loop, and the
-replay evidence. It is built, not hand-edited:
+`docs/system_walkthrough.html` is the deliverable — one tab per frozen
+artifact, plus the hourly decision, the learning loop, the replay evidence and
+the production assurance. It is built, not hand-edited:
 
 ```bash
 python3 -m tools.walkthrough.build      # writes docs/system_walkthrough.html
@@ -582,136 +554,42 @@ python3 -m tools.walkthrough.build      # writes docs/system_walkthrough.html
 Tab prose lives in `tools/walkthrough/panels.py`; `_source.html` is the
 original single-topic decision-core page and its sections are lifted verbatim,
 so edit the panels rather than the output. Figures on the artifact tabs are
-quoted from the v3 deck and this design doc (the `baseline-20260811043259`
-run) so the page holds one vintage throughout; the decision tab is a
-self-contained solve whose inputs are printed on it. It is published as a
-claude.ai artifact — deploy the built file with the existing artifact URL so
-the same link updates rather than a second page appearing.
+quoted from `docs/design.md` (the `baseline-20260811043259` run) so the page
+holds one vintage throughout; the decision tab is a self-contained solve whose
+inputs are printed on it. It is published as a claude.ai artifact — deploy the
+built file with the EXISTING artifact URL, so the same link updates rather than
+a second page appearing.
 
-**A structural or wording change belongs in the builder and a re-run, never in
-the `.pptx`.** A hand-edited deck cannot be rebuilt, and the rebuild is what
-the next agent will do. `tools.deck_diff` is the guard: it pairs slides by
-eyebrow + title and exits non-zero if a slide was dropped or a reused slide
-changed for a reason not on its INTENDED list.
+### The deck is retired
 
-When you make a deliberate edit, add its authorising phrase to that list —
-and take the phrase **from the text being replaced**, not from the replacement.
-A token matching only the new wording authorises nothing, because a deleted
-line would then be waved through by the allowed rewrite sitting next to it. A
-phrase that exists only in the new text is the right entry for a run you
-genuinely **added**. v3's appendix index quotes
-slide RANGES, and `build_v3` asserts every one of them against the order it
-just wrote, so a reorder that makes the index lie fails the build instead of
-shipping.
+`docs/perishable_markdown_deck_v3.pptx` (44 slides) and its build input
+`tools/deck_source.pptx` (34 slides) are still in the repo, but the six modules
+that built, diffed, patched and number-tagged them are gone — the walkthrough
+replaced the deck as the thing that gets presented. Consequences worth knowing
+before anyone quotes it:
 
-`build_v3` names every slide by its POSITION in v2 and resolves file numbers
-through v2's own slide-id list. Slide file numbers do not track positions —
-address slides by position and the mapping stays honest.
+- **The `.pptx` is a frozen document now, not build output.** There is no
+  rebuild path and no `deck_diff` guard. Everything on it is as of
+  `baseline-20260811043259`, and nothing re-derives it when the pipeline runs.
+- **Two of its figures are known wrong.** Slides 2 and 42 give observed IL% as
+  `36.68% / 36.7%`; `reports/backtest_calibrated.json` gives `0.3868` — i.e.
+  **38.68%**, which is what the walkthrough carries. Do not quote the deck for
+  that number.
+- If a deck is wanted again, build it from the walkthrough rather than
+  restoring the old modules: they encoded a slide ordering the walkthrough no
+  longer follows. They are recoverable from git history all the same — last
+  present at `10120c8`.
 
-Those decks and `docs/design.md` quote ~25 measured quantities that go stale on
-every re-run (the launch-freeze retrain changes most of them). Do not hunt
-through the JSON:
+`docs/design.md` and the walkthrough quote ~25 measured quantities that go
+stale on every re-run (the launch-freeze retrain moves most of them).
+`tools.deck_numbers` used to list them in one block; it is gone with the rest,
+so read them off the reports directly. Two rules survive it:
 
-```bash
-python3 -m tools.deck_numbers --backtest reports/<gate-passing>.json \
-    [--shadow reports/shadow.json] [--phase0 reports/phase0.json] \
-    [--thresholds reports/thresholds.json]
-```
-
-It prints each quantity tagged with the slide(s) and design-doc sections that
-carry it. Missing reports print `--` rather than failing. Only ever quote a
-**gate-passing** backtest — the same rule that governs pasting `tau_initial`.
-
-Slide tags refer to the 34-slide deck, which is still the build source, so
-they have not gone stale. To find the same slide in v3, `tools.build_v3`
-prints a `v1 -> v3` position map at the end of every run. If slides are
-inserted or reordered, re-map the tags in `tools/deck_numbers.py` in the same
-change — a stale tag sends the next person to the wrong slide, which is worse
-than no tag.
-
-### Writing the refreshed numbers back into the deck
-
-Do **not** hand-edit the `.pptx`. Unzipping it, editing slide XML and zipping
-it back is easy to get subtly wrong, and a mis-zipped archive still contains
-the right bytes — it simply will not open. Use `tools.deck_text`, which does
-the whole round trip and verifies the rebuilt archive before replacing the
-original.
-
-**Step 1 — get the new numbers.** Run `tools.deck_numbers` as above. Each row
-prints `[slide, slide, ...]`; those are 1-based positions in the deck as
-presented, not `slideN.xml` file numbers (they diverge as soon as slides move).
-
-**Step 2 — find the exact string on the slide.**
-
-```bash
-python3 -m tools.deck_text --list --slide 18
-```
-
-This dumps every text run with its shape name. Copy the run text verbatim —
-including the currency sign, thin spaces and em dashes — because the patch
-matches exact substrings.
-
-**Step 3 — write a patch file.** A JSON list of `{slide, old, new}`:
-
-```json
-[
-  {"slide": 18, "old": "₩1,271 / day", "new": "₩1,231 / day"},
-  {"slide": 2,  "old": "₩14.7M",       "new": "₩14.27M"}
-]
-```
-
-**Step 4 — dry-run, then apply.**
-
-```bash
-python3 -m tools.deck_text --patch refresh.json --dry-run
-python3 -m tools.deck_text --patch refresh.json
-```
-
-Every entry must match **exactly once** on its slide. Zero matches or two
-matches refuses the whole patch and writes nothing — deliberately. A silent
-no-op would leave a stale number on the slide while the run log claims the
-refresh succeeded, which is precisely the failure this tool exists to prevent.
-If an entry refuses because the string appears twice, lengthen `old` until it
-is unique on that slide rather than reaching for a different tool.
-
-**Step 5 — check it still renders.** Numbers change length, and a longer
-string can overflow a stat card or push a table row into the footer:
-
-```bash
-soffice --headless --convert-to pdf docs/perishable_markdown_deck_v3.pptx
-pdftoppm -jpeg -r 80 perishable_markdown_deck_v3.pdf slide
-```
-
-Look at the slides you touched. If a replacement overflows, shorten the
-surrounding caption — never shrink the font, which breaks the deck's type
-scale.
-
-### Rules for the refresh
-
-- **Never invent a number.** If a report is missing, `deck_numbers` prints
-  `--`; leave the slide alone and say which slides could not be refreshed.
-  A plausible-looking wrong number on a leadership slide is the worst
-  possible output of this task.
-- **Only a gate-passing backtest.** The same rule that governs pasting
-  `tau_initial`. A number from a failing run must not reach the deck.
-- **Refresh `docs/design.md` in the same change.** The same quantities appear
-  in §8 and §12; `deck_numbers` tags the design sections alongside the slides.
-- **Report what moved.** List every slide changed and the old → new value, so
-  the next reader can tell a refresh from a rewrite.
-
-### Currently known stale (as of the 34-slide deck)
-
-These were carried over from an earlier run and could not be verified against
-the latest production reports. Check each against fresh `deck_numbers` output
-and correct or confirm it:
-
-| Slide | Shows | Suspected correct |
-| --- | --- | --- |
-| 2 | `₩14.7M` IL on the 2,000-episode sample | `₩14.27M` |
-| 18 | implied spend / budget `₩1,271 / day` (twice) | `₩1,230.9` vs `₩1,230.2` |
-| 24 | uncalibrated window sold ratios and `MAE 0.405 → 0.373` | confirm against the current model |
-| 31 | shadow line | refresh if the full-population run replaces the 3,000-episode sample |
-| 33 | the three owner thresholds framed as open decisions | they are now set — restate as decided, and re-derive `scrap_deterioration_pct` against the corrected control-arm floor first |
+- **Only from a gate-passing backtest** — the same rule that governs pasting
+  `tau_initial`. A number from a failing run must not reach a document.
+- **Never invent one.** If a report is missing, leave the figure alone and say
+  which one could not be refreshed. A plausible-looking wrong number in a
+  leadership document is the worst possible output of this task.
 
 ## Repo conventions
 
