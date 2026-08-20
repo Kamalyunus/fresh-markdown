@@ -178,6 +178,29 @@ def test_tau_moves_even_when_no_cell_reaches_the_information_threshold(cfg, tmp_
     assert reloaded.state["cells"]["vegetables"]["version"] == 0
 
 
+def test_the_posterior_carries_no_information_since_update_counter(cfg, tmp_path):
+    """PRD 13.4 originally specified a running counter and it was carried in
+    the artifact for a while, always reset and never incremented.
+
+    Adding it back would be a bug, not a schema restoration: the trigger reads
+    the UNCONSUMED BATCH, and nothing consumes a sub-threshold one, so a
+    counter incremented while the same outcomes are re-read next run double
+    counts them. A field that is permanently zero also reads as "no evidence
+    has accrued", which is the opposite of what a growing batch means.
+    """
+    posterior = _posterior(cfg, tmp_path)
+    for rec in posterior.state["cells"].values():
+        assert "information_since_update" not in rec
+
+    posterior.commit_update("vegetables", -1.1, 0.55, 20, 15.0, ["X1"],
+                            applied=True)
+    rec = PosteriorStore(cfg, path=str(tmp_path / "posterior.json")) \
+        .state["cells"]["vegetables"]
+    assert "information_since_update" not in rec
+    # the total that DID survive, and is the one to read
+    assert rec["accumulated_information"] == pytest.approx(15.0)
+
+
 def test_a_null_tau_initial_is_reported_not_crashed(cfg, tmp_path):
     """Before a gate-passing backtest there is nothing in force to calibrate."""
     blank = dict(cfg, exploration=dict(cfg["exploration"], tau_initial=None))

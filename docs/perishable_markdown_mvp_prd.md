@@ -547,12 +547,22 @@ One record per category. The persisted posterior is a **Normal summary**, not a 
     "std": 0.38,
     "n_obs": 340,
     "accumulated_information": 61.2,
-    "information_since_update": 4.1,
     "version": 14,
     "updated_at": "2026-09-18T02:00:00Z"
   }
 }
 ```
+
+There is deliberately **no `information_since_update` counter**. Earlier drafts
+carried one; §13.4 explains why the trigger is evaluated on the unconsumed
+batch instead. `accumulated_information` is the running total across committed
+revisions.
+
+Alongside the per-cell records the same file holds the exactly-once ledger
+(`processed_outcome_ids`), the cell assignment (`cell_of`), the prior's
+provenance (`prior_source`), and `tau` with its `tau_calibrated_through` stamp
+(§12.3). `tau` is production learning state and lives here rather than in
+config, which is hand-maintained.
 
 The grid exists only inside the update computation. This keeps storage trivial and makes the bounded-step projection of §13.4 well-defined.
 
@@ -667,6 +677,10 @@ tau_next      = tau × clip(budget_today / max(realised_cost, guard),
 
 `tau` is a **currency amount**, not a rate. It is compared against `Q(p_star) - Q(p)`, which is expected IL in won.
 
+The calibration runs inside `pipeline.update --apply`, behind the same operator gate as the posterior, and on every run — `tau` moves on **spend**, not on evidence, so it is calibrated whether or not any cell crossed `information_increment`. A day that explored and learned nothing still cost money, and that is what `tau` prices. `budget_today` and `realised_cost` are the **same two quantities §15.4's `exploration_cost_vs_budget` stop condition compares**, deliberately: one definition means the proportional correction and the suspension backstop cannot disagree about what "over budget" means, and `tau` starts shrinking well before the stop condition fires. A date stamp (`tau_calibrated_through`) makes the calibration exactly-once per day; without it two runs would apply the same ratio twice and move `tau` by its square.
+
+`tau` is persisted to the posterior artifact (§10.1), not written back to config: it is production learning state, and a running system must not edit its own hand-maintained source of truth. `exploration.tau_initial` is the launch value and the fallback until the first calibration; a production caller reads the artifact, not the config key, or `tau` stays pinned at its launch value forever.
+
 `tau_initial` is derived from the phase-0 replay as a quantile of the observed `Q(p_star) - Q(p)` distribution across feasible non-optimal prices — pick the quantile whose implied daily spend matches `budget_share_of_il`. The phase-0 run instead reported the share of hourly transitions carrying a markdown increase (0.5436), which is a rate and dimensionally wrong for this purpose; it must not be used as `tau_initial`. Budget scales down as the posterior narrows, so a converged system spends a quarter of the launch budget on learning. It never reaches zero, so drift remains detectable.
 
 ### 12.4 Safety
@@ -725,7 +739,14 @@ An episode-level random effect integrated by Gauss-Hermite quadrature recovers t
 
 ### 13.4 Update trigger and bounded step
 
-Updates are **incremental**. Apply an update to a cell whenever `information_since_update` reaches `information_increment`.
+Updates are **incremental**. Apply an update to a cell whenever the effective information in its **unconsumed batch** reaches `information_increment`.
+
+The batch is every eligible outcome not yet consumed by a committed revision, so it already spans however many days it took to accumulate; its information is recomputed from those outcomes on each run rather than added to a running counter. **This is deliberate, and it replaces the `information_since_update` counter earlier drafts specified.** Two reasons:
+
+- A counter incremented while the same outcomes are re-read on the next run **double counts** them. Nothing consumes a sub-threshold batch (§13.5), so it *is* re-read.
+- Nothing may be banked without the observations behind it. If a sub-threshold batch were marked consumed and only its scalar kept, the posterior would later step on the strength of an information count it no longer had the data to justify — and on a pilot small enough that no single day clears the threshold, every outcome would be discarded forever while the mean never moved.
+
+So the likelihood is evaluated over the whole accumulated batch each time, and the batch is consumed only by a revision that actually fires. `pipeline.update` reports `batch_oldest_outcome_age_days` so a batch that keeps growing without firing is visible long before the 21-day flat-posterior alert.
 
 Each update is bounded relative to the cell's pre-update values:
 
@@ -742,7 +763,7 @@ new_std  = max(raw_std,
 
 If either bound binds, flag the cell `bound_clipped` for operator review.
 
-Persist `(new_mean, new_std)`, increment `version`, add the batch's effective information to `accumulated_information`, and reset `information_since_update` to zero.
+Persist `(new_mean, new_std)`, increment `version`, add the batch's effective information to `accumulated_information`, add `n_obs`, and record the consumed outcome IDs — all in one atomic write (§13.5). Nothing is reset, because nothing was counted up.
 
 Bounded steps make frequent updating safe, which is what makes the system fast.
 

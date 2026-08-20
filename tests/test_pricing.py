@@ -27,6 +27,45 @@ def test_feasible_tiers_respect_cost_floor():
     assert np.allclose(np.diff(tiers), CFG["pricing"]["tier_step"])
 
 
+def test_zero_cost_never_offers_a_zero_price():
+    """A zero-cost row put d_max at 1.0, which put a 100% discount in the
+    action set, which crashed the solver.
+
+    mu(d) = mu_ref * ((1 - d)/(1 - d_ref))^eps with eps negative is
+    0 ** negative at d = 1 -- a ZeroDivisionError out of pricing.demand, from
+    inside pipeline.shadow, on the full-population run. The 3,000-episode
+    sample never drew a zero-cost episode, so the gate passed and the crash
+    waited for --max-episodes 0. Nothing upstream rejects a zero cost:
+    non_priceable tests `cost >= original_price`, so zero reads as maximally
+    priceable.
+    """
+    step = CFG["pricing"]["tier_step"]
+    tiers, d_max = dp_mod.feasible_tiers(10000.0, 0.0, step)
+    assert d_max == 1.0                      # the true cost floor, unchanged
+    assert 1.0 not in tiers
+    assert max(tiers) == pytest.approx(1.0 - step)
+    assert all(10000.0 * (1 - d) > 0 for d in tiers)
+
+    # the call that raised, end to end
+    res = dp_mod.solve(10000.0, 0.0, 3, [0.8, 0.8, 0.62, 0.41], 0.30,
+                       -1.0, 0.919, CFG, anchor_discount=None, entry=True)
+    assert np.isfinite(res.v_star)
+    # and at the widest |epsilon| the search may return, where the divergence
+    # at d -> 1 is steepest
+    deep = dp_mod.solve(10000.0, 0.0, 3, [0.8] * 4, 0.30,
+                        CFG["posterior"]["epsilon_min"], 0.919, CFG,
+                        anchor_discount=0.0, entry=False)
+    assert np.isfinite(deep.v_star)
+
+
+def test_a_tier_step_that_does_not_divide_one_still_excludes_zero_price():
+    """The exclusion is `price > 0`, not "drop the last tier"."""
+    tiers, _ = dp_mod.feasible_tiers(10000.0, 0.0, 0.5)
+    assert tiers == [0.0, 0.5]               # 1.0 dropped, 0.5 kept
+    tiers, _ = dp_mod.feasible_tiers(10000.0, 0.0, 0.3)
+    assert max(tiers) == pytest.approx(0.9)  # 0.9 < 1.0, nothing to drop
+
+
 def test_nb_pmf_tail_mass_folded():
     pmf, tail = nb_pmf_vector(mu=3.0, r=1.2, max_k=CFG["pricing"]["negbin_max_k"])
     assert pmf.sum() == pytest.approx(1.0)

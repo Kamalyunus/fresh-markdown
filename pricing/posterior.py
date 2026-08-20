@@ -57,7 +57,6 @@ class PosteriorStore:
         def record(mean, std):
             return {"mean": float(mean), "std": float(std), "n_obs": 0,
                     "accumulated_information": 0.0,
-                    "information_since_update": 0.0,
                     "version": 0,
                     "updated_at": pd.Timestamp.now("UTC").isoformat()}
 
@@ -119,10 +118,16 @@ class PosteriorStore:
         rec = self.state["cells"][cell]
         if not applied:
             return                       # nothing consumed, nothing persisted
+        # No `information_since_update` counter. PRD 13.4 specified one and it
+        # was carried here for a while, always reset and never incremented,
+        # because the trigger is evaluated on the UNCONSUMED BATCH rather than
+        # on a running total -- see `pipeline.update.run`. A field that is
+        # permanently zero reads as "no evidence has accrued", which is the
+        # opposite of what a growing batch means, so it is gone rather than
+        # kept for the schema's sake. `accumulated_information` is the total.
         rec["mean"], rec["std"] = float(new_mean), float(new_std)
         rec["version"] += 1
         rec["accumulated_information"] += effective_information
-        rec["information_since_update"] = 0.0
         rec["updated_at"] = pd.Timestamp.now("UTC").isoformat()
         rec["n_obs"] += n_new_obs
         self.state["processed_outcome_ids"].extend(outcome_ids)

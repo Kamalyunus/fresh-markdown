@@ -23,12 +23,31 @@ from pricing.demand import mu_at, nb_pmf_vector
 
 
 def feasible_tiers(original_price, cost, tier_step):
-    """{k * tier_step : 0 <= k * tier_step <= d_max}, ascending discounts."""
+    """{k * tier_step : 0 <= k * tier_step <= d_max}, ascending discounts.
+
+    A 100% discount is EXCLUDED: a zero price is not a price, and the demand
+    model is undefined there. mu(d) = mu_ref * ((1 - d)/(1 - d_ref))^eps
+    diverges as d -> 1 and raises outright at d = 1, since epsilon is negative
+    by construction and 0 ** negative is a ZeroDivisionError.
+
+    That tier is reachable whenever `cost` is 0, which nothing upstream
+    rejects: `non_priceable_dropped` tests `cost >= original_price`, so a zero
+    cost reads as maximally priceable (d_max = 1.0), and
+    `negative_quantities_dropped` drops negative costs, not zero ones. A
+    zero-cost row is almost certainly a missing cost rather than a free good,
+    but the action set must not depend on that being caught upstream -- this
+    is the layer that owns "which prices are legal", and a price of zero is
+    not one of them.
+
+    `d_max` is still returned as the true cost floor, so the decision event
+    records the economics rather than this correction.
+    """
     d_max = 1.0 - cost / original_price
     if d_max < 0:
         return [], d_max
     n = int(np.floor(d_max / tier_step + 1e-9))
-    return [round(k * tier_step, 6) for k in range(n + 1)], d_max
+    tiers = [round(k * tier_step, 6) for k in range(n + 1)]
+    return [d for d in tiers if d < 1.0], d_max
 
 
 def deepening_threshold_epsilon(original_price, cost, d):
