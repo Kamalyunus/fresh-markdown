@@ -127,3 +127,37 @@ class PosteriorStore:
         rec["n_obs"] += n_new_obs
         self.state["processed_outcome_ids"].extend(outcome_ids)
         self._atomic_write(self.path, self.state)
+
+    # ------------------------------------------------------------------ tau
+    # tau is production learning state in exactly the sense the posterior is:
+    # it is set from config ONCE at launch and moves thereafter from realised
+    # spend (12.3). It therefore lives here, in the file that already commits
+    # atomically and is already the one thing production writes -- not back
+    # into config.yaml, which is hand-maintained and would make a running
+    # system edit its own source of truth.
+
+    def tau(self, cfg):
+        """The exploration budget in force, in currency.
+
+        Falls back to `exploration.tau_initial` until the first calibration:
+        a launch that has spent nothing has nothing to calibrate from.
+        """
+        stored = self.state.get("tau")
+        return float(stored) if stored is not None \
+            else cfg["exploration"]["tau_initial"]
+
+    def tau_calibrated_through(self):
+        """The last date tau was calibrated for, or None."""
+        return self.state.get("tau_calibrated_through")
+
+    def commit_tau(self, tau, through_date):
+        """Persist a recalibrated tau, stamped with the date it consumed.
+
+        The stamp is the exactly-once guard: two `--apply` runs on the same
+        day would otherwise apply the same budget-vs-spend ratio twice and
+        move tau by its square.
+        """
+        self.state["tau"] = float(tau)
+        self.state["tau_calibrated_through"] = str(through_date)
+        self.state["tau_updated_at"] = pd.Timestamp.now("UTC").isoformat()
+        self._atomic_write(self.path, self.state)

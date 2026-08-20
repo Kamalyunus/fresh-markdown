@@ -17,6 +17,20 @@ Accumulated information is deflated by deff (13.3). Each update is bounded
 (13.4) and updates are exactly-once (13.5): the posterior store commits the
 revision and the consumed outcome IDs in a single atomic write.
 
+Two things move here, and they move on different evidence:
+
+  posterior mean/std   on INFORMATION -- only when a cell's effective
+                       information crosses `learning.information_increment`
+  tau                  on SPEND (12.3) -- every run, because a day that
+                       explored and learned nothing still cost money
+
+Both are persisted to `artifacts/posterior.json`, which is production learning
+state and the only file this command writes. `tau` lives there rather than in
+`config.yaml` so that a running system does not edit its own hand-maintained
+source of truth; `PosteriorStore.tau(cfg)` falls back to
+`exploration.tau_initial` until the first calibration, and is what a
+production caller should pass to `inference.decide`.
+
 The command refuses to apply while any hard event-quality gate fails (14.1).
 """
 
@@ -30,6 +44,7 @@ from scipy.stats import nbinom
 
 from common.config import load_config, deff
 from events.store import EventStore
+from pricing import explore
 from pricing.posterior import PosteriorStore, bounded_step
 
 
@@ -125,6 +140,73 @@ def grid_update(pairs, cell_record, cfg):
     }
 
 
+def tau_calibration(decisions, outcomes, posterior, cfg):
+    """Section 12.3: move tau toward the budget from what exploration spent.
+
+    Deliberately on the SAME two numbers `pipeline.monitor` compares for its
+    `exploration_cost_vs_budget` stop condition -- realised exploration cost
+    against `budget_today` on realised markdown IL, both over the whole event
+    window. One definition, so the proportional correction and the suspension
+    backstop cannot disagree about what "over budget" means: tau starts
+    shrinking well before the 2x stop condition fires, which is the ordering
+    that keeps exploration running.
+
+    Both sides cover the same window, so the RATIO is scale-free -- a batch
+    that carries forward does not double-count itself, because it grows on
+    both sides at once.
+
+    Returns a report block, always. `commit` is False when there is nothing
+    to calibrate from, which is a different thing from a ratio of 1.
+    """
+    from pipeline.monitor import business_metrics      # sibling; no cycle
+
+    tau_now = posterior.tau(cfg)
+    block = {"tau_before": tau_now, "tau_after": tau_now, "commit": False}
+
+    if tau_now is None:
+        block["skipped"] = ("exploration.tau_initial is null -- nothing in "
+                            "force to calibrate")
+        return block
+
+    dates = [o["finalized_at"][:10] for o in outcomes if o.get("finalized_at")]
+    if not dates:
+        block["skipped"] = "no finalized outcomes"
+        return block
+    through = max(dates)
+    if posterior.tau_calibrated_through() == through:
+        block["skipped"] = f"already calibrated through {through}"
+        block["through_date"] = through
+        return block
+
+    forced = [d for d in decisions if d["is_exploration"]]
+    realised = float(sum(d["exploration_cost"] for d in forced))
+    business = business_metrics(decisions, outcomes, cfg)
+    il_abs = (business.get("il_pct_aggregate") or {}).get("il_absolute")
+    cells = posterior.state["cells"]
+    if not il_abs or not cells:
+        block["skipped"] = ("no closed-episode IL to project a budget from"
+                            if not il_abs else "no posterior cells")
+        return block
+
+    # the WIDEST cell std, matching the monitor: the budget is sized for the
+    # cell that still has the most to learn, not the average one
+    widest_std = max(rec["std"] for rec in cells.values())
+    budget = explore.budget_today(il_abs, widest_std, cfg)
+    block.update({
+        "through_date": through,
+        "realised_exploration_cost": round(realised, 1),
+        "markdown_il": round(float(il_abs), 1),
+        "widest_posterior_std": widest_std,
+        "budget": round(budget, 1),
+        "tau_after": round(explore.tau_next(tau_now, budget, realised, cfg), 2),
+        "commit": True,
+    })
+    block["clipped"] = block["tau_after"] in (
+        round(tau_now * cfg["exploration"]["tau_adjust_clip"][0], 2),
+        round(tau_now * cfg["exploration"]["tau_adjust_clip"][1], 2))
+    return block
+
+
 def run(cfg, apply=False, events_root=None, posterior_path=None):
     store = EventStore(cfg, root=events_root)
     posterior = PosteriorStore(cfg, path=posterior_path)
@@ -171,12 +253,21 @@ def run(cfg, apply=False, events_root=None, posterior_path=None):
             posterior.commit_update(cell, new_mean, new_std, len(pairs),
                                     eff_info, outcome_ids, applied=trigger)
 
+    # tau moves on SPEND, not on evidence, so it is calibrated whether or not
+    # any cell crossed the information threshold -- a day that explored and
+    # learned nothing still cost money, and that is exactly what tau prices.
+    report["tau_calibration"] = tau_calibration(
+        store.load_decisions(), store.load_outcomes(), posterior, cfg)
+
     if apply:
         if hard_fail:
             report["refused"] = (f"hard event-quality gate(s) failed: {hard_fail}; "
                                  "no update applied")
         else:
             report["applied"] = True
+            tc = report["tau_calibration"]
+            if tc["commit"]:
+                posterior.commit_tau(tc["tau_after"], tc["through_date"])
     return report
 
 
@@ -201,6 +292,16 @@ def main():
               f"mean {c['mean_before']:+.3f}->{c['proposed_mean']:+.3f} "
               f"std {c['std_before']:.3f}->{c['proposed_std']:.3f}"
               + ("  [CLIPPED -> operator review]" if c["bound_clipped"] else ""))
+
+    tc = report["tau_calibration"]
+    if tc.get("skipped"):
+        print(f"tau: {tc['tau_before']} unchanged -- {tc['skipped']}")
+    else:
+        print(f"tau: {tc['tau_before']} -> {tc['tau_after']}  "
+              f"(spent {tc['realised_exploration_cost']} of {tc['budget']} "
+              f"through {tc['through_date']})"
+              + ("  [CLIP BOUND]" if tc.get("clipped") else ""))
+
     if "refused" in report:
         print("REFUSED:", report["refused"])
     elif report["applied"]:

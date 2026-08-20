@@ -91,6 +91,46 @@ python3 -m pipeline.assurance          # the same checks, standalone
 python3 -m pipeline.status             # the dozen numbers that decide something
 ```
 
+### What `--apply` moves, and on what evidence
+
+`artifacts/posterior.json` is the only file production writes, and **two
+different things move in it on two different kinds of evidence**:
+
+| moves | on | when |
+| --- | --- | --- |
+| `mean`, `std`, `version`, `accumulated_information`, `n_obs` | INFORMATION | only when a cell's effective information crosses `learning.information_increment` |
+| `processed_outcome_ids` | — | with the revision that consumed them, in the same atomic write |
+| `tau`, `tau_calibrated_through` | SPEND (§12.3) | every run, whether or not any cell triggered |
+
+**`tau` moves on spend, not on evidence.** A day that explored and learned
+nothing still cost money, and that is exactly what `tau` prices — so it is
+calibrated on every `--apply`, independently of the information threshold.
+`tau` lives in `posterior.json`, not `config.yaml`: it is production learning
+state in the same sense the posterior is, and a running system must not edit
+its own hand-maintained source of truth. `PosteriorStore.tau(cfg)` falls back
+to `exploration.tau_initial` until the first calibration, and **is what a
+production caller should pass to `inference.decide`** — reading
+`config.exploration.tau_initial` directly pins `tau` at its launch value
+forever. (`pipeline.shadow` reads config on purpose: nothing has been spent
+yet, so there is nothing to calibrate from.)
+
+`tau_calibration` deliberately uses **the same two numbers `pipeline.monitor`
+compares** for its `exploration_cost_vs_budget` stop condition — realised
+exploration cost against `budget_today` on realised markdown IL, both over the
+whole event window. One definition, so the proportional correction and the
+suspension backstop cannot disagree about what "over budget" means: `tau`
+starts shrinking well before the 2× stop condition fires, which is the ordering
+that keeps exploration running rather than switching it off. The date stamp is
+the exactly-once guard — two runs in a day would otherwise apply the same
+ratio twice and move `tau` by its square.
+
+Everything else in that file is static by design: `cell_of` (cell assignment
+does not move during the MVP window) and `prior_source` (provenance). One
+field is **dead**: `information_since_update` is initialised to 0.0, reset to
+0.0, and never incremented or read — PRD §13.4 specifies a running counter
+that the implementation replaced with batch recomputation (`update.py`
+explains why). It is permanently zero; read `accumulated_information` instead.
+
 ## The frozen artifacts are one bundle
 
 Six artifacts are fitted in sequence and frozen together, and they are only
