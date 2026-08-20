@@ -893,8 +893,11 @@
   <h3 style="margin-top:30px">Step 1 — what we are solving for</h3>
   <p>
     Not a ratio: a <em class="term">solve</em>. We look only at <strong>anchor rows</strong>
-    — rows priced within 2.5pp of the reference discount, where the price-response term is
-    exactly 1 and so cannot contaminate what we are measuring. Then we find the factor
+    — rows priced within <strong>±1.25pp</strong> of the reference discount, half a tier step,
+    so that the reference tier is the nearest one. There the price-response term is
+    exactly 1 and cannot contaminate what we are measuring. (The demand model's velocity
+    features use a wider ±2.5pp band for the same idea: they need row count more than they
+    need precision, and they are not solving for a correction.) Then we find the factor
     <code>f</code> that makes total predicted sales match total actual sales,
     <em>after</em> censoring:
   </p>
