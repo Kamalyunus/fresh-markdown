@@ -426,6 +426,24 @@ max(0, this starting_inventory - units_sold)`), never by comparing against
 test would flag every episode's last hour. In production a restock can still
 happen after the fact; the outcome records it with `adjustment_reason`.
 
+**Dropping restocked episodes is an OFFLINE rule. Production absorbs them, and
+`tests/test_restock.py` is what holds that claim up** — the question gets asked
+every time someone reads the filter table. The agent is a policy re-solved each
+hour rather than a plan, so a restock is just a larger `q` on the next call;
+the monotone price constraint does not bind the wrong way, because more stock
+argues for a *deeper* discount and deeper is always allowed; and
+`pipeline.monitor` reads scrap off the LAST row's `starting_inventory`, which
+already carries the restock, so IL comes out right. The test runs a
+three-hour episode that gains five units mid-window and asserts IL to the won.
+
+One thing genuinely degrades, and is pinned rather than fixed. `grid_update`
+flags censoring with `units_sold >= starting_inventory`, which is wrong for an
+hour that sold MORE than it opened with because stock arrived during it:
+demand was observed exactly, and the likelihood uses "at least
+`starting_inventory`" instead. That discards information rather than biasing
+epsilon — the safe direction — so it is recorded, not repaired. Make it an
+exact count if you like, but do it deliberately: the test will tell you.
+
 **Any outcome whose inventory does not reconcile MUST name a reason or it is
 quarantined** — and a quarantined outcome never lands, so event completeness
 drops and the shadow gate fails. Exactly two reasons are legitimate:
