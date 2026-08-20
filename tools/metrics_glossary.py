@@ -1,0 +1,683 @@
+"""tools.metrics_glossary -- every measured quantity, and the component it sits in.
+
+    python3 -m tools.metrics_glossary        # writes docs/metrics.html
+
+The four reports carry ~725 fields between them. `pipeline.status` prints the
+ten that gate a decision, which is the right tier-one view and deliberately
+not a reference. This is the reference: what a quantity means, what unit it is
+in, which component writes it, and whether anything downstream reads it.
+
+The catalogue below is data, not prose -- short strings in a table -- so it
+lives in Python rather than in partial files. What keeps it honest is
+`tests/test_metrics_glossary.py`, which cross-checks the entries that HAVE a
+machine-readable source of truth: the two event schemas, the artifact list,
+and the status gate names. Those three drift silently; the rest is prose that
+a human must keep true, and the entries say so by living in one place.
+
+Units are stated because getting one wrong has already cost this project a
+launch value: `tau` is a CURRENCY amount and phase 0 first reported a rate for
+it, which is dimensionally meaningless against `Q(p*) - Q(p)`.
+"""
+
+import html
+import pathlib
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+OUT = ROOT / "docs" / "metrics.html"
+
+# unit -> how it is displayed. Kept short: the badge is scanned, not read.
+UNITS = {
+    "won": "₩", "rate": "0–1", "pct": "%", "count": "n", "ratio": "×",
+    "pp": "pp", "days": "d", "hours": "h", "secs": "s", "exp": "ε",
+    "id": "id", "verdict": "✓/✗", "text": "…",
+}
+
+# (name, unit, meaning, read_by)  -- read_by "" means diagnostic only.
+# GATE marks a quantity that blocks or suspends something.
+CATALOGUE = [
+
+("Population", "bootstrap.prepare_data → artifacts/split_manifest.json",
+ "The rows every other number is measured on. Frozen at launch.", [
+  ("data_quality_waterfall", "count",
+   "Rows and episodes remaining after each of the 13 filter stages, in order. "
+   "The first entry is `raw`.", "every figure traces back through it"),
+  ("episode_rule", "text",
+   "The persisted definition of an episode: a maximal run of consecutive hourly "
+   "rows for one SKU × FC over which the source hours-remaining counter "
+   "decrements by one per elapsed hour. NOT keyed by date.",
+   "production must derive identical boundaries"),
+  ("split.train / calib / test", "text",
+   "Date windows, fixed before any model was fit. An episode belongs wholly to "
+   "the split its window STARTED in.", "the calibration gate, which must not grade its own fit"),
+ ]),
+
+("Phase 0 — is this problem tractable?", "bootstrap.measure → reports/phase0.json",
+ "Measured once on raw history, before anything is modelled. Each `m` is a PRD "
+ "deliverable, so none can be dropped.", [
+  ("m1 · cost_ratio_pct", "pct",
+   "Unit cost as a share of full price. Sets how much discounting room exists at all.", ""),
+  ("m1 · d_max_pct", "pct",
+   "The feasible discount ceiling, `1 − cost/price`, in percent. The cost floor "
+   "expressed in discount space.", "the action set is built from it"),
+  ("m1 · share_non_explorable", "rate",
+   "Share of episodes with too few feasible tiers to experiment on at all.",
+   "learning throughput"),
+  ("m2 · discount_std_pp", "pp",
+   "Spread of discounts within one SKU × FC × hour cell. Near zero means the "
+   "legacy rule was deterministic and history carries no price variation to learn from.",
+   "why elasticity is unidentifiable from history"),
+  ("m3 · rho", "rate",
+   "Correlation between hours inside one episode, on a category × hour proxy "
+   "computed BEFORE any model exists. Diagnostic only — never paste this one.",
+   "superseded by artifacts/rho.json"),
+  ("m3 · implied_deff", "ratio",
+   "The evidence deflator implied by m3's rho. Same caveat.", ""),
+  ("m4 · zero_sale_rate", "rate",
+   "Share of hours selling nothing. Around three quarters. This is why accuracy "
+   "is gated on an aggregate ratio rather than on MAE.", ""),
+  ("m5 · overall_censored_hour_rate", "rate",
+   "Share of hours where sales hit inventory, so demand is known only as a lower bound.",
+   "the censored likelihood everywhere"),
+  ("m5 · episodes_reaching_zero_inventory", "rate",
+   "Share of episodes that sold out. Their windows are short BECAUSE they sold out, "
+   "which is the lookahead bias `extend_to_window` exists to remove.", ""),
+  ("m6 · il_pct_aggregate", "rate",
+   "Inventory Loss as a ratio of sums: (discount given away + scrap at cost) ÷ "
+   "(full-price value of units sold). Never averaged per episode — the denominator "
+   "is zero for a zero-sale episode.", "the business baseline"),
+  ("m6 · il_absolute_total", "won",
+   "The same loss in currency, always reported alongside the ratio.", ""),
+  ("m6 · il_pct_ratio_se_clustered", "rate",
+   "Standard error of IL%, clustered by SKU × FC. Pasted into config; it sizes "
+   "the A/B.", "ab_test minimum detectable effect"),
+  ("m7 · episodes_per_category_per_week", "count",
+   "Volume per category. Below `min_episodes_per_week_for_cell` a category has no "
+   "posterior cell of its own and pools into the global one.", "cell assignment"),
+  ("m8 · entry_hour", "text",
+   "Distribution of the episode's first priced hour. Elasticity identification uses "
+   "entry rows ONLY, so this is the population that estimate is drawn from.", ""),
+  ("m11 · episode_endings", "count",
+   "Splits episodes three ways — `completed` (leftover IS scrap), `sold_out_early` "
+   "(no scrap by construction), `truncated` (scrap UNKNOWN). Truncated episodes are "
+   "excluded from scrap and IL aggregates, with the excluded share reported.",
+   "every scrap and IL figure"),
+ ]),
+
+("Demand model", "bootstrap.train_baseline → artifacts/baseline_model.txt, calibration.json",
+ "The frozen forecaster. It answers exactly one question and is graded on exactly that.", [
+  ("mu_ref", "count",
+   "Expected units next hour AT THE REFERENCE DISCOUNT. The price feature is "
+   "overwritten to `d_ref` at inference, always, so the model never expresses a "
+   "price effect — that is ε's job.", "the DP, every hour"),
+  ("level factor", "ratio",
+   "One multiplicative correction per subcategory, blended toward its parent "
+   "category with a pseudo-count of 100 anchor units. SOLVED on the censored "
+   "basis, not divided out.", "μ_ref at inference, when apply_level_calibration is true"),
+  ("anchor row", "text",
+   "A row priced within ±1.25pp (half a tier step) of the category reference "
+   "discount, so the price-response term is exactly 1. **The velocity features "
+   "use a wider ±2.5pp band** — same word, two bands, deliberately.",
+   "the calibration solve and the gate"),
+  ("sku_ref_sales_rate_30d", "rate",
+   "Trailing 30-day anchor-hour sales rate at SKU × FC, falling back to SKU pooled "
+   "across FCs. Point-in-time: an episode never sees its own day.", "the model"),
+  ("prior_episode_ref_sales_rate", "rate",
+   "The same signal from that SKU × FC's previous clearance window. Computed at "
+   "episode grain, NaN when that episode had no anchor hours.", "the model"),
+ ]),
+
+("Dispersion and correlation", "bootstrap.fit_dispersion → artifacts/r_lookup.json, rho.json",
+ "Two numbers that never touch a price. They govern how much a piece of evidence "
+ "is worth, and how confident the agent may be.", [
+  ("r", "count",
+   "Negative-binomial dispersion, `Var[D] = μ + μ²/r`. Small is lumpy, large is "
+   "near-Poisson. Fitted per subcategory by maximum likelihood with censored hours "
+   "entering as `P(D ≥ q)`. Clamped only on the HIGH side.",
+   "every probability the DP uses, and every posterior update"),
+  ("rho", "rate",
+   "Correlation between hours within one episode, measured on the FITTED MODEL'S "
+   "residuals at the working elasticity. **0.3103.** Changing "
+   "`posterior.prior.fallback_mean` invalidates it.", "GATE — mirrored into config"),
+  ("mean_forced_hours_per_episode", "hours",
+   "Average number of hours per episode that carry forced (randomised) prices. "
+   "**8.563.** The cluster size in the design effect.", "GATE — mirrored into config"),
+  ("deff", "ratio",
+   "Design effect `1 + (m − 1)·ρ` = **3.347**. Divides Fisher information before it "
+   "is compared to the learning threshold: 8.563 correlated hours carry the "
+   "information of about 2.56 independent ones.", "every posterior update"),
+ ]),
+
+("Elasticity prior", "bootstrap.estimate_prior → artifacts/prior.json",
+ "The cold-start guess at price response, and the record of why it is a guess.", [
+  ("epsilon_naive", "exp",
+   "Elasticity fitted on entry rows with no controls. Contaminated by the clock.", ""),
+  ("epsilon_controlled", "exp",
+   "The same fit with hour, day and category controls — the bracket's other end. "
+   "The two together are the bracket.", "the acceptance gate"),
+  ("source", "text",
+   "`bracket` when history identified a usable range, `fallback` when it did not. "
+   "**Fallback in all 16 categories** — a rejected bracket is the DESIGNED outcome, "
+   "not a failure.", "GATE — reported by pipeline.status"),
+  ("mean / std", "exp",
+   "The prior in force per cell. **−1.0 ± 0.6** at launch. ε is always negative; "
+   "`epsilon_max` (−0.05) is a sign constraint, never a bound to widen.",
+   "the DP until production learns better"),
+ ]),
+
+("Replay — fidelity", "backtest → reports/backtest.json → fidelity",
+ "Does the frozen model still describe the world? This is the backtest's most "
+ "important job, and it is NOT evidence the policy works.", [
+  ("fidelity_episode_sold_ratio", "ratio",
+   "Actual ÷ predicted sales on the gate window. Above 1 the model under-predicts. "
+   "The pooled ratio embeds the unidentifiable prior's slope, so it is reported as "
+   "a diagnostic rather than used as the verdict.", ""),
+  ("level_bias_at_anchor", "ratio",
+   "The same ratio restricted to anchor rows, where the price term is 1. This is "
+   "the model's only production job.", "GATE — the calibration gate metric"),
+  ("calibration_gate_band", "ratio",
+   "**[0.90, 1.10]** — roughly 2σ of measured week-to-week demand volatility. Wide "
+   "enough not to fire on noise, tight enough to catch a stale model.", "GATE"),
+  ("gate_window", "text",
+   "Which split the gate is read on. Must be DISJOINT from the calibration fit "
+   "window, or the gate grades its own fit. Read the field; do not assume.", "GATE"),
+  ("slope_ratio_by_discount_gap", "ratio",
+   "Actual ÷ predicted bucketed by distance from the reference discount. Flat and "
+   "offset means LEVEL error (calibration fixes it). Right at the anchor and wrong "
+   "either side means SLOPE error (only the prior or learning fixes it).",
+   "which remedy the gate decision tree sends you to"),
+  ("fidelity_hourly_mae / rmse / bias", "count",
+   "Per-hour error in units. On a series that is ~78% zeroes an MAE near the mean is "
+   "expected; this is why the gate is on a ratio, not on MAE.", ""),
+  ("fidelity_nz_mae / nz_bias", "count",
+   "The same errors restricted to hours that actually sold something.", ""),
+  ("fidelity_zero_acc", "rate",
+   "How often the model calls a zero-sale hour correctly (predicting under half a unit).", ""),
+  ("sold_over_censored_prediction", "ratio",
+   "Realised sales ÷ `E[min(D, q)]` — the CENSORED basis. Everything that compares "
+   "predictions to reality must use this.", "the level factor solve"),
+  ("sold_over_raw_mu", "ratio",
+   "The same against raw μ. Shown only to make the gap visible: a true correction of "
+   "1.45 fits as 0.68 on this basis — the wrong side of 1.", ""),
+  ("censoring_shrinkage", "ratio",
+   "Censored total ÷ raw μ total. How much the inventory ceiling removes.", ""),
+  ("anchor_ratio_by_rate_history", "ratio",
+   "The anchor ratio split by whether the SKU had velocity history. `no_history` far "
+   "above `with_history` means new assortment, not a macro trend.",
+   "distinguishing wobble from trend"),
+  ("level_mix_decomposition", "ratio",
+   "Is weekly movement in the anchor ratio demand drift, or a change in which SKUs "
+   "entered the cohort? Per-SKU ratios held fixed while composition varies.", ""),
+  ("calibration_window_sweep", "ratio",
+   "Rolling-origin test of the calibration mechanism across candidate trailing "
+   "windows. Answers 'how long should the fit window be' with data.", ""),
+ ]),
+
+("Replay — policy", "backtest → reports/backtest.json → policy_deltas",
+ "What the DP would have done. **Replay is never evidence the policy works** — the "
+ "A/B is. Read these as internal consistency only.", [
+  ("actual_il / actual_il_pct", "won",
+   "Observed-world inventory loss under the legacy prices that really ran.", ""),
+  ("legacy_model_il", "won",
+   "Legacy prices scored UNDER THE MODEL. The honest comparator.", "the policy verdict"),
+  ("dp_il", "won",
+   "DP prices scored under the same model.", "the policy verdict"),
+  ("policy_gap_like_for_like", "won",
+   "`dp_il − legacy_model_il`. Same demand generator both arms, so model bias "
+   "cancels. **Never compare `actual_*` against `dp_*`** — that charges all model "
+   "bias to the DP.", "the only defensible policy statement in replay"),
+  ("actual_clearance / dp_clearance", "rate",
+   "Share of stock sold before the window closed, per arm.", ""),
+  ("actual_mean_discount / dp_mean_discount", "rate",
+   "Average discount applied per arm. The DP opens far shallower and holds.", ""),
+  ("tau_initial", "won",
+   "The exploration budget's launch value: the currency quantile of the "
+   "`Q(p*) − Q(p)` distribution whose implied daily spend matches "
+   "`budget_share_of_il`. **A CURRENCY AMOUNT, never a rate.** Paste only from a "
+   "GATE-PASSING backtest.", "GATE — blocks launch while null"),
+  ("cost_distribution_quantile", "rate",
+   "Where `tau_initial` landed in the cost distribution. Sanity check on the solve.", ""),
+ ]),
+
+("Thresholds", "bootstrap.derive_thresholds → reports/thresholds.json",
+ "Evidence for the values only the owner may set.", [
+  ("target_mde_rel", "rate",
+   "The relative effect size the A/B must be able to detect.", "GATE — owner-set"),
+  ("recommended_duration_weeks", "days",
+   "How long the A/B must run to reach that effect size. The duration curve is flat, "
+   "so more weeks buy little.", ""),
+  ("three_sigma / three_sigma_robust", "rate",
+   "Noise floor of a guardrail series — raw and outlier-resistant. A floor above 1.0 "
+   "means the series swings by more than its own level, and NO threshold on that "
+   "basis is both safe and useful.", "GATE — guardrail floors"),
+  ("guardrail_noise (trailing basis)", "rate",
+   "Each day against a trailing 28-day mean. Applies only BEFORE an A/B is running.", ""),
+  ("guardrail_noise_control_arm_basis", "rate",
+   "Same-day treatment vs control, using the identical arm hash the monitor uses and "
+   "smoothed the same way. This is what binds once both arms are populated.", ""),
+  ("guardrail_threshold_recommendation", "verdict",
+   "Reports BOTH floors, names the binding one, and stamps a verdict. `TOO TIGHT` "
+   "and `CLEARS THE FLOOR BUT LIKELY INERT` are both blocking, not advisory.",
+   "GATE — read by pipeline.status"),
+ ]),
+
+("Shadow", "pipeline.shadow → reports/shadow.json",
+ "The full decision path against live data with no price applied. The last gate "
+ "before anything is priced for real.", [
+  ("event_completeness", "rate",
+   "Outcomes landing per decision. **≥ 0.99.** Quarantined outcomes do not land, so "
+   "a missing `adjustment_reason` shows up here first.", "GATE — shadow exit"),
+  ("matched_decision_rate", "rate",
+   "Decisions that got an outcome back. **≥ 0.99.**", "GATE — shadow exit"),
+  ("cost_floor_violations", "count",
+   "Prices below cost. **Must be exactly zero** — the action set makes them "
+   "unrepresentable, so any count is a defect, not a tolerance.", "GATE — shadow exit"),
+  ("window.sampled / population_episodes", "count",
+   "Whether the run sampled and out of how many. **Quote the sampling caveat "
+   "whenever you quote the violation count**: the 3,000-episode default once passed "
+   "on a sample that hid a crash the full run found.", ""),
+  ("state_rejected_count", "count",
+   "States refused rather than priced. Refusal is the designed response to an "
+   "implausible state, so a non-zero count is information, not failure.", ""),
+  ("effective_information_total", "count",
+   "Fisher information for ε the run would have bought, after deff deflation. "
+   "Accumulated on EXPLORATION decisions only.", ""),
+  ("episodes_per_bounded_update", "count",
+   "`information_increment ÷ effective information per episode`. Divide by the "
+   "pilot's daily episode count for the evidence-side floor; the binding constraint "
+   "is whichever is larger, that or the calendar.", "weeks-to-convergence"),
+  ("realised_vs_predicted_sold_ratio_at_legacy_price", "ratio",
+   "The production continuation of the calibration gate, and the first place "
+   "frozen-baseline drift shows.", ""),
+  ("solver_latency_p95_s", "secs",
+   "95th percentile DP solve time.", ""),
+ ]),
+
+("Decision event", "inference.decide → events_store/decisions.jsonl",
+ "36 required fields per priced hour. Written by the service; an integrating team "
+ "produces none of it. Full field list in the event contract.", [
+  ("expected_il", "won",
+   "Expected inventory loss under the APPLIED action — the objective. Positive here; "
+   "the DP's internal value is its negative, because the solver maximises value and "
+   "every term is a cost.", "monitoring, and the reproduction check"),
+  ("mu_ref_path", "count",
+   "The FULL remaining-hours forecast, one entry per remaining hour. Its length must "
+   "equal `hours_remaining`. Without it a decision cannot be recomputed.",
+   "GATE — assurance reproduction"),
+  ("anchor_discount", "rate",
+   "The discount already in force, which fixed the action set. `null` at entry.",
+   "GATE — assurance reproduction"),
+  ("action_set_size", "count",
+   "Actions allowed at THIS decision after the no-price-increase constraint. Distinct "
+   "from the 25-tier grid, and what explorability is judged on.", ""),
+  ("exploration_cost", "won",
+   "`Q(p*) − Q(p)` for the applied tier: expected IL given up to run the experiment. "
+   "Zero when not exploring.", "the tau controller and the budget stop condition"),
+  ("affordable_set_size", "count",
+   "How many alternatives cost no more than `tau`. **If non-empty, the draw happens** "
+   "— there is no exploration rate.", "assurance uniformity"),
+  ("tau_current", "won",
+   "The exploration budget in force at that decision.", ""),
+ ]),
+
+("Outcome event", "the integrating team → events_store/outcomes.jsonl",
+ "9 required fields, one per decision. This is the integration.", [
+  ("units_sold", "count",
+   "Zero-sale hours MUST be sent — around three quarters of hours, and the "
+   "observations that identify demand at a price.", "the censored likelihood"),
+  ("starting_inventory", "count",
+   "Units at the top of the hour. `units_sold ≥ starting_inventory` is what marks "
+   "the observation censored.", "the censored likelihood"),
+  ("applied_price", "won",
+   "The price ACTUALLY in force, not the one recommended. The gap between the two is "
+   "monitored.", "GATE — price mismatch ≤ 1%"),
+  ("is_stockout", "verdict",
+   "Whether demand hit the inventory ceiling. Any missing rate above zero fires a "
+   "stop condition. False on an episode-close write-off — that is not demand.",
+   "GATE — stop condition"),
+  ("execution_status", "text",
+   "Only `ok`, `success` or absent make the outcome eligible for learning. Anything "
+   "else is stored and excluded.", "learning eligibility"),
+  ("adjustment_reason", "text",
+   "Required when inventory does not reconcile. Exactly two are legitimate: "
+   "`intraday_restock` and `episode_close_write_off` (~49.5% of episodes).",
+   "GATE — event completeness"),
+ ]),
+
+("Learning", "pipeline.update → artifacts/posterior.json",
+ "The only file production writes. Two things move in it, on two different kinds "
+ "of evidence.", [
+  ("information_pending", "count",
+   "Effective information in the UNCONSUMED batch, recomputed each run. There is no "
+   "stored counter — a sub-threshold batch is left unconsumed and re-evaluated whole.", ""),
+  ("information_required", "count",
+   "**12.0** — the threshold a cell's batch must clear. SET, not derived from data.",
+   "GATE — whether the posterior moves"),
+  ("batch_oldest_outcome_age_days", "days",
+   "How long the batch has been accumulating without firing. Surfaces a stalled "
+   "learning loop long before the 21-day flat-posterior alert.", ""),
+  ("accumulated_information", "count",
+   "Running total across COMMITTED revisions. The artifact-level survivor of the "
+   "old pending counter.", ""),
+  ("bound_clipped", "verdict",
+   "Whether the bounded step bound. Mean moves at most 0.15, std shrinks at most 25%, "
+   "floored at `min_std`. A clipped cell is flagged for operator review.", ""),
+  ("tau", "won",
+   "The exploration budget in force. Recalibrated on **spend, not evidence**, on "
+   "every `--apply` — a day that explored and learned nothing still cost money.", ""),
+  ("tau_calibrated_through", "text",
+   "The last date tau consumed. The exactly-once guard: two runs in a day would "
+   "otherwise move tau by the square of the ratio.", ""),
+  ("processed_outcome_ids", "id",
+   "The exactly-once ledger. An outcome is marked processed ONLY when a revision "
+   "actually consumes it.", "GATE — exactly-once"),
+ ]),
+
+("Monitoring — business", "pipeline.monitor → reports/monitor.json → business",
+ "Is the business all right? Section 15 family one.", [
+  ("il_pct_aggregate", "rate",
+   "Live IL%, always a ratio of sums and always reported with its denominator.", ""),
+  ("il_pct_by_arm", "rate",
+   "The same split by A/B arm, using the shared arm hash. The comparison the "
+   "experiment reads out on.", ""),
+  ("episodes_excluded_still_running", "count",
+   "In-flight episodes held out. Their leftover is stock on the shelf, not scrap in "
+   "the bin — booking it would count it today and something different tomorrow.", ""),
+  ("sell_through", "rate", "Units sold ÷ units that entered the window.", ""),
+  ("waste_units", "count", "Units scrapped at the close.", ""),
+ ]),
+
+("Monitoring — learning", "pipeline.monitor → reports/monitor.json → learning",
+ "Is the loop actually learning? Section 15 family two.", [
+  ("posterior_by_cell", "exp",
+   "Mean, std, n_obs, accumulated information and version per cell.", ""),
+  ("posterior_std_flat_alert", "days",
+   "Cells whose std has not moved for N days. Std moves only when an update commits, "
+   "so 'flat for N days' is exactly 'no committed update in N days'.",
+   "the 21-day dead-loop alert"),
+  ("forced_decision_count", "count", "Decisions that explored.", ""),
+  ("affordable_set_empty_rate", "rate",
+   "Share of decisions with nothing affordable to explore. High means tau is too "
+   "tight or the action sets are too narrow.", ""),
+  ("mean_forced_log_price_ratio", "ratio",
+   "Average |log price ratio| on forced decisions. Information goes as its SQUARE, "
+   "so this drives learning speed more than the count does.", ""),
+  ("realised_exploration_cost", "won",
+   "What exploration actually spent.", "GATE — vs 2× budget, and the tau controller"),
+ ]),
+
+("Monitoring — safety", "pipeline.monitor → reports/monitor.json → safety",
+ "Is the plumbing sound? Section 15 family three. Three of these can suspend "
+ "exploration.", [
+  ("duplicate_or_unmatched_rate", "rate",
+   "Repeated ids plus outcomes with no matching decision. **≤ 1%.**", "GATE — stop condition"),
+  ("applied_vs_recommended_price_mismatch", "rate",
+   "Outcomes whose applied price differs from the decision's by more than 1e-6. "
+   "**≤ 1%.** The 'did our price go live' check.", "GATE — stop condition"),
+  ("missing_stockout_field_rate", "rate",
+   "Outcomes without `is_stockout`. **Must be exactly zero.**", "GATE — stop condition"),
+  ("quarantined_event_count", "count",
+   "Events written to quarantine with their validation failure attached. Nothing is "
+   "ever silently dropped.", ""),
+  ("realised_vs_predicted_sold_ratio", "ratio",
+   "Realised revenue base ÷ predicted. Production's continuation of the calibration gate.", ""),
+ ]),
+
+("Assurance", "pipeline.assurance → reports/assurance.json",
+ "Are the FROZEN ARTIFACTS still a description of the world we price in? Verdicts "
+ "are PASS / FAIL / **INSUFFICIENT** — a thin window says so rather than passing.", [
+  ("reproduction · mismatch_rate", "rate",
+   "Share of logged decisions that do not re-solve to themselves from their own "
+   "event payload. The DP is deterministic, so any mismatch means config, artifact, "
+   "code or a library moved underneath it.", "GATE — operator gate"),
+  ("reproduction · decisions_skipped_no_inputs", "count",
+   "Events that cannot be replayed because they predate `mu_ref_path`. Skipped, "
+   "never silently counted as passing.", ""),
+  ("dispersion · bins_flagged", "count",
+   "Predicted-μ bins where realised zero-sale or stockout rates diverge from "
+   "`NB(μ, r)`. Both statistics are EXACT under censoring; a variance comparison "
+   "would not be.", "GATE — operator gate"),
+  ("correlation · rho_live vs rho_frozen", "rate",
+   "ρ re-measured on live residuals AT THE WORKING ELASTICITY — the same basis "
+   "`fit_dispersion` used. Measuring at the posterior mean would show drift that is "
+   "not there.", "GATE — operator gate"),
+  ("exploration · chi_square / p_value", "ratio",
+   "Tests that the applied tier is a uniform draw from the reconstructed affordable "
+   "set. Uniformity is what makes the evidence causal.", "GATE — operator gate"),
+  ("exploration · affordable_but_not_explored", "count",
+   "Decisions reporting a non-empty affordable set and no exploration. The two "
+   "disagree, and `select()` cannot produce that.", "GATE"),
+ ]),
+
+("Status board", "pipeline.status",
+ "The ten checks that gate a decision, each with the figure behind it and where to "
+ "look when red. Computes nothing. Exit code 1 on any FAIL. **Start here.**", [
+  ("launch blockers", "verdict", "Config values strict mode refuses to start without.", "GATE"),
+  ("artifact bundle", "verdict",
+   "Do the frozen artifacts form ONE bundle, unedited since sealing? Mixed vintages "
+   "and edited files are separate failures with different remedies.", "GATE"),
+  ("artifact mirrors", "verdict",
+   "Do the config pastes still match the artifacts they came from? Read the bundle "
+   "line FIRST — the check says they disagree, not which is stale.", "GATE"),
+  ("calibration gate", "verdict", "The level at the anchor, in band.", "GATE"),
+  ("elasticity prior", "verdict", "Source and how many categories accepted a bracket.", ""),
+  ("exploration tau", "verdict", "What is in force, and the latest derivation.", "GATE"),
+  ("shadow gate", "verdict", "Completeness, matched rate, cost-floor violations.", "GATE"),
+  ("guardrail floors", "verdict", "The two owner thresholds against their noise floors.", "GATE"),
+  ("stop conditions", "verdict",
+   "How many evaluated, how many fired, and how many CANNOT fire because their "
+   "threshold is null.", "GATE"),
+  ("assurance", "verdict", "The four live-data checks, with thin windows warned not passed.", "GATE"),
+ ]),
+]
+
+
+# ------------------------------------------------------------------ rendering
+CSS = """
+:root {
+  --ground:#F3F3F1; --surface:#FFFFFF; --sunk:#EAEAE6; --rule:#DEDED8;
+  --rule-firm:#C2C2B8; --ink:#1A1A18; --muted:#65645D; --faint:#8A897F;
+  --accent:#94282C; --accent-w:#F4E4E3; --gate:#7A5B12; --gate-w:#F6EEDA;
+  --display:"Source Serif 4",Georgia,serif;
+  --body:"Source Sans 3",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --data:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --ground:#131311; --surface:#1B1B18; --sunk:#212120; --rule:#2E2E2A;
+  --rule-firm:#43433C; --ink:#E9E8E2; --muted:#9C9B91; --faint:#807F76;
+  --accent:#E08A82; --accent-w:#331A19; --gate:#D9B36A; --gate-w:#332A14;
+}}
+:root[data-theme="dark"]{
+  --ground:#131311; --surface:#1B1B18; --sunk:#212120; --rule:#2E2E2A;
+  --rule-firm:#43433C; --ink:#E9E8E2; --muted:#9C9B91; --faint:#807F76;
+  --accent:#E08A82; --accent-w:#331A19; --gate:#D9B36A; --gate-w:#332A14;
+}
+*{box-sizing:border-box}
+body{background:var(--ground);color:var(--ink);font-family:var(--body);
+  font-size:16px;line-height:1.6;margin:0;padding:0 20px 110px;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:1000px;margin:0 auto}
+header.mast{padding:54px 0 26px}
+.eyebrow{font-family:var(--data);font-size:11px;font-weight:500;letter-spacing:.17em;
+  text-transform:uppercase;color:var(--accent);margin:0 0 16px}
+h1{font-family:var(--display);font-weight:600;font-size:clamp(30px,5vw,44px);
+  line-height:1.08;letter-spacing:-.015em;text-wrap:balance;margin:0 0 18px}
+.standfirst{font-size:17.5px;line-height:1.55;color:var(--muted);max-width:62ch;margin:0}
+.standfirst strong{color:var(--ink);font-weight:600}
+
+/* filter bar */
+.bar{position:sticky;top:0;z-index:30;background:var(--ground);
+  border-bottom:1px solid var(--rule-firm);padding:12px 0;margin-bottom:8px}
+.bar .inner{max-width:1000px;margin:0 auto;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+#q{flex:1 1 260px;min-width:0;font-family:var(--data);font-size:14px;color:var(--ink);
+  background:var(--surface);border:1px solid var(--rule-firm);border-radius:5px;
+  padding:9px 12px}
+#q:focus{outline:2px solid var(--accent);outline-offset:-1px}
+#q::placeholder{color:var(--faint)}
+#count{font-family:var(--data);font-size:12.5px;color:var(--muted);white-space:nowrap}
+.toggle{font-family:var(--data);font-size:11.5px;font-weight:500;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--muted);background:var(--surface);cursor:pointer;
+  border:1px solid var(--rule-firm);border-radius:5px;padding:8px 12px}
+.toggle[aria-pressed="true"]{background:var(--gate-w);color:var(--gate);border-color:var(--gate)}
+
+/* sections */
+section{margin-top:40px;scroll-margin-top:74px}
+section[hidden]{display:none}
+h2{font-family:var(--display);font-weight:600;font-size:24px;line-height:1.2;
+  letter-spacing:-.01em;margin:0 0 4px;text-wrap:balance}
+.src{font-family:var(--data);font-size:12px;color:var(--accent);margin:0 0 8px;
+  word-break:break-word}
+.intro{font-size:14.5px;color:var(--muted);max-width:70ch;margin:0 0 4px}
+
+/* rows */
+.rows{border:1px solid var(--rule);border-radius:6px;background:var(--surface);
+  margin-top:16px;overflow:hidden}
+.row{display:grid;grid-template-columns:minmax(200px,300px) 1fr;gap:0 22px;
+  padding:14px 18px;border-top:1px solid var(--rule)}
+.row:first-child{border-top:0}
+.row[hidden]{display:none}
+.row:target,.row.hit{background:var(--accent-w)}
+.nm{font-family:var(--data);font-size:13.5px;font-weight:500;color:var(--ink);
+  word-break:break-word;display:flex;flex-wrap:wrap;gap:7px;align-items:baseline}
+.u{font-family:var(--data);font-size:10px;font-weight:500;color:var(--muted);
+  background:var(--sunk);border-radius:3px;padding:2px 6px;white-space:nowrap}
+.mn{font-size:14.5px;line-height:1.52}
+.mn code{font-family:var(--data);font-size:.86em;background:var(--sunk);
+  border-radius:3px;padding:1px 5px}
+.mn strong{font-weight:600}
+.rd{display:block;margin-top:6px;font-size:12.5px;color:var(--muted)}
+.rd b{font-family:var(--data);font-size:10px;font-weight:600;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--gate);background:var(--gate-w);
+  border-radius:3px;padding:2px 6px;margin-right:7px}
+.empty{padding:30px 18px;color:var(--muted);font-size:14.5px}
+.empty[hidden]{display:none}
+footer{margin-top:60px;padding-top:20px;border-top:1px solid var(--rule);
+  font-size:13px;color:var(--faint);max-width:70ch}
+footer code{font-family:var(--data)}
+@media (max-width:680px){
+  .row{grid-template-columns:1fr;gap:8px}
+  body{padding:0 15px 80px}
+}
+"""
+
+JS = """
+(function(){
+  var q=document.getElementById("q"),cnt=document.getElementById("count"),
+      gate=document.getElementById("gateonly"),empty=document.getElementById("empty"),
+      rows=[].slice.call(document.querySelectorAll(".row")),
+      secs=[].slice.call(document.querySelectorAll("section[data-sec]"));
+  rows.forEach(function(r){r._t=r.textContent.toLowerCase();});
+  function apply(){
+    var s=q.value.trim().toLowerCase(), g=gate.getAttribute("aria-pressed")==="true", n=0;
+    rows.forEach(function(r){
+      var ok=(!s||r._t.indexOf(s)>=0)&&(!g||r.dataset.gate==="1");
+      r.hidden=!ok; if(ok)n++;
+    });
+    secs.forEach(function(sec){
+      sec.hidden=!sec.querySelector(".row:not([hidden])");
+    });
+    cnt.textContent=n+(n===1?" metric":" metrics");
+    empty.hidden=n>0;
+  }
+  q.addEventListener("input",apply);
+  gate.addEventListener("click",function(){
+    gate.setAttribute("aria-pressed",gate.getAttribute("aria-pressed")==="true"?"false":"true");
+    apply();
+  });
+  q.addEventListener("keydown",function(e){if(e.key==="Escape"){q.value="";apply();}});
+  apply();
+})();
+"""
+
+
+def _md(text):
+    """The only markup the entries use: **bold**, `code`."""
+    out, parts = [], html.escape(text).split("**")
+    for i, part in enumerate(parts):
+        out.append(f"<strong>{part}</strong>" if i % 2 else part)
+    text = "".join(out)
+    parts, out = text.split("`"), []
+    for i, part in enumerate(parts):
+        out.append(f"<code>{part}</code>" if i % 2 else part)
+    return "".join(out)
+
+
+def render():
+    total = sum(len(entries) for _, _, _, entries in CATALOGUE)
+    body = []
+    for i, (title, source, intro, entries) in enumerate(CATALOGUE):
+        rows = []
+        for name, unit, meaning, read in entries:
+            is_gate = read.startswith("GATE")
+            read_html = ""
+            if read:
+                label = "<b>gates</b>" if is_gate else ""
+                txt = read[5:].lstrip(" —-") if is_gate else read
+                read_html = (f'<span class="rd">{label}{_md(txt)}</span>'
+                             if txt else f'<span class="rd">{label}</span>')
+            rows.append(
+                f'<div class="row" data-gate="{"1" if is_gate else "0"}">'
+                f'<div class="nm">{_md(name)}'
+                f'<span class="u">{html.escape(UNITS.get(unit, unit))}</span></div>'
+                f'<div class="mn">{_md(meaning)}{read_html}</div></div>')
+        body.append(
+            f'<section data-sec id="s{i}">\n<h2>{html.escape(title)}</h2>\n'
+            f'<p class="src">{html.escape(source)}</p>\n'
+            f'<p class="intro">{_md(intro)}</p>\n'
+            f'<div class="rows">\n' + "\n".join(rows) + "\n</div>\n</section>")
+
+    OUT.write_text(f"""<title>Markdown Metrics Index</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?\
+family=JetBrains+Mono:wght@400;500;600&\
+family=Source+Sans+3:wght@400;600&\
+family=Source+Serif+4:wght@600&display=swap">
+<style>{CSS}</style>
+
+<div class="wrap">
+<header class="mast">
+  <p class="eyebrow">Perishable Markdown MVP · reference</p>
+  <h1>Every number the system measures, and who owns it</h1>
+  <p class="standfirst">
+    The four reports carry around <strong>725 fields</strong> between them, which is the right
+    number to write and the wrong number to read. This is the index: what a quantity means,
+    what unit it is in, the component that writes it, and whether anything downstream is
+    gated on it. Type to filter, or show only the checks that block something.
+  </p>
+</header>
+</div>
+
+<div class="bar"><div class="inner">
+  <input id="q" type="search" placeholder="filter — try  il, tau, censor, rho, gate" aria-label="Filter metrics">
+  <button class="toggle" id="gateonly" aria-pressed="false">gates only</button>
+  <span id="count">{total} metrics</span>
+</div></div>
+
+<div class="wrap">
+{chr(10).join(body)}
+<p class="empty" id="empty" hidden>Nothing matches that filter.</p>
+
+<footer>
+  <p>
+    Generated by <code>tools.metrics_glossary</code>. Entries whose source of truth is
+    machine-readable — the two event schemas, the frozen-artifact list, and the status
+    gate names — are cross-checked against the code by
+    <code>tests/test_metrics_glossary.py</code>, so those cannot drift silently. The rest is
+    prose held true by hand, which is why it lives in one file rather than scattered across
+    the reports it describes.
+  </p>
+  <p>
+    Figures quoted are the <code>baseline-20260811043259</code> production run. Where a value
+    is owner-set rather than measured, the entry says so.
+  </p>
+</footer>
+</div>
+
+<script>{JS}</script>
+""")
+    return total
+
+
+if __name__ == "__main__":
+    n = render()
+    print(f"wrote {OUT.relative_to(ROOT)}: {n} metrics, {len(CATALOGUE)} components")

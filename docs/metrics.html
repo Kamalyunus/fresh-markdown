@@ -1,0 +1,397 @@
+<title>Markdown Metrics Index</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Source+Sans+3:wght@400;600&family=Source+Serif+4:wght@600&display=swap">
+<style>
+:root {
+  --ground:#F3F3F1; --surface:#FFFFFF; --sunk:#EAEAE6; --rule:#DEDED8;
+  --rule-firm:#C2C2B8; --ink:#1A1A18; --muted:#65645D; --faint:#8A897F;
+  --accent:#94282C; --accent-w:#F4E4E3; --gate:#7A5B12; --gate-w:#F6EEDA;
+  --display:"Source Serif 4",Georgia,serif;
+  --body:"Source Sans 3",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --data:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --ground:#131311; --surface:#1B1B18; --sunk:#212120; --rule:#2E2E2A;
+  --rule-firm:#43433C; --ink:#E9E8E2; --muted:#9C9B91; --faint:#807F76;
+  --accent:#E08A82; --accent-w:#331A19; --gate:#D9B36A; --gate-w:#332A14;
+}}
+:root[data-theme="dark"]{
+  --ground:#131311; --surface:#1B1B18; --sunk:#212120; --rule:#2E2E2A;
+  --rule-firm:#43433C; --ink:#E9E8E2; --muted:#9C9B91; --faint:#807F76;
+  --accent:#E08A82; --accent-w:#331A19; --gate:#D9B36A; --gate-w:#332A14;
+}
+*{box-sizing:border-box}
+body{background:var(--ground);color:var(--ink);font-family:var(--body);
+  font-size:16px;line-height:1.6;margin:0;padding:0 20px 110px;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:1000px;margin:0 auto}
+header.mast{padding:54px 0 26px}
+.eyebrow{font-family:var(--data);font-size:11px;font-weight:500;letter-spacing:.17em;
+  text-transform:uppercase;color:var(--accent);margin:0 0 16px}
+h1{font-family:var(--display);font-weight:600;font-size:clamp(30px,5vw,44px);
+  line-height:1.08;letter-spacing:-.015em;text-wrap:balance;margin:0 0 18px}
+.standfirst{font-size:17.5px;line-height:1.55;color:var(--muted);max-width:62ch;margin:0}
+.standfirst strong{color:var(--ink);font-weight:600}
+
+/* filter bar */
+.bar{position:sticky;top:0;z-index:30;background:var(--ground);
+  border-bottom:1px solid var(--rule-firm);padding:12px 0;margin-bottom:8px}
+.bar .inner{max-width:1000px;margin:0 auto;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+#q{flex:1 1 260px;min-width:0;font-family:var(--data);font-size:14px;color:var(--ink);
+  background:var(--surface);border:1px solid var(--rule-firm);border-radius:5px;
+  padding:9px 12px}
+#q:focus{outline:2px solid var(--accent);outline-offset:-1px}
+#q::placeholder{color:var(--faint)}
+#count{font-family:var(--data);font-size:12.5px;color:var(--muted);white-space:nowrap}
+.toggle{font-family:var(--data);font-size:11.5px;font-weight:500;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--muted);background:var(--surface);cursor:pointer;
+  border:1px solid var(--rule-firm);border-radius:5px;padding:8px 12px}
+.toggle[aria-pressed="true"]{background:var(--gate-w);color:var(--gate);border-color:var(--gate)}
+
+/* sections */
+section{margin-top:40px;scroll-margin-top:74px}
+section[hidden]{display:none}
+h2{font-family:var(--display);font-weight:600;font-size:24px;line-height:1.2;
+  letter-spacing:-.01em;margin:0 0 4px;text-wrap:balance}
+.src{font-family:var(--data);font-size:12px;color:var(--accent);margin:0 0 8px;
+  word-break:break-word}
+.intro{font-size:14.5px;color:var(--muted);max-width:70ch;margin:0 0 4px}
+
+/* rows */
+.rows{border:1px solid var(--rule);border-radius:6px;background:var(--surface);
+  margin-top:16px;overflow:hidden}
+.row{display:grid;grid-template-columns:minmax(200px,300px) 1fr;gap:0 22px;
+  padding:14px 18px;border-top:1px solid var(--rule)}
+.row:first-child{border-top:0}
+.row[hidden]{display:none}
+.row:target,.row.hit{background:var(--accent-w)}
+.nm{font-family:var(--data);font-size:13.5px;font-weight:500;color:var(--ink);
+  word-break:break-word;display:flex;flex-wrap:wrap;gap:7px;align-items:baseline}
+.u{font-family:var(--data);font-size:10px;font-weight:500;color:var(--muted);
+  background:var(--sunk);border-radius:3px;padding:2px 6px;white-space:nowrap}
+.mn{font-size:14.5px;line-height:1.52}
+.mn code{font-family:var(--data);font-size:.86em;background:var(--sunk);
+  border-radius:3px;padding:1px 5px}
+.mn strong{font-weight:600}
+.rd{display:block;margin-top:6px;font-size:12.5px;color:var(--muted)}
+.rd b{font-family:var(--data);font-size:10px;font-weight:600;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--gate);background:var(--gate-w);
+  border-radius:3px;padding:2px 6px;margin-right:7px}
+.empty{padding:30px 18px;color:var(--muted);font-size:14.5px}
+.empty[hidden]{display:none}
+footer{margin-top:60px;padding-top:20px;border-top:1px solid var(--rule);
+  font-size:13px;color:var(--faint);max-width:70ch}
+footer code{font-family:var(--data)}
+@media (max-width:680px){
+  .row{grid-template-columns:1fr;gap:8px}
+  body{padding:0 15px 80px}
+}
+</style>
+
+<div class="wrap">
+<header class="mast">
+  <p class="eyebrow">Perishable Markdown MVP · reference</p>
+  <h1>Every number the system measures, and who owns it</h1>
+  <p class="standfirst">
+    The four reports carry around <strong>725 fields</strong> between them, which is the right
+    number to write and the wrong number to read. This is the index: what a quantity means,
+    what unit it is in, the component that writes it, and whether anything downstream is
+    gated on it. Type to filter, or show only the checks that block something.
+  </p>
+</header>
+</div>
+
+<div class="bar"><div class="inner">
+  <input id="q" type="search" placeholder="filter — try  il, tau, censor, rho, gate" aria-label="Filter metrics">
+  <button class="toggle" id="gateonly" aria-pressed="false">gates only</button>
+  <span id="count">121 metrics</span>
+</div></div>
+
+<div class="wrap">
+<section data-sec id="s0">
+<h2>Population</h2>
+<p class="src">bootstrap.prepare_data → artifacts/split_manifest.json</p>
+<p class="intro">The rows every other number is measured on. Frozen at launch.</p>
+<div class="rows">
+<div class="row" data-gate="0"><div class="nm">data_quality_waterfall<span class="u">n</span></div><div class="mn">Rows and episodes remaining after each of the 13 filter stages, in order. The first entry is <code>raw</code>.<span class="rd">every figure traces back through it</span></div></div>
+<div class="row" data-gate="0"><div class="nm">episode_rule<span class="u">…</span></div><div class="mn">The persisted definition of an episode: a maximal run of consecutive hourly rows for one SKU × FC over which the source hours-remaining counter decrements by one per elapsed hour. NOT keyed by date.<span class="rd">production must derive identical boundaries</span></div></div>
+<div class="row" data-gate="0"><div class="nm">split.train / calib / test<span class="u">…</span></div><div class="mn">Date windows, fixed before any model was fit. An episode belongs wholly to the split its window STARTED in.<span class="rd">the calibration gate, which must not grade its own fit</span></div></div>
+</div>
+</section>
+<section data-sec id="s1">
+<h2>Phase 0 — is this problem tractable?</h2>
+<p class="src">bootstrap.measure → reports/phase0.json</p>
+<p class="intro">Measured once on raw history, before anything is modelled. Each <code>m</code> is a PRD deliverable, so none can be dropped.</p>
+<div class="rows">
+<div class="row" data-gate="0"><div class="nm">m1 · cost_ratio_pct<span class="u">%</span></div><div class="mn">Unit cost as a share of full price. Sets how much discounting room exists at all.</div></div>
+<div class="row" data-gate="0"><div class="nm">m1 · d_max_pct<span class="u">%</span></div><div class="mn">The feasible discount ceiling, <code>1 − cost/price</code>, in percent. The cost floor expressed in discount space.<span class="rd">the action set is built from it</span></div></div>
+<div class="row" data-gate="0"><div class="nm">m1 · share_non_explorable<span class="u">0–1</span></div><div class="mn">Share of episodes with too few feasible tiers to experiment on at all.<span class="rd">learning throughput</span></div></div>
+<div class="row" data-gate="0"><div class="nm">m2 · discount_std_pp<span class="u">pp</span></div><div class="mn">Spread of discounts within one SKU × FC × hour cell. Near zero means the legacy rule was deterministic and history carries no price variation to learn from.<span class="rd">why elasticity is unidentifiable from history</span></div></div>
+<div class="row" data-gate="0"><div class="nm">m3 · rho<span class="u">0–1</span></div><div class="mn">Correlation between hours inside one episode, on a category × hour proxy computed BEFORE any model exists. Diagnostic only — never paste this one.<span class="rd">superseded by artifacts/rho.json</span></div></div>
+<div class="row" data-gate="0"><div class="nm">m3 · implied_deff<span class="u">×</span></div><div class="mn">The evidence deflator implied by m3&#x27;s rho. Same caveat.</div></div>
+<div class="row" data-gate="0"><div class="nm">m4 · zero_sale_rate<span class="u">0–1</span></div><div class="mn">Share of hours selling nothing. Around three quarters. This is why accuracy is gated on an aggregate ratio rather than on MAE.</div></div>
+<div class="row" data-gate="0"><div class="nm">m5 · overall_censored_hour_rate<span class="u">0–1</span></div><div class="mn">Share of hours where sales hit inventory, so demand is known only as a lower bound.<span class="rd">the censored likelihood everywhere</span></div></div>
+<div class="row" data-gate="0"><div class="nm">m5 · episodes_reaching_zero_inventory<span class="u">0–1</span></div><div class="mn">Share of episodes that sold out. Their windows are short BECAUSE they sold out, which is the lookahead bias <code>extend_to_window</code> exists to remove.</div></div>
+<div class="row" data-gate="0"><div class="nm">m6 · il_pct_aggregate<span class="u">0–1</span></div><div class="mn">Inventory Loss as a ratio of sums: (discount given away + scrap at cost) ÷ (full-price value of units sold). Never averaged per episode — the denominator is zero for a zero-sale episode.<span class="rd">the business baseline</span></div></div>
+<div class="row" data-gate="0"><div class="nm">m6 · il_absolute_total<span class="u">₩</span></div><div class="mn">The same loss in currency, always reported alongside the ratio.</div></div>
+<div class="row" data-gate="0"><div class="nm">m6 · il_pct_ratio_se_clustered<span class="u">0–1</span></div><div class="mn">Standard error of IL%, clustered by SKU × FC. Pasted into config; it sizes the A/B.<span class="rd">ab_test minimum detectable effect</span></div></div>
+<div class="row" data-gate="0"><div class="nm">m7 · episodes_per_category_per_week<span class="u">n</span></div><div class="mn">Volume per category. Below <code>min_episodes_per_week_for_cell</code> a category has no posterior cell of its own and pools into the global one.<span class="rd">cell assignment</span></div></div>
+<div class="row" data-gate="0"><div class="nm">m8 · entry_hour<span class="u">…</span></div><div class="mn">Distribution of the episode&#x27;s first priced hour. Elasticity identification uses entry rows ONLY, so this is the population that estimate is drawn from.</div></div>
+<div class="row" data-gate="0"><div class="nm">m11 · episode_endings<span class="u">n</span></div><div class="mn">Splits episodes three ways — <code>completed</code> (leftover IS scrap), <code>sold_out_early</code> (no scrap by construction), <code>truncated</code> (scrap UNKNOWN). Truncated episodes are excluded from scrap and IL aggregates, with the excluded share reported.<span class="rd">every scrap and IL figure</span></div></div>
+</div>
+</section>
+<section data-sec id="s2">
+<h2>Demand model</h2>
+<p class="src">bootstrap.train_baseline → artifacts/baseline_model.txt, calibration.json</p>
+<p class="intro">The frozen forecaster. It answers exactly one question and is graded on exactly that.</p>
+<div class="rows">
+<div class="row" data-gate="0"><div class="nm">mu_ref<span class="u">n</span></div><div class="mn">Expected units next hour AT THE REFERENCE DISCOUNT. The price feature is overwritten to <code>d_ref</code> at inference, always, so the model never expresses a price effect — that is ε&#x27;s job.<span class="rd">the DP, every hour</span></div></div>
+<div class="row" data-gate="0"><div class="nm">level factor<span class="u">×</span></div><div class="mn">One multiplicative correction per subcategory, blended toward its parent category with a pseudo-count of 100 anchor units. SOLVED on the censored basis, not divided out.<span class="rd">μ_ref at inference, when apply_level_calibration is true</span></div></div>
+<div class="row" data-gate="0"><div class="nm">anchor row<span class="u">…</span></div><div class="mn">A row priced within ±1.25pp (half a tier step) of the category reference discount, so the price-response term is exactly 1. <strong>The velocity features use a wider ±2.5pp band</strong> — same word, two bands, deliberately.<span class="rd">the calibration solve and the gate</span></div></div>
+<div class="row" data-gate="0"><div class="nm">sku_ref_sales_rate_30d<span class="u">0–1</span></div><div class="mn">Trailing 30-day anchor-hour sales rate at SKU × FC, falling back to SKU pooled across FCs. Point-in-time: an episode never sees its own day.<span class="rd">the model</span></div></div>
+<div class="row" data-gate="0"><div class="nm">prior_episode_ref_sales_rate<span class="u">0–1</span></div><div class="mn">The same signal from that SKU × FC&#x27;s previous clearance window. Computed at episode grain, NaN when that episode had no anchor hours.<span class="rd">the model</span></div></div>
+</div>
+</section>
+<section data-sec id="s3">
+<h2>Dispersion and correlation</h2>
+<p class="src">bootstrap.fit_dispersion → artifacts/r_lookup.json, rho.json</p>
+<p class="intro">Two numbers that never touch a price. They govern how much a piece of evidence is worth, and how confident the agent may be.</p>
+<div class="rows">
+<div class="row" data-gate="0"><div class="nm">r<span class="u">n</span></div><div class="mn">Negative-binomial dispersion, <code>Var[D] = μ + μ²/r</code>. Small is lumpy, large is near-Poisson. Fitted per subcategory by maximum likelihood with censored hours entering as <code>P(D ≥ q)</code>. Clamped only on the HIGH side.<span class="rd">every probability the DP uses, and every posterior update</span></div></div>
+<div class="row" data-gate="1"><div class="nm">rho<span class="u">0–1</span></div><div class="mn">Correlation between hours within one episode, measured on the FITTED MODEL&#x27;S residuals at the working elasticity. <strong>0.3103.</strong> Changing <code>posterior.prior.fallback_mean</code> invalidates it.<span class="rd"><b>gates</b>mirrored into config</span></div></div>
+<div class="row" data-gate="1"><div class="nm">mean_forced_hours_per_episode<span class="u">h</span></div><div class="mn">Average number of hours per episode that carry forced (randomised) prices. <strong>8.563.</strong> The cluster size in the design effect.<span class="rd"><b>gates</b>mirrored into config</span></div></div>
+<div class="row" data-gate="0"><div class="nm">deff<span class="u">×</span></div><div class="mn">Design effect <code>1 + (m − 1)·ρ</code> = <strong>3.347</strong>. Divides Fisher information before it is compared to the learning threshold: 8.563 correlated hours carry the information of about 2.56 independent ones.<span class="rd">every posterior update</span></div></div>
+</div>
+</section>
+<section data-sec id="s4">
+<h2>Elasticity prior</h2>
+<p class="src">bootstrap.estimate_prior → artifacts/prior.json</p>
+<p class="intro">The cold-start guess at price response, and the record of why it is a guess.</p>
+<div class="rows">
+<div class="row" data-gate="0"><div class="nm">epsilon_naive<span class="u">ε</span></div><div class="mn">Elasticity fitted on entry rows with no controls. Contaminated by the clock.</div></div>
+<div class="row" data-gate="0"><div class="nm">epsilon_controlled<span class="u">ε</span></div><div class="mn">The same fit with hour, day and category controls — the bracket&#x27;s other end. The two together are the bracket.<span class="rd">the acceptance gate</span></div></div>
+<div class="row" data-gate="1"><div class="nm">source<span class="u">…</span></div><div class="mn"><code>bracket</code> when history identified a usable range, <code>fallback</code> when it did not. <strong>Fallback in all 16 categories</strong> — a rejected bracket is the DESIGNED outcome, not a failure.<span class="rd"><b>gates</b>reported by pipeline.status</span></div></div>
+<div class="row" data-gate="0"><div class="nm">mean / std<span class="u">ε</span></div><div class="mn">The prior in force per cell. <strong>−1.0 ± 0.6</strong> at launch. ε is always negative; <code>epsilon_max</code> (−0.05) is a sign constraint, never a bound to widen.<span class="rd">the DP until production learns better</span></div></div>
+</div>
+</section>
+<section data-sec id="s5">
+<h2>Replay — fidelity</h2>
+<p class="src">backtest → reports/backtest.json → fidelity</p>
+<p class="intro">Does the frozen model still describe the world? This is the backtest&#x27;s most important job, and it is NOT evidence the policy works.</p>
+<div class="rows">
+<div class="row" data-gate="0"><div class="nm">fidelity_episode_sold_ratio<span class="u">×</span></div><div class="mn">Actual ÷ predicted sales on the gate window. Above 1 the model under-predicts. The pooled ratio embeds the unidentifiable prior&#x27;s slope, so it is reported as a diagnostic rather than used as the verdict.</div></div>
+<div class="row" data-gate="1"><div class="nm">level_bias_at_anchor<span class="u">×</span></div><div class="mn">The same ratio restricted to anchor rows, where the price term is 1. This is the model&#x27;s only production job.<span class="rd"><b>gates</b>the calibration gate metric</span></div></div>
+<div class="row" data-gate="1"><div class="nm">calibration_gate_band<span class="u">×</span></div><div class="mn"><strong>[0.90, 1.10]</strong> — roughly 2σ of measured week-to-week demand volatility. Wide enough not to fire on noise, tight enough to catch a stale model.<span class="rd"><b>gates</b></span></div></div>
+<div class="row" data-gate="1"><div class="nm">gate_window<span class="u">…</span></div><div class="mn">Which split the gate is read on. Must be DISJOINT from the calibration fit window, or the gate grades its own fit. Read the field; do not assume.<span class="rd"><b>gates</b></span></div></div>
+<div class="row" data-gate="0"><div class="nm">slope_ratio_by_discount_gap<span class="u">×</span></div><div class="mn">Actual ÷ predicted bucketed by distance from the reference discount. Flat and offset means LEVEL error (calibration fixes it). Right at the anchor and wrong either side means SLOPE error (only the prior or learning fixes it).<span class="rd">which remedy the gate decision tree sends you to</span></div></div>
+<div class="row" data-gate="0"><div class="nm">fidelity_hourly_mae / rmse / bias<span class="u">n</span></div><div class="mn">Per-hour error in units. On a series that is ~78% zeroes an MAE near the mean is expected; this is why the gate is on a ratio, not on MAE.</div></div>
+<div class="row" data-gate="0"><div class="nm">fidelity_nz_mae / nz_bias<span class="u">n</span></div><div class="mn">The same errors restricted to hours that actually sold something.</div></div>
+<div class="row" data-gate="0"><div class="nm">fidelity_zero_acc<span class="u">0–1</span></div><div class="mn">How often the model calls a zero-sale hour correctly (predicting under half a unit).</div></div>
+<div class="row" data-gate="0"><div class="nm">sold_over_censored_prediction<span class="u">×</span></div><div class="mn">Realised sales ÷ <code>E[min(D, q)]</code> — the CENSORED basis. Everything that compares predictions to reality must use this.<span class="rd">the level factor solve</span></div></div>
+<div class="row" data-gate="0"><div class="nm">sold_over_raw_mu<span class="u">×</span></div><div class="mn">The same against raw μ. Shown only to make the gap visible: a true correction of 1.45 fits as 0.68 on this basis — the wrong side of 1.</div></div>
+<div class="row" data-gate="0"><div class="nm">censoring_shrinkage<span class="u">×</span></div><div class="mn">Censored total ÷ raw μ total. How much the inventory ceiling removes.</div></div>
+<div class="row" data-gate="0"><div class="nm">anchor_ratio_by_rate_history<span class="u">×</span></div><div class="mn">The anchor ratio split by whether the SKU had velocity history. <code>no_history</code> far above <code>with_history</code> means new assortment, not a macro trend.<span class="rd">distinguishing wobble from trend</span></div></div>
+<div class="row" data-gate="0"><div class="nm">level_mix_decomposition<span class="u">×</span></div><div class="mn">Is weekly movement in the anchor ratio demand drift, or a change in which SKUs entered the cohort? Per-SKU ratios held fixed while composition varies.</div></div>
+<div class="row" data-gate="0"><div class="nm">calibration_window_sweep<span class="u">×</span></div><div class="mn">Rolling-origin test of the calibration mechanism across candidate trailing windows. Answers &#x27;how long should the fit window be&#x27; with data.</div></div>
+</div>
+</section>
+<section data-sec id="s6">
+<h2>Replay — policy</h2>
+<p class="src">backtest → reports/backtest.json → policy_deltas</p>
+<p class="intro">What the DP would have done. <strong>Replay is never evidence the policy works</strong> — the A/B is. Read these as internal consistency only.</p>
+<div class="rows">
+<div class="row" data-gate="0"><div class="nm">actual_il / actual_il_pct<span class="u">₩</span></div><div class="mn">Observed-world inventory loss under the legacy prices that really ran.</div></div>
+<div class="row" data-gate="0"><div class="nm">legacy_model_il<span class="u">₩</span></div><div class="mn">Legacy prices scored UNDER THE MODEL. The honest comparator.<span class="rd">the policy verdict</span></div></div>
+<div class="row" data-gate="0"><div class="nm">dp_il<span class="u">₩</span></div><div class="mn">DP prices scored under the same model.<span class="rd">the policy verdict</span></div></div>
+<div class="row" data-gate="0"><div class="nm">policy_gap_like_for_like<span class="u">₩</span></div><div class="mn"><code>dp_il − legacy_model_il</code>. Same demand generator both arms, so model bias cancels. <strong>Never compare <code>actual_*</code> against <code>dp_*</code></strong> — that charges all model bias to the DP.<span class="rd">the only defensible policy statement in replay</span></div></div>
+<div class="row" data-gate="0"><div class="nm">actual_clearance / dp_clearance<span class="u">0–1</span></div><div class="mn">Share of stock sold before the window closed, per arm.</div></div>
+<div class="row" data-gate="0"><div class="nm">actual_mean_discount / dp_mean_discount<span class="u">0–1</span></div><div class="mn">Average discount applied per arm. The DP opens far shallower and holds.</div></div>
+<div class="row" data-gate="1"><div class="nm">tau_initial<span class="u">₩</span></div><div class="mn">The exploration budget&#x27;s launch value: the currency quantile of the <code>Q(p*) − Q(p)</code> distribution whose implied daily spend matches <code>budget_share_of_il</code>. <strong>A CURRENCY AMOUNT, never a rate.</strong> Paste only from a GATE-PASSING backtest.<span class="rd"><b>gates</b>blocks launch while null</span></div></div>
+<div class="row" data-gate="0"><div class="nm">cost_distribution_quantile<span class="u">0–1</span></div><div class="mn">Where <code>tau_initial</code> landed in the cost distribution. Sanity check on the solve.</div></div>
+</div>
+</section>
+<section data-sec id="s7">
+<h2>Thresholds</h2>
+<p class="src">bootstrap.derive_thresholds → reports/thresholds.json</p>
+<p class="intro">Evidence for the values only the owner may set.</p>
+<div class="rows">
+<div class="row" data-gate="1"><div class="nm">target_mde_rel<span class="u">0–1</span></div><div class="mn">The relative effect size the A/B must be able to detect.<span class="rd"><b>gates</b>owner-set</span></div></div>
+<div class="row" data-gate="0"><div class="nm">recommended_duration_weeks<span class="u">d</span></div><div class="mn">How long the A/B must run to reach that effect size. The duration curve is flat, so more weeks buy little.</div></div>
+<div class="row" data-gate="1"><div class="nm">three_sigma / three_sigma_robust<span class="u">0–1</span></div><div class="mn">Noise floor of a guardrail series — raw and outlier-resistant. A floor above 1.0 means the series swings by more than its own level, and NO threshold on that basis is both safe and useful.<span class="rd"><b>gates</b>guardrail floors</span></div></div>
+<div class="row" data-gate="0"><div class="nm">guardrail_noise (trailing basis)<span class="u">0–1</span></div><div class="mn">Each day against a trailing 28-day mean. Applies only BEFORE an A/B is running.</div></div>
+<div class="row" data-gate="0"><div class="nm">guardrail_noise_control_arm_basis<span class="u">0–1</span></div><div class="mn">Same-day treatment vs control, using the identical arm hash the monitor uses and smoothed the same way. This is what binds once both arms are populated.</div></div>
+<div class="row" data-gate="1"><div class="nm">guardrail_threshold_recommendation<span class="u">✓/✗</span></div><div class="mn">Reports BOTH floors, names the binding one, and stamps a verdict. <code>TOO TIGHT</code> and <code>CLEARS THE FLOOR BUT LIKELY INERT</code> are both blocking, not advisory.<span class="rd"><b>gates</b>read by pipeline.status</span></div></div>
+</div>
+</section>
+<section data-sec id="s8">
+<h2>Shadow</h2>
+<p class="src">pipeline.shadow → reports/shadow.json</p>
+<p class="intro">The full decision path against live data with no price applied. The last gate before anything is priced for real.</p>
+<div class="rows">
+<div class="row" data-gate="1"><div class="nm">event_completeness<span class="u">0–1</span></div><div class="mn">Outcomes landing per decision. <strong>≥ 0.99.</strong> Quarantined outcomes do not land, so a missing <code>adjustment_reason</code> shows up here first.<span class="rd"><b>gates</b>shadow exit</span></div></div>
+<div class="row" data-gate="1"><div class="nm">matched_decision_rate<span class="u">0–1</span></div><div class="mn">Decisions that got an outcome back. <strong>≥ 0.99.</strong><span class="rd"><b>gates</b>shadow exit</span></div></div>
+<div class="row" data-gate="1"><div class="nm">cost_floor_violations<span class="u">n</span></div><div class="mn">Prices below cost. <strong>Must be exactly zero</strong> — the action set makes them unrepresentable, so any count is a defect, not a tolerance.<span class="rd"><b>gates</b>shadow exit</span></div></div>
+<div class="row" data-gate="0"><div class="nm">window.sampled / population_episodes<span class="u">n</span></div><div class="mn">Whether the run sampled and out of how many. <strong>Quote the sampling caveat whenever you quote the violation count</strong>: the 3,000-episode default once passed on a sample that hid a crash the full run found.</div></div>
+<div class="row" data-gate="0"><div class="nm">state_rejected_count<span class="u">n</span></div><div class="mn">States refused rather than priced. Refusal is the designed response to an implausible state, so a non-zero count is information, not failure.</div></div>
+<div class="row" data-gate="0"><div class="nm">effective_information_total<span class="u">n</span></div><div class="mn">Fisher information for ε the run would have bought, after deff deflation. Accumulated on EXPLORATION decisions only.</div></div>
+<div class="row" data-gate="0"><div class="nm">episodes_per_bounded_update<span class="u">n</span></div><div class="mn"><code>information_increment ÷ effective information per episode</code>. Divide by the pilot&#x27;s daily episode count for the evidence-side floor; the binding constraint is whichever is larger, that or the calendar.<span class="rd">weeks-to-convergence</span></div></div>
+<div class="row" data-gate="0"><div class="nm">realised_vs_predicted_sold_ratio_at_legacy_price<span class="u">×</span></div><div class="mn">The production continuation of the calibration gate, and the first place frozen-baseline drift shows.</div></div>
+<div class="row" data-gate="0"><div class="nm">solver_latency_p95_s<span class="u">s</span></div><div class="mn">95th percentile DP solve time.</div></div>
+</div>
+</section>
+<section data-sec id="s9">
+<h2>Decision event</h2>
+<p class="src">inference.decide → events_store/decisions.jsonl</p>
+<p class="intro">36 required fields per priced hour. Written by the service; an integrating team produces none of it. Full field list in the event contract.</p>
+<div class="rows">
+<div class="row" data-gate="0"><div class="nm">expected_il<span class="u">₩</span></div><div class="mn">Expected inventory loss under the APPLIED action — the objective. Positive here; the DP&#x27;s internal value is its negative, because the solver maximises value and every term is a cost.<span class="rd">monitoring, and the reproduction check</span></div></div>
+<div class="row" data-gate="1"><div class="nm">mu_ref_path<span class="u">n</span></div><div class="mn">The FULL remaining-hours forecast, one entry per remaining hour. Its length must equal <code>hours_remaining</code>. Without it a decision cannot be recomputed.<span class="rd"><b>gates</b>assurance reproduction</span></div></div>
+<div class="row" data-gate="1"><div class="nm">anchor_discount<span class="u">0–1</span></div><div class="mn">The discount already in force, which fixed the action set. <code>null</code> at entry.<span class="rd"><b>gates</b>assurance reproduction</span></div></div>
+<div class="row" data-gate="0"><div class="nm">action_set_size<span class="u">n</span></div><div class="mn">Actions allowed at THIS decision after the no-price-increase constraint. Distinct from the 25-tier grid, and what explorability is judged on.</div></div>
+<div class="row" data-gate="0"><div class="nm">exploration_cost<span class="u">₩</span></div><div class="mn"><code>Q(p*) − Q(p)</code> for the applied tier: expected IL given up to run the experiment. Zero when not exploring.<span class="rd">the tau controller and the budget stop condition</span></div></div>
+<div class="row" data-gate="0"><div class="nm">affordable_set_size<span class="u">n</span></div><div class="mn">How many alternatives cost no more than <code>tau</code>. <strong>If non-empty, the draw happens</strong> — there is no exploration rate.<span class="rd">assurance uniformity</span></div></div>
+<div class="row" data-gate="0"><div class="nm">tau_current<span class="u">₩</span></div><div class="mn">The exploration budget in force at that decision.</div></div>
+</div>
+</section>
+<section data-sec id="s10">
+<h2>Outcome event</h2>
+<p class="src">the integrating team → events_store/outcomes.jsonl</p>
+<p class="intro">9 required fields, one per decision. This is the integration.</p>
+<div class="rows">
+<div class="row" data-gate="0"><div class="nm">units_sold<span class="u">n</span></div><div class="mn">Zero-sale hours MUST be sent — around three quarters of hours, and the observations that identify demand at a price.<span class="rd">the censored likelihood</span></div></div>
+<div class="row" data-gate="0"><div class="nm">starting_inventory<span class="u">n</span></div><div class="mn">Units at the top of the hour. <code>units_sold ≥ starting_inventory</code> is what marks the observation censored.<span class="rd">the censored likelihood</span></div></div>
+<div class="row" data-gate="1"><div class="nm">applied_price<span class="u">₩</span></div><div class="mn">The price ACTUALLY in force, not the one recommended. The gap between the two is monitored.<span class="rd"><b>gates</b>price mismatch ≤ 1%</span></div></div>
+<div class="row" data-gate="1"><div class="nm">is_stockout<span class="u">✓/✗</span></div><div class="mn">Whether demand hit the inventory ceiling. Any missing rate above zero fires a stop condition. False on an episode-close write-off — that is not demand.<span class="rd"><b>gates</b>stop condition</span></div></div>
+<div class="row" data-gate="0"><div class="nm">execution_status<span class="u">…</span></div><div class="mn">Only <code>ok</code>, <code>success</code> or absent make the outcome eligible for learning. Anything else is stored and excluded.<span class="rd">learning eligibility</span></div></div>
+<div class="row" data-gate="1"><div class="nm">adjustment_reason<span class="u">…</span></div><div class="mn">Required when inventory does not reconcile. Exactly two are legitimate: <code>intraday_restock</code> and <code>episode_close_write_off</code> (~49.5% of episodes).<span class="rd"><b>gates</b>event completeness</span></div></div>
+</div>
+</section>
+<section data-sec id="s11">
+<h2>Learning</h2>
+<p class="src">pipeline.update → artifacts/posterior.json</p>
+<p class="intro">The only file production writes. Two things move in it, on two different kinds of evidence.</p>
+<div class="rows">
+<div class="row" data-gate="0"><div class="nm">information_pending<span class="u">n</span></div><div class="mn">Effective information in the UNCONSUMED batch, recomputed each run. There is no stored counter — a sub-threshold batch is left unconsumed and re-evaluated whole.</div></div>
+<div class="row" data-gate="1"><div class="nm">information_required<span class="u">n</span></div><div class="mn"><strong>12.0</strong> — the threshold a cell&#x27;s batch must clear. SET, not derived from data.<span class="rd"><b>gates</b>whether the posterior moves</span></div></div>
+<div class="row" data-gate="0"><div class="nm">batch_oldest_outcome_age_days<span class="u">d</span></div><div class="mn">How long the batch has been accumulating without firing. Surfaces a stalled learning loop long before the 21-day flat-posterior alert.</div></div>
+<div class="row" data-gate="0"><div class="nm">accumulated_information<span class="u">n</span></div><div class="mn">Running total across COMMITTED revisions. The artifact-level survivor of the old pending counter.</div></div>
+<div class="row" data-gate="0"><div class="nm">bound_clipped<span class="u">✓/✗</span></div><div class="mn">Whether the bounded step bound. Mean moves at most 0.15, std shrinks at most 25%, floored at <code>min_std</code>. A clipped cell is flagged for operator review.</div></div>
+<div class="row" data-gate="0"><div class="nm">tau<span class="u">₩</span></div><div class="mn">The exploration budget in force. Recalibrated on <strong>spend, not evidence</strong>, on every <code>--apply</code> — a day that explored and learned nothing still cost money.</div></div>
+<div class="row" data-gate="0"><div class="nm">tau_calibrated_through<span class="u">…</span></div><div class="mn">The last date tau consumed. The exactly-once guard: two runs in a day would otherwise move tau by the square of the ratio.</div></div>
+<div class="row" data-gate="1"><div class="nm">processed_outcome_ids<span class="u">id</span></div><div class="mn">The exactly-once ledger. An outcome is marked processed ONLY when a revision actually consumes it.<span class="rd"><b>gates</b>exactly-once</span></div></div>
+</div>
+</section>
+<section data-sec id="s12">
+<h2>Monitoring — business</h2>
+<p class="src">pipeline.monitor → reports/monitor.json → business</p>
+<p class="intro">Is the business all right? Section 15 family one.</p>
+<div class="rows">
+<div class="row" data-gate="0"><div class="nm">il_pct_aggregate<span class="u">0–1</span></div><div class="mn">Live IL%, always a ratio of sums and always reported with its denominator.</div></div>
+<div class="row" data-gate="0"><div class="nm">il_pct_by_arm<span class="u">0–1</span></div><div class="mn">The same split by A/B arm, using the shared arm hash. The comparison the experiment reads out on.</div></div>
+<div class="row" data-gate="0"><div class="nm">episodes_excluded_still_running<span class="u">n</span></div><div class="mn">In-flight episodes held out. Their leftover is stock on the shelf, not scrap in the bin — booking it would count it today and something different tomorrow.</div></div>
+<div class="row" data-gate="0"><div class="nm">sell_through<span class="u">0–1</span></div><div class="mn">Units sold ÷ units that entered the window.</div></div>
+<div class="row" data-gate="0"><div class="nm">waste_units<span class="u">n</span></div><div class="mn">Units scrapped at the close.</div></div>
+</div>
+</section>
+<section data-sec id="s13">
+<h2>Monitoring — learning</h2>
+<p class="src">pipeline.monitor → reports/monitor.json → learning</p>
+<p class="intro">Is the loop actually learning? Section 15 family two.</p>
+<div class="rows">
+<div class="row" data-gate="0"><div class="nm">posterior_by_cell<span class="u">ε</span></div><div class="mn">Mean, std, n_obs, accumulated information and version per cell.</div></div>
+<div class="row" data-gate="0"><div class="nm">posterior_std_flat_alert<span class="u">d</span></div><div class="mn">Cells whose std has not moved for N days. Std moves only when an update commits, so &#x27;flat for N days&#x27; is exactly &#x27;no committed update in N days&#x27;.<span class="rd">the 21-day dead-loop alert</span></div></div>
+<div class="row" data-gate="0"><div class="nm">forced_decision_count<span class="u">n</span></div><div class="mn">Decisions that explored.</div></div>
+<div class="row" data-gate="0"><div class="nm">affordable_set_empty_rate<span class="u">0–1</span></div><div class="mn">Share of decisions with nothing affordable to explore. High means tau is too tight or the action sets are too narrow.</div></div>
+<div class="row" data-gate="0"><div class="nm">mean_forced_log_price_ratio<span class="u">×</span></div><div class="mn">Average |log price ratio| on forced decisions. Information goes as its SQUARE, so this drives learning speed more than the count does.</div></div>
+<div class="row" data-gate="1"><div class="nm">realised_exploration_cost<span class="u">₩</span></div><div class="mn">What exploration actually spent.<span class="rd"><b>gates</b>vs 2× budget, and the tau controller</span></div></div>
+</div>
+</section>
+<section data-sec id="s14">
+<h2>Monitoring — safety</h2>
+<p class="src">pipeline.monitor → reports/monitor.json → safety</p>
+<p class="intro">Is the plumbing sound? Section 15 family three. Three of these can suspend exploration.</p>
+<div class="rows">
+<div class="row" data-gate="1"><div class="nm">duplicate_or_unmatched_rate<span class="u">0–1</span></div><div class="mn">Repeated ids plus outcomes with no matching decision. <strong>≤ 1%.</strong><span class="rd"><b>gates</b>stop condition</span></div></div>
+<div class="row" data-gate="1"><div class="nm">applied_vs_recommended_price_mismatch<span class="u">0–1</span></div><div class="mn">Outcomes whose applied price differs from the decision&#x27;s by more than 1e-6. <strong>≤ 1%.</strong> The &#x27;did our price go live&#x27; check.<span class="rd"><b>gates</b>stop condition</span></div></div>
+<div class="row" data-gate="1"><div class="nm">missing_stockout_field_rate<span class="u">0–1</span></div><div class="mn">Outcomes without <code>is_stockout</code>. <strong>Must be exactly zero.</strong><span class="rd"><b>gates</b>stop condition</span></div></div>
+<div class="row" data-gate="0"><div class="nm">quarantined_event_count<span class="u">n</span></div><div class="mn">Events written to quarantine with their validation failure attached. Nothing is ever silently dropped.</div></div>
+<div class="row" data-gate="0"><div class="nm">realised_vs_predicted_sold_ratio<span class="u">×</span></div><div class="mn">Realised revenue base ÷ predicted. Production&#x27;s continuation of the calibration gate.</div></div>
+</div>
+</section>
+<section data-sec id="s15">
+<h2>Assurance</h2>
+<p class="src">pipeline.assurance → reports/assurance.json</p>
+<p class="intro">Are the FROZEN ARTIFACTS still a description of the world we price in? Verdicts are PASS / FAIL / <strong>INSUFFICIENT</strong> — a thin window says so rather than passing.</p>
+<div class="rows">
+<div class="row" data-gate="1"><div class="nm">reproduction · mismatch_rate<span class="u">0–1</span></div><div class="mn">Share of logged decisions that do not re-solve to themselves from their own event payload. The DP is deterministic, so any mismatch means config, artifact, code or a library moved underneath it.<span class="rd"><b>gates</b>operator gate</span></div></div>
+<div class="row" data-gate="0"><div class="nm">reproduction · decisions_skipped_no_inputs<span class="u">n</span></div><div class="mn">Events that cannot be replayed because they predate <code>mu_ref_path</code>. Skipped, never silently counted as passing.</div></div>
+<div class="row" data-gate="1"><div class="nm">dispersion · bins_flagged<span class="u">n</span></div><div class="mn">Predicted-μ bins where realised zero-sale or stockout rates diverge from <code>NB(μ, r)</code>. Both statistics are EXACT under censoring; a variance comparison would not be.<span class="rd"><b>gates</b>operator gate</span></div></div>
+<div class="row" data-gate="1"><div class="nm">correlation · rho_live vs rho_frozen<span class="u">0–1</span></div><div class="mn">ρ re-measured on live residuals AT THE WORKING ELASTICITY — the same basis <code>fit_dispersion</code> used. Measuring at the posterior mean would show drift that is not there.<span class="rd"><b>gates</b>operator gate</span></div></div>
+<div class="row" data-gate="1"><div class="nm">exploration · chi_square / p_value<span class="u">×</span></div><div class="mn">Tests that the applied tier is a uniform draw from the reconstructed affordable set. Uniformity is what makes the evidence causal.<span class="rd"><b>gates</b>operator gate</span></div></div>
+<div class="row" data-gate="1"><div class="nm">exploration · affordable_but_not_explored<span class="u">n</span></div><div class="mn">Decisions reporting a non-empty affordable set and no exploration. The two disagree, and <code>select()</code> cannot produce that.<span class="rd"><b>gates</b></span></div></div>
+</div>
+</section>
+<section data-sec id="s16">
+<h2>Status board</h2>
+<p class="src">pipeline.status</p>
+<p class="intro">The ten checks that gate a decision, each with the figure behind it and where to look when red. Computes nothing. Exit code 1 on any FAIL. <strong>Start here.</strong></p>
+<div class="rows">
+<div class="row" data-gate="1"><div class="nm">launch blockers<span class="u">✓/✗</span></div><div class="mn">Config values strict mode refuses to start without.<span class="rd"><b>gates</b></span></div></div>
+<div class="row" data-gate="1"><div class="nm">artifact bundle<span class="u">✓/✗</span></div><div class="mn">Do the frozen artifacts form ONE bundle, unedited since sealing? Mixed vintages and edited files are separate failures with different remedies.<span class="rd"><b>gates</b></span></div></div>
+<div class="row" data-gate="1"><div class="nm">artifact mirrors<span class="u">✓/✗</span></div><div class="mn">Do the config pastes still match the artifacts they came from? Read the bundle line FIRST — the check says they disagree, not which is stale.<span class="rd"><b>gates</b></span></div></div>
+<div class="row" data-gate="1"><div class="nm">calibration gate<span class="u">✓/✗</span></div><div class="mn">The level at the anchor, in band.<span class="rd"><b>gates</b></span></div></div>
+<div class="row" data-gate="0"><div class="nm">elasticity prior<span class="u">✓/✗</span></div><div class="mn">Source and how many categories accepted a bracket.</div></div>
+<div class="row" data-gate="1"><div class="nm">exploration tau<span class="u">✓/✗</span></div><div class="mn">What is in force, and the latest derivation.<span class="rd"><b>gates</b></span></div></div>
+<div class="row" data-gate="1"><div class="nm">shadow gate<span class="u">✓/✗</span></div><div class="mn">Completeness, matched rate, cost-floor violations.<span class="rd"><b>gates</b></span></div></div>
+<div class="row" data-gate="1"><div class="nm">guardrail floors<span class="u">✓/✗</span></div><div class="mn">The two owner thresholds against their noise floors.<span class="rd"><b>gates</b></span></div></div>
+<div class="row" data-gate="1"><div class="nm">stop conditions<span class="u">✓/✗</span></div><div class="mn">How many evaluated, how many fired, and how many CANNOT fire because their threshold is null.<span class="rd"><b>gates</b></span></div></div>
+<div class="row" data-gate="1"><div class="nm">assurance<span class="u">✓/✗</span></div><div class="mn">The four live-data checks, with thin windows warned not passed.<span class="rd"><b>gates</b></span></div></div>
+</div>
+</section>
+<p class="empty" id="empty" hidden>Nothing matches that filter.</p>
+
+<footer>
+  <p>
+    Generated by <code>tools.metrics_glossary</code>. Entries whose source of truth is
+    machine-readable — the two event schemas, the frozen-artifact list, and the status
+    gate names — are cross-checked against the code by
+    <code>tests/test_metrics_glossary.py</code>, so those cannot drift silently. The rest is
+    prose held true by hand, which is why it lives in one file rather than scattered across
+    the reports it describes.
+  </p>
+  <p>
+    Figures quoted are the <code>baseline-20260811043259</code> production run. Where a value
+    is owner-set rather than measured, the entry says so.
+  </p>
+</footer>
+</div>
+
+<script>
+(function(){
+  var q=document.getElementById("q"),cnt=document.getElementById("count"),
+      gate=document.getElementById("gateonly"),empty=document.getElementById("empty"),
+      rows=[].slice.call(document.querySelectorAll(".row")),
+      secs=[].slice.call(document.querySelectorAll("section[data-sec]"));
+  rows.forEach(function(r){r._t=r.textContent.toLowerCase();});
+  function apply(){
+    var s=q.value.trim().toLowerCase(), g=gate.getAttribute("aria-pressed")==="true", n=0;
+    rows.forEach(function(r){
+      var ok=(!s||r._t.indexOf(s)>=0)&&(!g||r.dataset.gate==="1");
+      r.hidden=!ok; if(ok)n++;
+    });
+    secs.forEach(function(sec){
+      sec.hidden=!sec.querySelector(".row:not([hidden])");
+    });
+    cnt.textContent=n+(n===1?" metric":" metrics");
+    empty.hidden=n>0;
+  }
+  q.addEventListener("input",apply);
+  gate.addEventListener("click",function(){
+    gate.setAttribute("aria-pressed",gate.getAttribute("aria-pressed")==="true"?"false":"true");
+    apply();
+  });
+  q.addEventListener("keydown",function(e){if(e.key==="Escape"){q.value="";apply();}});
+  apply();
+})();
+</script>

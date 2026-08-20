@@ -671,6 +671,33 @@ inputs are printed on it. It is published as a claude.ai artifact — deploy the
 built file with the EXISTING artifact URL, so the same link updates rather than
 a second page appearing.
 
+### The metrics index
+
+`docs/metrics.html` is the reference for "what is this number": **121 metrics
+across 17 components**, each with its unit, the component that writes it, and
+whether anything downstream is gated on it. Built, not hand-edited:
+
+```bash
+python3 -m tools.metrics_glossary       # writes docs/metrics.html
+```
+
+The catalogue lives in `tools/metrics_glossary.py` as data — short strings in
+a table, not prose documents, which is why it stays in Python. The page
+carries a live filter and a **gates-only** toggle, because the question is
+almost always "which of these blocks something".
+
+Read it as the tier-two companion to `pipeline.status`: status prints the ten
+checks that gate a decision, this explains the ~700 fields behind them. It
+does NOT list all 45 event fields — `docs/event_contract.html` does that
+exhaustively under its own guard, and two exhaustive lists of one schema is
+how they come to disagree. `tests/test_metrics_glossary.py` asserts that
+non-duplication, and cross-checks the three things that drift silently: every
+event field named must be real, every artifact path must be in
+`provenance.ARTIFACTS`, and the Status board section must match
+`pipeline.status`'s check names verbatim. It also pins the config figures the
+index quotes (`rho`, forced hours, `deff`, `information_increment`), since a
+re-run moves them and a stale number in a reference gets quoted in a meeting.
+
 ### The integration contract
 
 `docs/event_contract.html` is what an integrating engineering team builds
