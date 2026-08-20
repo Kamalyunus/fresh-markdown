@@ -64,6 +64,13 @@ def test_filter_chain_waterfall(workspace):
     wf = manifest["data_quality_waterfall"]
     rows = [s["rows"] for s in wf if s["step"] != "contiguous_episodes_built"]
     assert rows == sorted(rows, reverse=True)
+    # every stage is named and counted -- 14 of them plus the raw row. The
+    # count is asserted so that adding or removing a filter has to be a
+    # deliberate edit here, and so the figure quoted in the walkthrough and
+    # design doc has something holding it to the code.
+    assert wf[0]["step"] == "raw"
+    assert len(wf) == 15, [s["step"] for s in wf]
+    assert "zero_cost_dropped" in {s["step"] for s in wf}
     d = pd.read_parquet("data/prepared.parquet")
     assert d.category.notna().all()
     assert (d.units_sold <= d.starting_inventory).all()
@@ -81,11 +88,15 @@ def test_prepared_data_is_priceable_and_self_consistent(workspace):
     assert d.total_discount.between(0, 1).all()      # percent -> fraction once
     assert (d.starting_inventory >= 0).all()
     assert (d.units_sold >= 0).all()
-    assert (d.cost >= 0).all()
     assert (d.units_sold <= d.starting_inventory).all()
     assert (d.original_price > 0).all()
-    # every surviving episode has at least one feasible discount tier
+    # every surviving episode has at least one feasible discount tier, and a
+    # cost we actually know. A zero cost is a MISSING cost -- it reads as
+    # maximally priceable (d_max = 1.0), and it contributes no scrap to IL,
+    # so it deflates every figure measured over it.
+    assert (d.cost > 0).all()
     assert (d.cost < d.original_price).all() and (d.d_max > 0).all()
+    assert (d.d_max < 1.0).all()
     # and no surviving HOUR is priced under cost. The filter must test the
     # offered price: applied_price is 0 on zero-sale rows (~78% of them), so
     # a filter reading it is blind on exactly those, and the survivors reach
@@ -568,6 +579,50 @@ def test_true_leftover_on_the_production_worked_example():
     # on production it is still positive on ~99.9% of final rows, which is
     # why scrap must not be keyed to it
     assert int(episodes.last_rows(d).hours_remaining.iloc[0]) == 0
+
+
+def test_zero_cost_episodes_are_dropped_whole(workspace, tmp_path):
+    """A zero cost is a MISSING cost -- nobody gives perishable stock away.
+
+    It survived every other stage: `non_priceable` tests
+    `cost >= original_price`, so zero reads as maximally priceable, and
+    `negative_quantities` drops negative costs only. The damage ran two ways.
+    It put `d_max = 1.0` in the action set, which raised ZeroDivisionError out
+    of the demand model on the full-population shadow run. And scrap is
+    `cost x leftover`, so these episodes contributed discount cost and no
+    scrap -- quietly deflating every IL figure measured over them.
+
+    Dropped WHOLE, like its neighbours: a hole punched mid-window re-segments
+    into a spurious short episode.
+    """
+    _chdir(workspace)
+    from bootstrap.prepare_data import load_and_filter
+
+    cfg = yaml.safe_load(open("config.yaml"))
+    raw = pd.read_parquet("data/flc.parquet")
+
+    def episodes_at(wf, label):
+        return next(ep for step, _, ep in wf if step == label)
+
+    _, clean_wf = load_and_filter("data/flc.parquet", cfg)
+    assert "zero_cost_dropped" in {label for label, _, _ in clean_wf}
+
+    # zero the cost on ONE hour of one window -- the whole episode must go
+    holed = raw.copy()
+    victim = holed.index[len(holed) // 2]
+    holed.loc[victim, "cogs_wo_vat"] = 0.0
+    path = tmp_path / "holed.parquet"
+    holed.to_parquet(path)
+    d, wf = load_and_filter(str(path), cfg)
+
+    assert (d.cost > 0).all()
+    # the drop lands at THIS stage, not somewhere incidental downstream
+    before = episodes_at(wf, "non_priceable_dropped")
+    after = episodes_at(wf, "zero_cost_dropped")
+    assert after == before - 1, (before, after)
+    assert episodes_at(wf, "zero_cost_dropped") == \
+        episodes_at(clean_wf, "zero_cost_dropped") - 1, \
+        "one zeroed hour must remove one whole episode, not just that row"
 
 
 def test_restocked_episodes_are_dropped():

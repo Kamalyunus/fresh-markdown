@@ -459,34 +459,40 @@ which is worse than losing the episode.
 | `window_too_long_dropped` | episode | `hours_remaining` above `data.max_window_hours` (**120**) — flc_window carries very large values from upstream data issues. Raised from 48 by the owner: 48 was cutting legitimate multi-day windows, not only defects |
 | `below_cost_dropped` | episode | any hour whose OFFERED price is under cost — legacy already violated the floor, so the episode is not evidence about a system that cannot. Test `original_price × (1 − discount)`, NEVER `applied_price`: the source zeroes that on zero-sale rows (~78% of rows), so a filter reading it is blind on exactly those and below-cost hours survive to be rejected one-by-one at decision time |
 | `non_priceable_dropped` | episode | `cost >= original_price`, i.e. `d_max <= 0`: no feasible tier exists |
-| — | — | **there is no zero-cost filter.** `cost = 0` gives `d_max = 1.0`, so it reads as maximally priceable and survives every stage. See the note below the table |
+| `zero_cost_dropped` | episode | `cost <= 0` — the other end of the same check. Nobody gives perishable stock away, so this is a MISSING cost, not a free good. See the note below the table |
 | `units_gt_inventory_dropped` | episode | sales exceed the inventory on hand |
 | `contiguous_episodes_built` | — | re-segmentation, not a filter: episode count can RISE here because earlier drops split windows |
 | `restocked_episodes_dropped` | episode | an hour opens with more stock than the previous hour left — mid-window replenishment breaks the one-inventory-pool assumption the DP rests on. Runs AFTER re-segmentation; across a data gap the jump would read as a restock |
 
-**`cost = 0` survives the whole chain, and it used to crash the solver.**
+**`zero_cost_dropped` was added after a zero cost crashed the solver**, and it
+is worth knowing what it is defending against, because the damage ran in two
+directions.
+
 `non_priceable_dropped` tests `cost >= original_price`, so a zero cost gives
-`d_max = 1.0` and reads as maximally priceable; `negative_quantities_dropped`
-drops negative costs, not zero ones. That put a 100% discount in the action
-set, and `mu(d) = mu_ref · ((1−d)/(1−d_ref))^ε` at `d = 1` is `0 ** negative`
-— a `ZeroDivisionError` out of `pricing.demand`. It surfaced from
-`pipeline.shadow --max-episodes 0`: the 3,000-episode default had never drawn
-a zero-cost episode, so **the gate passed on a sample that hid a crash**.
-Quote the sampling caveat for more than the violation count.
+`d_max = 1.0` and reads as *maximally* priceable; `negative_quantities_dropped`
+drops negative costs, not zero ones. So it survived every stage. That put a
+100% discount in the action set, and `mu(d) = mu_ref · ((1−d)/(1−d_ref))^ε` at
+`d = 1` is `0 ** negative` — a `ZeroDivisionError` out of `pricing.demand`.
+Quieter and worse: **scrap is `cost × leftover`, so those episodes contributed
+discount cost and no scrap at all**, deflating every IL figure measured over
+them. The crash was the symptom; the deflation was the cost.
 
-`pricing.dp.feasible_tiers` now excludes any tier whose price is not strictly
-positive, so the action set is safe whatever reaches it — that layer owns
-"which prices are legal". Two things are still worth deciding on the data
-side:
+It surfaced from `pipeline.shadow --max-episodes 0`. The 3,000-episode default
+had never drawn a zero-cost episode, so **the gate passed on a sample that hid
+a crash** — quote the sampling caveat for more than the violation count.
 
-- **Count them first**: `d[d.cost <= 0]` on `data/prepared.parquet`. A
-  zero-cost row is far more likely a missing cost than a free good.
-- **They deflate IL silently.** Scrap is `cost × leftover`, so a zero-cost
-  episode contributes discount cost only and no scrap at all. If the count is
-  material, the IL baseline, the guardrail floors and the replay figures are
-  all measured slightly low. Adding a `zero_cost_dropped` stage would change
-  the population and every downstream number, so it is an owner decision, not
-  an agent one.
+The fix is in two layers on purpose. `pricing.dp.feasible_tiers` excludes any
+tier whose price is not strictly positive, so the action set is safe whatever
+reaches it — that layer owns "which prices are legal" and must not depend on a
+filter upstream. `zero_cost_dropped` then keeps rows whose cost we do not know
+out of the population every measured number rests on. **Neither makes the
+other redundant**: the filter cannot protect a production caller, and the tier
+rule cannot un-deflate an IL baseline.
+
+**Every figure measured before this filter existed is slightly low** and needs
+the full bootstrap re-run — IL baseline, guardrail noise floors, replay IL,
+`tau_initial`. The waterfall now reports how many episodes it removed; if that
+count is non-trivial, say so alongside the refreshed numbers.
 
 Restocks are detected on the inventory CHAIN (`next starting_inventory >
 max(0, this starting_inventory - units_sold)`), never by comparing against

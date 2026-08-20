@@ -317,6 +317,7 @@ a spurious short episode, which loses more than the episode does.
 | `window_too_long_dropped` | window above `data.max_window_hours` (**120**, raised from 48 — the shorter bound was cutting legitimate multi-day windows) — the counter carries very large values from upstream data issues |
 | `below_cost_dropped` | any hour whose **offered** price is under cost — tested on `original_price × (1 − discount)`, never `applied_price`, which the source zeroes on zero-sale rows |
 | `non_priceable_dropped` | `cost >= original_price`, so `d_max <= 0` and no tier is feasible |
+| `zero_cost_dropped` | `cost <= 0` — the other end of the same check, and a **missing** cost rather than a free good. It read as maximally priceable (`d_max = 1.0`), which put a zero price in the action set and raised `ZeroDivisionError` out of the demand model; worse, scrap is `cost × leftover`, so these episodes contributed discount cost and no scrap, deflating every IL figure measured over them |
 | `units_gt_inventory_dropped` | sales exceeding inventory on hand |
 | `contiguous_episodes_built` | *(not a filter)* re-segmentation — earlier drops can split a window, so episode count may RISE here |
 | `restocked_episodes_dropped` | an hour opening with more stock than the previous hour left behind |
