@@ -1641,7 +1641,7 @@ is reproducible from its event alone. Run outputs (`data/`, `reports/`,
 
 | Term | Meaning |
 | --- | --- |
-| Episode | One (SKU, FC, date) selling window of contiguous hours |
+| Episode | One SKU × FC selling window: a maximal run of consecutive hourly rows over which the source `hours_remaining` counter decrements by exactly one per elapsed hour. **Deliberately NOT keyed by date** — FLC windows routinely run past midnight, and a date key splits one economic episode into two, resets the price anchor mid-window, and charges the carried-over stock to scrap at the seam |
 | IL / IL% | Inventory Loss in currency / IL over full-price value of units sold |
 | FLC window | The remaining hours a perishable item may be sold |
 | `d_ref` | Category reference discount — the anchor at which the frozen model predicts |
