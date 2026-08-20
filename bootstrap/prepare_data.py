@@ -138,7 +138,19 @@ def load_and_filter(path, cfg=None):
     d = d[~d.episode_id.isin(bad)]
     d = step(d, "discount_out_of_range_dropped")
 
-    neg = (d.starting_inventory < 0) | (d.units_sold < 0) | (d.cost < 0)
+    # Cost is tested `<= 0`, not `< 0`. A zero cost is a MISSING cost -- nobody
+    # gives perishable stock away -- and it is the one impossible value that
+    # looks plausible, so nothing downstream catches it: `non_priceable`
+    # tests `cost >= original_price`, and zero reads as MAXIMALLY priceable
+    # (d_max = 1.0). It did damage in two directions. It put a 100% discount
+    # in the action set, where mu(d) = mu_ref * ((1-d)/(1-d_ref))^eps is
+    # 0 ** negative; `pricing.dp.feasible_tiers` now refuses that tier
+    # independently, since that layer owns which prices are legal and must
+    # protect a production caller this filter never sees. And scrap is
+    # `cost x leftover`, so these episodes contributed discount cost and NO
+    # SCRAP -- quietly deflating every IL figure measured over them, which was
+    # the expensive half.
+    neg = (d.starting_inventory < 0) | (d.units_sold < 0) | (d.cost <= 0)
     d = d[~d.episode_id.isin(d.loc[neg, "episode_id"].unique())]
     d = step(d, "negative_quantities_dropped")
 
@@ -186,23 +198,6 @@ def load_and_filter(path, cfg=None):
     bad = d.loc[d.cost >= d.original_price, "episode_id"].unique()
     d = d[~d.episode_id.isin(bad)]
     d = step(d, "non_priceable_dropped")
-
-    # The other end of the same check: cost at or below zero. Nobody gives
-    # perishable stock away, so a zero cost is a MISSING cost, and it is
-    # damaging in two directions at once. It reads as maximally priceable
-    # (d_max = 1.0), which put a zero price in the action set and raised
-    # ZeroDivisionError out of the demand model; `pricing.dp.feasible_tiers`
-    # now refuses that tier, but a row whose cost we do not know still cannot
-    # be priced honestly. And scrap is `cost x leftover`, so these episodes
-    # contribute discount cost and NO SCRAP -- they were quietly deflating
-    # every IL figure measured on them.
-    #
-    # `<= 0` rather than `== 0` so the stage stands on its own if the chain is
-    # ever reordered; negative costs are already gone at
-    # negative_quantities_dropped.
-    bad = d.loc[d.cost <= 0, "episode_id"].unique()
-    d = d[~d.episode_id.isin(bad)]
-    d = step(d, "zero_cost_dropped")
 
     bad = d.loc[d.units_sold > d.starting_inventory, "episode_id"].unique()
     d = d[~d.episode_id.isin(bad)]

@@ -64,13 +64,12 @@ def test_filter_chain_waterfall(workspace):
     wf = manifest["data_quality_waterfall"]
     rows = [s["rows"] for s in wf if s["step"] != "contiguous_episodes_built"]
     assert rows == sorted(rows, reverse=True)
-    # every stage is named and counted -- 14 of them plus the raw row. The
+    # every stage is named and counted -- 13 of them plus the raw row. The
     # count is asserted so that adding or removing a filter has to be a
     # deliberate edit here, and so the figure quoted in the walkthrough and
     # design doc has something holding it to the code.
     assert wf[0]["step"] == "raw"
-    assert len(wf) == 15, [s["step"] for s in wf]
-    assert "zero_cost_dropped" in {s["step"] for s in wf}
+    assert len(wf) == 14, [s["step"] for s in wf]
     d = pd.read_parquet("data/prepared.parquet")
     assert d.category.notna().all()
     assert (d.units_sold <= d.starting_inventory).all()
@@ -584,13 +583,14 @@ def test_true_leftover_on_the_production_worked_example():
 def test_zero_cost_episodes_are_dropped_whole(workspace, tmp_path):
     """A zero cost is a MISSING cost -- nobody gives perishable stock away.
 
-    It survived every other stage: `non_priceable` tests
-    `cost >= original_price`, so zero reads as maximally priceable, and
-    `negative_quantities` drops negative costs only. The damage ran two ways.
-    It put `d_max = 1.0` in the action set, which raised ZeroDivisionError out
-    of the demand model on the full-population shadow run. And scrap is
-    `cost x leftover`, so these episodes contributed discount cost and no
-    scrap -- quietly deflating every IL figure measured over them.
+    Caught by `negative_quantities_dropped`, whose cost test is `<= 0` rather
+    than `< 0` -- the `=` is the whole point. Nothing downstream catches a
+    zero: `non_priceable` tests `cost >= original_price`, so zero reads as
+    MAXIMALLY priceable. The damage ran two ways. It put `d_max = 1.0` in the
+    action set, which raised ZeroDivisionError out of the demand model on the
+    full-population shadow run. And scrap is `cost x leftover`, so these
+    episodes contributed discount cost and no scrap -- quietly deflating every
+    IL figure measured over them.
 
     Dropped WHOLE, like its neighbours: a hole punched mid-window re-segments
     into a spurious short episode.
@@ -605,7 +605,6 @@ def test_zero_cost_episodes_are_dropped_whole(workspace, tmp_path):
         return next(ep for step, _, ep in wf if step == label)
 
     _, clean_wf = load_and_filter("data/flc.parquet", cfg)
-    assert "zero_cost_dropped" in {label for label, _, _ in clean_wf}
 
     # zero the cost on ONE hour of one window -- the whole episode must go
     holed = raw.copy()
@@ -617,11 +616,10 @@ def test_zero_cost_episodes_are_dropped_whole(workspace, tmp_path):
 
     assert (d.cost > 0).all()
     # the drop lands at THIS stage, not somewhere incidental downstream
-    before = episodes_at(wf, "non_priceable_dropped")
-    after = episodes_at(wf, "zero_cost_dropped")
+    before = episodes_at(wf, "discount_out_of_range_dropped")
+    after = episodes_at(wf, "negative_quantities_dropped")
     assert after == before - 1, (before, after)
-    assert episodes_at(wf, "zero_cost_dropped") == \
-        episodes_at(clean_wf, "zero_cost_dropped") - 1, \
+    assert after == episodes_at(clean_wf, "negative_quantities_dropped") - 1, \
         "one zeroed hour must remove one whole episode, not just that row"
 
 

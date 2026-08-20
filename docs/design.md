@@ -310,14 +310,13 @@ a spurious short episode, which loses more than the episode does.
 | `duplicate_hour_rows_dropped` | both copies of any repeated (SKU, FC, hour) — no principled way to choose, and they collide two runs into one episode id |
 | `exclusion_window_removed` | any episode with *any* hour in the known bad-data window |
 | `discount_out_of_range_dropped` | discount outside [0,1] — the percent→fraction conversion applied twice or not at all |
-| `negative_quantities_dropped` | negative inventory, sales or cost |
+| `negative_quantities_dropped` | impossible quantities: negative inventory or sales, and **`cost <= 0`** — a zero cost is a *missing* cost, not a free good. It reads as maximally priceable (`d_max = 1.0`), so nothing downstream catches it; and since scrap is `cost × leftover`, these episodes contributed discount cost and no scrap, deflating every IL figure measured over them |
 | `null_category_dropped` | no category/subcategory — no reference discount, no dispersion cell |
 | `zero_base_price_dropped` | `original_price` still absent after fill-within-episode |
 | `negative_window_dropped` | any `hours_remaining < 0` |
 | `window_too_long_dropped` | window above `data.max_window_hours` (**120**, raised from 48 — the shorter bound was cutting legitimate multi-day windows) — the counter carries very large values from upstream data issues |
 | `below_cost_dropped` | any hour whose **offered** price is under cost — tested on `original_price × (1 − discount)`, never `applied_price`, which the source zeroes on zero-sale rows |
 | `non_priceable_dropped` | `cost >= original_price`, so `d_max <= 0` and no tier is feasible |
-| `zero_cost_dropped` | `cost <= 0` — the other end of the same check, and a **missing** cost rather than a free good. It read as maximally priceable (`d_max = 1.0`), which put a zero price in the action set and raised `ZeroDivisionError` out of the demand model; worse, scrap is `cost × leftover`, so these episodes contributed discount cost and no scrap, deflating every IL figure measured over them |
 | `units_gt_inventory_dropped` | sales exceeding inventory on hand |
 | `contiguous_episodes_built` | *(not a filter)* re-segmentation — earlier drops can split a window, so episode count may RISE here |
 | `restocked_episodes_dropped` | an hour opening with more stock than the previous hour left behind |

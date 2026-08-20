@@ -560,7 +560,7 @@
     <caption>Everything the agent stands on</caption>
     <thead><tr><th>Artifact</th><th>What it holds</th><th>State</th></tr></thead>
     <tbody>
-      <tr><td>split_manifest.json</td><td>the analysis population — 14 counted filter stages</td><td class="good">frozen</td></tr>
+      <tr><td>split_manifest.json</td><td>the analysis population — 13 counted filter stages</td><td class="good">frozen</td></tr>
       <tr><td>baseline_model.txt</td><td>μ_ref — units next hour at the reference discount</td><td class="good">frozen</td></tr>
       <tr><td>calibration.json</td><td>one level factor per subcategory</td><td class="good">frozen</td></tr>
       <tr><td>r_lookup.json</td><td>demand dispersion, by subcategory</td><td class="good">frozen</td></tr>
@@ -608,7 +608,7 @@
   <div class="step-head"><h2>The population every other number is measured on</h2></div>
   <p class="lede">
     Before anything is modelled, the raw feed is reduced to a population we are willing to
-    defend, through <strong>fourteen named filter stages</strong>. Every stage is counted
+    defend, through <strong>thirteen named filter stages</strong>. Every stage is counted
     and written to the manifest — so any figure anywhere in this system traces back to the
     rows behind it.
   </p>
@@ -623,18 +623,20 @@
 
 <section class="prose">
   <p style="margin-top:24px">
-    Structural drops go first — duplicate hour rows, out-of-range discounts, negative
-    quantities, null categories, zero base prices, negative windows. Then the economic
-    ones: windows longer than 120 hours (a known source defect rather than a genuinely
-    long window), prices already below cost, rows where cost is missing or above the
-    full price, and sales exceeding inventory. Nothing is dropped silently at any stage.
+    Structural drops go first — duplicate hour rows, out-of-range discounts, impossible
+    quantities (negative inventory or sales, and a cost of zero, which is a
+    <em>missing</em> cost rather than a free good), null categories, zero base prices,
+    negative windows. Then the economic ones: windows longer than 120 hours (a known
+    source defect rather than a genuinely long window), prices already below cost, a cost
+    at or above the full price, and sales exceeding inventory. Nothing is dropped silently
+    at any stage.
   </p>
 </section>
 
 <ul class="chips" style="margin-top:26px">
   <li><span class="k">Hourly rows</span><span class="v">2.07M</span></li>
   <li><span class="k">Episodes</span><span class="v">334k</span></li>
-  <li><span class="k">Filter stages</span><span class="v">14</span></li>
+  <li><span class="k">Filter stages</span><span class="v">13</span></li>
   <li><span class="k">Window cap</span><span class="v">120 h</span></li>
 </ul>
 

@@ -452,30 +452,30 @@ which is worse than losing the episode.
 | `duplicate_hour_rows_dropped` | rows (both copies) | two states for one sku x fc x hour; no way to choose, and they collide two runs into one episode id |
 | `exclusion_window_removed` | episode | any episode with ANY hour in the known demand-issue window |
 | `discount_out_of_range_dropped` | episode | discount outside [0,1] — the percent->fraction conversion applied twice or not at all |
-| `negative_quantities_dropped` | episode | negative inventory, sales or cost |
+| `negative_quantities_dropped` | episode | impossible quantities: negative inventory or sales, and **`cost <= 0`** — note the `<=`. See the note below the table |
 | `null_category_dropped` | rows | missing category/subcategory (no reference discount, no dispersion cell) |
 | `zero_base_price_dropped` | rows | `original_price` still null/zero after ffill+bfill within the episode |
 | `negative_window_dropped` | episode | any `hours_remaining < 0` |
 | `window_too_long_dropped` | episode | `hours_remaining` above `data.max_window_hours` (**120**) — flc_window carries very large values from upstream data issues. Raised from 48 by the owner: 48 was cutting legitimate multi-day windows, not only defects |
 | `below_cost_dropped` | episode | any hour whose OFFERED price is under cost — legacy already violated the floor, so the episode is not evidence about a system that cannot. Test `original_price × (1 − discount)`, NEVER `applied_price`: the source zeroes that on zero-sale rows (~78% of rows), so a filter reading it is blind on exactly those and below-cost hours survive to be rejected one-by-one at decision time |
 | `non_priceable_dropped` | episode | `cost >= original_price`, i.e. `d_max <= 0`: no feasible tier exists |
-| `zero_cost_dropped` | episode | `cost <= 0` — the other end of the same check. Nobody gives perishable stock away, so this is a MISSING cost, not a free good. See the note below the table |
 | `units_gt_inventory_dropped` | episode | sales exceed the inventory on hand |
 | `contiguous_episodes_built` | — | re-segmentation, not a filter: episode count can RISE here because earlier drops split windows |
 | `restocked_episodes_dropped` | episode | an hour opens with more stock than the previous hour left — mid-window replenishment breaks the one-inventory-pool assumption the DP rests on. Runs AFTER re-segmentation; across a data gap the jump would read as a restock |
 
-**`zero_cost_dropped` was added after a zero cost crashed the solver**, and it
-is worth knowing what it is defending against, because the damage ran in two
-directions.
+**`negative_quantities_dropped` tests `cost <= 0`, not `cost < 0`, and the
+`=` is load-bearing.** It was `< 0` until a zero cost crashed the solver, and
+the damage ran in two directions.
 
 `non_priceable_dropped` tests `cost >= original_price`, so a zero cost gives
-`d_max = 1.0` and reads as *maximally* priceable; `negative_quantities_dropped`
-drops negative costs, not zero ones. So it survived every stage. That put a
-100% discount in the action set, and `mu(d) = mu_ref · ((1−d)/(1−d_ref))^ε` at
-`d = 1` is `0 ** negative` — a `ZeroDivisionError` out of `pricing.demand`.
-Quieter and worse: **scrap is `cost × leftover`, so those episodes contributed
-discount cost and no scrap at all**, deflating every IL figure measured over
-them. The crash was the symptom; the deflation was the cost.
+`d_max = 1.0` and reads as *maximally* priceable — nothing downstream catches
+it. That put a 100% discount in the action set, and
+`mu(d) = mu_ref · ((1−d)/(1−d_ref))^ε` at `d = 1` is `0 ** negative` — a
+`ZeroDivisionError` out of `pricing.demand`. Quieter and worse: **scrap is
+`cost × leftover`, so those episodes contributed discount cost and no scrap at
+all**, deflating every IL figure measured over them. The crash was the symptom;
+the deflation was the cost. Nobody gives perishable stock away: a zero cost is
+a MISSING cost.
 
 It surfaced from `pipeline.shadow --max-episodes 0`. The 3,000-episode default
 had never drawn a zero-cost episode, so **the gate passed on a sample that hid
@@ -484,7 +484,7 @@ a crash** — quote the sampling caveat for more than the violation count.
 The fix is in two layers on purpose. `pricing.dp.feasible_tiers` excludes any
 tier whose price is not strictly positive, so the action set is safe whatever
 reaches it — that layer owns "which prices are legal" and must not depend on a
-filter upstream. `zero_cost_dropped` then keeps rows whose cost we do not know
+filter upstream. The `<= 0` test then keeps rows whose cost we do not know
 out of the population every measured number rests on. **Neither makes the
 other redundant**: the filter cannot protect a production caller, and the tier
 rule cannot un-deflate an IL baseline.
