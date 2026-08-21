@@ -72,6 +72,26 @@ report sets `window.sampled` and adds `shadow_gate.sampling_caveat`; quote the
 caveat whenever you quote the zero violation count, and note it covers ~0.9%
 of the extract at the default.
 
+`exploration_budget_would_be` answers the question the backtest cannot:
+**is this `tau` affordable?** `backtest.tau_initial_derivation` reports
+`implied_daily_spend` against `daily_budget` and they match BY CONSTRUCTION —
+the bisection solves `tau` until they do — but it solves on the **exploit-only
+replay path**. Shadow runs the **anchored** path, where each hour's action set
+is constrained by the price already in force, so the affordable sets differ
+and the same `tau` buys a different amount of exploration. Shadow now reports
+both sides on its own basis, same episodes and same days, plus the ratio and
+whether it clears the `exploration_cost_vs_budget` stop multiple. **Read it
+before the pilot**: over 2× and exploration suspends on day one; between 1×
+and 2× the `tau` controller walks it down, capped at halving per day.
+
+Its budget uses `common.episodes.classify_last` for scrap, not a local copy.
+An inline copy was written first and dropped **all** scrap on a feed with no
+write-off sentinel — that function carries a fallback for exactly that case.
+It understated the budget 10× and flipped the verdict from "within budget" to
+"WOULD SUSPEND", which would have sent someone to re-derive `tau` against a
+budget that was never real. `tests/test_end_to_end.test_shadow_phase_harness`
+asserts scrap is present and exceeds the discount term.
+
 Shadow needs `apply_level_calibration` and `tau_initial` non-null. Its exit
 gate: event completeness and matched rate above `monitoring.shadow_gate`
 thresholds and ZERO cost-floor violations. Shadow outcomes carry

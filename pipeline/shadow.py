@@ -126,12 +126,26 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
     rec_disc = leg_disc = would_be_cost = 0.0
     n_forced = empty_affordable = 0
     raw_information = 0.0
+    # Markdown IL on the SAME episodes over the SAME window, so the budget
+    # projection and the realised exploration spend share a population --
+    # comparing a total from here against one from the backtest is comparing
+    # two different samples of two different sizes. Accumulated per episode
+    # rather than collected into rows: at --max-episodes 0 the row list would
+    # be millions of dicts and the answer is two scalars.
+    il_discount = 0.0
+    # one FINAL row per episode -- bounded by episode count, not row count --
+    # so scrap can be classified by `common.episodes.classify_last` rather
+    # than by a copy of it. An inline copy was tried and dropped ALL scrap on
+    # a feed with no write-off sentinel, which is the exact silent emptying
+    # that function's fallback exists to prevent.
+    last_rows = []
     latencies = []
     drift = {"mu": [], "r": [], "q": [], "sold": []}
 
     for eid, g in groups:
         mu_path = list(g.mu_ref_hat.to_numpy())
         anchor = None
+        last_obs = None
         for t in range(len(g)):
             row = g.iloc[t]
             if not row.is_observed:      # window tail: no outcome to record
@@ -221,7 +235,22 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
             drift["q"].append(q)
             drift["sold"].append(sold)
 
+            # discount given away at the LEGACY price -- no price was applied,
+            # so this is the markdown IL the business actually carried
+            il_discount += float(row.original_price) * legacy_d * sold
+            last_obs = (q, sold, float(row.cost), ending)
+
             anchor = legacy_d                 # reality's price is the next anchor
+
+        # Scrap is an end-of-episode quantity, so the final row is kept and
+        # classified after the loop, all episodes together -- the sentinel
+        # test needs the whole frame to know whether the convention is in
+        # force at all.
+        if last_obs is not None:
+            start, sold_last, unit_cost, ending_last = last_obs
+            last_rows.append({"episode_id": eid, "starting_inventory": start,
+                              "units_sold": sold_last, "cost": unit_cost,
+                              "ending_inventory": ending_last})
 
     if n_dec == 0:
         raise RuntimeError("no decisions produced -- empty input or all states rejected")
@@ -241,6 +270,60 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
     eff_information = raw_information / deff(cfg)
     inc = cfg["learning"]["information_increment"]
     n_ep = len(groups)
+    # Would-be exploration spend against the budget, on SHADOW'S OWN basis.
+    #
+    # `backtest.tau_initial_derivation` already reports implied_daily_spend
+    # against daily_budget, and the two match there BY CONSTRUCTION -- the
+    # bisection solves tau until they do. But it solves on the EXPLOIT-ONLY
+    # replay path, where each hour is scored independently. Shadow runs the
+    # ANCHORED path, where the action set is constrained by the price already
+    # in force, so the affordable sets differ and the same tau buys a
+    # different amount of exploration. That gap had nowhere to be seen: the
+    # operator had to divide one report's total by another report's episode
+    # count, on two different samples of two different sizes.
+    #
+    # Both sides here cover the same episodes over the same days.
+    n_days = max((pd.Timestamp(d.date.max()) - pd.Timestamp(d.date.min())).days + 1, 1)
+    last = pd.DataFrame(last_rows)
+    kind = episodes.classify_last(last)
+    leftover = episodes.leftover_units(last.starting_inventory, last.units_sold)
+    completed = (kind == episodes.COMPLETED).to_numpy()
+    il_scrap = float((last.cost.to_numpy() * leftover.to_numpy())[completed].sum())
+    il_unknown_scrap = int((kind == episodes.NOT_CLOSED).sum())
+    markdown_il = il_discount + il_scrap
+    daily_il = markdown_il / n_days
+    daily_budget = cfg["exploration"]["budget_share_of_il"] * daily_il
+    implied_daily_spend = would_be_cost / n_days
+    over = (implied_daily_spend / daily_budget) if daily_budget > 0 else None
+    stop_at = cfg["monitoring"]["stop_conditions"]["exploration_cost_vs_budget"]
+    budget_check = {
+        "basis": "shadow's own anchored decision path, same episodes and days "
+                 "on both sides",
+        "days": int(n_days),
+        "implied_daily_spend": round(implied_daily_spend, 1),
+        "daily_budget": round(daily_budget, 1),
+        "spend_over_budget": round(over, 2) if over is not None else None,
+        "stop_condition_multiple": stop_at,
+        "markdown_il_total": round(markdown_il, 1),
+        "markdown_il_discount": round(il_discount, 1),
+        "markdown_il_scrap": round(il_scrap, 1),
+        "episodes_unknown_scrap_excluded": il_unknown_scrap,
+        "budget_share_of_il": cfg["exploration"]["budget_share_of_il"],
+        "tau": tau,
+        "verdict": (
+            "NO IL -- cannot project a budget" if over is None else
+            f"WOULD SUSPEND -- {over:.2f}x budget, above the {stop_at}x stop "
+            "condition; re-derive tau on this basis before the pilot"
+            if over > stop_at else
+            f"OVER BUDGET -- {over:.2f}x; the tau controller shrinks tau at the "
+            "operator gate, capped at halving per day" if over > 1 else
+            f"within budget -- {over:.2f}x"),
+        "note": ("tau was derived on the backtest's exploit-only path; this is "
+                 "the same tau measured on the anchored path, so the two are "
+                 "not required to agree. A gap here is the reason to re-derive, "
+                 "not a defect."),
+    }
+
     per_episode = eff_information / n_ep if n_ep else 0.0
     step = cfg["learning"]["max_mean_step"]
     learning_yield = {
@@ -326,6 +409,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
             "note": "no price was applied; costs are the expected IL the "
                     "recommendations would have spent",
         },
+        "exploration_budget_would_be": budget_check,
         "learning_yield_would_be": learning_yield,
         "recommendation_vs_legacy": {
             "mean_recommended_discount": round(rec_disc / n_dec, 4),
@@ -396,6 +480,10 @@ def main():
           f"updates from this window "
           f"({ly['episodes_per_bounded_update']} episodes per update); "
           f"calendar floor is 1 update/day")
+    bc = report["exploration_budget_would_be"]
+    print(f"exploration budget : spend {bc['implied_daily_spend']:,.0f}/day vs "
+          f"budget {bc['daily_budget']:,.0f}/day over {bc['days']} days")
+    print(f"                     {bc['verdict']}")
     print(g["verdict"])
     print(f"wrote {args.out}")
 

@@ -105,7 +105,7 @@ footer code{font-family:var(--data)}
 <div class="bar"><div class="inner">
   <input id="q" type="search" placeholder="filter — try  il, tau, censor, rho, gate" aria-label="Filter metrics">
   <button class="toggle" id="gateonly" aria-pressed="false">gates only</button>
-  <span id="count">121 metrics</span>
+  <span id="count">124 metrics</span>
 </div></div>
 
 <div class="wrap">
@@ -235,6 +235,9 @@ footer code{font-family:var(--data)}
 <div class="row" data-gate="0"><div class="nm">window.sampled / population_episodes<span class="u">n</span></div><div class="mn">Whether the run sampled and out of how many. <strong>Quote the sampling caveat whenever you quote the violation count</strong>: the 3,000-episode default once passed on a sample that hid a crash the full run found.</div></div>
 <div class="row" data-gate="0"><div class="nm">state_rejected_count<span class="u">n</span></div><div class="mn">States refused rather than priced. Refusal is the designed response to an implausible state, so a non-zero count is information, not failure.</div></div>
 <div class="row" data-gate="0"><div class="nm">effective_information_total<span class="u">n</span></div><div class="mn">Fisher information for ε the run would have bought, after deff deflation. Accumulated on EXPLORATION decisions only.</div></div>
+<div class="row" data-gate="1"><div class="nm">exploration_budget · implied_daily_spend<span class="u">₩</span></div><div class="mn">What exploration would have spent per day, on SHADOW&#x27;S OWN anchored path. The backtest reports the same pair, but solves on the exploit-only replay path where each hour is scored independently — the anchored action sets differ, so the same tau buys a different amount of exploration.<span class="rd"><b>gates</b>whether tau is affordable before the pilot</span></div></div>
+<div class="row" data-gate="0"><div class="nm">exploration_budget · daily_budget<span class="u">₩</span></div><div class="mn"><code>budget_share_of_il</code> × daily markdown IL over the SAME episodes and days. Scrap is included via <code>classify_last</code>, whose no-sentinel fallback is load-bearing: without it a feed that reports honest ending inventory throughout loses ALL scrap and the budget reads ~10× too small.</div></div>
+<div class="row" data-gate="1"><div class="nm">exploration_budget · spend_over_budget<span class="u">×</span></div><div class="mn">Spend ÷ budget. Above <code>exploration_cost_vs_budget</code> (2×) the stop condition would suspend exploration on day one of the pilot; between 1× and 2× the tau controller shrinks tau at the operator gate, capped at halving a day.<span class="rd"><b>gates</b>read before launch, not after</span></div></div>
 <div class="row" data-gate="0"><div class="nm">episodes_per_bounded_update<span class="u">n</span></div><div class="mn"><code>information_increment ÷ effective information per episode</code>. Divide by the pilot&#x27;s daily episode count for the evidence-side floor; the binding constraint is whichever is larger, that or the calendar.<span class="rd">weeks-to-convergence</span></div></div>
 <div class="row" data-gate="0"><div class="nm">realised_vs_predicted_sold_ratio_at_legacy_price<span class="u">×</span></div><div class="mn">The production continuation of the calibration gate, and the first place frozen-baseline drift shows.</div></div>
 <div class="row" data-gate="0"><div class="nm">solver_latency_p95_s<span class="u">s</span></div><div class="mn">95th percentile DP solve time.</div></div>

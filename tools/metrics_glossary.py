@@ -281,6 +281,22 @@ CATALOGUE = [
   ("effective_information_total", "count",
    "Fisher information for ε the run would have bought, after deff deflation. "
    "Accumulated on EXPLORATION decisions only.", ""),
+  ("exploration_budget · implied_daily_spend", "won",
+   "What exploration would have spent per day, on SHADOW'S OWN anchored path. "
+   "The backtest reports the same pair, but solves on the exploit-only replay "
+   "path where each hour is scored independently — the anchored action sets "
+   "differ, so the same tau buys a different amount of exploration.",
+   "GATE — whether tau is affordable before the pilot"),
+  ("exploration_budget · daily_budget", "won",
+   "`budget_share_of_il` × daily markdown IL over the SAME episodes and days. "
+   "Scrap is included via `classify_last`, whose no-sentinel fallback is "
+   "load-bearing: without it a feed that reports honest ending inventory "
+   "throughout loses ALL scrap and the budget reads ~10× too small.", ""),
+  ("exploration_budget · spend_over_budget", "ratio",
+   "Spend ÷ budget. Above `exploration_cost_vs_budget` (2×) the stop condition "
+   "would suspend exploration on day one of the pilot; between 1× and 2× the "
+   "tau controller shrinks tau at the operator gate, capped at halving a day.",
+   "GATE — read before launch, not after"),
   ("episodes_per_bounded_update", "count",
    "`information_increment ÷ effective information per episode`. Divide by the "
    "pilot's daily episode count for the evidence-side floor; the binding constraint "

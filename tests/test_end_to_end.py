@@ -417,6 +417,30 @@ def test_shadow_phase_harness(workspace):
     assert "sampling_caveat" in gate
     assert gate["verdict"].startswith("PASS")   # caveat is not a gate row
 
+    # the budget check answers "is this tau affordable on the ANCHORED path",
+    # which the backtest's derivation cannot: it solves on the exploit-only
+    # replay path, so the same tau buys a different amount of exploration
+    b = report["exploration_budget_would_be"]
+    spend = report["exploration_would_be"]["would_be_cost_total"] / b["days"]
+    assert b["implied_daily_spend"] == pytest.approx(spend, rel=1e-3)
+    assert b["daily_budget"] == pytest.approx(
+        b["budget_share_of_il"] * b["markdown_il_total"] / b["days"], rel=1e-3)
+    assert b["markdown_il_total"] == pytest.approx(
+        b["markdown_il_discount"] + b["markdown_il_scrap"])
+    assert b["spend_over_budget"] == pytest.approx(
+        b["implied_daily_spend"] / b["daily_budget"], rel=1e-2)
+
+    # SCRAP MUST BE IN THE PROJECTION. An inline copy of classify_last was
+    # tried here and dropped every scrap won on a feed with no write-off
+    # sentinel -- the fallback that function carries precisely to stop that.
+    # It understated the budget 10x and turned "within budget" into "WOULD
+    # SUSPEND", which is the wrong direction to be wrong in: it would have
+    # sent someone to re-derive tau against a budget that was never real.
+    assert b["markdown_il_scrap"] > 0, \
+        "scrap vanished from the budget projection -- classify_last's " \
+        "no-sentinel fallback is being bypassed again"
+    assert b["markdown_il_scrap"] > b["markdown_il_discount"]
+
     # shadow outcomes are NOT learning evidence: update must consume nothing
     from common.config import load_config
     from pipeline.update import run as update_run
