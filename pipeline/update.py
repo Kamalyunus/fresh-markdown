@@ -179,6 +179,19 @@ def tau_calibration(decisions, outcomes, posterior, cfg):
         return block
 
     forced = [d for d in decisions if d["is_exploration"]]
+    if not forced:
+        # NOT the same as "explored and spent almost nothing", and the
+        # difference is a positive feedback loop. With no forced decisions
+        # realised cost is 0, the guard floors the denominator at
+        # `tau_spend_guard`, and `budget / 1` clips to the 2x ceiling -- so
+        # tau DOUBLES. The window where that happens is precisely the one
+        # where exploration was suspended by the stop condition for
+        # overspending, so tau would grow every day it was switched off and
+        # come back further over budget than it went away: 448 -> 896 ->
+        # 1792. An absence of spend is an absence of signal; hold tau still.
+        block["skipped"] = "no exploration in the window -- nothing to calibrate from"
+        block["through_date"] = through
+        return block
     realised = float(sum(d["exploration_cost"] for d in forced))
     business = business_metrics(decisions, outcomes, cfg)
     il_abs = (business.get("il_pct_aggregate") or {}).get("il_absolute")

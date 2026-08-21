@@ -211,3 +211,37 @@ def test_a_null_tau_initial_is_reported_not_crashed(cfg, tmp_path):
     assert not block["commit"]
     assert block["tau_before"] is None
     assert "null" in block["skipped"]
+
+
+def test_a_window_with_no_exploration_holds_tau_still(cfg, tmp_path):
+    """The bug this exists for is positive feedback, not a rounding error.
+
+    With no forced decisions the realised cost is 0. `tau_next` floors the
+    denominator at `tau_spend_guard` (1 won), so `budget / 1` is enormous and
+    clips to the 2x ceiling -- tau DOUBLES. And the window where exploration
+    is absent is exactly the one where the stop condition suspended it for
+    OVERSPENDING, so tau would grow every day it was switched off and return
+    further over budget than it went away: 448 -> 896 -> 1792 -> 3584.
+
+    An absence of spend is an absence of signal. Hold tau still.
+    """
+    store = EventStore(cfg, root=str(tmp_path / "events"))
+    for i in range(20):                       # exploitation only: cost 0, no draws
+        d = _decision(i, 0.30, exploration_cost=0.0)
+        assert not d["is_exploration"]
+        store.emit_decision(d)
+        store.emit_outcome(_outcome(i, 1))
+    posterior = _posterior(cfg, tmp_path)
+
+    before = posterior.tau(cfg)
+    block = upd.tau_calibration(store.load_decisions(), store.load_outcomes(),
+                                posterior, cfg)
+    assert not block["commit"], "tau must not move on a window with no exploration"
+    assert "no exploration" in block["skipped"]
+    assert block["tau_after"] == before
+
+    # and the raw controller still does the dangerous thing, so the guard above
+    # is what stands between the two -- not luck
+    from pricing import explore
+    doubled = explore.tau_next(before, 805_478.0, 0.0, cfg)
+    assert doubled == pytest.approx(before * cfg["exploration"]["tau_adjust_clip"][1])
