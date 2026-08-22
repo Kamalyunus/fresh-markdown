@@ -83,6 +83,7 @@ def _require_shadow_config(cfg, backtest_path="reports/backtest.json"):
 
 
 def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None,
+                      sampled_episodes=None, population_episodes=None,
                       max_days=60):
     """Day-by-day simulation of the tau controller over the shadow window.
 
@@ -134,6 +135,17 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
         "days_stop_condition_fires": suspend_days,
         "first_day_within_budget": first_within,
         "clip": cfg["exploration"]["tau_adjust_clip"],
+        # THE ONE FIGURE IN THIS REPORT A SAMPLE DEGRADES. Everything else
+        # scales: the gate reads rates, and tau_recommended equates two
+        # quantities that both scale linearly with the sample, so the tau
+        # solving them is invariant. This series does not -- it divides the
+        # sample across the window's days, so a 3,000-episode sample over 18
+        # days leaves ~167 episodes behind each day's budget and spend.
+        "episodes_per_day_sampled": round(
+            sampled_episodes / max(len(rows), 1), 1) if sampled_episodes else None,
+        "episodes_per_day_population": round(
+            population_episodes / max(window_days or len(rows), 1), 1)
+            if population_episodes else None,
         "verdict": (
             "no days simulated" if not rows else
             f"exploration suspends on day 1 and stays suspended for "
@@ -147,6 +159,14 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
                  "path a pilot launched at tau_start would have walked. Run "
                  "it again with tau_initial set to tau_recommended to confirm "
                  "the launch value clears day 1."
+                 + (" ON A SAMPLE the day-to-day movement mixes real "
+                    "volatility with sampling noise, and the controller will "
+                    "look jumpier than it is; the pooled "
+                    "exploration_budget_would_be.spend_over_budget is "
+                    "sample-invariant and is the figure to quote. Raise "
+                    "--max-episodes if reading this series closely."
+                    if sampled_episodes and population_episodes
+                    and sampled_episodes < population_episodes else "")
                  + (f" TRUNCATED: {len(ledger.days) - len(rows)} later days "
                     f"not walked (cap {max_days})."
                     if len(rows) < len(ledger.days) else "")),
@@ -446,7 +466,8 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
                  "tau_controller_trace."),
     }
     budget_check["tau_controller_trace"] = _controller_trace(
-        ledger, il_by_day, tau, widest_std, cfg, window_days=n_days)
+        ledger, il_by_day, tau, widest_std, cfg, window_days=n_days,
+        sampled_episodes=n_ep, population_episodes=len(population))
 
     per_episode = eff_information / n_ep if n_ep else 0.0
     step = cfg["learning"]["max_mean_step"]

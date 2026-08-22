@@ -341,6 +341,13 @@ CATALOGUE = [
    "tau was launched with and no correction can precede it — a single "
    "spend_over_budget multiple cannot show this.",
    "GATE — does the pilot survive its own launch"),
+  ("tau_controller_trace · episodes_per_day_sampled", "count",
+   "The ONE figure a sample degrades. The gate reads rates, and `tau_recommended` / "
+   "`spend_over_budget` equate two quantities that both scale with the sample, so they "
+   "are sample-INVARIANT. The daily series is not — it divides the sample across the "
+   "window's days, so 3,000 episodes over an 18-day hold-out leaves ~167 behind each "
+   "day's budget and the controller looks jumpier than it is. Quote the pooled "
+   "`spend_over_budget`; raise `--max-episodes` only to read this series closely.", ""),
   ("tau_controller_trace · window_days", "count",
    "Calendar span the budget divides by. NOT `days_with_decisions` (days that "
    "produced a decision) and NOT `days_simulated` (walked, capped at 60, with "

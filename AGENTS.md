@@ -75,7 +75,8 @@ record which happened. No `data.holdout` in config is an error, not a silent
 full run.
 
 Shadow runs on a uniform sample of `monitoring.shadow_gate.sample_episodes`
-episodes (**default 3,000**, drawn before `mu_ref` prediction so the cost
+episodes (**default 3,000** — roughly 3.5 minutes against ~47 for a full
+18-day hold-out sweep; sample first, always, drawn before `mu_ref` prediction so the cost
 scales with the sample, not the extract). 3,000 keeps the standard error on a
 rate near 0.99 at 0.18pp against the 1.00pp the gate discriminates on — wide
 margin, and fast enough that the gate actually gets re-run after a change.
@@ -84,6 +85,17 @@ worth doing once for the final pre-launch record, not for iteration. A sampled
 report sets `window.sampled` and adds `shadow_gate.sampling_caveat`; quote the
 caveat whenever you quote the zero violation count, and note it covers ~0.9%
 of the extract at the default.
+
+**Sampling degrades exactly one figure**, and it is worth knowing which.
+The gate reads rates. `tau_recommended` and `spend_over_budget` equate two
+quantities that both scale linearly with the sample, so they are
+**sample-invariant** — the same at 3,000 as at 40,000. The exception is
+`tau_controller_trace.by_day`: it divides the sample across the window's
+days, so 3,000 episodes over an 18-day hold-out leaves ~167 behind each day's
+budget and spend, and the controller looks jumpier than it is. The trace
+reports `episodes_per_day_sampled` against `episodes_per_day_population` and
+says so. Quote the pooled `spend_over_budget`; raise `--max-episodes` only if
+you are reading the daily series closely.
 
 `exploration_budget_would_be` answers the question the backtest cannot:
 **is this `tau` affordable?** `backtest.tau_initial_derivation` reports
@@ -898,7 +910,7 @@ the tab.
 
 ### The metrics index
 
-`docs/metrics.html` is the reference for "what is this number": **134 metrics
+`docs/metrics.html` is the reference for "what is this number": **135 metrics
 across 17 components**, each with its unit, the component that writes it, and
 whether anything downstream is gated on it. Built, not hand-edited:
 

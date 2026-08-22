@@ -253,6 +253,24 @@ def test_missing_holdout_config_is_an_error_not_a_silent_full_run():
     assert "SystemExit" in src[:src.index("no data.holdout")]
 
 
+def test_the_trace_says_when_a_sample_is_too_thin_to_read_daily():
+    """Sampling degrades exactly one figure, and it has to name itself.
+
+    The gate reads rates; tau_recommended equates two quantities that both
+    scale with the sample, so the tau solving them is invariant. The
+    day-by-day trace is the exception -- it divides the sample across the
+    window's days, so the controller looks jumpier than it is.
+    """
+    import inspect
+    from pipeline import shadow
+    src = inspect.getsource(shadow._controller_trace)
+    assert "episodes_per_day_sampled" in src
+    assert "episodes_per_day_population" in src
+    # and it must point at the figure that DOES survive sampling, or the
+    # caveat leaves the reader with nothing to quote
+    assert "sample-invariant" in src and "spend_over_budget" in src
+
+
 # ------------------------------------------------- pre-launch containment
 
 def test_pre_launch_stops_at_the_gate_window():
