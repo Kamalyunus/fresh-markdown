@@ -20,6 +20,9 @@ working directory silently reads/writes the wrong artifacts.
 
 ```
 step                                          writes                                  reads
+0. bootstrap.download_flc                     data/flc_raw.parquet                    sb_scm.fresh_flc_detail
+   (Redshift extract; REDSHIFT_* from ~/.env, never from config.yaml. Not
+   part of run_bootstrap.sh -- it takes the parquet as its argument.)
 1. bootstrap.prepare_data --input <raw>       data/prepared.parquet,                  raw FLC parquet
                                               artifacts/split_manifest.json
 2. bootstrap.measure --input <raw>            reports/phase0.json                     raw FLC parquet
@@ -825,6 +828,10 @@ so read them off the reports directly. Two rules survive it:
 - Modules are run as `python3 -m package.module` from the repo root.
 - `data/`, `reports/`, `artifacts/`, `events_store/` are gitignored run
   outputs — never commit them.
+- Credentials live in `~/.env` and reach the code as `REDSHIFT_*` environment
+  variables. `.env` is gitignored. No hostname, credential or connection
+  string goes in `config.yaml`, in a module, or in a commit — config.yaml is
+  the source of every *tunable*, not of any secret.
 - Synthetic validation: `tools/make_dummy_flc.py --policy randomized` makes
   elasticity recoverable (estimator should RECOVER it); `--policy legacy`
   reproduces the production confound (estimator should DETECT it).

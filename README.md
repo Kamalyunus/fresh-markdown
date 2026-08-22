@@ -14,6 +14,7 @@ randomized exploration.
 | --- | --- | --- |
 | `config.yaml` | §7 | Every tunable parameter. Single source of truth; no numeric literals in code. |
 | `common/config.py` | §7 | Loader; strict mode refuses to start on null MEASURED values. |
+| `bootstrap/download_flc.py` | §9.1 | Redshift extract of the raw hourly FLC feed into `data/flc_raw.parquet`, aliased to the column names step 1 renames. Credentials from `REDSHIFT_*` in `~/.env`; the exclusion window from `config.yaml`. |
 | `bootstrap/prepare_data.py` | §9.1–9.2 | Schema mapping, 12-step filter chain, window-keyed episode construction (not date-keyed — 36-hour windows are common), waterfall, split manifest. |
 | `common/episodes.py` | §9.2 | One definition of episode endings and true leftover: `ending_inventory` is written off to zero on an episode's last row, so scrap is `max(0, starting − sold)`. Also extends episodes to their full window so the DP horizon is not shortened by a realised sellout. |
 | `bootstrap/measure.py` | §8, App. A | Phase-0 measurement suite (m1–m8, m10, m11 episode endings) and reassessment gates. |
@@ -41,8 +42,15 @@ randomized exploration.
 
 ```bash
 pip install -r requirements.txt
-scripts/run_bootstrap.sh data/flc_filtered.parquet
+python3 -m bootstrap.download_flc --days 120      # step 0: data/flc_raw.parquet
+scripts/run_bootstrap.sh data/flc_raw.parquet
 ```
+
+Step 0 needs `REDSHIFT_HOST`, `REDSHIFT_PORT`, `REDSHIFT_DATABASE`,
+`REDSHIFT_USERNAME` and `REDSHIFT_PASSWORD` in the environment — put them in
+`~/.env` (gitignored, and outside the repo). If you already have the extract,
+skip it and pass that file instead; the pipeline takes the path as an argument
+and does not care what the file is called.
 
 This runs prepare → measure → train_baseline → fit_dispersion →
 estimate_prior → backtest, then stops at the human gates. (The script

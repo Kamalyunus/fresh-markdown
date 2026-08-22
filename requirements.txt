@@ -6,3 +6,8 @@ PyYAML>=6.0
 lightgbm>=4.0
 pytest>=7.4
 matplotlib>=3.8
+
+# bootstrap.download_flc only (step 0). Every other step reads the parquet it
+# writes, so the pipeline runs without these.
+psycopg2-binary>=2.9
+python-dotenv>=1.0
