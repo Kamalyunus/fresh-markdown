@@ -35,6 +35,7 @@ randomized exploration.
 | `backtest/` | §17 | Fidelity gate, policy deltas, `Q(p*) − Q(p)` spread and `tau_initial` derivation. |
 | `common/parallel.py` | — | Runs the per-episode work across CPUs (`--workers N`, `0` = all but one). Results in submission order, never completion order; workers compute and the parent commits, so the event path the shadow gate measures is unchanged. Reports are identical either way. |
 | `tools/make_dummy_flc.py` | — | Synthetic FLC generator (legacy + randomized policies, known ground-truth elasticity). |
+| `tools/eda.py` · `tools/eda_page.py` | — | Builds `reports/eda.json` and `docs/eda.html`: 15 descriptive panels on the population — daily volumes, SKU Pareto by COGS at risk, window entry by hour, clearance, anchor-row availability, entry-arm feasibility, cell sizes against every threshold, weekly drift. Decides nothing; every panel names the config keys it informs and a test asserts they exist. |
 | `tools/make_charts.py` | — | One diagnostic chart per component, generated from the report artifacts into `reports/charts/`. |
 | `tools/walkthrough/` | — | Builds `docs/system_walkthrough.html`, the leadership-facing walkthrough — one tab per frozen artifact, plus the decision, the learning loop, replay, shadow and the assurance checks. `figures.py` registers every measured figure against the report and model version it came from, so a re-run cannot leave the page silently stale. |
 | `tools/metrics_glossary.py` | — | Builds `docs/metrics.html`: 135 metrics across 17 components, each with its unit, owning component, and whether it gates anything. Filterable, with a gates-only toggle. |
@@ -53,7 +54,7 @@ Step 0 needs `REDSHIFT_HOST`, `REDSHIFT_PORT`, `REDSHIFT_DATABASE`,
 skip it and pass that file instead; the pipeline takes the path as an argument
 and does not care what the file is called.
 
-This runs prepare → measure → train_baseline → fit_dispersion →
+This runs prepare → **eda** → measure → train_baseline → fit_dispersion →
 estimate_prior → backtest, then stops at the human gates. (The script
 retrains the baseline every time — to iterate on one step, run that step's
 module directly. Agents: read `AGENTS.md` before touching the pipeline.)

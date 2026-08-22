@@ -25,6 +25,9 @@ step                                          writes                            
    part of run_bootstrap.sh -- it takes the parquet as its argument.)
 1. bootstrap.prepare_data --input <raw>       data/prepared.parquet,                  raw FLC parquet
                                               artifacts/split_manifest.json
+1b. tools.eda --input prepared               reports/eda.json, docs/eda.html         prepared + config
+   (15 descriptive panels on the population. Decides nothing and produces no
+   config value -- read it BEFORE the fits, it costs seconds)
 2. bootstrap.measure --input <raw>            reports/phase0.json                     raw FLC parquet
 3. bootstrap.train_baseline --input prepared  artifacts/baseline_model.txt,           prepared
                                               artifacts/feature_schema.json
@@ -907,6 +910,40 @@ The shadow tab's figure slots are registered as `PENDING` and its
 before the numbers exist is deliberate: it fixes how the result will be read
 before anyone can see it, and the pre-registered τ decision rule is printed on
 the tab.
+
+### The population EDA
+
+`docs/eda.html` describes the population every other number is measured on:
+15 panels built by `python3 -m tools.eda` from the prepared parquet and
+`config.yaml` alone — no artifacts, no model, no DP, so it runs in seconds and
+is worth re-running on every new extract.
+
+**It decides nothing.** No gate, no verdict, no MEASURED value.
+`bootstrap.measure` owns those, and a second source for one of them is exactly
+the drift `artifact_mirror_drift` exists to catch. A test asserts the report
+contains no `verdict`, `pass`, `tau_initial` or `rho`.
+
+What makes it more than a notebook: **every panel names the config keys it
+should change your mind about**, and `tests/test_eda.py` parametrises over
+every one of those keys and asserts it resolves — so a rename breaks the
+claim instead of leaving it stale. `reports/eda.json` carries every number
+including the chart series; `docs/eda.html` is a pure view over it and cannot
+show a figure the report does not contain.
+
+The panels worth reading first on a fresh extract:
+
+- **anchors** — anchor rows per subcategory in BOTH bands (`tier_step/2` for
+  calibration, `ref_rate_anchor_band` for the velocity features). Calibration
+  is fit entirely on the first and nothing else shows the count before the fit
+  runs.
+- **entry_arms** — how often each of the five entry offsets survives the cost
+  floor. config asserts the deepest one vanishes above a ~0.65 cost ratio;
+  this is the first thing that measures it.
+- **cells** — one table saying whether the subcategory → category → global
+  hierarchy has anything to work with, or falls through to global everywhere.
+- **drift** — the weekly level series with the split boundaries marked. The
+  panel that would have caught the calibration fortnight being the most
+  anomalous stretch in five months.
 
 ### The metrics index
 

@@ -15,6 +15,12 @@ INPUT="${1:?usage: scripts/run_bootstrap.sh <flc_parquet>}"
 echo "== step 1: bootstrap.prepare_data ==============================="
 python3 -m bootstrap.prepare_data --input "$INPUT" --out data/prepared.parquet
 
+echo "== step 1b: tools.eda ==========================================="
+# Read BEFORE the fits, not after: it describes the population every later
+# number is measured on, and it costs seconds. Non-fatal -- a broken panel
+# must not stop the pipeline that produces the gates.
+python3 -m tools.eda --input data/prepared.parquet || echo "  (eda skipped)"
+
 echo "== step 2: bootstrap.measure (phase 0) =========================="
 python3 -m bootstrap.measure --input "$INPUT" --out reports/phase0.json
 
