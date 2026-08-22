@@ -5,6 +5,7 @@ import os
 import pandas as pd
 
 from common.config import load_config
+from bootstrap.prepare_data import pre_launch
 from bootstrap.train_baseline import BaselineModel
 from backtest.replay import fidelity, policy_replay, derive_tau_initial
 
@@ -20,6 +21,17 @@ def main():
 
     cfg = load_config(args.config)
     d = pd.read_parquet(args.input)
+    # The backtest is a PRE-LAUNCH artifact and must see nothing past the gate
+    # window. Without this, policy_replay and derive_tau_initial ran over the
+    # hold-out too -- so tau_initial, a MEASURED launch value, was being fitted
+    # on the one window reserved for grading it.
+    before = d.episode_id.nunique()
+    d = pre_launch(d, cfg)
+    excluded = before - d.episode_id.nunique()
+    if d.empty:
+        raise SystemExit(
+            f"no episodes opened on or before split.test_end "
+            f"({cfg['data']['split']['test_end']})")
     model = BaselineModel(cfg)
     with open(cfg["posterior"]["prior"]["path"]) as f:
         prior = json.load(f)
@@ -33,6 +45,15 @@ def main():
     tau = derive_tau_initial(ledger, ep, cfg)
 
     out = {
+        "population": {
+            "episodes": int(d.episode_id.nunique()),
+            "episodes_excluded_after_test_end": int(excluded),
+            "sees_up_to": cfg["data"]["split"]["test_end"],
+            "note": ("The backtest is pre-launch and sees nothing past the "
+                     "gate window, so by_week and by_window['all'] stop at "
+                     "test_end. The hold-out is read once, by "
+                     "`pipeline.shadow --holdout`."),
+        },
         "artifact_versions": {
             "baseline_model_version": model.version,
             "prior_source": prior["source"],

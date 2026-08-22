@@ -404,7 +404,17 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
     midnight-seam failure the whole episode definition exists to prevent,
     and it was live in `pipeline.shadow`'s `--date-start` until the hold-out
     work. `split_frames` and shadow both call the one function.
-14. **A number a procedure solves for is not evidence about that number.**
+14. **Nothing pre-launch may see past `split.test_end`.** The three artifact
+    fits are bounded by `split_frames`, but two paths were not and neither
+    announced itself: `policy_replay` / `derive_tau_initial` ran on the whole
+    frame, so `tau_initial` — a MEASURED launch value — was being fitted on
+    the hold-out; and `calibration_fit_window: "all"` resolved to the whole
+    frame. Both now go through `bootstrap.prepare_data.pre_launch`, and the
+    backtest reports `population.episodes_excluded_after_test_end`.
+    `fidelity.by_week` and `by_window["all"]` therefore stop at `test_end` —
+    if a week past it appears there again, something upstream of the slice
+    has changed. The hold-out is read once, by `pipeline.shadow --holdout`.
+15. **A number a procedure solves for is not evidence about that number.**
     `backtest.derive_tau_initial` bisects until implied spend equals budget,
     so it reports 1.00× on any population — including one where the answer
     is eight times wrong. It hid the entry-only scoping bug for the whole

@@ -32,7 +32,7 @@ import pandas as pd
 
 from common.config import load_config, reference_discount
 from common.provenance import stamp
-from bootstrap.prepare_data import split_frames
+from bootstrap.prepare_data import pre_launch, split_frames
 from pricing.demand import expected_min_demand_inventory_vec
 
 # Feature order is authoritative in feature_schema.json; this list only seeds
@@ -188,7 +188,10 @@ def fit_level_calibration(d, cfg):
     elif fit_window == "train+calib":
         calib = pd.concat([splits["train"], splits["calib"]])
     elif fit_window == "all":
-        calib = d.copy()
+        # "all" means all PRE-LAUNCH data, never the hold-out. Without the
+        # bound this one branch quietly fits the level factors on the window
+        # reserved for grading them.
+        calib = pre_launch(d, cfg).copy()
     elif fit_window == "trailing":
         # the last N weeks ENDING WHERE THE GATE WINDOW BEGINS: recent enough
         # to track a moving level, and disjoint from what the gate evaluates

@@ -96,10 +96,13 @@ def test_underspending_raises_tau_and_overspending_lowers_it(cfg, tmp_path):
     assert over["tau_after"] < over["tau_before"], over
     # never more than the configured multiple in one step, either way
     lo, hi = cfg["exploration"]["tau_adjust_clip"]
+    # tau_before and tau_after are both reported to 2dp, so the clip bound
+    # computed from one rounded value against the other can miss by up to a
+    # cent either side. 1e-6 was tight enough only by luck.
     for block in (under, over):
-        assert (block["tau_before"] * lo - 1e-6
+        assert (block["tau_before"] * lo - 0.01
                 <= block["tau_after"]
-                <= block["tau_before"] * hi + 1e-6)
+                <= block["tau_before"] * hi + 0.01)
 
 
 def test_tau_is_calibrated_on_the_same_numbers_the_stop_condition_uses(cfg, tmp_path):

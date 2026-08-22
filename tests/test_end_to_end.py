@@ -547,8 +547,8 @@ def test_shadow_phase_harness(workspace):
         b["budget_share_of_il"] * b["markdown_il_total"] / b["days"], rel=1e-3)
     assert b["markdown_il_total"] == pytest.approx(
         b["markdown_il_discount"] + b["markdown_il_scrap"])
-    assert b["spend_over_budget"] == pytest.approx(
-        b["implied_daily_spend"] / b["daily_budget"], rel=1e-2)
+    assert b["spend_over_budget"] == pytest.approx(   # reported to 2dp
+        b["implied_daily_spend"] / b["daily_budget"], abs=0.005)
 
     # SCRAP MUST BE IN THE PROJECTION. An inline copy of classify_last was
     # tried here and dropped every scrap won on a feed with no write-off

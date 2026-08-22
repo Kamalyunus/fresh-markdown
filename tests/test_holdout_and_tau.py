@@ -211,6 +211,59 @@ def test_shadow_budget_uses_the_production_budget_function():
     assert "explore.budget_today(" in src
 
 
+# ------------------------------------------------- pre-launch containment
+
+def test_pre_launch_stops_at_the_gate_window():
+    from bootstrap.prepare_data import pre_launch
+    cfg = load_config()
+    end = cfg["data"]["split"]["test_end"]
+    d = pd.DataFrame({
+        "episode_id": ["before", "before", "straddles", "straddles",
+                       "holdout", "after_holdout"],
+        "date": [end, end, end, cfg["data"]["holdout"]["start"],
+                 cfg["data"]["holdout"]["start"], "2026-09-01"],
+        "hour_of_day": [22, 23, 23, 0, 9, 9],
+    })
+    kept = set(pre_launch(d, cfg).episode_id)
+    assert kept == {"before", "straddles"}, \
+        "an episode that OPENED before the gate window closed belongs to " \
+        "pre-launch whole; one that opened after does not belong at all"
+
+
+def test_the_backtest_cannot_reach_past_the_gate_window():
+    """Two paths reached the hold-out and neither announced itself.
+
+    `policy_replay` and `derive_tau_initial` ran on the whole frame, so
+    tau_initial -- a MEASURED launch value -- was being fitted on the window
+    reserved for grading it. And `calibration_fit_window: "all"` resolved to
+    the whole frame, one config edit from fitting the level factors there.
+    """
+    import inspect
+    from backtest import __main__ as bt
+    from bootstrap import train_baseline
+
+    src = inspect.getsource(bt.main)
+    assert "pre_launch(d, cfg)" in src
+    assert src.index("pre_launch(d, cfg)") < src.index("fidelity("), \
+        "the slice must happen before anything reads the frame"
+
+    fit = inspect.getsource(train_baseline.fit_level_calibration)
+    all_branch = fit[fit.index('fit_window == "all"'):]
+    assert "pre_launch(d, cfg)" in all_branch.split("elif")[0], \
+        'calibration_fit_window "all" must mean all PRE-LAUNCH data'
+
+
+def test_the_three_artifact_fits_stay_inside_their_own_splits():
+    """Bounded already -- asserted so they stay that way."""
+    import inspect
+    from bootstrap import train_baseline, fit_dispersion, estimate_prior
+    assert 'splits["train"]' in inspect.getsource(train_baseline.train)
+    assert 'split_frames(d, cfg)["calib"]' in inspect.getsource(
+        fit_dispersion.fit_dispersion)
+    assert 'split_frames(d, cfg)["train"]' in inspect.getsource(
+        estimate_prior.estimate_prior)
+
+
 # -------------------------------------------------------- tau provenance
 
 def _cfg_with_tau(tau):

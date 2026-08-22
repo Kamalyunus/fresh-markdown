@@ -503,6 +503,29 @@ def add_ref_rate_features(d, cfg):
     return d
 
 
+def pre_launch(d, cfg):
+    """Everything the PRE-LAUNCH artifacts are allowed to see: episodes whose
+    window opened on or before `split.test_end`.
+
+    The three fits are already bounded -- the baseline to `train`, dispersion
+    to `calib`, the prior to `train` -- but two things were not, and both
+    reached past the gate window:
+
+      * `calibration_fit_window: "all"` resolves to the whole frame, so one
+        config edit fits the level factors on the hold-out.
+      * `policy_replay` and `derive_tau_initial` run on the whole frame, so
+        `tau_initial` -- a MEASURED launch value -- was being derived partly
+        on hold-out episodes.
+
+    Neither would announce itself. The hold-out is worth exactly one honest
+    reading (see `data.holdout`), and a value fitted on it has spent that
+    reading without anyone deciding to.
+
+    Episode-scoped, so a window opening before the boundary is kept whole.
+    """
+    return episodes.window_slice(d, None, cfg["data"]["split"]["test_end"])
+
+
 def split_frames(d, cfg):
     """Date splits for baseline fitting only (config data.split).
 

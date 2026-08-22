@@ -1516,6 +1516,16 @@ Confirmed with the business: **when a listing ends with stock on hand, those
 units are disposed of and counted as scrap**, whatever the nominal counter
 says.
 
+**The backtest sees nothing past the gate window.** `bootstrap.prepare_data.
+pre_launch` slices the frame to episodes that opened on or before
+`split.test_end` before anything reads it, so `fidelity.by_week` and
+`by_window["all"]` stop there and `population.episodes_excluded_after_test_end`
+records what was held back. This was not always true, and the two paths that
+reached past it were both silent: `policy_replay` and `derive_tau_initial` ran
+on the whole frame — so `tau_initial`, a MEASURED launch value, was partly
+fitted on the hold-out — and `calibration_fit_window: "all"` resolved to the
+whole frame, one config edit from fitting the level factors there.
+
 **Offline, `not_closed` was empty — and then it wasn't.** On the earlier
 extract, 356,228 of 356,228 final rows carried `ending_inventory = 0`; not one
 reported honest inventory, so every episode had finished and the split was
