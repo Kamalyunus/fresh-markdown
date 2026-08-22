@@ -102,12 +102,16 @@ rate, zero cost-floor violations) plus would-be exploration spend,
 recommended-vs-legacy discount deltas, and the frozen-baseline drift ratio.
 Architecture and rationale live in [`docs/design.md`](docs/design.md).
 
-Run it once on the hold-out — the window after `test_end` that no artifact
-was fit on and no gate was decided on:
+It runs on the hold-out **by default** — the window after `test_end` that no
+artifact was fit on and no gate was decided on. For the launch record, sweep
+every episode in it:
 
 ```bash
-python3 -m pipeline.shadow --input data/prepared.parquet --holdout --max-episodes 0
+python3 -m pipeline.shadow --input data/prepared.parquet --max-episodes 0
 ```
+
+`--all` runs the whole extract instead; the report then carries an in-sample
+caveat naming which numbers that flatters.
 
 That is the only unrehearsed test the extract can give. It re-derives `tau`
 on the path production runs (`tau_recommended`) and walks the `tau` controller

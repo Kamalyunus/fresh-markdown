@@ -17,10 +17,17 @@ the anchor entering hour t is the legacy discount applied at t-1 (entry has no
 anchor). The recommendation answers "what would we have done from the real
 state", not "what would our price path have been".
 
+Runs on `data.holdout` BY DEFAULT. Every frozen artifact is fit on data up to
+`split.test_end`, so a shadow run that includes that data grades the pipeline
+on rows it already saw -- the drift ratio, the tau derivation and the learning
+yield all read better than they are. `--all` runs the whole extract instead
+and the report carries an in-sample caveat saying which numbers to distrust.
+
 Usage:
     python3 -m pipeline.shadow --input data/prepared.parquet \
-        --out reports/shadow.json [--date-start D --date-end D] \
-        [--max-episodes N] [--seed N]
+        --out reports/shadow.json [--max-episodes N] [--seed N]
+    python3 -m pipeline.shadow ... --all          # partly in-sample
+    python3 -m pipeline.shadow ... --date-start D --date-end D
 """
 
 import argparse
@@ -42,6 +49,14 @@ from inference.decide import decide, StateRejected
 from pricing.posterior import PosteriorStore
 
 SHADOW_STATUS = "shadow_not_applied"
+
+# The window shadow runs on unless told otherwise. Every frozen artifact is
+# fit on data up to split.test_end, so a run that includes that data is
+# grading the pipeline on rows it already saw -- the drift ratio, the tau
+# derivation and the learning yield all read better than they are. The
+# hold-out is the only window where they mean what they say, so it is the
+# DEFAULT rather than a flag someone has to remember.
+HOLDOUT_BASIS = "holdout"
 
 
 
@@ -138,7 +153,8 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
     }
 
 
-def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
+def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
+               window_basis=HOLDOUT_BASIS):
     _require_shadow_config(cfg)
     model = BaselineModel(cfg)
     posterior = PosteriorStore(cfg)
@@ -485,6 +501,18 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
             "Cost-floor safety is structural (the action set cannot express a "
             "below-cost price) and separately unit-tested -- this gate "
             "confirms it end-to-end, it does not establish it.")
+    if window_basis != HOLDOUT_BASIS:
+        # Every artifact was fit on data up to test_end, so a run that
+        # includes that data grades the pipeline on rows it already saw. The
+        # plumbing checks survive that; the drift ratio, tau and the learning
+        # yield do not.
+        gate["in_sample_caveat"] = (
+            f"run on '{window_basis}', NOT the hold-out. Every artifact was "
+            "fit on data up to split.test_end, so any of that window included "
+            "here is in-sample: the drift ratio, tau_recommended and the "
+            "learning yield are flattered by it. The completeness, matched-rate "
+            "and cost-floor checks are unaffected -- they test plumbing, not "
+            "fit. Re-run without --all for the launch record.")
     gate["verdict"] = ("PASS -- proceed to exploit-only pilot (section 19)"
                        if all(g["pass"] for g in gate.values()
                               if isinstance(g, dict))
@@ -500,6 +528,8 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
         "window": {"date_min": str(d.date.min()), "date_max": str(d.date.max()),
                    "episodes": len(groups),
                    "population_episodes": int(len(population)),
+                   "basis": window_basis,
+                   "out_of_sample": window_basis == HOLDOUT_BASIS,
                    "sampled": sampled,
                    "sample_seed": seed if sampled else None},
         "decision_count": n_dec,
@@ -540,12 +570,18 @@ def main():
     ap.add_argument("--out", default="reports/shadow.json")
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--date-start", default=None,
-                    help="keep episodes whose WINDOW OPENED on or after this")
+                    help="keep episodes whose WINDOW OPENED on or after this; "
+                         "overrides the hold-out default")
     ap.add_argument("--date-end", default=None,
                     help="keep episodes whose WINDOW OPENED on or before this")
     ap.add_argument("--holdout", action="store_true",
-                    help="run on data.holdout -- the window no artifact was "
-                         "fit on and no gate was decided on")
+                    help="run on data.holdout (THE DEFAULT -- accepted for "
+                         "explicitness, changes nothing)")
+    ap.add_argument("--all", action="store_true",
+                    help="run on the whole extract instead. Partly IN-SAMPLE: "
+                         "the drift ratio, tau_recommended and the learning "
+                         "yield are flattered by rows the artifacts were fit "
+                         "on. The report says so. Not for the launch record.")
     ap.add_argument("--events-dir", default=None)
     ap.add_argument("--max-episodes", type=int, default=None,
                     help="episode sample size; 0 = all episodes. Default: "
@@ -555,11 +591,22 @@ def main():
 
     cfg = load_config(args.config)
     d = pd.read_parquet(args.input)
+    # Hold-out by default. Anything else is a deliberate, labelled exception.
     start, end = args.date_start, args.date_end
-    if args.holdout:
+    if start or end:
+        basis = f"explicit range {start or 'start'} -> {end or 'end'}"
+        print(f"== {basis} ==")
+    elif args.all:
+        basis = "full extract"
+        print("== full extract -- PARTLY IN-SAMPLE, not the launch record ==")
+    else:
         h = cfg["data"].get("holdout")
         if not h:
-            raise SystemExit("--holdout needs data.holdout in config.yaml")
+            raise SystemExit(
+                "no data.holdout in config.yaml. Shadow runs on the hold-out "
+                "by default because every artifact is fit up to test_end; "
+                "add the window, or pass --all and read the in-sample caveat.")
+        basis = HOLDOUT_BASIS
         start, end = h["start"], h["end"]
         print(f"== holdout window {start} -> {end} "
               "(no artifact was fit on it) ==")
@@ -571,7 +618,8 @@ def main():
         raise SystemExit(f"no episodes opened in [{start}, {end}]")
 
     report = run_shadow(d, cfg, events_root=args.events_dir,
-                        seed=args.seed, max_episodes=args.max_episodes)
+                        seed=args.seed, max_episodes=args.max_episodes,
+                        window_basis=basis)
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as f:
@@ -579,6 +627,9 @@ def main():
 
     g = report["shadow_gate"]
     w = report["window"]
+    print(f"window             : {w['basis']} · {w['date_min']} -> "
+          f"{w['date_max']}"
+          + ("" if w["out_of_sample"] else "  [PARTLY IN-SAMPLE]"))
     print(f"episodes           : {w['episodes']:,} of "
           f"{w['population_episodes']:,}"
           + (f" (sample, seed {w['sample_seed']})" if w["sampled"] else ""))

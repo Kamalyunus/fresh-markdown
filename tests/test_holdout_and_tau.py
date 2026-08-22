@@ -211,6 +211,48 @@ def test_shadow_budget_uses_the_production_budget_function():
     assert "explore.budget_today(" in src
 
 
+# --------------------------------------------- shadow defaults to holdout
+
+def test_shadow_runs_on_the_holdout_unless_told_otherwise():
+    """The default matters more than the flag.
+
+    Every frozen artifact is fit on data up to test_end, so a shadow run that
+    includes that data grades the pipeline on rows it already saw. Making the
+    hold-out opt-IN meant the honest run was the one someone had to remember.
+    """
+    import inspect
+    from pipeline import shadow
+
+    src = inspect.getsource(shadow.main)
+    # the hold-out branch is the fall-through, not a flag test
+    assert "elif args.all:" in src
+    assert 'basis = HOLDOUT_BASIS' in src
+    assert src.index("args.all") < src.index("basis = HOLDOUT_BASIS")
+    # and run_shadow assumes it too, so a programmatic caller gets the same
+    assert inspect.signature(shadow.run_shadow).parameters[
+        "window_basis"].default == shadow.HOLDOUT_BASIS
+
+
+def test_a_non_holdout_run_says_which_numbers_it_flatters():
+    import inspect
+    from pipeline import shadow
+    src = inspect.getsource(shadow.run_shadow)
+    assert "in_sample_caveat" in src
+    # the caveat has to name what it does NOT undermine, or it reads as
+    # "ignore this whole report" and gets ignored itself
+    assert "cost-floor" in src[src.index("in_sample_caveat"):]
+
+
+def test_missing_holdout_config_is_an_error_not_a_silent_full_run():
+    """The dangerous failure is running on everything and not saying so."""
+    import inspect
+    from pipeline import shadow
+    src = inspect.getsource(shadow.main)
+    branch = src[src.index("no data.holdout"):]
+    assert "--all" in branch          # names the deliberate alternative
+    assert "SystemExit" in src[:src.index("no data.holdout")]
+
+
 # ------------------------------------------------- pre-launch containment
 
 def test_pre_launch_stops_at_the_gate_window():

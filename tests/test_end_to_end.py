@@ -517,8 +517,11 @@ def test_shadow_phase_harness(workspace):
         return r.stdout
 
     run("-m", "bootstrap.init_posterior", "--force")
+    # --all here on purpose: this test exercises the harness and the SAMPLING
+    # caveat, which needs more episodes than the hold-out window holds. The
+    # hold-out default is covered by its own run below.
     run("-m", "pipeline.shadow", "--input", "data/prepared.parquet",
-        "--out", "reports/shadow.json", "--max-episodes", "60")
+        "--out", "reports/shadow.json", "--all", "--max-episodes", "60")
 
     with open("reports/shadow.json") as f:
         report = json.load(f)
@@ -536,6 +539,11 @@ def test_shadow_phase_harness(workspace):
     assert w["population_episodes"] > w["episodes"]
     assert "sampling_caveat" in gate
     assert gate["verdict"].startswith("PASS")   # caveat is not a gate row
+
+    # and a run that is NOT the hold-out has to say which numbers it flatters
+    assert w["basis"] == "full extract" and not w["out_of_sample"]
+    assert "in_sample_caveat" in gate
+    assert "cost-floor" in gate["in_sample_caveat"]   # names what still holds
 
     # the budget check answers "is this tau affordable on the ANCHORED path",
     # which the backtest's derivation cannot: it solves on the exploit-only
@@ -598,6 +606,33 @@ def test_shadow_phase_harness(workspace):
                          events_root=cfg["events"]["shadow_store_dir"])
     assert not report2["cells"]
 
+
+
+def test_shadow_defaults_to_the_holdout_window(workspace):
+    """No flag, no window arguments -- it must land on the hold-out.
+
+    The honest run was opt-in until now, which is the wrong way round: every
+    artifact is fit up to test_end, so a run including that data grades the
+    pipeline on rows it already saw.
+    """
+    _chdir(workspace)
+    env = {**os.environ, "PYTHONPATH": REPO}
+    r = subprocess.run(
+        [sys.executable, "-m", "pipeline.shadow", "--input",
+         "data/prepared.parquet", "--out", "reports/shadow_holdout.json",
+         "--max-episodes", "0"],
+        cwd=workspace, env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    with open("reports/shadow_holdout.json") as f:
+        report = json.load(f)
+    w, cfg = report["window"], yaml.safe_load(open("config.yaml"))
+    assert w["basis"] == "holdout" and w["out_of_sample"]
+    assert w["date_min"] >= cfg["data"]["holdout"]["start"]
+    assert "in_sample_caveat" not in report["shadow_gate"]
+    # and it really is a different, later population than the --all run
+    with open("reports/shadow.json") as f:
+        assert w["date_min"] > json.load(f)["window"]["date_min"]
 
 def test_derive_thresholds_cli(workspace):
     _chdir(workspace)

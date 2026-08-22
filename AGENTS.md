@@ -64,6 +64,16 @@ python3 -m bootstrap.init_posterior
 python3 -m pipeline.shadow --input data/prepared.parquet --out reports/shadow.json
 ```
 
+**It runs on `data.holdout` by default.** Every frozen artifact is fit on data
+up to `split.test_end`, so a shadow run that includes that data grades the
+pipeline on rows it already saw — the drift ratio, `tau_recommended` and the
+learning yield all read better than they are. `--all` runs the whole extract
+and the report carries `shadow_gate.in_sample_caveat` naming exactly which
+numbers that flatters (and which it does not: completeness, matched rate and
+cost-floor test plumbing, not fit). `window.basis` and `window.out_of_sample`
+record which happened. No `data.holdout` in config is an error, not a silent
+full run.
+
 Shadow runs on a uniform sample of `monitoring.shadow_gate.sample_episodes`
 episodes (**default 3,000**, drawn before `mu_ref` prediction so the cost
 scales with the sample, not the extract). 3,000 keeps the standard error on a
@@ -126,10 +136,11 @@ the single definition, used by both, and
 ### The hold-out window
 
 `data.holdout` names a window **after** `test_end` that nothing is fit on and
-no gate was decided on:
+no gate was decided on. Shadow uses it by default; `--holdout` is accepted for
+explicitness and changes nothing:
 
 ```bash
-python3 -m pipeline.shadow --input data/prepared.parquet --holdout --max-episodes 0
+python3 -m pipeline.shadow --input data/prepared.parquet --max-episodes 0
 ```
 
 Every artifact stops at `test_end`, so standing there and running this window
