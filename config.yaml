@@ -45,6 +45,25 @@ data:
     # elapsed hour -- see prepare_data.assign_episode_ids, which is the
     # authoritative definition. NOT keyed by calendar date: 36-hour windows
     # are common and a date key splits one economic episode into three.
+  drop_unclosed_episodes: true         # SET  drop episodes whose OUTCOME is
+    # unknown -- the last row held still reports positive ending_inventory
+    # while stock remained, so the source never wrote the remainder off and
+    # the listing did not end there.
+    #
+    # true  every figure is measured on the same rows. Previously these were
+    #       kept and excluded from scrap and IL only, so they contributed
+    #       hours to the demand and dispersion fits while contributing
+    #       nothing to the loss the system minimises. On production they were
+    #       3.38% of episodes holding 78.6% of all at-risk leftover units.
+    # false keep them and exclude from IL only, as before.
+    #
+    # The cost of true is real and reported as `rows_dropped` in the
+    # waterfall: their observed hours are good training data, and they are
+    # the LARGEST episodes, so mu_ref and r are then fit without the slow,
+    # heavily-stocked windows. Read `share_window_ran_past_extract_end`
+    # beside it -- near 1.0 is ordinary edge truncation that a longer extract
+    # recovers, well below means a feed gap or a subset that never writes off
+    # and a longer extract fixes neither.
   max_window_hours: 120                # SET  upper bound on a plausible FLC
   manufacturing_window_hours: 24     # SET  standard clearance window for
     # SKUs whose flc_window enters ALREADY negative -- a large negative

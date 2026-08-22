@@ -245,7 +245,13 @@ def ending_summary(d):
                  "large. Closure is read from the source's own sentinel -- "
                  "ending_inventory zeroed on the final row -- so an episode "
                  "whose final row still reports honest inventory is the only "
-                 "kind with an unknown outcome."),
+                 "kind with an unknown outcome. When "
+                 "data.drop_unclosed_episodes is true those episodes are "
+                 "already gone, so not_closed and "
+                 "scrap_units_unknown_not_closed read ZERO here BY "
+                 "CONSTRUCTION and say nothing -- their counts, the units at "
+                 "stake, and the edge-vs-feed-gap split live in the "
+                 "unclosed_episodes_dropped row of the waterfall."),
     }
 
 

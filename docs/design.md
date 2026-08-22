@@ -322,6 +322,7 @@ a spurious short episode, which loses more than the episode does.
 | `chain_break_dropped` | any hour that neither reconciles (`ending == starting − sold`) nor names why not, via the same `common.episodes.adjustment_reason` that `pipeline.shadow` builds outcomes with and `events.store` enforces in production — so the analysis population cannot hold a break production would quarantine. Recognised **by the zero, never by position**: the source writes stock off at *its* window boundary, which sits mid-window once a window is merged across midnight |
 | `contiguous_episodes_built` | *(not a filter)* re-segmentation — earlier drops can split a window, so episode count may RISE here |
 | `restocked_episodes_dropped` | an hour opening with more stock than the previous hour left behind |
+| `unclosed_episodes_dropped` | episodes whose OUTCOME is unknown — the final row held still reports positive `ending_inventory` while stock remained, so the source never wrote the remainder off and the listing did not end there. Their leftover is neither scrap (assumes no further sales) nor zero (assumes it all sold). Off with `data.drop_unclosed_episodes: false`. The stage reports `rows_dropped` (the training signal given up — these are the largest episodes) and `share_window_ran_past_extract_end` (edge truncation vs a feed gap) |
 
 `contiguous_episodes_built` runs between the row-level and episode-level
 passes and is **not** a filter: episode count can *rise* there, because
@@ -1507,11 +1508,31 @@ Confirmed with the business: **when a listing ends with stock on hand, those
 units are disposed of and counted as scrap**, whatever the nominal counter
 says.
 
-**Offline, `not_closed` is empty and the rule really is the two lines above.**
-Measured on the filtered extract, **356,228 of 356,228 final rows carry
-`ending_inventory = 0` — not one reports honest inventory.** Every episode in
-the extract has finished, so the split is purely on leftover: 48,280 (13.55%)
-ended holding stock, 307,948 (86.45%) sold out.
+**Offline, `not_closed` was empty — and then it wasn't.** On the earlier
+extract, 356,228 of 356,228 final rows carried `ending_inventory = 0`; not one
+reported honest inventory, so every episode had finished and the split was
+purely on leftover. On the current 397,764-episode extract that is **no longer
+true**: 24,540 final rows lack the sentinel and 13,444 episodes (3.38%) are
+`not_closed`.
+
+Two things about that population make it matter more than 3.38% suggests.
+They hold **334,622 leftover units against the closed population's 91,096** —
+78.6% of everything at risk — because they average 24.9 units each against
+3.05, and a big slow-clearing window is exactly the kind still open when an
+extract is cut. And they were half-in: excluded from scrap and IL, but
+contributing hours to the demand and dispersion fits, so no two figures were
+measured on the same rows.
+
+`data.drop_unclosed_episodes` (default **true**) now removes them in
+`prepare_data`, as the `unclosed_episodes_dropped` stage. The stage reports
+`rows_dropped` — the training signal given up, and it is the largest episodes
+— and `share_window_ran_past_extract_end`, which separates the two causes:
+near 1.0 is ordinary edge truncation that a longer extract recovers, well
+below means the window closed inside the data with no sentinel, which is a
+feed gap or a subset that never writes off and which a longer extract does not
+fix. **Worth checking against the flc_window recovery**: the sentinel-free
+rows appeared in the same run family that began recovering the "manufacturing"
+SKUs, and if those are the same episodes the cause is the third one.
 
 **The third state exists for production, not for the extract.** Live, the
 monitor reads events while episodes are still in flight, and an in-flight

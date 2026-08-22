@@ -105,7 +105,7 @@ footer code{font-family:var(--data)}
 <div class="bar"><div class="inner">
   <input id="q" type="search" placeholder="filter — try  il, tau, censor, rho, gate" aria-label="Filter metrics">
   <button class="toggle" id="gateonly" aria-pressed="false">gates only</button>
-  <span id="count">130 metrics</span>
+  <span id="count">132 metrics</span>
 </div></div>
 
 <div class="wrap">
@@ -114,7 +114,8 @@ footer code{font-family:var(--data)}
 <p class="src">bootstrap.prepare_data → artifacts/split_manifest.json</p>
 <p class="intro">The rows every other number is measured on. Frozen at launch.</p>
 <div class="rows">
-<div class="row" data-gate="0"><div class="nm">data_quality_waterfall<span class="u">n</span></div><div class="mn">Rows and episodes remaining after each of the 15 filter stages, in order. The first entry is <code>raw</code>.<span class="rd">every figure traces back through it</span></div></div>
+<div class="row" data-gate="0"><div class="nm">data_quality_waterfall<span class="u">n</span></div><div class="mn">Rows and episodes remaining after each of the 16 filter stages, in order. The first entry is <code>raw</code>.<span class="rd">every figure traces back through it</span></div></div>
+<div class="row" data-gate="0"><div class="nm">unclosed_episodes_dropped<span class="u">n</span></div><div class="mn">Episodes whose OUTCOME is unknown — the final row held still reports positive <code>ending_inventory</code> while stock remained, so the source never closed the listing. Read <code>rows_dropped</code> (the training signal given up — these are the LARGEST episodes) and <code>share_window_ran_past_extract_end</code>: near 1.0 is edge truncation a longer extract recovers, well below is a feed gap or a subset that never writes off. <strong>Read the numbers here, not in m11</strong> — with the drop on, m11&#x27;s <code>not_closed</code> and <code>scrap_units_unknown_not_closed</code> are zero by construction.<span class="rd">every scrap and IL figure</span></div></div>
 <div class="row" data-gate="0"><div class="nm">episode_rule<span class="u">…</span></div><div class="mn">The persisted definition of an episode: a maximal run of consecutive hourly rows for one SKU × FC over which the source hours-remaining counter decrements by one per elapsed hour. NOT keyed by date.<span class="rd">production must derive identical boundaries</span></div></div>
 <div class="row" data-gate="0"><div class="nm">split.train / calib / test<span class="u">…</span></div><div class="mn">Date windows, fixed before any model was fit. An episode belongs wholly to the split its window STARTED in.<span class="rd">the calibration gate, which must not grade its own fit</span></div></div>
 </div>
@@ -138,7 +139,8 @@ footer code{font-family:var(--data)}
 <div class="row" data-gate="0"><div class="nm">m6 · il_pct_ratio_se_clustered<span class="u">0–1</span></div><div class="mn">Standard error of IL%, clustered by SKU × FC. Pasted into config; it sizes the A/B.<span class="rd">ab_test minimum detectable effect</span></div></div>
 <div class="row" data-gate="0"><div class="nm">m7 · episodes_per_category_per_week<span class="u">n</span></div><div class="mn">Volume per category. Below <code>min_episodes_per_week_for_cell</code> a category has no posterior cell of its own and pools into the global one.<span class="rd">cell assignment</span></div></div>
 <div class="row" data-gate="0"><div class="nm">m8 · entry_hour<span class="u">…</span></div><div class="mn">Distribution of the episode&#x27;s first priced hour. Elasticity identification uses entry rows ONLY, so this is the population that estimate is drawn from.</div></div>
-<div class="row" data-gate="0"><div class="nm">m11 · episode_endings<span class="u">n</span></div><div class="mn">Splits episodes three ways — <code>completed</code> (leftover IS scrap), <code>sold_out_early</code> (no scrap by construction), <code>truncated</code> (scrap UNKNOWN). Truncated episodes are excluded from scrap and IL aggregates, with the excluded share reported.<span class="rd">every scrap and IL figure</span></div></div>
+<div class="row" data-gate="0"><div class="nm">m11 · episode_endings<span class="u">n</span></div><div class="mn">Splits episodes three ways — <code>completed</code> (leftover IS scrap), <code>sold_out_early</code> (no scrap by construction), <code>not_closed</code> (scrap UNKNOWN). With <code>data.drop_unclosed_episodes</code> on, the third bucket is already gone and reads ZERO here by construction — its counts live in the <code>unclosed_episodes_dropped</code> waterfall row.<span class="rd">every scrap and IL figure</span></div></div>
+<div class="row" data-gate="0"><div class="nm">m11 · share_last_row_counter_at_zero<span class="u">0–1</span></div><div class="mn">How often <code>hours_remaining</code> actually reaches 0 on a final row. Measured at 0.52% — the counter is NOMINAL, so any rule keyed to it is measuring a rounding error. This is the tripwire for the bug that once excluded ~99% of real leftover.</div></div>
 </div>
 </section>
 <section data-sec id="s2">

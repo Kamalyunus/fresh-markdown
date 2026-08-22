@@ -39,8 +39,17 @@ CATALOGUE = [
 ("Population", "bootstrap.prepare_data → artifacts/split_manifest.json",
  "The rows every other number is measured on. Frozen at launch.", [
   ("data_quality_waterfall", "count",
-   "Rows and episodes remaining after each of the 15 filter stages, in order. "
+   "Rows and episodes remaining after each of the 16 filter stages, in order. "
    "The first entry is `raw`.", "every figure traces back through it"),
+  ("unclosed_episodes_dropped", "count",
+   "Episodes whose OUTCOME is unknown — the final row held still reports positive "
+   "`ending_inventory` while stock remained, so the source never closed the listing. "
+   "Read `rows_dropped` (the training signal given up — these are the LARGEST "
+   "episodes) and `share_window_ran_past_extract_end`: near 1.0 is edge truncation a "
+   "longer extract recovers, well below is a feed gap or a subset that never writes "
+   "off. **Read the numbers here, not in m11** — with the drop on, m11's `not_closed` "
+   "and `scrap_units_unknown_not_closed` are zero by construction.",
+   "every scrap and IL figure"),
   ("episode_rule", "text",
    "The persisted definition of an episode: a maximal run of consecutive hourly "
    "rows for one SKU × FC over which the source hours-remaining counter "
@@ -98,9 +107,14 @@ CATALOGUE = [
    "entry rows ONLY, so this is the population that estimate is drawn from.", ""),
   ("m11 · episode_endings", "count",
    "Splits episodes three ways — `completed` (leftover IS scrap), `sold_out_early` "
-   "(no scrap by construction), `truncated` (scrap UNKNOWN). Truncated episodes are "
-   "excluded from scrap and IL aggregates, with the excluded share reported.",
-   "every scrap and IL figure"),
+   "(no scrap by construction), `not_closed` (scrap UNKNOWN). With "
+   "`data.drop_unclosed_episodes` on, the third bucket is already gone and reads ZERO "
+   "here by construction — its counts live in the `unclosed_episodes_dropped` "
+   "waterfall row.", "every scrap and IL figure"),
+  ("m11 · share_last_row_counter_at_zero", "rate",
+   "How often `hours_remaining` actually reaches 0 on a final row. Measured at 0.52% "
+   "— the counter is NOMINAL, so any rule keyed to it is measuring a rounding error. "
+   "This is the tripwire for the bug that once excluded ~99% of real leftover.", ""),
  ]),
 
 ("Demand model", "bootstrap.train_baseline → artifacts/baseline_model.txt, calibration.json",

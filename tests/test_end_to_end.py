@@ -64,17 +64,47 @@ def test_filter_chain_waterfall(workspace):
     wf = manifest["data_quality_waterfall"]
     rows = [s["rows"] for s in wf if s["step"] != "contiguous_episodes_built"]
     assert rows == sorted(rows, reverse=True)
-    # every stage is named and counted -- 15 of them plus the raw row. The
+    # every stage is named and counted -- 16 of them plus the raw row. The
     # count is asserted so that adding or removing a filter has to be a
     # deliberate edit here, and so the figure quoted in the walkthrough and
     # design doc has something holding it to the code.
     assert wf[0]["step"] == "raw"
-    assert len(wf) == 16, [s["step"] for s in wf]
+    assert len(wf) == 17, [s["step"] for s in wf]
     d = pd.read_parquet("data/prepared.parquet")
     assert d.category.notna().all()
     assert (d.units_sold <= d.starting_inventory).all()
     assert d.total_discount.between(0, 1).all()      # percent -> fraction once
     assert (d.original_price > 0).all()
+
+
+def test_unclosed_episodes_leave_with_their_numbers(workspace):
+    """The drop that carries its own diagnostic.
+
+    An episode whose outcome is unknown contributed hours to the demand fit
+    and nothing to IL, so no two figures were measured on the same rows.
+    Dropping them fixes that -- but the drop has to report what it cost and
+    WHY those episodes were unclosed, because the two causes have different
+    remedies and only one of them is fixed by a longer extract.
+    """
+    _chdir(workspace)
+    with open("artifacts/split_manifest.json") as f:
+        wf = json.load(f)["data_quality_waterfall"]
+    stage = next(s for s in wf if s["step"] == "unclosed_episodes_dropped")
+    prev = wf[[s["step"] for s in wf].index("unclosed_episodes_dropped") - 1]
+
+    assert stage["episodes_dropped"] == prev["episodes"] - stage["episodes"]
+    assert stage["rows_dropped"] == prev["rows"] - stage["rows"]
+    assert 0.0 <= stage["share_window_ran_past_extract_end"] <= 1.0
+    assert stage["leftover_units_unknown"] >= 0
+
+    # and the population that survives has NO unknown outcomes left, which is
+    # the whole point: every scrap and IL figure is now measured on rows whose
+    # ending is a fact rather than an assumption
+    from common import episodes as E
+    d = pd.read_parquet("data/prepared.parquet")
+    kind = E.classify(d)
+    assert (kind == E.NOT_CLOSED).sum() == 0
+    assert E.scrap_units(d).notna().all()      # no NaN left to propagate
 
 
 def test_prepared_data_is_priceable_and_self_consistent(workspace):

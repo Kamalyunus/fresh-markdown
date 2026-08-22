@@ -735,6 +735,26 @@ last row -- `common.episodes.leftover_units` is the only definition, and
 treat unknown as zero. Truncated episodes are excluded from scrap
 and IL aggregates, with the excluded share reported.
 
+**`not_closed` episodes are dropped in `prepare_data`** as of
+`data.drop_unclosed_episodes` (default true). Excluding them from IL alone
+left them half-in: contributing hours to the demand and dispersion fits while
+contributing nothing to the loss the system minimises, so no two figures were
+measured on the same rows. On production they were 3.38% of episodes holding
+**78.6% of all at-risk leftover units** (334,622 against 91,096) — they
+average 24.9 units each against 3.05, because a big slow-clearing window is
+the kind still open when an extract is cut.
+
+Read the numbers in the **`unclosed_episodes_dropped` waterfall row**, not in
+`m11`: with the drop on, `m11.not_closed` and
+`scrap_units_unknown_not_closed` are ZERO BY CONSTRUCTION and say nothing.
+The stage reports `rows_dropped` — the training signal given up, and these
+are the largest episodes, so `mu_ref` and `r` are then fit without the slow,
+heavily-stocked windows — and `share_window_ran_past_extract_end`, which
+separates the causes: near 1.0 is ordinary edge truncation that a longer
+extract recovers; well below means the window closed inside the data with no
+sentinel, which is a feed gap or a subset that never writes off, and a longer
+extract fixes neither.
+
 The DP horizon comes from the WINDOW, not the row count. `backtest` and
 `pipeline.shadow` call `common.episodes.extend_to_window` before predicting,
 which appends the hours a sold-out episode never recorded (marked
@@ -847,7 +867,7 @@ the tab.
 
 ### The metrics index
 
-`docs/metrics.html` is the reference for "what is this number": **130 metrics
+`docs/metrics.html` is the reference for "what is this number": **132 metrics
 across 17 components**, each with its unit, the component that writes it, and
 whether anything downstream is gated on it. Built, not hand-edited:
 
