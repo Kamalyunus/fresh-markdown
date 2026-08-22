@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from common.config import load_config, reference_discount
+from common import episodes
 from common.episodes import adjustment_reason
 from common.provenance import stamp
 
@@ -382,11 +383,11 @@ def split_frames(d, cfg):
     train/calib boundary would run through the middle of an episode.
     """
     s = cfg["data"]["split"]
-    ds = d.groupby("episode_id")["date"].transform("min").astype(str)
+    slice_ = episodes.window_slice
     return {
-        "train": d[ds.ge(s["train_start"]) & ds.le(s["train_end"])],
-        "calib": d[ds.ge(s["calib_start"]) & ds.le(s["calib_end"])],
-        "test": d[ds.ge(s["test_start"]) & ds.le(s["test_end"])],
+        "train": slice_(d, s["train_start"], s["train_end"]),
+        "calib": slice_(d, s["calib_start"], s["calib_end"]),
+        "test": slice_(d, s["test_start"], s["test_end"]),
     }
 
 
@@ -409,6 +410,7 @@ def write_manifest(path, cfg, waterfall):
         json.dump(stamp({
             "episode_rule": EPISODE_RULE,
             "split": cfg["data"]["split"],
+            "holdout": cfg["data"].get("holdout"),
             "exclusion_window": cfg["data"]["exclusion_window"],
             "config_version": cfg["meta"]["config_version"],
             "data_quality_waterfall": waterfall_rows(waterfall),

@@ -17,6 +17,8 @@ no exploration probability schedule, base rate, floor, ceiling, or cold-start
 std.
 """
 
+import numpy as np
+
 
 def affordable_set(dp_result, tau):
     """Tier indices a perturbation may legally land on, and their costs.
@@ -57,6 +59,135 @@ def select(dp_result, tau, rng, explorable=True):
         choice.update(chosen_index=j, is_exploration=True,
                       exploration_cost=float(costs[j]))
     return choice
+
+
+class SpreadLedger:
+    """Q(p_star) - Q(p) spreads, bucketed by day, and the tau they imply.
+
+    ONE definition of "what would tau spend", shared by the backtest replay
+    and the shadow harness, because two copies drifted apart once already:
+    the replay collected spreads at the ENTRY decision only (`if t == 0`)
+    while `select` is called at every decision hour, so tau_initial was
+    solved to fund roughly one exploration per episode against a system that
+    explores ~8 times per episode. That is most of the 8.7x the shadow report
+    measured, and it was invisible because the replay's own bisection reports
+    1.00x by construction.
+
+    Costs are recorded for EVERY decision the caller sees, independently of
+    the tau in force -- the spread is a property of the state, not of what
+    was drawn from it. Stored flat and chunked rather than as one array per
+    decision: at full population this holds ~30M costs, and 3M small numpy
+    arrays cost more in object overhead than the numbers do.
+    """
+
+    _FLUSH = 1 << 20
+
+    def __init__(self):
+        self._chunks, self._buf = [], []
+        self._lens, self._day_of, self._day_index = [], [], {}
+
+    def add(self, day, costs):
+        """Record one decision's spreads. `costs` excludes the optimum."""
+        if not len(costs):
+            return
+        self._buf.extend(costs)
+        self._lens.append(len(costs))
+        day = str(day)
+        if day not in self._day_index:
+            self._day_index[day] = len(self._day_index)
+        self._day_of.append(self._day_index[day])
+        if len(self._buf) >= self._FLUSH:
+            self._chunks.append(np.asarray(self._buf, dtype=np.float64))
+            self._buf = []
+
+    def sink(self, day):
+        """A one-argument callable for `inference.decide(spread_sink=...)`."""
+        return lambda costs: self.add(day, costs)
+
+    def _build(self):
+        if self._buf:
+            self._chunks.append(np.asarray(self._buf, dtype=np.float64))
+            self._buf = []
+        if getattr(self, "_costs", None) is None or self._chunks:
+            self._costs = (np.concatenate(self._chunks) if self._chunks
+                           else np.zeros(0))
+            self._chunks = []
+            lens = np.asarray(self._lens, dtype=np.int64)
+            self._dec_of = np.repeat(np.arange(len(lens)), lens)
+            self._dec_day = np.asarray(self._day_of, dtype=np.int64)
+
+    @property
+    def decisions(self):
+        return len(self._lens)
+
+    @property
+    def days(self):
+        """Day labels in first-seen order; index i is row i of spend_by_day."""
+        return [d for d, _ in sorted(self._day_index.items(), key=lambda kv: kv[1])]
+
+    def spend_by_day(self, tau):
+        """Expected exploration spend per day at `tau`.
+
+        Uniform selection over the affordable set, so the expected cost of a
+        forced decision is the MEAN affordable cost; a decision with an empty
+        affordable set contributes nothing. Expected, not realised: the trace
+        asks what a counterfactual tau would have spent, and the draws on
+        record were made at a different one.
+        """
+        self._build()
+        n_dec, n_day = len(self._lens), len(self._day_index)
+        if not n_dec:
+            return np.zeros(n_day)
+        m = self._costs <= tau
+        sums = np.bincount(self._dec_of[m], weights=self._costs[m], minlength=n_dec)
+        cnts = np.bincount(self._dec_of[m], minlength=n_dec)
+        per_dec = np.divide(sums, cnts, out=np.zeros(n_dec), where=cnts > 0)
+        return np.bincount(self._dec_day, weights=per_dec, minlength=n_day)
+
+    def implied_daily_spend(self, tau, n_days=None):
+        by_day = self.spend_by_day(tau)
+        return float(by_day.sum()) / max(n_days or len(by_day), 1)
+
+    def solve_tau(self, budget_per_day, n_days=None, steps=60):
+        """The tau whose implied daily spend equals `budget_per_day`.
+
+        Bisection rather than a quantile: spend is a non-linear function of
+        tau (it moves both the size of the affordable set and the mean cost
+        within it), so no fixed quantile of the cost distribution is the
+        answer on a population it was not measured on.
+
+        Returns the low end of the bracket, so the answer is always a tau
+        whose implied spend is UNDER budget. Spend steps rather than sliding
+        -- it jumps as each cost crosses tau -- so no tau lands exactly on
+        the budget, and on a thin window the last step can be a percent wide.
+        Under is the right side of a budget to miss on.
+        """
+        self._build()
+        if not len(self._costs) or budget_per_day <= 0:
+            return None
+        lo, hi = 0.0, float(self._costs.max())
+        if self.implied_daily_spend(hi, n_days) < budget_per_day:
+            return hi                       # budget exceeds even unbounded tau
+        for _ in range(steps):
+            mid = (lo + hi) / 2
+            if self.implied_daily_spend(mid, n_days) < budget_per_day:
+                lo = mid
+            else:
+                hi = mid
+        return lo
+
+    def quantile_of(self, tau):
+        self._build()
+        if not len(self._costs):
+            return None
+        return float((self._costs <= tau).mean())
+
+    def distribution(self, percentiles=(10, 25, 50, 75, 90, 95, 99)):
+        self._build()
+        if not len(self._costs):
+            return {}
+        return {f"p{p}": round(float(np.percentile(self._costs, p)), 2)
+                for p in percentiles}
 
 
 def budget_today(projected_markdown_il, posterior_std, cfg):

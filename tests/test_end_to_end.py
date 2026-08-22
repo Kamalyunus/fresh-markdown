@@ -459,6 +459,35 @@ def test_shadow_phase_harness(workspace):
         "no-sentinel fallback is being bypassed again"
     assert b["markdown_il_scrap"] > b["markdown_il_discount"]
 
+    # tau re-derived on THIS path, by the same bisection the replay runs.
+    # Reported, never applied: tau_initial is a MEASURED value and goes
+    # through the paste gate like rho and mean_forced_hours_per_episode.
+    assert b["tau_recommended"] > 0
+    assert b["tau_recommended_implied_spend"] <= b["daily_budget"]
+    assert b["spread_decisions"] > 0
+    assert b["spread_decisions_per_episode"] > 1.0, \
+        "spreads collected once per episode -- the entry-only scoping is back"
+    assert b["tau"] == pytest.approx(500.0)      # unchanged by the derivation
+
+    # the trace the single multiple cannot give: does the pilot survive day 1
+    tr = b["tau_controller_trace"]
+    # three day counts, none of them interchangeable: the calendar span the
+    # budget divides by, the days that produced a decision, the days walked
+    assert tr["window_days"] == b["days"]
+    assert tr["days_with_decisions"] <= tr["window_days"]
+    assert tr["days_simulated"] + tr["days_truncated"] == tr["days_with_decisions"]
+    if tr["days_truncated"]:
+        assert "TRUNCATED" in tr["note"]
+    assert tr["tau_start"] == pytest.approx(b["tau"])
+    assert len(tr["clip"]) == 2
+    assert tr["days_stop_condition_fires"] <= tr["days_simulated"]
+    assert len(tr["by_day"]) == tr["days_simulated"]
+    assert [r["day"] for r in tr["by_day"]] == sorted(r["day"] for r in tr["by_day"])
+    assert tr["by_day"][0]["tau"] == pytest.approx(tr["tau_start"])
+    row = next(r for r in tr["by_day"] if r["over_budget"] is not None)
+    assert row["over_budget"] == pytest.approx(   # the field is rounded to 2dp
+        row["spend"] / row["budget"], abs=0.01)
+
     # shadow outcomes are NOT learning evidence: update must consume nothing
     from common.config import load_config
     from pipeline.update import run as update_run

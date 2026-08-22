@@ -56,13 +56,20 @@ def validate_state(s, tiers, anchor_discount, mu_ref_path):
 
 
 def decide(state, posterior_store, event_store, cfg, rng, tau_current,
-           baseline_version):
+           baseline_version, spread_sink=None):
     """Price one decision interval and emit the section 16.1 decision event.
 
     `state` carries: episode_id, sku_id, fc, category, subcategory,
     hour_of_day, hours_remaining, q, original_price, cost, r, mu_ref_path
     (mu_ref per remaining hour, index 0 = now), and current_discount
     (None for the entry decision).
+
+    `spread_sink`, if given, is called with this decision's
+    Q(p_star) - Q(p) costs (the optimum excluded). Deliberately OUT OF BAND
+    rather than a field on the event: the vector is one float per feasible
+    tier on every decision, the event log is the production audit trail, and
+    `pricing.explore.SpreadLedger` is the only consumer. It is called before
+    the draw, so what it records does not depend on the tau in force.
     """
     s = state
     d_ref = reference_discount(cfg, s["category"])
@@ -87,6 +94,12 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
     # one action while the grid still has twenty, and at entry the coarse arm
     # set is the action set. Judging on len(tiers) overstated both.
     explorable = len(result.q_by_tier) >= cfg["exploration"]["min_feasible_tiers"]
+    if spread_sink is not None and explorable:
+        # reuse affordable_set's cost definition rather than restating it --
+        # tau is calibrated against exactly the quantity it is compared to
+        _, spread_costs = explore.affordable_set(result, 0.0)
+        spread_sink([c for j, c in spread_costs.items()
+                     if j != result.optimal_index])
     choice = explore.select(result, tau_current, rng, explorable=explorable)
 
     d_opt = result.tiers[result.optimal_index]

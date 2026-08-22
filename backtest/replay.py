@@ -26,6 +26,7 @@ from bootstrap.fit_dispersion import lookup_r
 from bootstrap.measure import m10_fidelity_decomposition
 from common import episodes
 from pricing import dp as dp_mod
+from pricing import explore
 from pricing.demand import (mu_at, expected_min_demand_inventory,
                             expected_min_demand_inventory_vec)
 
@@ -414,7 +415,7 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0):
         eps_ids = rng.choice(eps_ids, max_episodes, replace=False)
     sub = d_pred[d_pred.episode_id.isin(eps_ids)]
 
-    rows, spreads = [], []
+    rows, ledger = [], explore.SpreadLedger()
     for eid, g in sub.groupby("episode_id"):
         e = _episode_frame(g, unfinished)
         if e["q0"] <= 0 or e["hours"] < 1:
@@ -467,10 +468,14 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0):
             except ValueError:
                 break
             star = res.optimal_index
-            costs = [res.q_by_tier[star] - res.q_by_tier[j]
-                     for j in res.q_by_tier if j != star]
-            if t == 0 and costs:
-                spreads.append({"date": e["date"], "costs": costs})
+            # EVERY decision hour, not just entry. `explore.select` is
+            # called at every hour, so a tau solved on entry decisions alone
+            # funds roughly one exploration per episode against a system that
+            # explores ~8 times per episode -- and the bisection below reports
+            # 1.00x either way, so the shortfall never surfaced here. It
+            # surfaced in shadow, as an 8.7x overspend nobody could source.
+            ledger.add(e["date"], [res.q_by_tier[star] - res.q_by_tier[j]
+                                   for j in res.q_by_tier if j != star])
             d_t = res.tiers[star]
             anchor = d_t
             mu = mu_at(e["mu_ref_path"][t], d_t, e["d_ref"], e["eps"],
@@ -582,50 +587,40 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0):
                  "output is never evidence the policy works; the A/B is that "
                  "evidence (PRD 17.1)."),
     }
-    all_costs = np.array([c for s in spreads for c in s["costs"]])
-    block["q_spread_distribution"] = {
-        f"p{p}": round(float(np.percentile(all_costs, p)), 2)
-        for p in [10, 25, 50, 75, 90, 95, 99]} if len(all_costs) else {}
-    return block, ep, spreads
+    block["q_spread_distribution"] = ledger.distribution()
+    return block, ep, ledger
 
 
-def derive_tau_initial(spreads, ep, cfg):
-    """Section 12.3: tau_initial is the currency quantile of the observed
-    Q(p_star) - Q(p) distribution whose implied daily exploration spend matches
-    budget_share_of_il of daily markdown IL. Never a rate."""
-    if not spreads:
+def derive_tau_initial(ledger, ep, cfg):
+    """Section 12.3: tau_initial is the currency amount whose implied daily
+    exploration spend matches budget_share_of_il of daily markdown IL. Never
+    a rate.
+
+    Reports 1.00x by construction -- the bisection solves until it does -- so
+    this block is evidence that a tau EXISTS at this budget, never evidence
+    that the launch value is right. What grades it is `pipeline.shadow` on a
+    window this never saw: same procedure, the path production runs, and free
+    to disagree.
+    """
+    if not ledger.decisions:
         return None
     daily_il = pd.DataFrame(ep).groupby("date")["actual_il"].sum()
     budget_per_day = float(cfg["exploration"]["budget_share_of_il"]
                            * daily_il.mean())
-
-    by_day = {}
-    for s in spreads:
-        by_day.setdefault(s["date"], []).append(np.asarray(s["costs"]))
-
-    def implied_daily_spend(tau):
-        # uniform selection over the affordable set -> expected cost per
-        # forced decision is the mean affordable cost
-        total = 0.0
-        for day, sets in by_day.items():
-            for costs in sets:
-                aff = costs[costs <= tau]
-                if len(aff):
-                    total += float(aff.mean())
-        return total / max(len(by_day), 1)
-
-    all_costs = np.sort(np.concatenate([np.asarray(s["costs"]) for s in spreads]))
-    lo, hi = 0.0, float(all_costs[-1])
-    for _ in range(60):
-        mid = (lo + hi) / 2
-        if implied_daily_spend(mid) < budget_per_day:
-            lo = mid
-        else:
-            hi = mid
-    tau = (lo + hi) / 2
-    quantile = float(np.searchsorted(all_costs, tau) / len(all_costs))
+    n_days = len(ledger.days)
+    tau = ledger.solve_tau(budget_per_day, n_days=n_days)
+    if tau is None:
+        return None
     return {"tau_initial": round(tau, 2),
             "unit": "currency (expected IL given up, per section 12.3)",
-            "implied_daily_spend": round(implied_daily_spend(tau), 1),
+            "implied_daily_spend": round(
+                ledger.implied_daily_spend(tau, n_days), 1),
             "daily_budget": round(budget_per_day, 1),
-            "cost_distribution_quantile": round(quantile, 4)}
+            "cost_distribution_quantile": round(ledger.quantile_of(tau), 4),
+            "spread_decisions": ledger.decisions,
+            "basis": ("every decision hour on the exploit-only replay path. "
+                      "Entry-only collection understated the funded decision "
+                      "count ~8x; see pricing.explore.SpreadLedger."),
+            "validate_on": ("pipeline.shadow --holdout reports "
+                            "tau_recommended and tau_controller_trace on a "
+                            "window no artifact was fit on.")}

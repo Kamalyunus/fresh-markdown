@@ -36,7 +36,7 @@ randomized exploration.
 | `tools/make_dummy_flc.py` | — | Synthetic FLC generator (legacy + randomized policies, known ground-truth elasticity). |
 | `tools/make_charts.py` | — | One diagnostic chart per component, generated from the report artifacts into `reports/charts/`. |
 | `tools/walkthrough/` | — | Builds `docs/system_walkthrough.html`, the leadership-facing walkthrough — one tab per frozen artifact, plus the decision, the learning loop, the replay and the assurance checks. |
-| `tools/metrics_glossary.py` | — | Builds `docs/metrics.html`: 121 metrics across 17 components, each with its unit, owning component, and whether it gates anything. Filterable, with a gates-only toggle. |
+| `tools/metrics_glossary.py` | — | Builds `docs/metrics.html`: 128 metrics across 17 components, each with its unit, owning component, and whether it gates anything. Filterable, with a gates-only toggle. |
 
 ## Running the bootstrap (PRD §1a order)
 
@@ -96,6 +96,20 @@ The shadow report carries the §19 exit gate (event completeness, matched
 rate, zero cost-floor violations) plus would-be exploration spend,
 recommended-vs-legacy discount deltas, and the frozen-baseline drift ratio.
 Architecture and rationale live in [`docs/design.md`](docs/design.md).
+
+Run it once on the hold-out — the window after `test_end` that no artifact
+was fit on and no gate was decided on:
+
+```bash
+python3 -m pipeline.shadow --input data/prepared.parquet --holdout --max-episodes 0
+```
+
+That is the only unrehearsed test the extract can give. It re-derives `tau`
+on the path production runs (`tau_recommended`) and walks the `tau` controller
+day by day (`tau_controller_trace`) so you can see whether the pilot survives
+its own first day — the backtest's derivation reports 1.00x by construction
+and cannot. One shot: tune anything on this window and it stops being a
+hold-out. See `AGENTS.md`.
 
 Daily production loop after the shadow gate passes: `inference.decide` per
 decision interval, then

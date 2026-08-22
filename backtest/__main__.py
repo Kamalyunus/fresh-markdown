@@ -27,10 +27,10 @@ def main():
         r_lookup = json.load(f)
 
     fid, d_pred = fidelity(d, cfg, model, prior, r_lookup)
-    pol, ep, spreads = policy_replay(d_pred, cfg,
-                                     max_episodes=args.policy_episodes,
-                                     seed=args.seed)
-    tau = derive_tau_initial(spreads, ep, cfg)
+    pol, ep, ledger = policy_replay(d_pred, cfg,
+                                    max_episodes=args.policy_episodes,
+                                    seed=args.seed)
+    tau = derive_tau_initial(ledger, ep, cfg)
 
     out = {
         "artifact_versions": {

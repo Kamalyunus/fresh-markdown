@@ -26,6 +26,20 @@ data:
     calib_end:   "2026-07-27"
     test_start:  "2026-07-28"
     test_end:    "2026-08-03"
+  holdout:                             # SET  a TRUE hold-out: no artifact is
+    start: "2026-08-04"                # fit on it and no gate was decided on
+    end:   "2026-08-21"                # it. Everything above stops at
+    # test_end, so standing at test_end and running this window forward is
+    # the only unrehearsed test the extract can give -- the shadow gate, the
+    # drift ratio and the tau derivation all report 1.00x or in-sample
+    # numbers on any window they were fitted against.
+    #
+    # ONE SHOT. The moment a value is tuned on this window and re-run, it
+    # stops being a hold-out and becomes a second calibration set. Decide
+    # what each run is for before running it.
+    #
+    # Episodes are assigned by the date their WINDOW OPENED
+    # (common.episodes.window_slice), so no episode straddles the seam.
     # An episode is a maximal run of consecutive hourly rows for one sku x fc
     # over which flc_window (hours_remaining) ticks down exactly one per
     # elapsed hour -- see prepare_data.assign_episode_ids, which is the

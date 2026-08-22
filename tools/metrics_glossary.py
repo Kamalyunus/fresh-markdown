@@ -297,6 +297,29 @@ CATALOGUE = [
    "would suspend exploration on day one of the pilot; between 1× and 2× the "
    "tau controller shrinks tau at the operator gate, capped at halving a day.",
    "GATE — read before launch, not after"),
+  ("exploration_budget · tau_recommended", "won",
+   "The same bisection the backtest runs, re-solved on shadow's own decisions. "
+   "Reported, never applied: `tau_initial` is MEASURED and goes through the "
+   "paste gate. Check `tau_recommended_implied_spend` sits just UNDER "
+   "`daily_budget` — spend steps as each cost crosses tau rather than sliding, "
+   "so no tau lands exactly on the budget.",
+   "GATE — the launch value for exploration.tau_initial"),
+  ("exploration_budget · spread_decisions_per_episode", "count",
+   "Decisions whose Q-spread funded the tau derivation, per episode. Near 1 "
+   "means the entry-only scoping is back: the replay once collected spreads at "
+   "`t == 0` only, funding one exploration per episode against a system that "
+   "explores every hour, and its own bisection reported 1.00× regardless.", ""),
+  ("tau_controller_trace · days_stop_condition_fires", "count",
+   "Days in the window on which realised spend would have exceeded the 2× stop. "
+   "`tau_next` reads only the day just closed, so day one is spent at whatever "
+   "tau was launched with and no correction can precede it — a single "
+   "spend_over_budget multiple cannot show this.",
+   "GATE — does the pilot survive its own launch"),
+  ("tau_controller_trace · window_days", "count",
+   "Calendar span the budget divides by. NOT `days_with_decisions` (days that "
+   "produced a decision) and NOT `days_simulated` (walked, capped at 60, with "
+   "`days_truncated` reporting the rest). Reading \"N of M days\" against the "
+   "wrong M is off by the gap, which on a sampled run is large.", ""),
   ("episodes_per_bounded_update", "count",
    "`information_increment ÷ effective information per episode`. Divide by the "
    "pilot's daily episode count for the evidence-side floor; the binding constraint "

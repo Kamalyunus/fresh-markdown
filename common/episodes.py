@@ -70,6 +70,31 @@ SOLD_OUT_EARLY = "sold_out_early"
 NOT_CLOSED = "not_closed"
 
 
+def window_slice(d, start=None, end=None):
+    """Episodes whose WINDOW STARTED in [start, end] -- whole, never sliced.
+
+    The one rule for cutting this data by date, because a row-level cut is
+    wrong in exactly the way the episode definition exists to prevent. FLC
+    windows routinely run past midnight, so `d[d.date >= start]` keeps the
+    tail of a window that opened the day before: the entry decision that set
+    the whole price path is gone, the opening inventory is gone, and
+    `hours_remaining` starts mid-countdown. The episode survives as a short
+    one that never existed.
+
+    Assignment is by the window's FIRST date, so every episode lands in
+    exactly one slice and no boundary runs through the middle of one.
+    """
+    if start is None and end is None:
+        return d
+    opened = d.groupby("episode_id")["date"].transform("min").astype(str)
+    keep = pd.Series(True, index=d.index)
+    if start is not None:
+        keep &= opened.ge(str(start))
+    if end is not None:
+        keep &= opened.le(str(end))
+    return d[keep]
+
+
 def last_rows(d, order=("date", "hour_of_day")):
     """Final row of each episode, in window order."""
     return d.sort_values(list(order)).groupby("episode_id").tail(1)

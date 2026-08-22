@@ -87,6 +87,53 @@ whether it clears the `exploration_cost_vs_budget` stop multiple. **Read it
 before the pilot**: over 2× and exploration suspends on day one; between 1×
 and 2× the `tau` controller walks it down, capped at halving per day.
 
+Two numbers in that block do the deciding:
+
+- **`tau_recommended`** — the same bisection, re-run on shadow's own
+  decisions. Report only: `tau_initial` is MEASURED and goes through the
+  paste gate like `rho`, and `artifact_mirror_drift` exists to catch the
+  silent-rewrite case. Check `tau_recommended_implied_spend` sits just under
+  `daily_budget`; it will never equal it, because spend **steps** as each
+  cost crosses `tau` rather than sliding.
+- **`tau_controller_trace`** — the day-by-day walk. A single multiple cannot
+  say whether the pilot survives its own launch: `tau_next` only reads the
+  day just closed, so day one is spent at whatever `tau` you launched with,
+  and the stop condition is evaluated on that same day. Three day counts are
+  reported and **none is interchangeable** — `window_days` (the calendar span
+  the budget divides by), `days_with_decisions`, and `days_simulated`
+  (capped at 60; `days_truncated` says what was dropped).
+
+**The entry-only scoping bug.** Until the `SpreadLedger` refactor,
+`policy_replay` collected spreads at `t == 0` only, so `tau_initial` was
+solved to fund roughly **one exploration per episode** against a system that
+calls `explore.select` every hour. That is most of any large multiple shadow
+reports, and it could not surface in the backtest — the bisection reports
+1.00x whatever population it is given. `pricing.explore.SpreadLedger` is now
+the single definition, used by both, and
+`tests/test_holdout_and_tau.py` asserts the replay collects every hour.
+
+### The hold-out window
+
+`data.holdout` names a window **after** `test_end` that nothing is fit on and
+no gate was decided on:
+
+```bash
+python3 -m pipeline.shadow --input data/prepared.parquet --holdout --max-episodes 0
+```
+
+Every artifact stops at `test_end`, so standing there and running this window
+forward is the only unrehearsed test the extract can give — the shadow gate,
+the drift ratio and the `tau` derivation all report in-sample numbers or
+1.00x on any window they were fitted against. **One shot**: tune a value on it
+and re-run, and it is a second calibration set, not a hold-out.
+
+Date cuts are **episode-scoped** (`common.episodes.window_slice`), never
+row-scoped. Windows run past midnight, so `d[d.date >= start]` keeps the tail
+of an episode that opened the day before — no entry decision, wrong opening
+inventory, a countdown starting mid-window. Episodes are assigned by the date
+their window opened, so nothing straddles the seam. `split_frames` uses the
+same function.
+
 Its budget uses `common.episodes.classify_last` for scrap, not a local copy.
 An inline copy was written first and dropped **all** scrap on a feed with no
 write-off sentinel — that function carries a fallback for exactly that case.

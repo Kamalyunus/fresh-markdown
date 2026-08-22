@@ -36,6 +36,7 @@ from common.episodes import adjustment_reason
 from bootstrap.train_baseline import BaselineModel
 from bootstrap.fit_dispersion import lookup_r
 from events.store import EventStore
+from pricing import explore
 from pricing.demand import expected_min_demand_inventory_vec
 from inference.decide import decide, StateRejected
 from pricing.posterior import PosteriorStore
@@ -53,6 +54,77 @@ def _require_shadow_config(cfg):
         missing.append("exploration.tau_initial (from a PASSING backtest)")
     if missing:
         raise ConfigError("shadow phase blocked by null config: " + "; ".join(missing))
+
+
+def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None,
+                      max_days=60):
+    """Day-by-day simulation of the tau controller over the shadow window.
+
+    Answers the question a single spend-over-budget multiple cannot: does the
+    pilot survive its own first week. The controller only sees yesterday --
+
+        tau <- tau * clip(budget / realised_cost, 0.5, 2.0)
+
+    -- so a tau that starts 8x too generous cannot be corrected before the
+    first day's spend is on the books, and the stop condition is evaluated on
+    that same spend. Three days of halving is three days above a 2.0x stop.
+
+    Spend per day is EXPECTED spend at the tau in force that day, not the
+    draws on record: the draws were made once, at tau_initial, and this walks
+    a counterfactual tau path.
+    """
+    stop_at = cfg["monitoring"]["stop_conditions"]["exploration_cost_vs_budget"]
+    days = ledger.days
+    order = sorted(range(len(days)), key=lambda i: days[i])
+    tau, rows, first_within, suspend_days = float(tau0), [], None, 0
+    for rank, i in enumerate(order[:max_days]):
+        day = days[i]
+        spend = float(ledger.spend_by_day(tau)[i])
+        budget = explore.budget_today(il_by_day.get(day, 0.0), widest_std, cfg)
+        over = (spend / budget) if budget > 0 else None
+        fired = bool(over is not None and over > stop_at)
+        suspend_days += int(fired)
+        if over is not None and over <= 1.0 and first_within is None:
+            first_within = rank + 1
+        rows.append({"day": day, "tau": round(tau, 2),
+                     "spend": round(spend, 1), "budget": round(budget, 1),
+                     "over_budget": round(over, 2) if over is not None else None,
+                     "stop_condition_fires": fired})
+        # the controller runs at the operator gate, on the day just closed
+        tau = explore.tau_next(tau, budget, spend, cfg)
+    return {
+        "tau_start": round(float(tau0), 2),
+        "tau_end": round(tau, 2),
+        "by_day": rows,
+        # THREE different day counts, all of them real, none interchangeable:
+        # the calendar span the budget is divided by, the days that actually
+        # produced a decision to spend on, and the days walked here. On a
+        # sampled run the middle one is far below the first, and a
+        # "3 of N days" read against the wrong N is off by the gap.
+        "window_days": int(window_days) if window_days else len(ledger.days),
+        "days_with_decisions": len(ledger.days),
+        "days_simulated": len(rows),
+        "days_truncated": max(len(ledger.days) - len(rows), 0),
+        "days_stop_condition_fires": suspend_days,
+        "first_day_within_budget": first_within,
+        "clip": cfg["exploration"]["tau_adjust_clip"],
+        "verdict": (
+            "no days simulated" if not rows else
+            f"exploration suspends on day 1 and stays suspended for "
+            f"{suspend_days} of {len(rows)} days -- the controller cannot "
+            "correct a tau it has not yet seen spend from"
+            if rows[0]["stop_condition_fires"] else
+            f"survives launch; {suspend_days} of {len(rows)} days would fire "
+            "the stop condition" if suspend_days else
+            "survives launch; the stop condition never fires"),
+        "note": ("Expected spend at the tau in force each day, so this is the "
+                 "path a pilot launched at tau_start would have walked. Run "
+                 "it again with tau_initial set to tau_recommended to confirm "
+                 "the launch value clears day 1."
+                 + (f" TRUNCATED: {len(ledger.days) - len(rows)} later days "
+                    f"not walked (cap {max_days})."
+                    if len(rows) < len(ledger.days) else "")),
+    }
 
 
 def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
@@ -106,6 +178,11 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
     # rather than collected into rows: at --max-episodes 0 the row list would
     # be millions of dicts and the answer is two scalars.
     il_discount = 0.0
+    il_disc_by_day = {}
+    # Q-spreads for every decision on THIS path, so tau can be re-derived on
+    # the population that will actually run rather than inherited from the
+    # replay's entry-only one.
+    ledger = explore.SpreadLedger()
     # one FINAL row per episode -- bounded by episode count, not row count --
     # so scrap can be classified by `common.episodes.classify_last` rather
     # than by a copy of it. An inline copy was tried and dropped ALL scrap on
@@ -136,8 +213,10 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
                 "cost": float(row.cost), "r": float(row.r_val),
                 "mu_ref_path": mu_path[t:], "current_discount": anchor,
             }
+            row_day = str(row.date)
             try:
-                evt = decide(state, posterior, store, cfg, rng, tau, model.version)
+                evt = decide(state, posterior, store, cfg, rng, tau,
+                             model.version, spread_sink=ledger.sink(row_day))
             except StateRejected as e:
                 rejected[str(e)] = rejected.get(str(e), 0) + 1
                 anchor = float(row.total_discount)
@@ -210,8 +289,10 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
 
             # discount given away at the LEGACY price -- no price was applied,
             # so this is the markdown IL the business actually carried
-            il_discount += float(row.original_price) * legacy_d * sold
-            last_obs = (q, sold, float(row.cost), ending)
+            hour_il = float(row.original_price) * legacy_d * sold
+            il_discount += hour_il
+            il_disc_by_day[row_day] = il_disc_by_day.get(row_day, 0.0) + hour_il
+            last_obs = (q, sold, float(row.cost), ending, row_day)
 
             anchor = legacy_d                 # reality's price is the next anchor
 
@@ -220,10 +301,11 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
         # test needs the whole frame to know whether the convention is in
         # force at all.
         if last_obs is not None:
-            start, sold_last, unit_cost, ending_last = last_obs
+            start, sold_last, unit_cost, ending_last, close_day = last_obs
             last_rows.append({"episode_id": eid, "starting_inventory": start,
                               "units_sold": sold_last, "cost": unit_cost,
-                              "ending_inventory": ending_last})
+                              "ending_inventory": ending_last,
+                              "close_day": close_day})
 
     if n_dec == 0:
         raise RuntimeError("no decisions produced -- empty input or all states rejected")
@@ -261,14 +343,35 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
     kind = episodes.classify_last(last)
     leftover = episodes.leftover_units(last.starting_inventory, last.units_sold)
     completed = (kind == episodes.COMPLETED).to_numpy()
-    il_scrap = float((last.cost.to_numpy() * leftover.to_numpy())[completed].sum())
+    scrap_per_ep = (last.cost.to_numpy() * leftover.to_numpy()) * completed
+    il_scrap = float(scrap_per_ep.sum())
     il_unknown_scrap = int((kind == episodes.NOT_CLOSED).sum())
     markdown_il = il_discount + il_scrap
-    daily_il = markdown_il / n_days
-    daily_budget = cfg["exploration"]["budget_share_of_il"] * daily_il
+    # Scrap lands on the day the episode CLOSED, so a day's budget is funded
+    # by the IL that day actually carried. Charging it to the opening day
+    # would fund exploration out of losses that had not happened yet.
+    il_by_day = dict(il_disc_by_day)
+    for day, amount in zip(last.close_day.to_numpy(), scrap_per_ep):
+        il_by_day[day] = il_by_day.get(day, 0.0) + float(amount)
+
+    # The budget production applies, not a simplified one: budget_today
+    # scales the share down as the posterior narrows. Nothing moves the
+    # posterior in shadow, so the scale is constant here -- but it is the
+    # same quantity the stop condition is evaluated against, and once the
+    # widest cell std drops under budget_scale_ref_std the same spend is a
+    # larger multiple of a smaller budget.
+    cells = posterior.state["cells"]
+    widest_std = max(rec["std"] for rec in cells.values())
+    daily_budget = explore.budget_today(markdown_il, widest_std, cfg) / n_days
     implied_daily_spend = would_be_cost / n_days
     over = (implied_daily_spend / daily_budget) if daily_budget > 0 else None
     stop_at = cfg["monitoring"]["stop_conditions"]["exploration_cost_vs_budget"]
+
+    # Re-derive tau on THIS path -- same bisection the replay runs, on the
+    # decisions that actually happen. See SpreadLedger: the replay solved on
+    # entry decisions only, so its tau funds roughly one exploration per
+    # episode against a system that explores every hour.
+    tau_rec = ledger.solve_tau(daily_budget, n_days=n_days)
     budget_check = {
         "basis": "shadow's own anchored decision path, same episodes and days "
                  "on both sides",
@@ -282,7 +385,21 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
         "markdown_il_scrap": round(il_scrap, 1),
         "episodes_unknown_scrap_excluded": il_unknown_scrap,
         "budget_share_of_il": cfg["exploration"]["budget_share_of_il"],
+        "budget_scale_applied": round(min(max(
+            widest_std / cfg["exploration"]["budget_scale_ref_std"],
+            cfg["exploration"]["budget_scale_floor"]), 1.0), 4),
         "tau": tau,
+        "tau_recommended": round(tau_rec, 2) if tau_rec else None,
+        "tau_recommended_ratio": round(tau_rec / tau, 4)
+            if tau_rec and tau else None,
+        # so the derivation can be checked rather than taken on trust: this
+        # must sit just under daily_budget
+        "tau_recommended_implied_spend": round(
+            ledger.implied_daily_spend(tau_rec, n_days), 1) if tau_rec else None,
+        "spread_decisions": ledger.decisions,
+        "spread_decisions_per_episode": round(ledger.decisions / n_ep, 2)
+            if n_ep else None,
+        "q_spread_distribution": ledger.distribution(),
         "verdict": (
             "NO IL -- cannot project a budget" if over is None else
             f"WOULD SUSPEND -- {over:.2f}x budget, above the {stop_at}x stop "
@@ -291,11 +408,18 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None):
             f"OVER BUDGET -- {over:.2f}x; the tau controller shrinks tau at the "
             "operator gate, capped at halving per day" if over > 1 else
             f"within budget -- {over:.2f}x"),
-        "note": ("tau was derived on the backtest's exploit-only path; this is "
-                 "the same tau measured on the anchored path, so the two are "
-                 "not required to agree. A gap here is the reason to re-derive, "
-                 "not a defect."),
+        "note": ("tau_initial came from the replay's EXPLOIT-ONLY path and, "
+                 "before the SpreadLedger fix, from its ENTRY decisions only "
+                 "-- roughly one exploration per episode against a system "
+                 "that explores every hour, which is most of any large "
+                 "multiple here. tau_recommended is the same bisection run on "
+                 "this path over these decisions; paste it into "
+                 "exploration.tau_initial the way rho and "
+                 "mean_forced_hours_per_episode are pasted, after reading "
+                 "tau_controller_trace."),
     }
+    budget_check["tau_controller_trace"] = _controller_trace(
+        ledger, il_by_day, tau, widest_std, cfg, window_days=n_days)
 
     per_episode = eff_information / n_ep if n_ep else 0.0
     step = cfg["learning"]["max_mean_step"]
@@ -404,8 +528,13 @@ def main():
     ap.add_argument("--input", required=True)
     ap.add_argument("--out", default="reports/shadow.json")
     ap.add_argument("--config", default="config.yaml")
-    ap.add_argument("--date-start", default=None)
-    ap.add_argument("--date-end", default=None)
+    ap.add_argument("--date-start", default=None,
+                    help="keep episodes whose WINDOW OPENED on or after this")
+    ap.add_argument("--date-end", default=None,
+                    help="keep episodes whose WINDOW OPENED on or before this")
+    ap.add_argument("--holdout", action="store_true",
+                    help="run on data.holdout -- the window no artifact was "
+                         "fit on and no gate was decided on")
     ap.add_argument("--events-dir", default=None)
     ap.add_argument("--max-episodes", type=int, default=None,
                     help="episode sample size; 0 = all episodes. Default: "
@@ -415,12 +544,20 @@ def main():
 
     cfg = load_config(args.config)
     d = pd.read_parquet(args.input)
-    ds = d.date.astype(str)
-    if args.date_start:
-        d = d[ds.ge(args.date_start)]
-        ds = d.date.astype(str)
-    if args.date_end:
-        d = d[ds.le(args.date_end)]
+    start, end = args.date_start, args.date_end
+    if args.holdout:
+        h = cfg["data"].get("holdout")
+        if not h:
+            raise SystemExit("--holdout needs data.holdout in config.yaml")
+        start, end = h["start"], h["end"]
+        print(f"== holdout window {start} -> {end} "
+              "(no artifact was fit on it) ==")
+    # Episode-scoped, never row-scoped. A window that opened before `start`
+    # and ran past midnight would otherwise survive as its own tail: no entry
+    # decision, wrong opening inventory, a countdown starting mid-window.
+    d = episodes.window_slice(d, start, end)
+    if d.empty:
+        raise SystemExit(f"no episodes opened in [{start}, {end}]")
 
     report = run_shadow(d, cfg, events_root=args.events_dir,
                         seed=args.seed, max_episodes=args.max_episodes)
@@ -457,6 +594,13 @@ def main():
     print(f"exploration budget : spend {bc['implied_daily_spend']:,.0f}/day vs "
           f"budget {bc['daily_budget']:,.0f}/day over {bc['days']} days")
     print(f"                     {bc['verdict']}")
+    if bc["tau_recommended"]:
+        print(f"tau                : in force {bc['tau']:,.2f} -> recommended "
+              f"{bc['tau_recommended']:,.2f} "
+              f"({bc['tau_recommended_ratio']:.2f}x) on "
+              f"{bc['spread_decisions']:,} decisions "
+              f"({bc['spread_decisions_per_episode']}/episode)")
+    print(f"tau controller     : {bc['tau_controller_trace']['verdict']}")
     print(g["verdict"])
     print(f"wrote {args.out}")
 
