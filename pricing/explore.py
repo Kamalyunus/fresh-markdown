@@ -190,6 +190,50 @@ class SpreadLedger:
                 for p in percentiles}
 
 
+def tau_provenance_error(cfg, backtest):
+    """Why the pasted `exploration.tau_initial` cannot be trusted, or None.
+
+    tau_initial is MEASURED: it is pasted by hand from a backtest derivation,
+    and nothing until now checked that the paste still matched its source. A
+    stale one is silent and expensive -- it sets how much exploration the
+    pilot buys on day one, and the stop condition is evaluated on that day's
+    spend before the controller has seen anything to correct from.
+
+    Three ways a paste goes bad, all checked here:
+
+      * no derivation to source it from at all;
+      * a derivation that PREDATES the entry-only scoping fix. Those solved
+        tau on entry decisions only, funding roughly one exploration per
+        episode against a system that explores every hour, so the value is
+        wrong by about that factor. `spread_decisions` is the marker: the old
+        block did not emit it;
+      * a value that simply disagrees with the derivation -- a hand-typed
+        number, or a backtest re-run since the paste.
+
+    `backtest` is the loaded reports/backtest.json, or None.
+    """
+    tau = cfg["exploration"]["tau_initial"]
+    if tau is None:
+        return None                 # null is a separate, louder failure
+    der = (backtest or {}).get("tau_initial_derivation") or {}
+    if not der:
+        return (f"exploration.tau_initial is {tau} but no backtest derivation "
+                "is on disk to source it from. Run `python3 -m backtest` and "
+                "paste tau_initial_derivation.tau_initial.")
+    if "spread_decisions" not in der:
+        return (f"exploration.tau_initial ({tau}) came from a backtest that "
+                "predates the entry-only scoping fix: it solved tau on ENTRY "
+                "decisions only, funding ~1 exploration per episode against a "
+                "system that explores every hour. Re-run `python3 -m backtest` "
+                "and re-paste.")
+    derived = float(der["tau_initial"])
+    if abs(derived - float(tau)) > 0.01:
+        return (f"exploration.tau_initial is {tau} but the backtest derived "
+                f"{derived}. Re-paste, or re-run the backtest if the paste is "
+                "the newer of the two.")
+    return None
+
+
 def budget_today(projected_markdown_il, posterior_std, cfg):
     """Section 12.3: a share of markdown IL, scaled down as the posterior
     narrows, never below budget_scale_floor of the full budget."""

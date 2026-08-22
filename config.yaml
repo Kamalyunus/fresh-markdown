@@ -239,7 +239,17 @@ pricing:
 
 exploration:
   budget_share_of_il: 0.01             # SET  1% of markdown IL
-  tau_initial: null                    # MEASURED  currency quantile from replay, section 12.3
+  tau_initial: null                    # MEASURED  section 12.3. Paste ONLY
+    # from `reports/backtest.json` -> tau_initial_derivation.tau_initial, and
+    # only from a report written AFTER the entry-only scoping fix (its block
+    # carries `spread_decisions`). Earlier derivations solved tau on ENTRY
+    # decisions alone, funding roughly one exploration per episode against a
+    # system that calls explore.select every hour -- wrong by about that
+    # factor, and invisible, because the bisection reports 1.00x whatever
+    # population it is handed. Any value pasted before that fix is void.
+    # `pricing.explore.tau_provenance_error` enforces all of this: shadow
+    # refuses to start on a stale paste and `pipeline.status` reports it.
+    # It is a CURRENCY amount compared against Q(p*) - Q(p), never a rate.
   tau_adjust_clip: [0.5, 2.0]          # SET  max daily multiplicative change
   tau_spend_guard: 1.0                 # SET  divide-by-zero guard on realised cost, currency
   budget_scale_ref_std: 0.40           # SET  budget scales with std / this

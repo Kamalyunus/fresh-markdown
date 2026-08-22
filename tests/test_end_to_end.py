@@ -404,7 +404,12 @@ def test_shadow_phase_harness(workspace):
     with open("config.yaml") as f:
         cfg_raw = yaml.safe_load(f)
     cfg_raw["baseline_model"]["apply_level_calibration"] = False
-    cfg_raw["exploration"]["tau_initial"] = 500.0
+    # Paste tau the way an operator has to: from the backtest's own
+    # derivation. A hand-typed number is now refused -- see
+    # pricing.explore.tau_provenance_error.
+    with open("reports/backtest.json") as f:
+        derived = json.load(f)["tau_initial_derivation"]
+    cfg_raw["exploration"]["tau_initial"] = derived["tau_initial"]
     with open("config.yaml", "w") as f:
         f.write(yaml.safe_dump(cfg_raw))
 
@@ -467,7 +472,7 @@ def test_shadow_phase_harness(workspace):
     assert b["spread_decisions"] > 0
     assert b["spread_decisions_per_episode"] > 1.0, \
         "spreads collected once per episode -- the entry-only scoping is back"
-    assert b["tau"] == pytest.approx(500.0)      # unchanged by the derivation
+    assert b["tau"] == pytest.approx(derived["tau_initial"])   # not rewritten
 
     # the trace the single multiple cannot give: does the pilot survive day 1
     tr = b["tau_controller_trace"]

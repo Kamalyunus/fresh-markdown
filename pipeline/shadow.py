@@ -46,7 +46,7 @@ SHADOW_STATUS = "shadow_not_applied"
 
 
 
-def _require_shadow_config(cfg):
+def _require_shadow_config(cfg, backtest_path="reports/backtest.json"):
     missing = []
     if cfg["baseline_model"]["apply_level_calibration"] is None:
         missing.append("baseline_model.apply_level_calibration (section 9.3 decision)")
@@ -54,6 +54,17 @@ def _require_shadow_config(cfg):
         missing.append("exploration.tau_initial (from a PASSING backtest)")
     if missing:
         raise ConfigError("shadow phase blocked by null config: " + "; ".join(missing))
+
+    # Non-null is not enough. tau_initial is pasted by hand and decides how
+    # much exploration day one buys -- the day the stop condition is
+    # evaluated on, before the controller has any spend to correct from.
+    report = None
+    if os.path.exists(backtest_path):
+        with open(backtest_path) as f:
+            report = json.load(f)
+    stale = explore.tau_provenance_error(cfg, report)
+    if stale:
+        raise ConfigError("shadow phase blocked by a stale tau: " + stale)
 
 
 def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None,

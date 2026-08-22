@@ -27,6 +27,7 @@ import os
 from common.config import (RUNTIME_REQUIRED, artifact_mirror_drift,
                            config_get, load_config)
 from common import provenance
+from pricing import explore
 
 PASS, FAIL, WARN, NONE = "PASS", "FAIL", "WARN", "not run"
 
@@ -152,6 +153,12 @@ def _tau(cfg, backtest):
                     f"config null; backtest derived {derived}"
                     if derived else "config null and no derivation",
                     "paste from a GATE-PASSING backtest only")
+    # a pasted value is not a good one: it has to still match its source, and
+    # its source has to postdate the entry-only scoping fix
+    stale = explore.tau_provenance_error(cfg, backtest)
+    if stale:
+        return _row("exploration tau", FAIL, stale.split(". ")[0],
+                    "python3 -m backtest, then re-paste tau_initial")
     return _row("exploration tau", PASS, f"{pasted} in force"
                 + (f" · latest derivation {derived}" if derived else ""))
 

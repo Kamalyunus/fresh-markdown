@@ -15,7 +15,7 @@ randomized exploration.
 | `config.yaml` | §7 | Every tunable parameter. Single source of truth; no numeric literals in code. |
 | `common/config.py` | §7 | Loader; strict mode refuses to start on null MEASURED values. |
 | `bootstrap/download_flc.py` | §9.1 | Redshift extract of the raw hourly FLC feed into `data/flc_raw.parquet`, aliased to the column names step 1 renames. Credentials from `REDSHIFT_*` in `~/.env`; the exclusion window from `config.yaml`. |
-| `bootstrap/prepare_data.py` | §9.1–9.2 | Schema mapping, 12-step filter chain, window-keyed episode construction (not date-keyed — 36-hour windows are common), waterfall, split manifest. |
+| `bootstrap/prepare_data.py` | §9.1–9.2 | Schema mapping, 15-stage filter chain, window-keyed episode construction (not date-keyed — 36-hour windows are common), waterfall, split manifest. |
 | `common/episodes.py` | §9.2 | One definition of episode endings and true leftover: `ending_inventory` is written off to zero on an episode's last row, so scrap is `max(0, starting − sold)`. Also extends episodes to their full window so the DP horizon is not shortened by a realised sellout. |
 | `bootstrap/measure.py` | §8, App. A | Phase-0 measurement suite (m1–m8, m10, m11 episode endings) and reassessment gates. |
 | `bootstrap/train_baseline.py` | §9.3 | Frozen LightGBM/Tweedie `mu_ref`; price features overwritten to `d_ref` at inference; level-calibration factor fit. |
@@ -83,6 +83,11 @@ module directly. Agents: read `AGENTS.md` before touching the pipeline.)
    `mean_forced_hours_per_episode`, `tau_initial`,
    `il_pct_ratio_se_clustered`); the owner sets the SET BY OWNER keys.
    `common.config.load_config(strict=True)` refuses to start until then.
+   `tau_initial` is checked further: it must match
+   `reports/backtest.json` → `tau_initial_derivation.tau_initial` and come
+   from a report written after the entry-only scoping fix. Shadow refuses to
+   start otherwise, and `pipeline.status` reports a stale paste as FAIL
+   rather than passing it for being non-null.
 
 Then initialise the posterior and run the shadow phase (§19 — decisions
 logged, no prices applied):

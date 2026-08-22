@@ -103,6 +103,17 @@ Two numbers in that block do the deciding:
   the budget divides by), `days_with_decisions`, and `days_simulated`
   (capped at 60; `days_truncated` says what was dropped).
 
+**`tau_initial` is null and any earlier paste is void.** The scoping fix below
+changed what the backtest derives, so a value carried over from before is
+wrong by roughly the decisions-per-episode factor. Paste only from
+`reports/backtest.json` → `tau_initial_derivation.tau_initial`, and only from
+a report whose block carries `spread_decisions` (older reports do not).
+`pricing.explore.tau_provenance_error` enforces all three failure modes — no
+derivation on disk, a derivation predating the fix, a paste that no longer
+matches its source. Shadow refuses to start on any of them and
+`pipeline.status` reports it as FAIL instead of passing a pasted number
+because it is non-null.
+
 **The entry-only scoping bug.** Until the `SpreadLedger` refactor,
 `policy_replay` collected spreads at `t == 0` only, so `tau_initial` was
 solved to fund roughly **one exploration per episode** against a system that
@@ -385,6 +396,22 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
     are mediators of the episode's own price path and corrupt the learned
     elasticity; hours-remaining is planner state; one overwritten price
     feature is the auditable maximum (see design doc 5.4).
+13. **Cut this data by episode, never by row.** Use
+    `common.episodes.window_slice`, which assigns an episode by the date its
+    window OPENED. `d[d.date >= start]` keeps the tail of a window that
+    opened the evening before as its own short episode — no entry decision,
+    wrong opening inventory, a countdown starting mid-window. This is the
+    midnight-seam failure the whole episode definition exists to prevent,
+    and it was live in `pipeline.shadow`'s `--date-start` until the hold-out
+    work. `split_frames` and shadow both call the one function.
+14. **A number a procedure solves for is not evidence about that number.**
+    `backtest.derive_tau_initial` bisects until implied spend equals budget,
+    so it reports 1.00× on any population — including one where the answer
+    is eight times wrong. It hid the entry-only scoping bug for the whole
+    life of the code. Grade a fitted quantity somewhere it was not fitted:
+    that is what `data.holdout` and `pipeline.shadow --holdout` are for.
+    The same reading applies to `budget_share_of_il` and every gate whose
+    window overlaps its own fit window.
 
 ## Reading a backtest report
 

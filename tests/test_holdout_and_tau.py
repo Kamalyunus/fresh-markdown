@@ -12,13 +12,26 @@ Three properties, each of which was violated by the code these tests replace:
      its first day. The controller only ever sees yesterday.
 """
 
+import json
+import os
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from common import episodes
-from common.config import load_config
+from common.config import load_config as _load_config
 from pricing.explore import SpreadLedger, budget_today, tau_next
+
+# By path, not by CWD. The end-to-end tests chdir into a temp workspace and
+# stay there, so a bare load_config() here reads whichever config ran last --
+# and the assertions below are about the one this repo SHIPS.
+REPO_CONFIG = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.yaml")
+
+
+def load_config():
+    return _load_config(REPO_CONFIG)
 
 
 # ---------------------------------------------------------------- window_slice
@@ -196,6 +209,81 @@ def test_shadow_budget_uses_the_production_budget_function():
     from pipeline import shadow
     src = inspect.getsource(shadow.run_shadow)
     assert "explore.budget_today(" in src
+
+
+# -------------------------------------------------------- tau provenance
+
+def _cfg_with_tau(tau):
+    cfg = load_config()
+    return dict(cfg, exploration=dict(cfg["exploration"], tau_initial=tau))
+
+
+def _derivation(tau, scoped=True):
+    block = {"tau_initial": tau}
+    if scoped:
+        block["spread_decisions"] = 12345
+    return {"tau_initial_derivation": block}
+
+
+def test_a_matching_paste_from_a_current_backtest_is_clean():
+    from pricing.explore import tau_provenance_error
+    assert tau_provenance_error(_cfg_with_tau(410.74),
+                                _derivation(410.74)) is None
+
+
+def test_a_null_tau_is_not_this_check_s_business():
+    from pricing.explore import tau_provenance_error
+    # the null case is _require_shadow_config's, and it is louder
+    assert tau_provenance_error(_cfg_with_tau(None), None) is None
+
+
+def test_a_paste_with_no_derivation_on_disk_is_refused():
+    from pricing.explore import tau_provenance_error
+    assert "no backtest derivation" in tau_provenance_error(
+        _cfg_with_tau(410.74), None)
+
+
+def test_a_derivation_predating_the_scoping_fix_is_refused():
+    from pricing.explore import tau_provenance_error
+    err = tau_provenance_error(_cfg_with_tau(410.74),
+                               _derivation(410.74, scoped=False))
+    assert "ENTRY decisions only" in err
+
+
+def test_a_paste_that_no_longer_matches_its_source_is_refused():
+    from pricing.explore import tau_provenance_error
+    err = tau_provenance_error(_cfg_with_tau(500.0), _derivation(410.74))
+    assert "500.0" in err and "410.74" in err
+
+
+def test_shadow_refuses_to_start_on_a_stale_tau(tmp_path):
+    from common.config import ConfigError
+    from pipeline import shadow
+    cfg = load_config()
+    cfg = dict(cfg,
+               baseline_model=dict(cfg["baseline_model"],
+                                   apply_level_calibration=False),
+               exploration=dict(cfg["exploration"], tau_initial=410.74))
+    path = tmp_path / "backtest.json"
+    path.write_text(json.dumps(_derivation(410.74, scoped=False)))
+    with pytest.raises(ConfigError, match="stale tau"):
+        shadow._require_shadow_config(cfg, backtest_path=str(path))
+    path.write_text(json.dumps(_derivation(410.74)))
+    shadow._require_shadow_config(cfg, backtest_path=str(path))   # now fine
+
+
+def test_status_fails_a_stale_tau_rather_than_passing_it():
+    from pipeline import status
+    cfg = _cfg_with_tau(410.74)
+    row = status._tau(cfg, _derivation(410.74, scoped=False))
+    assert row["verdict"] == status.FAIL
+    assert status._tau(cfg, _derivation(410.74))["verdict"] == status.PASS
+
+
+def test_config_ships_tau_initial_null():
+    # it is void until re-derived: the scoping fix changed what the backtest
+    # produces, so any value carried over from before is wrong
+    assert load_config()["exploration"]["tau_initial"] is None
 
 
 # ------------------------------------------------------------------- config

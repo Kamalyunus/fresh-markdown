@@ -313,11 +313,13 @@ a spurious short episode, which loses more than the episode does.
 | `negative_quantities_dropped` | impossible quantities: negative inventory or sales, and **`cost <= 0`** — a zero cost is a *missing* cost, not a free good. It reads as maximally priceable (`d_max = 1.0`), so nothing downstream catches it; and since scrap is `cost × leftover`, these episodes contributed discount cost and no scrap, deflating every IL figure measured over them |
 | `null_category_dropped` | no category/subcategory — no reference discount, no dispersion cell |
 | `zero_base_price_dropped` | `original_price` still absent after fill-within-episode |
-| `negative_window_dropped` | any `hours_remaining < 0` |
+| `negative_window_recovered` | *(not a filter)* "manufacturing" SKUs enter with a counter that is **already negative** — a large negative constant, not a countdown from the window length. Dropping them is not neutral: they are concentrated in a few categories, so it selects on category and biases every per-category figure. Measured on production, 381,805 of 384,055 such episodes (**99.4%**) resolve inside `data.manufacturing_window_hours` (**24**), so those get a synthetic countdown `(cap−1) − position`. A countdown, never a clamp: the counter drives episode identification, the DP horizon, and `extend_to_window`, and a flat counter re-segments every hour. The 2,250 that run longer are **not** recovered and fall through to the drop below, with their count reported |
+| `negative_window_dropped` | any `hours_remaining < 0`. With the recovery in force this takes 2,268 episodes rather than 384,073 — a recovery stage changes no counts of its own, so its whole effect shows up here as a drop that did not happen |
 | `window_too_long_dropped` | window above `data.max_window_hours` (**120**, raised from 48 — the shorter bound was cutting legitimate multi-day windows) — the counter carries very large values from upstream data issues |
 | `below_cost_dropped` | any hour whose **offered** price is under cost — tested on `original_price × (1 − discount)`, never `applied_price`, which the source zeroes on zero-sale rows |
 | `non_priceable_dropped` | `cost >= original_price`, so `d_max <= 0` and no tier is feasible |
 | `units_gt_inventory_dropped` | sales exceeding inventory on hand |
+| `chain_break_dropped` | any hour that neither reconciles (`ending == starting − sold`) nor names why not, via the same `common.episodes.adjustment_reason` that `pipeline.shadow` builds outcomes with and `events.store` enforces in production — so the analysis population cannot hold a break production would quarantine. Recognised **by the zero, never by position**: the source writes stock off at *its* window boundary, which sits mid-window once a window is merged across midnight |
 | `contiguous_episodes_built` | *(not a filter)* re-segmentation — earlier drops can split a window, so episode count may RISE here |
 | `restocked_episodes_dropped` | an hour opening with more stock than the previous hour left behind |
 
@@ -832,6 +834,34 @@ exploration spend (validates the budget calibration), recommended-vs-legacy
 discount deltas (first look at how different the policy really is), and the
 drift ratio above — which also answers the learning-throughput question of
 section 13 *before* any price is applied.
+
+**The hold-out run.** `data.holdout` names a window *after* `test_end` that
+no artifact was fit on and no gate was decided on; `--holdout` runs it.
+Standing at `test_end` and walking that window forward is the only
+unrehearsed test the extract can give, because every other window grades
+something that was fitted to it — the calibration gate, the drift ratio and
+the `tau` derivation all report in-sample numbers or 1.00× on their own
+population. It is a **one-shot** resource: tune a value on it and re-run, and
+it is a second calibration set. Date cuts are episode-scoped
+(`common.episodes.window_slice`, assigning by the date a window *opened*);
+row-scoped slicing would keep the tail of an episode that opened the evening
+before as its own short episode — no entry decision, wrong opening
+inventory, a countdown starting mid-window.
+
+**Re-deriving `tau` where it will actually run.** The replay's bisection
+reports 1.00× *by construction* — it solves until it does — so it is
+evidence that a `tau` exists at this budget, never that the launch value is
+right. Shadow re-runs the same bisection on its own decisions
+(`tau_recommended`) and walks the controller day by day
+(`tau_controller_trace`). The trace exists because a single spend/budget
+multiple cannot answer the question that matters: `tau_next` reads only the
+day just closed, so day one is spent at whatever `tau` was launched with,
+the stop condition is evaluated on that same day's spend, and a `tau` that
+is 8× too generous suspends exploration before the controller has anything
+to correct from. Both are **reported, never applied** — `tau_initial` is
+MEASURED and goes through the paste gate, with
+`pricing.explore.tau_provenance_error` refusing a paste that has no source,
+predates the entry-only scoping fix, or no longer matches its derivation.
 
 ### 5.14 Replay and threshold derivation — evaluation discipline
 

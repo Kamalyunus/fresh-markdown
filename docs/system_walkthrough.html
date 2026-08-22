@@ -2304,12 +2304,29 @@ budget  =  1% of IL × clip( posterior std ⁄ 0.40, 0.25, 1 )   shrinks as beli
   <p style="margin-top:16px">
     The <strong>₩447.78</strong> quoted today was derived on the replay population — a sample
     of prepared history, not the launch book. It is a starting point, not a production
-    constant, and two things fix that. It is <strong>re-derived before launch</strong> from a
-    backtest on the launch population that has itself passed the calibration gate; and then it
-    <strong>corrects itself daily</strong> against realised spend. The clip is the safety —
-    at most 2× a day, so one anomalous day cannot run away with the budget, and a starting
-    value wrong by a factor of four is gone within two days.
+    constant. It <strong>corrects itself daily</strong> against realised spend, and the clip
+    is the safety: at most a halving or doubling a day, so no single anomalous day runs away
+    with the budget.
   </p>
+  <div class="callout">
+    <h3>The launch value has to be right on day one — the controller cannot rescue it</h3>
+    <p>
+      The daily correction reads only <em>yesterday</em>. So day one is spent at whatever τ
+      the system launched with, and the stop condition — exploration suspends above
+      <strong>2× budget</strong> — is evaluated on that same day's spend. A τ that is eight
+      times too generous does not get walked down over three days; it suspends exploration
+      before the first correction exists, and the learning loop never starts.
+    </p>
+    <p style="margin-top:14px">
+      The backtest cannot catch that. Its search <em>solves</em> τ until spend equals budget,
+      so it reports 1.00× on whatever population it is handed — evidence that a τ exists at
+      this budget, never that the launch value is right. Two things grade it instead: the
+      shadow run re-derives τ on the decision path production actually walks, and then
+      simulates the controller <strong>day by day</strong> across a window nothing was fitted
+      to, so the answer to "does the pilot survive its own first day" is read before launch
+      rather than discovered during it.
+    </p>
+  </div>
 
   <h3 style="margin-top:34px">How the belief updates</h3>
   <p>
