@@ -488,7 +488,7 @@ CATALOGUE = [
  ]),
 
 ("Status board", "pipeline.status",
- "The ten checks that gate a decision, each with the figure behind it and where to "
+ "The checks that gate a decision, each with the figure behind it and where to "
  "look when red. Computes nothing. Exit code 1 on any FAIL. **Start here.**", [
   ("launch blockers", "verdict", "Config values strict mode refuses to start without.", "GATE"),
   ("artifact bundle", "verdict",
@@ -506,6 +506,15 @@ CATALOGUE = [
    "How many evaluated, how many fired, and how many CANNOT fire because their "
    "threshold is null.", "GATE"),
   ("assurance", "verdict", "The four live-data checks, with thin windows warned not passed.", "GATE"),
+  ("walkthrough · replay", "verdict",
+   "Do the figures typed into the leadership walkthrough still match the report they "
+   "were read from? WARN when the report on disk is from a DIFFERENT model version — "
+   "that cannot be compared at all (hard rule 1), so it is 'stale, unverifiable', not "
+   "'wrong'. FAIL only on a disagreement WITHIN one run.", ""),
+  ("walkthrough · shadow", "verdict",
+   "Same check for the shadow tab. 'not run' until the hold-out run fills its "
+   "reserved figure slots — registered before the numbers exist, so how the result "
+   "gets read is fixed before anyone can see it.", ""),
  ]),
 ]
 

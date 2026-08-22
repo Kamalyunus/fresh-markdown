@@ -70,6 +70,17 @@ TAB_CSS = """
   .panel[hidden] { display: none; }
   @media (prefers-reduced-motion: reduce) { .tabs button { transition: none; } }
 
+  /* a figure the page has reserved a slot for but has no measurement behind
+     yet -- see tools/walkthrough/figures.py. Visibly empty on purpose: a
+     placeholder that looks like a number is worse than no number. */
+  .pend {
+    color: var(--muted); font-variant-numeric: normal;
+    letter-spacing: .06em;
+  }
+  td.pend, .v.pend { opacity: .65; }
+  /* a sub-label inside a prose table cell */
+  td .sub { display: block; color: var(--muted); font-weight: 400; font-size: 12px; }
+
   /* the file an artifact lives in, stated once at the top of its tab */
   .filecard {
     display: flex; flex-wrap: wrap; gap: 6px 26px; align-items: baseline;
@@ -176,7 +187,8 @@ TABS = [
     ("prior", "Elasticity",       "prior.json"),
     ("dp",    "Decision",         "pricing/dp.py"),
     ("learn", "Learning",         "posterior.json"),
-    ("replay","Replay",           "what we measured"),
+    ("replay","Replay",           "the agent against our model of the world"),
+    ("shadow","Shadow",           "the agent against the world itself"),
     ("assure","Assurance",        "how we know it keeps working"),
 ]
 

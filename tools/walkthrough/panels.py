@@ -28,7 +28,7 @@ PANEL_DIR = HERE / "panels"
 # tab key -> panels/<key>.html. "dp" is absent on purpose: that tab is lifted
 # from _source.html by the builder, not authored here.
 KEYS = ("map", "data", "model", "calib", "var", "prior", "learn", "replay",
-        "assure")
+        "shadow", "assure")
 
 
 def filecard(path, holds, state, reader, moves=False):

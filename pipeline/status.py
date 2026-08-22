@@ -163,6 +163,32 @@ def _tau(cfg, backtest):
                 + (f" · latest derivation {derived}" if derived else ""))
 
 
+def _walkthrough(root):
+    """Do the figures printed on docs/system_walkthrough.html still hold?
+
+    The page is prose with numbers typed in, so a re-run silently invalidates
+    every measured figure on it. This is the one place that gets read after a
+    run, so it is the one place that can catch it. A report from a DIFFERENT
+    model version is not proof the page is wrong -- it cannot be compared at
+    all (hard rule 1) -- so that is WARN. A disagreement within the same run
+    is a real contradiction, and FAIL.
+    """
+    from tools.walkthrough import figures
+    # figures.check resolves paths like "reports/backtest.json", so it
+    # wants the directory ABOVE the reports root status was given
+    base = os.path.dirname(os.path.abspath(root))
+    rows = []
+    for tab in figures.SOURCES:
+        verdict, detail, problems = figures.check(tab, root=base)
+        status = {"ok": PASS, "drift": FAIL, "stale": WARN,
+                  "pending": NONE, "no report": NONE}[verdict]
+        where = ("tools/walkthrough/figures.py, then rebuild"
+                 if verdict in ("drift", "stale") else "")
+        rows.append(_row(f"walkthrough · {tab}", status,
+                         "; ".join(problems) if problems else detail, where))
+    return rows
+
+
 def _guardrails(thresholds):
     if not thresholds:
         return _row("guardrail floors", NONE, "no thresholds report",
@@ -234,6 +260,7 @@ def collect(cfg, root="reports"):
         _guardrails(_read(os.path.join(root, "thresholds.json"))),
         _stops(_read(os.path.join(root, "monitor.json"))),
         _assurance(_read(os.path.join(root, "assurance.json"))),
+        *_walkthrough(root),
     ]
     return {
         "checks": rows,

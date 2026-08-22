@@ -105,7 +105,7 @@ footer code{font-family:var(--data)}
 <div class="bar"><div class="inner">
   <input id="q" type="search" placeholder="filter — try  il, tau, censor, rho, gate" aria-label="Filter metrics">
   <button class="toggle" id="gateonly" aria-pressed="false">gates only</button>
-  <span id="count">128 metrics</span>
+  <span id="count">130 metrics</span>
 </div></div>
 
 <div class="wrap">
@@ -342,7 +342,7 @@ footer code{font-family:var(--data)}
 <section data-sec id="s16">
 <h2>Status board</h2>
 <p class="src">pipeline.status</p>
-<p class="intro">The ten checks that gate a decision, each with the figure behind it and where to look when red. Computes nothing. Exit code 1 on any FAIL. <strong>Start here.</strong></p>
+<p class="intro">The checks that gate a decision, each with the figure behind it and where to look when red. Computes nothing. Exit code 1 on any FAIL. <strong>Start here.</strong></p>
 <div class="rows">
 <div class="row" data-gate="1"><div class="nm">launch blockers<span class="u">✓/✗</span></div><div class="mn">Config values strict mode refuses to start without.<span class="rd"><b>gates</b></span></div></div>
 <div class="row" data-gate="1"><div class="nm">artifact bundle<span class="u">✓/✗</span></div><div class="mn">Do the frozen artifacts form ONE bundle, unedited since sealing? Mixed vintages and edited files are separate failures with different remedies.<span class="rd"><b>gates</b></span></div></div>
@@ -354,6 +354,8 @@ footer code{font-family:var(--data)}
 <div class="row" data-gate="1"><div class="nm">guardrail floors<span class="u">✓/✗</span></div><div class="mn">The two owner thresholds against their noise floors.<span class="rd"><b>gates</b></span></div></div>
 <div class="row" data-gate="1"><div class="nm">stop conditions<span class="u">✓/✗</span></div><div class="mn">How many evaluated, how many fired, and how many CANNOT fire because their threshold is null.<span class="rd"><b>gates</b></span></div></div>
 <div class="row" data-gate="1"><div class="nm">assurance<span class="u">✓/✗</span></div><div class="mn">The four live-data checks, with thin windows warned not passed.<span class="rd"><b>gates</b></span></div></div>
+<div class="row" data-gate="0"><div class="nm">walkthrough · replay<span class="u">✓/✗</span></div><div class="mn">Do the figures typed into the leadership walkthrough still match the report they were read from? WARN when the report on disk is from a DIFFERENT model version — that cannot be compared at all (hard rule 1), so it is &#x27;stale, unverifiable&#x27;, not &#x27;wrong&#x27;. FAIL only on a disagreement WITHIN one run.</div></div>
+<div class="row" data-gate="0"><div class="nm">walkthrough · shadow<span class="u">✓/✗</span></div><div class="mn">Same check for the shadow tab. &#x27;not run&#x27; until the hold-out run fills its reserved figure slots — registered before the numbers exist, so how the result gets read is fixed before anyone can see it.</div></div>
 </div>
 </section>
 <p class="empty" id="empty" hidden>Nothing matches that filter.</p>

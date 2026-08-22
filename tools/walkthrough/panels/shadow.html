@@ -1,0 +1,237 @@
+
+<section class="prose" style="padding-top:34px">
+  <div class="step-head"><h2>The rehearsal that uses the real world</h2></div>
+  <p class="lede">
+    The previous tab replayed history through our own model of it. This one runs the
+    <strong>complete production decision path against live data</strong> while the legacy
+    rule keeps pricing: real inventory, real windows, the real price already in force
+    constraining what the agent may do next, every decision logged through the same event
+    store production will use — and not one won of it applied to a shelf.
+  </p>
+</section>
+
+<x-filecard path="reports/shadow.json" holds="the phase-1 exit gate, the would-be exploration spend, and the tau the pilot should launch with" state="per run" reader="the launch decision"></x-filecard>
+
+<section class="prose">
+  <h3 style="margin-top:34px">Three rungs, and only one of them is about value</h3>
+  <p>
+    These three sit in a strict order, and the most common mistake in this whole project
+    would be to read a number from one rung as if it answered the next one's question.
+  </p>
+</section>
+
+<figure style="margin-top:18px">
+  <div class="scroller"><table class="tl">
+    <caption>What each rehearsal can and cannot establish</caption>
+    <thead><tr><th>Rung</th><th>The question it answers</th><th>What it cannot say</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>Replay</strong><br><span class="sub">previous tab</span></td>
+        <td>Is the solver correct, is the action set safe, and is the legacy rule a poor
+            policy <em>in the world we believe in</em>?</td>
+        <td class="loss">Whether we believe in the right world. The agent plays against its
+            own model and is optimal there by construction</td>
+      </tr>
+      <tr>
+        <td><strong>Shadow</strong><br><span class="sub">this tab</span></td>
+        <td>Does the machine run correctly against the <em>real</em> world — real states,
+            real anchors, real plumbing — how different are its recommendations, and does
+            the pilot survive its own first day?</td>
+        <td class="loss">Anything about value. <strong>No price was applied, so there is no
+            counterfactual outcome and no IL number here at all</strong></td>
+      </tr>
+      <tr>
+        <td><strong>A/B</strong><br><span class="sub">after launch</span></td>
+        <td>Does the policy win, in money, in the market?</td>
+        <td class="good">Nothing. This is the evidence</td>
+      </tr>
+    </tbody>
+  </table></div>
+  <figcaption>
+    Shadow is more realistic than replay about the <em>decision path</em> and says strictly
+    less than replay about the <em>policy</em>. It is not a better version of the previous
+    tab; it answers a different question, and the two are worth having side by side.
+  </figcaption>
+</figure>
+
+<section class="prose">
+  <h3 style="margin-top:34px">Run on a window nothing was fitted to</h3>
+  <p>
+    Every artifact in this system stops at the end of the test window. The stretch after it
+    is a <em class="term">hold-out</em>: no model was trained on it, no factor was fit to it,
+    no gate was decided on it, and nobody has looked at it. Standing at the end of the test
+    window and walking that stretch forward is the only unrehearsed test the data can give.
+  </p>
+  <p>
+    It matters because most of the checks in this document grade something that was fitted to
+    the window it is graded on. The clearest case is the exploration budget: the replay
+    <em>solves</em> for a threshold until spend equals budget, so it reports a perfect match
+    on any population it is handed — including one where the answer is wrong by a factor of
+    eight. A number a procedure solves for is not evidence about that number.
+  </p>
+  <p>
+    <strong>It is a one-shot resource.</strong> Tune a value on it and re-run, and it has
+    quietly become a second calibration set. Which is why the readings below are written
+    down <em>before</em> the run rather than after it.
+  </p>
+</section>
+
+<div class="callout">
+  <h3>The exit gate — pass or the pilot does not start</h3>
+  <div class="scroller"><table>
+    <caption>Phase-1 exit gate · hold-out window</caption>
+    <thead><tr><th>Check</th><th>Threshold</th><th>Measured</th></tr></thead>
+    <tbody>
+      <tr><td>Event completeness</td><td>&gt; 99%</td><td class="pend">—</td></tr>
+      <tr><td>Matched decision rate</td><td>&gt; 99%</td><td class="pend">—</td></tr>
+      <tr><td>Cost-floor violations</td><td><strong>exactly zero</strong></td><td class="pend">—</td></tr>
+      <tr><td>Episodes exercised</td><td>every one in the window</td><td class="pend">—</td></tr>
+    </tbody>
+  </table></div>
+  <p style="margin-top:16px">
+    The first two are plumbing: every decision produced an outcome, and every outcome matched
+    exactly one decision — no duplicates, no orphans, no quarantine. The third is safety, and
+    it is the only figure in this document with a threshold of zero. A single price below
+    cost is not a rate to be managed; the feasible action set cannot express one, and the
+    gate confirms end to end what the solver guarantees structurally.
+  </p>
+</div>
+
+<section class="prose">
+  <h3 style="margin-top:34px">How different is it, really?</h3>
+  <p>
+    The first thing anyone wants from a shadow run is the money. There isn't any — see the
+    table above. What there is instead is the honest precursor: <em>how far apart are the two
+    policies</em>, hour by hour, on real states.
+  </p>
+</section>
+
+<ul class="chips" style="margin-top:22px">
+  <li><span class="k">Mean recommended discount</span><span class="v pend">—</span></li>
+  <li><span class="k">Mean legacy discount</span><span class="v pend">—</span></li>
+  <li><span class="k">Hours where they differ</span><span class="v pend">—</span></li>
+</ul>
+
+<section class="prose">
+  <p style="margin-top:22px">
+    A large divergence here is <strong>not good news and not bad news</strong>. It is the
+    size of the bet. It says the A/B is measuring something real rather than two arms that
+    price almost identically — and it says the same thing about the risk. Read alongside the
+    replay tab's finding that the agent wins by discounting <em>less</em>, a large divergence
+    means the pilot will visibly hold prices higher than the business is used to, and the
+    scrap line is where that shows up first.
+  </p>
+
+  <h3 style="margin-top:34px">Is the frozen model still describing reality?</h3>
+  <p>
+    The demand model is frozen at launch and never retrained during the MVP. That is a bet,
+    and this is the only place it gets tested before real money rides on it: the hold-out
+    sits weeks past the end of the training window, so the drift ratio measured here is the
+    frozen model grading itself on data from after its own world ended.
+  </p>
+</section>
+
+<div class="math">realised sales ÷ predicted sales, at the price that was actually charged      <span class="pend">—</span>
+
+1.00  the model still describes the world
+&gt;1.00  demand has risen, or the level was always under-called
+&lt;1.00  the model is now optimistic — and the agent prices on its optimism</div>
+
+<section class="prose">
+  <p style="margin-top:16px">
+    This is the production continuation of the calibration gate, not a substitute for it: the
+    gate asks whether the model is usable at all, on a window chosen in advance; this asks
+    whether it has stopped being usable since. The same ratio runs daily once the pilot is
+    live, which is what makes a frozen model defensible rather than merely convenient.
+  </p>
+
+  <h3 style="margin-top:34px">Does the pilot survive its own first day?</h3>
+  <p>
+    Exploration is a budgeted line item: at most <strong>1% of markdown loss</strong>, spent
+    on deliberately non-optimal prices in exchange for evidence about price response. The
+    threshold τ controls how much gets bought, it corrects itself daily against realised
+    spend, and above <strong>2× budget</strong> a stop condition suspends exploration
+    outright.
+  </p>
+</section>
+
+<div class="callout">
+  <h3>The correction reads only yesterday — so the launch value has to be right</h3>
+  <p>
+    τ adjusts by comparing yesterday's spend to yesterday's budget. On day one there is no
+    yesterday. So the first day is spent at whatever τ the system launched with, the stop
+    condition is evaluated on <em>that</em> day's spend, and a τ that is badly too generous
+    suspends exploration before the first correction exists. The learning loop would then
+    never start, and nothing in the daily monitoring would look broken — exploration would
+    simply be off.
+  </p>
+  <p style="margin-top:14px">
+    So the shadow run re-derives τ on the decision path production actually walks, and then
+    <strong>simulates the controller day by day</strong> across the hold-out. The reading is
+    fixed in advance:
+  </p>
+  <div class="scroller"><table>
+    <caption>Pre-registered decision rule</caption>
+    <thead><tr><th>Day-one spend</th><th>What it means</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td>over 2× budget</td><td>the stop fires before the controller can act</td>
+          <td class="loss">do not launch at this τ — re-derive and re-run</td></tr>
+      <tr><td>1× to 2×</td><td>over budget, but the controller walks it down</td>
+          <td>launch, and watch the first week</td></tr>
+      <tr><td>under 1×</td><td>affordable from the first hour</td>
+          <td class="good">launch</td></tr>
+    </tbody>
+  </table></div>
+  <div class="scroller" style="margin-top:18px"><table>
+    <caption>Hold-out measurement</caption>
+    <thead><tr><th>τ in force</th><th>τ re-derived here</th><th>Day-one spend vs budget</th><th>Days the stop fires</th></tr></thead>
+    <tbody>
+      <tr><td class="pend">—</td><td class="pend">—</td><td class="pend">—</td><td class="pend">—</td></tr>
+    </tbody>
+  </table></div>
+</div>
+
+<section class="prose">
+  <h3 style="margin-top:34px">And what would it have learned?</h3>
+  <p>
+    Every exploration decision buys a measurable quantity of evidence about price response.
+    Shadow adds it up and converts it into the only unit that matters to a plan: <strong>how
+    many episodes it takes to move the belief by one bounded step</strong>.
+  </p>
+</section>
+
+<ul class="chips" style="margin-top:22px">
+  <li><span class="k">Episodes per bounded update</span><span class="v pend">—</span></li>
+  <li><span class="k">Belief moves at most</span><span class="v">0.15 per update</span></li>
+  <li><span class="k">Updates per day</span><span class="v">1 — human gate</span></li>
+</ul>
+
+<section class="prose">
+  <p style="margin-top:22px">
+    Two floors sit under the learning rate and the <strong>larger one binds</strong>. The
+    evidence floor is how long it takes to accumulate enough observations for a step. The
+    calendar floor is fixed no matter how much evidence arrives: the belief may move at most
+    0.15 per update and at most one update commits per day, so shifting it by 0.6 takes four
+    days minimum even with infinite data. At production volume the calendar floor is expected
+    to be the binding one — which is worth knowing, because it means throwing more episodes
+    at the problem does not speed it up.
+  </p>
+</section>
+
+<div class="callout">
+  <h3>What shadow still cannot tell us</h3>
+  <p>
+    The recommendations were never applied, so every outcome recorded here happened under the
+    <em>legacy</em> price. They are marked ineligible for learning in the event store and the
+    update pipeline refuses to consume them — a recommendation the world never saw is not
+    evidence about that recommendation, and the code enforces that rather than trusting
+    anyone to remember it.
+  </p>
+  <p style="margin-top:14px">
+    So: no inventory-loss figure, no clearance comparison, no scrap comparison. Shadow proves
+    the machine runs correctly against reality and shows how far its advice diverges from
+    today's. <strong>The A/B remains the only thing that can say whether the advice is
+    better</strong>, and it is designed on the assumption that the replay tab's number might
+    not survive contact with the world.
+  </p>
+</div>

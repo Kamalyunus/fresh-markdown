@@ -810,9 +810,44 @@ inputs are printed on it. It is published as a claude.ai artifact — deploy the
 built file with the EXISTING artifact URL, so the same link updates rather than
 a second page appearing.
 
+**Every measured figure is registered in `tools/walkthrough/figures.py`**,
+against the JSON path it was read from *and* the `baseline_model_version` of
+the run it came from. That buys two different checks:
+
+- `tests/test_walkthrough_figures.py` fails if a panel stops printing a
+  registered literal, or if a same-version report disagrees with the page.
+- `pipeline.status` carries a `walkthrough · <tab>` row. A report from a
+  **different** model version is WARN, not FAIL — it cannot be compared at
+  all (hard rule 1), so the honest verdict is "stale, unverifiable". A
+  disagreement *within* one run is FAIL.
+
+**After a re-run, refreshing the page is a two-part edit**: update the
+numbers in the panel and bump `model_version` in `figures.py`, in the same
+commit. That pairing is the whole mechanism — this is the failure the v3 deck
+already has, where slides 2 and 42 still show 36.68% against a report that
+says 38.68%.
+
+### Replay, Shadow, A/B — three rungs, and they are not interchangeable
+
+The Replay tab is the agent against **our model of the world**; the Shadow tab
+is the same machine against **the world itself**. Shadow is the more realistic
+of the two about the decision path and says strictly *less* about the policy:
+no price was applied, so there is no counterfactual outcome and **no IL figure
+exists in a shadow run at all**. Do not "replace replay with shadow" — that
+deletes the only loss number in the document and puts nothing in its place.
+Replay states the value question inside a believed world; shadow states that
+the machine runs correctly against the real one and how far its advice
+diverges; only the A/B answers whether the advice is better.
+
+The shadow tab's figure slots are registered as `PENDING` and its
+`model_version` is `None` until the hold-out run lands. Registering the slots
+before the numbers exist is deliberate: it fixes how the result will be read
+before anyone can see it, and the pre-registered τ decision rule is printed on
+the tab.
+
 ### The metrics index
 
-`docs/metrics.html` is the reference for "what is this number": **121 metrics
+`docs/metrics.html` is the reference for "what is this number": **130 metrics
 across 17 components**, each with its unit, the component that writes it, and
 whether anything downstream is gated on it. Built, not hand-edited:
 
