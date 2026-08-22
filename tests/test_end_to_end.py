@@ -634,6 +634,45 @@ def test_shadow_defaults_to_the_holdout_window(workspace):
     with open("reports/shadow.json") as f:
         assert w["date_min"] > json.load(f)["window"]["date_min"]
 
+
+def test_parallel_and_serial_produce_the_same_reports(workspace):
+    """The only claim parallelism is allowed to make: it is faster.
+
+    Run both harnesses each way and compare the JSON. Anything that differs
+    is a shared-state leak -- an accumulator folded in completion order, a
+    draw that depended on position, an event committed by a worker.
+    """
+    _chdir(workspace)
+    env = {**os.environ, "PYTHONPATH": REPO}
+
+    def run(*args):
+        r = subprocess.run([sys.executable, *args], cwd=workspace, env=env,
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout + r.stderr
+
+    def compare(a, b, drop):
+        with open(a) as f:
+            x = json.load(f)
+        with open(b) as f:
+            y = json.load(f)
+        for k in drop:
+            x.pop(k, None), y.pop(k, None)
+        assert json.dumps(x, sort_keys=True) == json.dumps(y, sort_keys=True)
+
+    run("-m", "backtest", "--input", "data/prepared.parquet", "--out",
+        "reports/bt_s.json", "--policy-episodes", "80")
+    run("-m", "backtest", "--input", "data/prepared.parquet", "--out",
+        "reports/bt_p.json", "--policy-episodes", "80", "--workers", "3")
+    compare("reports/bt_s.json", "reports/bt_p.json", ())
+
+    for out, extra in (("reports/sh_s.json", []),
+                       ("reports/sh_p.json", ["--workers", "3"])):
+        run("-m", "pipeline.shadow", "--input", "data/prepared.parquet",
+            "--out", out, "--all", "--max-episodes", "80", *extra)
+    # solver latency is wall-clock, not a result
+    compare("reports/sh_s.json", "reports/sh_p.json", ("solver_latency_p95_s",))
+
+
 def test_derive_thresholds_cli(workspace):
     _chdir(workspace)
     env = {**os.environ, "PYTHONPATH": REPO}

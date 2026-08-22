@@ -16,6 +16,11 @@ def main():
     ap.add_argument("--out", default="reports/backtest.json")
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--policy-episodes", type=int, default=2000)
+    ap.add_argument("--workers", type=int, default=None,
+                    help="processes for the episode replay. 0 = every core "
+                         "but one. Episodes are independent and the replay is "
+                         "deterministic, so this changes speed and nothing "
+                         "else -- the report is identical either way.")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -41,7 +46,7 @@ def main():
     fid, d_pred = fidelity(d, cfg, model, prior, r_lookup)
     pol, ep, ledger = policy_replay(d_pred, cfg,
                                     max_episodes=args.policy_episodes,
-                                    seed=args.seed)
+                                    seed=args.seed, workers=args.workers)
     tau = derive_tau_initial(ledger, ep, cfg)
 
     out = {

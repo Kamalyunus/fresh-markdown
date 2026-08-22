@@ -25,6 +25,7 @@ from bootstrap.prepare_data import split_frames
 from bootstrap.fit_dispersion import lookup_r
 from bootstrap.measure import m10_fidelity_decomposition
 from common import episodes
+from common.parallel import map_episodes
 from pricing import dp as dp_mod
 from pricing import explore
 from pricing.demand import (mu_at, expected_min_demand_inventory,
@@ -395,7 +396,113 @@ def _episode_frame(g, unfinished=frozenset()):
     }
 
 
-def policy_replay(d_pred, cfg, max_episodes=2000, seed=0):
+def _replay_one(e, cfg):
+    """One episode's replay: the actual path, the legacy-under-model arm,
+    and the DP arm. Pure -- reads only `e` and `cfg`, touches no shared
+    state, so it runs identically in this process or a worker.
+
+    Returns (row, [(date, q_spread_costs), ...]) or None.
+    """
+    pcfg = cfg["pricing"]
+    max_k = pcfg["negbin_max_k"]
+    p0, cost = e["original_price"], e["cost"]
+    tiers, _ = dp_mod.feasible_tiers(p0, cost, pcfg["tier_step"])
+    if not tiers:
+        return None
+    spreads = []
+
+    # ---- actual path economics (observed world, legacy prices)
+    a_sold = e["actual_sold"]
+    a_disc_cost = float(np.sum(p0 * e["actual_discounts"] * a_sold))
+    # an episode that ended holding stock disposed of it. Only an
+    # unfinished one has no recorded ending, and charging that to scrap
+    # would overstate the baseline the policy is compared to.
+    a_scrap = cost * max(e["end_inv"], 0) if e["outcome_known"] else 0.0
+    a_denom = p0 * float(a_sold.sum())
+
+    # ---- LEGACY path under the MODEL's demand: same generator as the DP
+    # simulation below, so the two policies are compared apples-to-apples
+    # and model bias hits both arms identically
+    q = float(e["q0"])
+    lg_disc_cost = lg_sold_total = lg_disc_weighted = 0.0
+    for t in range(e["hours"]):
+        q_int = int(round(q))
+        if q_int <= 0:
+            break
+        d_t = float(e["actual_discounts"][t])
+        mu = mu_at(e["mu_ref_path"][t], d_t, e["d_ref"], e["eps"],
+                   pcfg["demand_floor"])
+        sold = min(expected_min_demand_inventory(mu, e["r"], q_int, max_k), q)
+        lg_disc_cost += p0 * d_t * sold
+        lg_disc_weighted += d_t * sold
+        lg_sold_total += sold
+        q -= sold
+    lg_scrap = cost * max(q, 0.0)
+
+    # ---- DP path, deterministic expected transitions
+    q = float(e["q0"])
+    anchor = None
+    dp_disc_cost, dp_sold_total, dp_disc_weighted = 0.0, 0.0, 0.0
+    for t in range(e["hours"]):
+        q_int = int(round(q))
+        if q_int <= 0:
+            break
+        try:
+            res = dp_mod.solve(p0, cost, q_int, list(e["mu_ref_path"][t:]),
+                               e["d_ref"], e["eps"], e["r"], cfg,
+                               anchor_discount=anchor, entry=(t == 0))
+        except ValueError:
+            break
+        star = res.optimal_index
+        # EVERY decision hour, not just entry. `explore.select` is
+        # called at every hour, so a tau solved on entry decisions alone
+        # funds roughly one exploration per episode against a system that
+        # explores ~8 times per episode -- and the bisection below reports
+        # 1.00x either way, so the shortfall never surfaced here. It
+        # surfaced in shadow, as an 8.7x overspend nobody could source.
+        spreads.append((e["date"], [res.q_by_tier[star] - res.q_by_tier[j]
+                                    for j in res.q_by_tier if j != star]))
+        d_t = res.tiers[star]
+        anchor = d_t
+        mu = mu_at(e["mu_ref_path"][t], d_t, e["d_ref"], e["eps"],
+                   pcfg["demand_floor"])
+        sold = min(expected_min_demand_inventory(mu, e["r"], q_int, max_k), q)
+        dp_disc_cost += p0 * d_t * sold
+        dp_disc_weighted += d_t * sold
+        dp_sold_total += sold
+        q -= sold
+    dp_scrap = cost * max(q, 0.0)
+    row = {
+        "outcome_known": e["outcome_known"],
+        "actual_il": a_disc_cost + a_scrap,
+        "actual_discount_cost": a_disc_cost, "actual_scrap_cost": a_scrap,
+        "actual_denom": a_denom,
+        "actual_cleared": float(a_sold.sum()) / e["q0"],
+        "actual_mean_discount": float(np.average(
+            e["actual_discounts"],
+            weights=a_sold if a_sold.sum() else None)),
+        "legacy_model_il": lg_disc_cost + lg_scrap,
+        "legacy_model_discount_cost": lg_disc_cost,
+        "legacy_model_scrap_cost": lg_scrap,
+        "legacy_model_denom": p0 * lg_sold_total,
+        "legacy_model_cleared": lg_sold_total / e["q0"],
+        "legacy_model_mean_discount": (lg_disc_weighted / lg_sold_total
+                                       if lg_sold_total else 0.0),
+        "dp_il": dp_disc_cost + dp_scrap,
+        "dp_discount_cost": dp_disc_cost, "dp_scrap_cost": dp_scrap,
+        "dp_denom": p0 * dp_sold_total,
+        "dp_cleared": dp_sold_total / e["q0"],
+        "dp_mean_discount": (dp_disc_weighted / dp_sold_total
+                             if dp_sold_total else 0.0),
+        "date": e["date"],
+        "eps": e["eps"],
+        "deepening_threshold": dp_mod.deepening_threshold_epsilon(
+            e["original_price"], e["cost"], e["d_ref"]),
+    }
+    return row, spreads
+
+
+def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
     """Section 17.3 policy block: what the DP would have done differently, plus
     the q-spread distribution for tau_initial. Deterministic expected-value
     transitions; replays the same pricing.dp code path production uses."""
@@ -415,105 +522,22 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0):
         eps_ids = rng.choice(eps_ids, max_episodes, replace=False)
     sub = d_pred[d_pred.episode_id.isin(eps_ids)]
 
-    rows, ledger = [], explore.SpreadLedger()
-    for eid, g in sub.groupby("episode_id"):
+    frames = []
+    for _, g in sub.groupby("episode_id"):
         e = _episode_frame(g, unfinished)
-        if e["q0"] <= 0 or e["hours"] < 1:
+        if e["q0"] > 0 and e["hours"] >= 1:
+            frames.append(e)
+
+    results = map_episodes(_replay_one, frames, cfg, workers)
+
+    rows, ledger = [], explore.SpreadLedger()
+    for out in results:
+        if out is None:
             continue
-        p0, cost = e["original_price"], e["cost"]
-        tiers, _ = dp_mod.feasible_tiers(p0, cost, pcfg["tier_step"])
-        if not tiers:
-            continue
-
-        # ---- actual path economics (observed world, legacy prices)
-        a_sold = e["actual_sold"]
-        a_disc_cost = float(np.sum(p0 * e["actual_discounts"] * a_sold))
-        # an episode that ended holding stock disposed of it. Only an
-        # unfinished one has no recorded ending, and charging that to scrap
-        # would overstate the baseline the policy is compared to.
-        a_scrap = cost * max(e["end_inv"], 0) if e["outcome_known"] else 0.0
-        a_denom = p0 * float(a_sold.sum())
-
-        # ---- LEGACY path under the MODEL's demand: same generator as the DP
-        # simulation below, so the two policies are compared apples-to-apples
-        # and model bias hits both arms identically
-        q = float(e["q0"])
-        lg_disc_cost = lg_sold_total = lg_disc_weighted = 0.0
-        for t in range(e["hours"]):
-            q_int = int(round(q))
-            if q_int <= 0:
-                break
-            d_t = float(e["actual_discounts"][t])
-            mu = mu_at(e["mu_ref_path"][t], d_t, e["d_ref"], e["eps"],
-                       pcfg["demand_floor"])
-            sold = min(expected_min_demand_inventory(mu, e["r"], q_int, max_k), q)
-            lg_disc_cost += p0 * d_t * sold
-            lg_disc_weighted += d_t * sold
-            lg_sold_total += sold
-            q -= sold
-        lg_scrap = cost * max(q, 0.0)
-
-        # ---- DP path, deterministic expected transitions
-        q = float(e["q0"])
-        anchor = None
-        dp_disc_cost, dp_sold_total, dp_disc_weighted = 0.0, 0.0, 0.0
-        for t in range(e["hours"]):
-            q_int = int(round(q))
-            if q_int <= 0:
-                break
-            try:
-                res = dp_mod.solve(p0, cost, q_int, list(e["mu_ref_path"][t:]),
-                                   e["d_ref"], e["eps"], e["r"], cfg,
-                                   anchor_discount=anchor, entry=(t == 0))
-            except ValueError:
-                break
-            star = res.optimal_index
-            # EVERY decision hour, not just entry. `explore.select` is
-            # called at every hour, so a tau solved on entry decisions alone
-            # funds roughly one exploration per episode against a system that
-            # explores ~8 times per episode -- and the bisection below reports
-            # 1.00x either way, so the shortfall never surfaced here. It
-            # surfaced in shadow, as an 8.7x overspend nobody could source.
-            ledger.add(e["date"], [res.q_by_tier[star] - res.q_by_tier[j]
-                                   for j in res.q_by_tier if j != star])
-            d_t = res.tiers[star]
-            anchor = d_t
-            mu = mu_at(e["mu_ref_path"][t], d_t, e["d_ref"], e["eps"],
-                       pcfg["demand_floor"])
-            sold = min(expected_min_demand_inventory(mu, e["r"], q_int, max_k), q)
-            dp_disc_cost += p0 * d_t * sold
-            dp_disc_weighted += d_t * sold
-            dp_sold_total += sold
-            q -= sold
-        dp_scrap = cost * max(q, 0.0)
-
-        rows.append({
-            "outcome_known": e["outcome_known"],
-            "actual_il": a_disc_cost + a_scrap,
-            "actual_discount_cost": a_disc_cost, "actual_scrap_cost": a_scrap,
-            "actual_denom": a_denom,
-            "actual_cleared": float(a_sold.sum()) / e["q0"],
-            "actual_mean_discount": float(np.average(
-                e["actual_discounts"],
-                weights=a_sold if a_sold.sum() else None)),
-            "legacy_model_il": lg_disc_cost + lg_scrap,
-            "legacy_model_discount_cost": lg_disc_cost,
-            "legacy_model_scrap_cost": lg_scrap,
-            "legacy_model_denom": p0 * lg_sold_total,
-            "legacy_model_cleared": lg_sold_total / e["q0"],
-            "legacy_model_mean_discount": (lg_disc_weighted / lg_sold_total
-                                           if lg_sold_total else 0.0),
-            "dp_il": dp_disc_cost + dp_scrap,
-            "dp_discount_cost": dp_disc_cost, "dp_scrap_cost": dp_scrap,
-            "dp_denom": p0 * dp_sold_total,
-            "dp_cleared": dp_sold_total / e["q0"],
-            "dp_mean_discount": (dp_disc_weighted / dp_sold_total
-                                 if dp_sold_total else 0.0),
-            "date": e["date"],
-            "eps": e["eps"],
-            "deepening_threshold": dp_mod.deepening_threshold_epsilon(
-                e["original_price"], e["cost"], e["d_ref"]),
-        })
+        row, spreads = out
+        rows.append(row)
+        for day, costs in spreads:
+            ledger.add(day, costs)
 
     ep = pd.DataFrame(rows)
     if not len(ep):

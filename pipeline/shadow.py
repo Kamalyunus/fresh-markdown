@@ -31,6 +31,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 
@@ -39,6 +40,7 @@ import pandas as pd
 
 from common.config import load_config, deff, ConfigError
 from common import episodes
+from common.parallel import map_episodes
 from common.episodes import adjustment_reason
 from bootstrap.train_baseline import BaselineModel
 from bootstrap.fit_dispersion import lookup_r
@@ -173,8 +175,188 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
     }
 
 
+class _BufferStore:
+    """Collects decision events instead of writing them.
+
+    Workers must not touch the event store: the shadow gate MEASURES that
+    store -- completeness, matched rate, dedup, quarantine -- so per-worker
+    stores merged afterwards would mean the gate no longer tests the path
+    production runs. Workers buffer; the parent commits every event through
+    the real store, in episode order, exactly as the serial loop did.
+    """
+
+    def __init__(self):
+        self.decisions = []
+
+    def emit_decision(self, event):
+        self.decisions.append(event)
+        return True
+
+
+class _FrozenCells:
+    """The posterior as the decision path sees it: read-only, and small.
+
+    Nothing updates the posterior during a shadow run, so a worker needs one
+    (mean, std) per category and not the store. Pre-resolved in the parent so
+    the cell map -- including the min_episodes_per_week_for_cell fallback to
+    the global cell -- is applied exactly once, by the real store.
+    """
+
+    def __init__(self, by_category):
+        self._by_category = by_category
+
+    def get(self, category):
+        return self._by_category[str(category)]
+
+
+def _episode_seed(seed, episode_id):
+    """A generator per episode, reproducible and independent of order.
+
+    The serial loop drew every exploration from one generator, so the draw an
+    episode got depended on how many episodes preceded it. That is fine until
+    the loop is reordered or split across processes, at which point the run
+    stops reproducing. Seeding from the episode's own id fixes the draw to the
+    episode: parallel and serial agree, and so do two runs that visit the
+    episodes in different orders.
+    """
+    h = hashlib.blake2b(str(episode_id).encode(), digest_size=8).digest()
+    return np.random.default_rng([int(seed), int.from_bytes(h, "big")])
+
+
+def _shadow_one(ep, ctx):
+    """Price one episode's hours. Pure: no store, no shared generator.
+
+    Returns everything the parent needs to fold in, including the events to
+    commit. `ep` carries the episode's rows as arrays rather than a DataFrame
+    -- `.iloc[t]` per hour was the second-largest cost in this loop after the
+    DP itself, and arrays remove it whether or not workers are in play.
+    """
+    cfg, tau = ctx["cfg"], ctx["tau"]
+    posterior = _FrozenCells(ctx["cells"])
+    store = _BufferStore()
+    rng = _episode_seed(ctx["seed"], ep["episode_id"])
+    n = len(ep["hour_of_day"])
+
+    out = {
+        "events": [], "rejected": {}, "spreads": [],
+        "cost_floor_violations": 0, "n_forced": 0, "empty_affordable": 0,
+        "would_be_cost": 0.0, "raw_information": 0.0,
+        "rec_disc": 0.0, "leg_disc": 0.0, "differs": 0,
+        "il_by_day": {}, "latencies": [],
+        "drift": {"mu": [], "r": [], "q": [], "sold": []},
+        "last_row": None,
+    }
+    anchor, last_obs = None, None
+
+    for t in range(n):
+        if not ep["is_observed"][t]:      # window tail: no outcome to record
+            continue
+        q = int(ep["starting_inventory"][t])
+        if q <= 0:                        # restock gap: no decision this hour
+            anchor = float(ep["total_discount"][t])
+            continue
+        state = {
+            "episode_id": ep["episode_id"], "sku_id": int(ep["sku_id"][t]),
+            "fc": ep["fc"][t], "category": ep["category"][t],
+            "subcategory": ep["subcategory"][t],
+            "hour_of_day": int(ep["hour_of_day"][t]),
+            "hours_remaining": n - t, "q": q,
+            "original_price": float(ep["original_price"][t]),
+            "cost": float(ep["cost"][t]), "r": float(ep["r_val"][t]),
+            "mu_ref_path": list(ep["mu_ref_hat"][t:]),
+            "current_discount": anchor,
+        }
+        row_day = str(ep["date"][t])
+        spreads_here = []
+        try:
+            evt = decide(state, posterior, store, cfg, rng, tau,
+                         ctx["model_version"],
+                         spread_sink=spreads_here.append)
+        except StateRejected as e:
+            out["rejected"][str(e)] = out["rejected"].get(str(e), 0) + 1
+            anchor = float(ep["total_discount"][t])
+            continue
+
+        for costs in spreads_here:
+            out["spreads"].append((row_day, costs))
+        out["latencies"].append(evt["solver_latency_s"])
+        if evt["applied_price"] < evt["cost"] - 1e-6:
+            out["cost_floor_violations"] += 1
+        if evt["is_exploration"]:
+            out["n_forced"] += 1
+            out["would_be_cost"] += evt["exploration_cost"]
+            # would-be learning yield. pipeline.update accumulates
+            # mu * (log price ratio)^2 with the ratio taken against the
+            # REFERENCE discount, not against the DP optimum -- so what
+            # drives information is how far the applied price sits from
+            # the anchor, not how large the perturbation was.
+            lr = np.log((1 - evt["applied_discount"])
+                        / (1 - evt["reference_discount"]))
+            mu_rec = max(ep["mu_ref_hat"][t] * np.exp(
+                evt["epsilon_posterior_mean"] * lr), cfg["pricing"]["demand_floor"])
+            out["raw_information"] += mu_rec * lr ** 2
+        if evt["affordable_set_size"] == 0:
+            out["empty_affordable"] += 1
+        legacy_d = float(ep["total_discount"][t])
+        out["rec_disc"] += evt["applied_discount"]
+        out["leg_disc"] += legacy_d
+        if abs(evt["applied_discount"] - legacy_d) > 1e-9:
+            out["differs"] += 1
+
+        # outcome = what actually happened under the LEGACY price
+        sold = int(ep["units_sold"][t])
+        ending = int(ep["ending_inventory"][t])
+        outcome = {
+            "event": "outcome",
+            "outcome_id": f"shadow-{evt['decision_id']}",
+            "decision_id": evt["decision_id"],
+            "units_sold": sold, "starting_inventory": q,
+            "ending_inventory": ending,
+            "applied_price": float(ep["original_price"][t] * (1 - legacy_d)),
+            "is_stockout": sold >= q,
+            "execution_status": SHADOW_STATUS,
+        }
+        # The store quarantines any outcome whose inventory does not
+        # reconcile and carries no documented reason, so both legitimate
+        # breaks must be named -- and only those two.
+        reason = adjustment_reason(q, sold, ending)
+        if reason:
+            outcome["adjustment_reason"] = reason
+        out["events"].append((store.decisions[-1], outcome))
+
+        # drift check at the legacy price (the price the outcome saw)
+        eps = evt["epsilon_posterior_mean"]
+        ratio = (1 - legacy_d) / (1 - evt["reference_discount"])
+        out["drift"]["mu"].append(max(ep["mu_ref_hat"][t] * ratio ** eps,
+                                      cfg["pricing"]["demand_floor"]))
+        out["drift"]["r"].append(float(ep["r_val"][t]))
+        out["drift"]["q"].append(q)
+        out["drift"]["sold"].append(sold)
+
+        # discount given away at the LEGACY price -- no price was applied,
+        # so this is the markdown IL the business actually carried
+        hour_il = float(ep["original_price"][t]) * legacy_d * sold
+        out["il_by_day"][row_day] = out["il_by_day"].get(row_day, 0.0) + hour_il
+        last_obs = (q, sold, float(ep["cost"][t]), ending, row_day)
+
+        anchor = legacy_d                 # reality's price is the next anchor
+
+    # Scrap is an end-of-episode quantity, so the final row is kept and
+    # classified after the loop, all episodes together -- the sentinel
+    # test needs the whole frame to know whether the convention is in
+    # force at all.
+    if last_obs is not None:
+        start, sold_last, unit_cost, ending_last, close_day = last_obs
+        out["last_row"] = {"episode_id": ep["episode_id"],
+                           "starting_inventory": start,
+                           "units_sold": sold_last, "cost": unit_cost,
+                           "ending_inventory": ending_last,
+                           "close_day": close_day}
+    return out
+
+
 def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
-               window_basis=HOLDOUT_BASIS):
+               window_basis=HOLDOUT_BASIS, workers=None):
     _require_shadow_config(cfg)
     model = BaselineModel(cfg)
     posterior = PosteriorStore(cfg)
@@ -239,120 +421,50 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     latencies = []
     drift = {"mu": [], "r": [], "q": [], "sold": []}
 
-    for eid, g in groups:
-        mu_path = list(g.mu_ref_hat.to_numpy())
-        anchor = None
-        last_obs = None
-        for t in range(len(g)):
-            row = g.iloc[t]
-            if not row.is_observed:      # window tail: no outcome to record
-                continue
-            q = int(row.starting_inventory)
-            if q <= 0:                      # restock gap: no decision this hour
-                anchor = float(row.total_discount)
-                continue
-            state = {
-                "episode_id": eid, "sku_id": int(row.sku_id), "fc": row.fc,
-                "category": row.category, "subcategory": row.subcategory,
-                "hour_of_day": int(row.hour_of_day),
-                "hours_remaining": len(g) - t, "q": q,
-                "original_price": float(row.original_price),
-                "cost": float(row.cost), "r": float(row.r_val),
-                "mu_ref_path": mu_path[t:], "current_discount": anchor,
-            }
-            row_day = str(row.date)
-            try:
-                evt = decide(state, posterior, store, cfg, rng, tau,
-                             model.version, spread_sink=ledger.sink(row_day))
-            except StateRejected as e:
-                rejected[str(e)] = rejected.get(str(e), 0) + 1
-                anchor = float(row.total_discount)
-                continue
+    # Episodes are independent -- nothing reads another episode, and nothing
+    # reads another DAY either: tau is fixed for the whole run and the
+    # controller walk below is post-processing over aggregates. So the unit of
+    # work is one episode and the whole window parallelises.
+    EP_COLS = ("hour_of_day", "sku_id", "fc", "category", "subcategory",
+               "starting_inventory", "ending_inventory", "units_sold",
+               "total_discount", "original_price", "cost", "r_val",
+               "mu_ref_hat", "date", "is_observed")
+    items = [dict({c: g[c].to_numpy() for c in EP_COLS}, episode_id=eid)
+             for eid, g in groups]
+    ctx = {"cfg": cfg, "tau": tau, "model_version": model.version,
+           "seed": seed,
+           "cells": {str(c): posterior.get(c) for c in d.category.unique()}}
 
+    for out in map_episodes(_shadow_one, items, ctx, workers):
+        for reason, k in out["rejected"].items():
+            rejected[reason] = rejected.get(reason, 0) + k
+        cost_floor_violations += out["cost_floor_violations"]
+        n_forced += out["n_forced"]
+        empty_affordable += out["empty_affordable"]
+        would_be_cost += out["would_be_cost"]
+        raw_information += out["raw_information"]
+        rec_disc += out["rec_disc"]
+        leg_disc += out["leg_disc"]
+        differs += out["differs"]
+        latencies.extend(out["latencies"])
+        for key in drift:
+            drift[key].extend(out["drift"][key])
+        for day, amount in out["il_by_day"].items():
+            il_discount += amount
+            il_disc_by_day[day] = il_disc_by_day.get(day, 0.0) + amount
+        for day, costs in out["spreads"]:
+            ledger.add(day, costs)
+        if out["last_row"] is not None:
+            last_rows.append(out["last_row"])
+        # THE PARENT COMMITS. Every event goes through the real store, in
+        # episode order, so dedup and quarantine -- which the gate measures --
+        # run exactly where they ran before.
+        for decision, outcome in out["events"]:
+            store.emit_decision(decision)
             n_dec += 1
-            latencies.append(evt["solver_latency_s"])
-            if evt["applied_price"] < evt["cost"] - 1e-6:
-                cost_floor_violations += 1
-            if evt["is_exploration"]:
-                n_forced += 1
-                would_be_cost += evt["exploration_cost"]
-                # would-be learning yield. pipeline.update accumulates
-                # mu * (log price ratio)^2 with the ratio taken against the
-                # REFERENCE discount, not against the DP optimum -- so what
-                # drives information is how far the applied price sits from
-                # the anchor, not how large the perturbation was.
-                lr = np.log((1 - evt["applied_discount"])
-                            / (1 - evt["reference_discount"]))
-                mu_rec = max(mu_path[t] * np.exp(evt["epsilon_posterior_mean"] * lr),
-                             cfg["pricing"]["demand_floor"])
-                raw_information += mu_rec * lr ** 2
-            if evt["affordable_set_size"] == 0:
-                empty_affordable += 1
-            legacy_d = float(row.total_discount)
-            rec_disc += evt["applied_discount"]
-            leg_disc += legacy_d
-            if abs(evt["applied_discount"] - legacy_d) > 1e-9:
-                differs += 1
-
-            # outcome = what actually happened under the LEGACY price
-            sold = int(row.units_sold)
-            ending = int(row.ending_inventory)
-            outcome = {
-                "event": "outcome",
-                "outcome_id": f"shadow-{evt['decision_id']}",
-                "decision_id": evt["decision_id"],
-                "units_sold": sold, "starting_inventory": q,
-                "ending_inventory": ending,
-                "applied_price": float(row.original_price * (1 - legacy_d)),
-                "is_stockout": sold >= q,
-                "execution_status": SHADOW_STATUS,
-                "finalized_at": pd.Timestamp.now("UTC").isoformat(),
-            }
-            # The store quarantines any outcome whose inventory does not
-            # reconcile and carries no documented reason, so both legitimate
-            # breaks must be named -- and only those two.
-            #   ending > leftover                : stock added mid-episode
-            #   ending < leftover on the LAST row: the source writes the
-            #     remainder off at episode close. The test is "is this the
-            #     final observed hour", NOT "did the window run out": a
-            #     truncated episode closes early and is written off just the
-            #     same, and gating on hours_remaining left those quarantining.
-            #   ending < leftover mid-episode    : unexplained shrinkage,
-            #     left undocumented ON PURPOSE so it quarantines.
-            reason = adjustment_reason(q, sold, ending)
-            if reason:
-                outcome["adjustment_reason"] = reason
+            outcome["finalized_at"] = pd.Timestamp.now("UTC").isoformat()
             if store.emit_outcome(outcome):
                 n_out += 1
-
-            # drift check at the legacy price (the price the outcome saw)
-            eps = evt["epsilon_posterior_mean"]
-            ratio = (1 - legacy_d) / (1 - evt["reference_discount"])
-            drift["mu"].append(max(mu_path[t] * ratio ** eps,
-                                   cfg["pricing"]["demand_floor"]))
-            drift["r"].append(float(row.r_val))
-            drift["q"].append(q)
-            drift["sold"].append(sold)
-
-            # discount given away at the LEGACY price -- no price was applied,
-            # so this is the markdown IL the business actually carried
-            hour_il = float(row.original_price) * legacy_d * sold
-            il_discount += hour_il
-            il_disc_by_day[row_day] = il_disc_by_day.get(row_day, 0.0) + hour_il
-            last_obs = (q, sold, float(row.cost), ending, row_day)
-
-            anchor = legacy_d                 # reality's price is the next anchor
-
-        # Scrap is an end-of-episode quantity, so the final row is kept and
-        # classified after the loop, all episodes together -- the sentinel
-        # test needs the whole frame to know whether the convention is in
-        # force at all.
-        if last_obs is not None:
-            start, sold_last, unit_cost, ending_last, close_day = last_obs
-            last_rows.append({"episode_id": eid, "starting_inventory": start,
-                              "units_sold": sold_last, "cost": unit_cost,
-                              "ending_inventory": ending_last,
-                              "close_day": close_day})
 
     if n_dec == 0:
         raise RuntimeError("no decisions produced -- empty input or all states rejected")
@@ -608,6 +720,11 @@ def main():
                     help="episode sample size; 0 = all episodes. Default: "
                          "monitoring.shadow_gate.sample_episodes")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--workers", type=int, default=None,
+                    help="processes for the episode loop. 0 = every core but "
+                         "one. Each episode draws from its OWN generator "
+                         "seeded by episode id, so the result is identical "
+                         "serial or parallel, and independent of order.")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -640,7 +757,7 @@ def main():
 
     report = run_shadow(d, cfg, events_root=args.events_dir,
                         seed=args.seed, max_episodes=args.max_episodes,
-                        window_basis=basis)
+                        window_basis=basis, workers=args.workers)
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as f:

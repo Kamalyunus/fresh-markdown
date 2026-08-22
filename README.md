@@ -33,6 +33,7 @@ randomized exploration.
 | `pipeline/monitor.py` | §15 | Business (IL% ratio-of-sums with denominators), learning, safety series; stop conditions. |
 | `pipeline/shadow.py` | §19 | Phase-1 harness: full decision path against live data, no prices applied; exit-gate report. |
 | `backtest/` | §17 | Fidelity gate, policy deltas, `Q(p*) − Q(p)` spread and `tau_initial` derivation. |
+| `common/parallel.py` | — | Runs the per-episode work across CPUs (`--workers N`, `0` = all but one). Results in submission order, never completion order; workers compute and the parent commits, so the event path the shadow gate measures is unchanged. Reports are identical either way. |
 | `tools/make_dummy_flc.py` | — | Synthetic FLC generator (legacy + randomized policies, known ground-truth elasticity). |
 | `tools/make_charts.py` | — | One diagnostic chart per component, generated from the report artifacts into `reports/charts/`. |
 | `tools/walkthrough/` | — | Builds `docs/system_walkthrough.html`, the leadership-facing walkthrough — one tab per frozen artifact, plus the decision, the learning loop, replay, shadow and the assurance checks. `figures.py` registers every measured figure against the report and model version it came from, so a re-run cannot leave the page silently stale. |

@@ -1000,6 +1000,21 @@ so read them off the reports directly. Two rules survive it:
 - Modules are run as `python3 -m package.module` from the repo root.
 - `data/`, `reports/`, `artifacts/`, `events_store/` are gitignored run
   outputs — never commit them.
+- **`--workers N` on `backtest` and `pipeline.shadow`** (`0` = every core but
+  one) parallelises the episode loop via `common.parallel.map_episodes`.
+  Measured on this repo: backtest 99s → 38s, shadow 95s → 36s, reports
+  byte-identical. Two invariants make that safe and both are tested:
+  results come back in **submission order** (never completion order), and
+  **workers compute while the parent commits** — a worker gets a
+  `_BufferStore` with no `emit_outcome` at all, so every event still goes
+  through the real `EventStore` in the parent, where the dedup and quarantine
+  the shadow gate MEASURES actually run.
+- **Each episode draws from its own generator**, seeded from its episode id
+  (`shadow._episode_seed`). The old shared generator made an episode's
+  exploration draw depend on how many episodes preceded it, so a reordered or
+  split run stopped reproducing. Order-independence is the property; parallel
+  execution is what needed it. Note this **changed the numbers** from any run
+  before it — same seed, different draws.
 - **Every waterfall stage reports money, not just counts.** `cogs_at_risk` is
   unit cost × opening stock, once per episode (never summed over hours —
   inventory persists, so a per-row sum multiplies the same stock by the window
