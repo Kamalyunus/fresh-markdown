@@ -77,6 +77,45 @@ def test_filter_chain_waterfall(workspace):
     assert (d.original_price > 0).all()
 
 
+def test_waterfall_reports_the_money_each_filter_removes(workspace):
+    """Rows are not the unit the business cares about.
+
+    IL is discount given away plus scrap at cost, so what a filter costs is
+    measured in exposure -- unit cost x opening stock -- not in rows. The two
+    diverge: a stage can take a small share of rows and a large share of the
+    money, and only the second says whether the surviving population still
+    represents the business.
+    """
+    _chdir(workspace)
+    with open("artifacts/split_manifest.json") as f:
+        wf = json.load(f)["data_quality_waterfall"]
+
+    raw = wf[0]["cogs_at_risk"]
+    assert raw > 0
+    assert "cogs_dropped" not in wf[0]              # nothing precedes raw
+    for prev, row in zip(wf, wf[1:]):
+        assert row["cogs_dropped"] == pytest.approx(
+            prev["cogs_at_risk"] - row["cogs_at_risk"], abs=0.2)
+        assert row["cogs_dropped_pct_of_raw"] == pytest.approx(
+            row["cogs_dropped"] / raw, abs=1e-5)
+        assert row["cogs_pct_of_raw"] == pytest.approx(
+            row["cogs_at_risk"] / raw, abs=1e-5)
+
+    # every stage removes money or leaves it alone -- except re-segmentation,
+    # which splits windows so one opening row becomes two and the same stock
+    # is counted twice. That stage ADDS, in episodes and in money alike.
+    for row in wf[1:]:
+        if row["step"] == "contiguous_episodes_built":
+            continue
+        assert row["cogs_dropped"] >= -0.2, row["step"]
+
+    # and the measure is per EPISODE, not per row: summing cost x inventory
+    # over hours would multiply the same stock by the window length
+    d = pd.read_parquet("data/prepared.parquet")
+    per_row = float((d.cost * d.starting_inventory).sum())
+    assert wf[-1]["cogs_at_risk"] < per_row
+
+
 def test_only_edge_truncation_is_dropped_not_every_unknown(workspace):
     """The drop is narrow ON PURPOSE, and this is what keeps it narrow.
 
@@ -736,7 +775,7 @@ def test_zero_cost_episodes_are_dropped_whole(workspace, tmp_path):
     raw = pd.read_parquet("data/flc.parquet")
 
     def episodes_at(wf, label):
-        return next(ep for step, _, ep in wf if step == label)
+        return next(t[2] for t in wf if t[0] == label)   # (label, rows, eps, cogs, ...)
 
     _, clean_wf = load_and_filter("data/flc.parquet", cfg)
 
@@ -808,7 +847,7 @@ def test_negative_entry_window_is_recovered_not_dropped(workspace, tmp_path):
 
     d, wf = load_and_filter(str(path), cfg)
     rows = {t[0]: t for t in wf}
-    rec = rows["negative_window_recovered"][3]
+    rec = rows["negative_window_recovered"][4]   # (label, rows, eps, cogs, detail)
     assert rec["episodes_recovered"] >= 1
     assert rec["window_hours_assumed"] == cap
 

@@ -41,6 +41,15 @@ CATALOGUE = [
   ("data_quality_waterfall", "count",
    "Rows and episodes remaining after each of the 16 filter stages, in order. "
    "The first entry is `raw`.", "every figure traces back through it"),
+  ("cogs_at_risk", "won",
+   "Unit cost × opening stock, ONCE per episode, reported at every waterfall stage "
+   "with `cogs_dropped` and `cogs_dropped_pct_of_raw`. Never summed over hours — "
+   "inventory persists, so a per-row sum multiplies the same stock by the window "
+   "length. Rows and money diverge, and that is the point: a filter taking 1% of rows "
+   "and 15% of the exposure has changed what the population represents. Negative "
+   "`cogs_dropped` appears at exactly one stage, `contiguous_episodes_built`, where "
+   "re-segmentation turns one opening row into two.",
+   "whether the surviving population still looks like the business"),
   ("edge_truncated_episodes_dropped", "count",
    "ONLY the episodes the extract cut off mid-window. Episodes unclosed for any other "
    "reason are KEPT and stay `not_closed`, because those are a feed problem no "

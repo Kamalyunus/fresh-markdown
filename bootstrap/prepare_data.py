@@ -88,6 +88,35 @@ def restocked_episodes(d):
     return d.loc[restocked, "episode_id"].unique()
 
 
+def cogs_at_risk(d):
+    """Money on the shelf: unit cost x opening stock, ONCE per episode.
+
+    A row count says how much data a filter removed. This says how much
+    exposure -- which is the quantity the system exists to protect, since IL
+    is discount given away plus scrap at cost. The two can diverge sharply: a
+    stage can drop 1% of rows and 15% of the money, or the reverse, and only
+    the second number tells you whether the surviving population still
+    represents the business.
+
+    Counted at the episode's OPENING row, not summed over hours: inventory
+    persists from hour to hour, so a per-row sum would multiply the same
+    stock by the length of the window. Relies on the frame being in window
+    order, which `load_and_filter` guarantees -- it sorts once up front and
+    again at re-segmentation, and every drop between them preserves order.
+
+    Before `negative_quantities_dropped` this includes impossible values
+    (negative stock, non-positive cost), so the first few stages carry
+    figures that are not real exposure. That is deliberate: clipping them
+    would hide the size of the bad data, and the drop that removes them is
+    exactly where the waterfall should show it.
+    """
+    if not len(d):
+        return 0.0
+    opening = ~d.episode_id.duplicated()
+    return float((d.cost.to_numpy()[opening.to_numpy()]
+                  * d.starting_inventory.to_numpy()[opening.to_numpy()]).sum())
+
+
 def _drop_edge_truncated(d):
     """Drop ONLY the episodes the extract cut off mid-window. Keep the rest.
 
@@ -194,11 +223,13 @@ def load_and_filter(path, cfg=None):
     df = df[~dup]
     df["episode_id"] = assign_episode_ids(df)
 
-    wf = [("raw", len(df) + int(dup.sum()), df.episode_id.nunique()),
-          ("duplicate_hour_rows_dropped", len(df), df.episode_id.nunique())]
+    wf = [("raw", len(df) + int(dup.sum()), df.episode_id.nunique(),
+           cogs_at_risk(df)),
+          ("duplicate_hour_rows_dropped", len(df), df.episode_id.nunique(),
+           cogs_at_risk(df))]
 
     def step(d, label):
-        wf.append((label, len(d), d.episode_id.nunique()))
+        wf.append((label, len(d), d.episode_id.nunique(), cogs_at_risk(d)))
         return d
 
     # Episode-scoped, not row-scoped: a window running past midnight can
@@ -340,7 +371,8 @@ def load_and_filter(path, cfg=None):
     # window that was contiguous in the raw extract
     d = d.sort_values(["sku_id", "fc", "date", "hour_of_day"]).copy()
     d["episode_id"] = assign_episode_ids(d)
-    wf.append(("contiguous_episodes_built", len(d), d.episode_id.nunique()))
+    wf.append(("contiguous_episodes_built", len(d), d.episode_id.nunique(),
+               cogs_at_risk(d)))
 
     # Intraday restock: the next hour opens with more stock than this hour
     # left behind. Detected on the inventory CHAIN, never on
@@ -493,12 +525,35 @@ def waterfall_rows(waterfall):
     it -- the split manifest and phase 0 -- and a stage that reports a detail
     block would otherwise appear in one and crash the other.
 
-    Most stages are (label, rows, episodes). A stage may carry a fourth
-    element, a dict merged into its row: the flc_window recovery reports what
-    it recovered, which a row count cannot show because it changes no counts.
+    Stages are (label, rows, episodes, cogs_at_risk). A stage may carry a
+    fifth element, a dict merged into its row: the flc_window recovery reports
+    what it recovered, which a count cannot show because it changes no counts.
+
+    Each row also gets what the stage COST, in money and as a share of the raw
+    exposure. Rows and episodes were never enough on their own: a filter can
+    take 1% of the rows and 15% of the money, and only the second figure says
+    whether the surviving population still looks like the business.
+
+    `cogs_dropped` goes NEGATIVE at `contiguous_episodes_built`, which is
+    correct and not a bug -- re-segmentation splits windows, so one opening
+    row becomes two and the same stock is counted twice. It is the only stage
+    that adds rather than removes, in episodes and in money alike.
     """
-    return [dict({"step": t[0], "rows": t[1], "episodes": t[2]},
-                 **(t[3] if len(t) > 3 else {})) for t in waterfall]
+    raw = waterfall[0][3] if waterfall else 0.0
+    out, prev = [], None
+    for t in waterfall:
+        label, rows, eps, cogs = t[:4]
+        row = {"step": label, "rows": rows, "episodes": eps,
+               "cogs_at_risk": round(cogs, 1),
+               "cogs_pct_of_raw": round(cogs / raw, 6) if raw else None}
+        if prev is not None:
+            row["cogs_dropped"] = round(prev - cogs, 1)
+            row["cogs_dropped_pct_of_raw"] = (
+                round((prev - cogs) / raw, 6) if raw else None)
+        row.update(t[4] if len(t) > 4 else {})
+        out.append(row)
+        prev = cogs
+    return out
 
 
 def write_manifest(path, cfg, waterfall):
@@ -529,13 +584,26 @@ def main():
     d.to_parquet(args.out, index=False)
     write_manifest(args.manifest, cfg, wf)
 
-    for row in waterfall_rows(wf):
-        detail = {k: v for k, v in row.items()
-                  if k not in ("step", "rows", "episodes")}
-        print(f"{row['step']:32s} rows {row['rows']:>10,}  "
-              f"episodes {row['episodes']:>9,}")
-        for k, v in detail.items():
-            print(f"{'':32s}   {k}: {v}")
+    # Money beside counts on every line, because they disagree and the
+    # disagreement is the point: a stage taking 1% of rows and 15% of the
+    # exposure has changed what the surviving population represents.
+    fixed = ("step", "rows", "episodes", "cogs_at_risk", "cogs_pct_of_raw",
+             "cogs_dropped", "cogs_dropped_pct_of_raw")
+    rows = waterfall_rows(wf)
+    for row in rows:
+        pct = row.get("cogs_dropped_pct_of_raw")
+        print(f"{row['step']:34s} rows {row['rows']:>10,}  "
+              f"episodes {row['episodes']:>9,}  "
+              f"cogs {row['cogs_at_risk']:>16,.0f}"
+              + (f"  dropped {pct:>7.2%}" if pct is not None else ""))
+        for k, v in row.items():
+            if k not in fixed:
+                print(f"{'':34s}   {k}: {v}")
+    if rows:
+        kept = rows[-1]["cogs_pct_of_raw"]
+        print(f"\nCOGS at risk surviving: {rows[-1]['cogs_at_risk']:,.0f} of "
+              f"{rows[0]['cogs_at_risk']:,.0f} raw"
+              + (f" ({kept:.2%})" if kept is not None else ""))
     print(f"wrote {args.out} and {args.manifest}")
 
 

@@ -36,7 +36,7 @@ randomized exploration.
 | `tools/make_dummy_flc.py` | — | Synthetic FLC generator (legacy + randomized policies, known ground-truth elasticity). |
 | `tools/make_charts.py` | — | One diagnostic chart per component, generated from the report artifacts into `reports/charts/`. |
 | `tools/walkthrough/` | — | Builds `docs/system_walkthrough.html`, the leadership-facing walkthrough — one tab per frozen artifact, plus the decision, the learning loop, replay, shadow and the assurance checks. `figures.py` registers every measured figure against the report and model version it came from, so a re-run cannot leave the page silently stale. |
-| `tools/metrics_glossary.py` | — | Builds `docs/metrics.html`: 133 metrics across 17 components, each with its unit, owning component, and whether it gates anything. Filterable, with a gates-only toggle. |
+| `tools/metrics_glossary.py` | — | Builds `docs/metrics.html`: 134 metrics across 17 components, each with its unit, owning component, and whether it gates anything. Filterable, with a gates-only toggle. |
 
 ## Running the bootstrap (PRD §1a order)
 

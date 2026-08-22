@@ -105,7 +105,7 @@ footer code{font-family:var(--data)}
 <div class="bar"><div class="inner">
   <input id="q" type="search" placeholder="filter — try  il, tau, censor, rho, gate" aria-label="Filter metrics">
   <button class="toggle" id="gateonly" aria-pressed="false">gates only</button>
-  <span id="count">133 metrics</span>
+  <span id="count">134 metrics</span>
 </div></div>
 
 <div class="wrap">
@@ -115,6 +115,7 @@ footer code{font-family:var(--data)}
 <p class="intro">The rows every other number is measured on. Frozen at launch.</p>
 <div class="rows">
 <div class="row" data-gate="0"><div class="nm">data_quality_waterfall<span class="u">n</span></div><div class="mn">Rows and episodes remaining after each of the 16 filter stages, in order. The first entry is <code>raw</code>.<span class="rd">every figure traces back through it</span></div></div>
+<div class="row" data-gate="0"><div class="nm">cogs_at_risk<span class="u">₩</span></div><div class="mn">Unit cost × opening stock, ONCE per episode, reported at every waterfall stage with <code>cogs_dropped</code> and <code>cogs_dropped_pct_of_raw</code>. Never summed over hours — inventory persists, so a per-row sum multiplies the same stock by the window length. Rows and money diverge, and that is the point: a filter taking 1% of rows and 15% of the exposure has changed what the population represents. Negative <code>cogs_dropped</code> appears at exactly one stage, <code>contiguous_episodes_built</code>, where re-segmentation turns one opening row into two.<span class="rd">whether the surviving population still looks like the business</span></div></div>
 <div class="row" data-gate="0"><div class="nm">edge_truncated_episodes_dropped<span class="u">n</span></div><div class="mn">ONLY the episodes the extract cut off mid-window. Episodes unclosed for any other reason are KEPT and stay <code>not_closed</code>, because those are a feed problem no re-download fixes and dropping them would zero out the evidence. <code>share_of_unclosed_explained_by_edge</code> near 1.0 means the whole unknown-scrap problem was the extract boundary; <code>rows_dropped</code> is the training signal given up, and these are the LARGEST episodes.<span class="rd">every scrap and IL figure</span></div></div>
 <div class="row" data-gate="0"><div class="nm">episode_rule<span class="u">…</span></div><div class="mn">The persisted definition of an episode: a maximal run of consecutive hourly rows for one SKU × FC over which the source hours-remaining counter decrements by one per elapsed hour. NOT keyed by date.<span class="rd">production must derive identical boundaries</span></div></div>
 <div class="row" data-gate="0"><div class="nm">split.train / calib / test<span class="u">…</span></div><div class="mn">Date windows, fixed before any model was fit. An episode belongs wholly to the split its window STARTED in.<span class="rd">the calibration gate, which must not grade its own fit</span></div></div>

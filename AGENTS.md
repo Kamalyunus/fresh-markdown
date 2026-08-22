@@ -877,7 +877,7 @@ the tab.
 
 ### The metrics index
 
-`docs/metrics.html` is the reference for "what is this number": **133 metrics
+`docs/metrics.html` is the reference for "what is this number": **134 metrics
 across 17 components**, each with its unit, the component that writes it, and
 whether anything downstream is gated on it. Built, not hand-edited:
 
@@ -967,6 +967,15 @@ so read them off the reports directly. Two rules survive it:
 - Modules are run as `python3 -m package.module` from the repo root.
 - `data/`, `reports/`, `artifacts/`, `events_store/` are gitignored run
   outputs — never commit them.
+- **Every waterfall stage reports money, not just counts.** `cogs_at_risk` is
+  unit cost × opening stock, once per episode (never summed over hours —
+  inventory persists, so a per-row sum multiplies the same stock by the window
+  length). Each row carries `cogs_dropped` and `cogs_dropped_pct_of_raw`.
+  Rows and money diverge and the divergence is the point: a stage taking a
+  small share of rows and a large share of the exposure has changed what the
+  surviving population represents. `cogs_dropped` goes NEGATIVE exactly once,
+  at `contiguous_episodes_built`, because re-segmentation turns one opening
+  row into two — the same stage where episode count rises.
 - Credentials live in `~/.env` and reach the code as `REDSHIFT_*` environment
   variables. `.env` is gitignored. No hostname, credential or connection
   string goes in `config.yaml`, in a module, or in a commit — config.yaml is

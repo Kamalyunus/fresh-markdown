@@ -324,6 +324,14 @@ a spurious short episode, which loses more than the episode does.
 | `restocked_episodes_dropped` | an hour opening with more stock than the previous hour left behind |
 | `edge_truncated_episodes_dropped` | **only** the episodes the extract cut off mid-window — the nominal window still had hours to run at the extract's last hour, so the outcome is unknowable from this data and a longer extract is the only thing that closes them. Episodes unclosed for any OTHER reason are **kept** and stay `not_closed`, because those are a feed problem a longer extract will not fix and deleting them would hide it. Off with `data.drop_edge_truncated_episodes: false`. Reports `rows_dropped` (the training signal given up — these are the largest episodes), `unclosed_kept_not_edge`, and `share_of_unclosed_explained_by_edge` |
 
+Every stage also reports **`cogs_at_risk`** — unit cost × opening stock,
+counted once per episode — with `cogs_dropped` and `cogs_dropped_pct_of_raw`
+beside it. Rows are not the unit the business cares about: IL is discount
+given away plus scrap at cost, so what a filter costs is exposure, and the two
+measures diverge. A stage can take 1% of rows and 15% of the money, and only
+the second figure says whether the surviving population still represents the
+business. `cogs_dropped` is negative at exactly one stage — see below.
+
 `contiguous_episodes_built` runs between the row-level and episode-level
 passes and is **not** a filter: episode count can *rise* there, because
 earlier drops split windows that were contiguous in the raw extract. The
