@@ -204,6 +204,35 @@ def scrap_units_last(last):
                                 index=kind.index))
 
 
+def _unknown_by(last, kind, left, by, top=8):
+    """Unclosed episodes and the units they hold, grouped by month or category.
+
+    Answers the question a single share cannot: is the unknown scrap one
+    incident, a standing property of the feed, or one corner of the
+    catalogue. Months are returned in order; categories by units descending,
+    capped, with the remainder folded into `other` rather than dropped.
+    """
+    ids = last.episode_id.to_numpy() if "episode_id" in last else last.index
+    key = (pd.Series(pd.to_datetime(last.date).dt.strftime("%Y-%m").to_numpy(),
+                     index=ids) if by == "month"
+           else pd.Series(last[by].astype(str).to_numpy(), index=ids))
+    sel = kind == NOT_CLOSED
+    if not sel.any():
+        return {}
+    g = pd.DataFrame({"key": key[sel], "units": left[sel]}).groupby("key")
+    out = [(k, {"episodes": int(len(v)), "leftover_units": int(v.units.sum())})
+           for k, v in g]
+    if by == "month":
+        return dict(sorted(out))
+    out.sort(key=lambda kv: -kv[1]["leftover_units"])
+    head, tail = out[:top], out[top:]
+    if tail:
+        head.append(("other", {
+            "episodes": sum(v["episodes"] for _, v in tail),
+            "leftover_units": sum(v["leftover_units"] for _, v in tail)}))
+    return dict(head)
+
+
 def ending_summary(d):
     """Share of each ending type, and the scrap at stake in the unknown one."""
     last = last_rows(d)
@@ -227,6 +256,16 @@ def ending_summary(d):
                    for k in (SOLD_OUT_EARLY, COMPLETED, NOT_CLOSED)},
         "scrap_units_completed": int(left[kind == COMPLETED].sum()),
         "scrap_units_unknown_not_closed": int(left[kind == NOT_CLOSED].sum()),
+        # WHERE the unknowns sit in time and in the catalogue. With
+        # data.drop_edge_truncated_episodes on, the extract boundary has
+        # already been removed, so anything left here is unclosed for a
+        # reason a longer extract will NOT fix -- a gap in the hourly feed,
+        # or a subset whose feed never writes off. Concentrated in one month
+        # reads as an incident; spread evenly across every month reads as a
+        # standing property of the feed; concentrated in a few categories
+        # names the subset.
+        "not_closed_by_month": _unknown_by(last, kind, left, "month"),
+        "not_closed_by_category": _unknown_by(last, kind, left, "category"),
         "share_episodes_ending_by_write_off": round(float(
             ((kind == COMPLETED) & (left > 0)).mean()), 4),
         # the diagnostic that caught the original misclassification: if the
@@ -245,13 +284,15 @@ def ending_summary(d):
                  "large. Closure is read from the source's own sentinel -- "
                  "ending_inventory zeroed on the final row -- so an episode "
                  "whose final row still reports honest inventory is the only "
-                 "kind with an unknown outcome. When "
-                 "data.drop_unclosed_episodes is true those episodes are "
-                 "already gone, so not_closed and "
-                 "scrap_units_unknown_not_closed read ZERO here BY "
-                 "CONSTRUCTION and say nothing -- their counts, the units at "
-                 "stake, and the edge-vs-feed-gap split live in the "
-                 "unclosed_episodes_dropped row of the waterfall."),
+                 "kind with an unknown outcome. With "
+                 "data.drop_edge_truncated_episodes on, the extract boundary "
+                 "has ALREADY been removed upstream, so everything still "
+                 "counted not_closed here is unclosed for a reason a longer "
+                 "extract will not fix -- a gap in the hourly feed, or a "
+                 "subset whose feed never writes off. not_closed_by_month and "
+                 "not_closed_by_category say which. How many the boundary did "
+                 "explain is in the edge_truncated_episodes_dropped row of "
+                 "the waterfall."),
     }
 
 

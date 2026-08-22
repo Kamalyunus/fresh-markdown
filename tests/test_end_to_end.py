@@ -77,34 +77,62 @@ def test_filter_chain_waterfall(workspace):
     assert (d.original_price > 0).all()
 
 
-def test_unclosed_episodes_leave_with_their_numbers(workspace):
-    """The drop that carries its own diagnostic.
+def test_only_edge_truncation_is_dropped_not_every_unknown(workspace):
+    """The drop is narrow ON PURPOSE, and this is what keeps it narrow.
 
-    An episode whose outcome is unknown contributed hours to the demand fit
-    and nothing to IL, so no two figures were measured on the same rows.
-    Dropping them fixes that -- but the drop has to report what it cost and
-    WHY those episodes were unclosed, because the two causes have different
-    remedies and only one of them is fixed by a longer extract.
+    Two things make an episode's outcome unknown, and they need opposite
+    responses. The extract cutting a window mid-flight is unavoidable and
+    unknowable -- drop it. Everything else is a feed problem a longer extract
+    will NOT fix, and dropping it too would drive m11's not_closed to zero by
+    construction and hide the problem behind a clean population.
+
+    So: the surviving frame MUST still contain not_closed episodes whenever
+    non-edge ones exist, and every dropped episode must genuinely be at the
+    edge.
     """
     _chdir(workspace)
+    from common import episodes as E
     with open("artifacts/split_manifest.json") as f:
         wf = json.load(f)["data_quality_waterfall"]
-    stage = next(s for s in wf if s["step"] == "unclosed_episodes_dropped")
-    prev = wf[[s["step"] for s in wf].index("unclosed_episodes_dropped") - 1]
+    steps = [s["step"] for s in wf]
+    stage = wf[steps.index("edge_truncated_episodes_dropped")]
+    prev = wf[steps.index("edge_truncated_episodes_dropped") - 1]
 
     assert stage["episodes_dropped"] == prev["episodes"] - stage["episodes"]
     assert stage["rows_dropped"] == prev["rows"] - stage["rows"]
-    assert 0.0 <= stage["share_window_ran_past_extract_end"] <= 1.0
-    assert stage["leftover_units_unknown"] >= 0
+    assert 0.0 <= stage["share_of_unclosed_explained_by_edge"] <= 1.0
 
-    # and the population that survives has NO unknown outcomes left, which is
-    # the whole point: every scrap and IL figure is now measured on rows whose
-    # ending is a fact rather than an assumption
-    from common import episodes as E
     d = pd.read_parquet("data/prepared.parquet")
-    kind = E.classify(d)
-    assert (kind == E.NOT_CLOSED).sum() == 0
-    assert E.scrap_units(d).notna().all()      # no NaN left to propagate
+    kept = int((E.classify(d) == E.NOT_CLOSED).sum())
+    assert kept == stage["unclosed_kept_not_edge"], \
+        "non-edge unclosed episodes were dropped -- the residue that proves " \
+        "whether the feed problem is systemic has been deleted"
+
+    # nothing that survived was cut by the extract boundary: its window ended
+    # before the extract's last hour
+    last = E.last_rows(d)
+    ts = pd.to_datetime(last.date) + pd.to_timedelta(last.hour_of_day, unit="h")
+    ends = ts + pd.to_timedelta(last.hours_remaining.clip(lower=0), unit="h")
+    unknown = (E.classify_last(last) == E.NOT_CLOSED).to_numpy()
+    if unknown.any():
+        assert (ends[unknown] <= ts.max()).all()
+        assert (ts[unknown] < ts.max()).all()
+
+
+def test_m11_still_reports_where_the_unknown_scrap_sits(workspace):
+    """The whole point of keeping the non-edge ones: they stay countable."""
+    _chdir(workspace)
+    with open("reports/phase0.json") as f:
+        m11 = json.load(f)["m11_episode_endings"]
+    by_month = m11["not_closed_by_month"]
+    assert isinstance(by_month, dict)
+    if m11["shares"]["not_closed"] > 0:
+        assert by_month, "not_closed episodes exist but are not broken out"
+        assert sum(v["episodes"] for v in by_month.values()) == \
+            round(m11["shares"]["not_closed"] * m11["episodes"])
+        assert sum(v["leftover_units"] for v in by_month.values()) == \
+            m11["scrap_units_unknown_not_closed"]
+        assert list(by_month) == sorted(by_month)       # chronological
 
 
 def test_prepared_data_is_priceable_and_self_consistent(workspace):

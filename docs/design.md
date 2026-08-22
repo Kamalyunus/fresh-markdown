@@ -322,7 +322,7 @@ a spurious short episode, which loses more than the episode does.
 | `chain_break_dropped` | any hour that neither reconciles (`ending == starting − sold`) nor names why not, via the same `common.episodes.adjustment_reason` that `pipeline.shadow` builds outcomes with and `events.store` enforces in production — so the analysis population cannot hold a break production would quarantine. Recognised **by the zero, never by position**: the source writes stock off at *its* window boundary, which sits mid-window once a window is merged across midnight |
 | `contiguous_episodes_built` | *(not a filter)* re-segmentation — earlier drops can split a window, so episode count may RISE here |
 | `restocked_episodes_dropped` | an hour opening with more stock than the previous hour left behind |
-| `unclosed_episodes_dropped` | episodes whose OUTCOME is unknown — the final row held still reports positive `ending_inventory` while stock remained, so the source never wrote the remainder off and the listing did not end there. Their leftover is neither scrap (assumes no further sales) nor zero (assumes it all sold). Off with `data.drop_unclosed_episodes: false`. The stage reports `rows_dropped` (the training signal given up — these are the largest episodes) and `share_window_ran_past_extract_end` (edge truncation vs a feed gap) |
+| `edge_truncated_episodes_dropped` | **only** the episodes the extract cut off mid-window — the nominal window still had hours to run at the extract's last hour, so the outcome is unknowable from this data and a longer extract is the only thing that closes them. Episodes unclosed for any OTHER reason are **kept** and stay `not_closed`, because those are a feed problem a longer extract will not fix and deleting them would hide it. Off with `data.drop_edge_truncated_episodes: false`. Reports `rows_dropped` (the training signal given up — these are the largest episodes), `unclosed_kept_not_edge`, and `share_of_unclosed_explained_by_edge` |
 
 `contiguous_episodes_built` runs between the row-level and episode-level
 passes and is **not** a filter: episode count can *rise* there, because
@@ -1523,16 +1523,27 @@ extract is cut. And they were half-in: excluded from scrap and IL, but
 contributing hours to the demand and dispersion fits, so no two figures were
 measured on the same rows.
 
-`data.drop_unclosed_episodes` (default **true**) now removes them in
-`prepare_data`, as the `unclosed_episodes_dropped` stage. The stage reports
-`rows_dropped` — the training signal given up, and it is the largest episodes
-— and `share_window_ran_past_extract_end`, which separates the two causes:
-near 1.0 is ordinary edge truncation that a longer extract recovers, well
-below means the window closed inside the data with no sentinel, which is a
-feed gap or a subset that never writes off and which a longer extract does not
-fix. **Worth checking against the flc_window recovery**: the sentinel-free
-rows appeared in the same run family that began recovering the "manufacturing"
-SKUs, and if those are the same episodes the cause is the third one.
+`data.drop_edge_truncated_episodes` (default **true**) removes them in
+`prepare_data` — but **only the extract-boundary ones**, and the narrowness is
+the point. Two causes need opposite responses:
+
+| | What it is | Response |
+| --- | --- | --- |
+| **edge** | the window still had hours to run at the extract's last hour | **dropped** — unknowable from this data, and only a longer extract closes it |
+| **not edge** | the window ended *inside* the data and no sentinel appeared | **kept**, still `not_closed` — a feed gap or a subset that never writes off, which no re-download fixes |
+
+Dropping both would drive `m11.not_closed` to zero *by construction* and hide
+a systemic feed problem behind a clean population. So after this stage
+`not_closed` means "unclosed for a reason the extract boundary does not
+explain", and `m11.not_closed_by_month` / `not_closed_by_category` say whether
+that residue is one incident, a standing property of the feed, or one corner
+of the catalogue. The waterfall's
+`share_of_unclosed_explained_by_edge` is the headline: near 1.0 and the whole
+unknown-scrap problem was the extract cut.
+
+**Worth checking against the flc_window recovery**: the sentinel-free rows
+appeared in the same run family that began recovering the "manufacturing"
+SKUs. If the kept residue concentrates in those categories, that is the cause.
 
 **The third state exists for production, not for the extract.** Live, the
 monitor reads events while episodes are still in flight, and an in-flight

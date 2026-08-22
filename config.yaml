@@ -26,6 +26,11 @@ data:
     calib_end:   "2026-07-27"
     test_start:  "2026-07-28"
     test_end:    "2026-08-03"
+    # An episode is a maximal run of consecutive hourly rows for one sku x fc
+    # over which flc_window (hours_remaining) ticks down exactly one per
+    # elapsed hour -- see prepare_data.assign_episode_ids, which is the
+    # authoritative definition. NOT keyed by calendar date: 36-hour windows
+    # are common and a date key splits one economic episode into three.
   holdout:                             # SET  a TRUE hold-out: no artifact is
     start: "2026-08-04"                # fit on it and no gate was decided on
     end:   "2026-08-21"                # it. Everything above stops at
@@ -40,38 +45,30 @@ data:
     #
     # Episodes are assigned by the date their WINDOW OPENED
     # (common.episodes.window_slice), so no episode straddles the seam.
-    # An episode is a maximal run of consecutive hourly rows for one sku x fc
-    # over which flc_window (hours_remaining) ticks down exactly one per
-    # elapsed hour -- see prepare_data.assign_episode_ids, which is the
-    # authoritative definition. NOT keyed by calendar date: 36-hour windows
-    # are common and a date key splits one economic episode into three.
-  drop_unclosed_episodes: true         # SET  drop episodes whose OUTCOME is
-    # unknown -- the last row held still reports positive ending_inventory
-    # while stock remained, so the source never wrote the remainder off and
-    # the listing did not end there.
+  drop_edge_truncated_episodes: true   # SET  drop ONLY the episodes the
+    # extract cut off mid-window: the nominal window still had hours to run
+    # at the extract's last hour, so the outcome is unknown and unknowable
+    # from this data. Unavoidable, not a defect, and a longer extract is the
+    # only thing that closes them.
     #
-    # true  every figure is measured on the same rows. Previously these were
-    #       kept and excluded from scrap and IL only, so they contributed
-    #       hours to the demand and dispersion fits while contributing
-    #       nothing to the loss the system minimises. On production they were
-    #       3.38% of episodes holding 78.6% of all at-risk leftover units.
-    # false keep them and exclude from IL only, as before.
+    # DELIBERATELY NOT every episode with an unknown outcome. The rest are
+    # unclosed for reasons the extract boundary does not explain -- a gap in
+    # the hourly feed splitting one window into fragments, or a subset whose
+    # feed never writes off -- and those are a DATA-QUALITY problem that must
+    # stay visible. They are kept, stay classified `not_closed`, and so
+    # m11.scrap_units_unknown_not_closed measures exactly that residue.
+    # Dropping them too would drive it to zero by construction and hide a
+    # systemic feed problem behind a clean population.
     #
-    # The cost of true is real and reported as `rows_dropped` in the
-    # waterfall: their observed hours are good training data, and they are
-    # the LARGEST episodes, so mu_ref and r are then fit without the slow,
-    # heavily-stocked windows. Read `share_window_ran_past_extract_end`
-    # beside it -- near 1.0 is ordinary edge truncation that a longer extract
-    # recovers, well below means a feed gap or a subset that never writes off
-    # and a longer extract fixes neither.
+    # Read `share_of_unclosed_explained_by_edge` in the waterfall beside
+    # m11.not_closed_by_month: near 1.0 and the unknown scrap was purely the
+    # extract boundary; well below, with months evenly loaded, and the feed
+    # has a standing problem no re-download will fix.
+    #
+    # The cost of true is real and reported as `rows_dropped`: those observed
+    # hours are good training data and they are the LARGEST episodes, so
+    # mu_ref and r are fit without the slow, heavily-stocked windows.
   max_window_hours: 120                # SET  upper bound on a plausible FLC
-  manufacturing_window_hours: 24     # SET  standard clearance window for
-    # SKUs whose flc_window enters ALREADY negative -- a large negative
-    # constant rather than a countdown. Episodes matching that pattern are
-    # recovered with a synthetic countdown from this value instead of being
-    # dropped; any that run LONGER than this are not the pattern and are
-    # dropped with their count reported. Verify the cap against the extract
-    # before trusting it: the recovery rests on it.
     # window. flc_window carries occasional very large values from upstream
     # data issues; an episode claiming a window longer than this is not
     # trusted and is dropped whole (window_too_long_dropped in the waterfall).
@@ -83,13 +80,20 @@ data:
     # windows, not just defects. Note the cost -- this bound also sizes the
     # synthetic tail, so the widest window drives DP horizon and prediction
     # work per episode.
-    # NOT a dial here: the boundary tolerance that decides which episodes have
-    # an UNKNOWN outcome is common.episodes.BOUNDARY_TOLERANCE_HOURS, a
-    # structural constant rather than a tuning surface. An episode whose last
-    # row sits within that of the extract's final hour may have been cut
-    # mid-window; every other episode that ends holding stock disposed of it,
-    # so its leftover IS scrap. Never key that rule to hours_remaining -- the
-    # counter is nominal and still positive on ~99.9% of final rows.
+  manufacturing_window_hours: 24       # SET  standard clearance window for
+    # SKUs whose flc_window enters ALREADY negative -- a large negative
+    # constant rather than a countdown. Episodes matching that pattern are
+    # recovered with a synthetic countdown from this value instead of being
+    # dropped; any that run LONGER than this are not the pattern and are
+    # dropped with their count reported. Verify the cap against the extract
+    # before trusting it: the recovery rests on it.
+    #
+    # NOT a dial anywhere: which episodes have an UNKNOWN outcome is decided
+    # by the source's own closure sentinel -- ending_inventory zeroed on the
+    # final row while stock remained -- in common.episodes.classify_last.
+    # There is no tolerance constant and never key that rule to
+    # hours_remaining: the counter is nominal and still positive on ~99.5% of
+    # final rows.
 
 reassessment_gates:                    # SET  section 8.1 phase-0 review gates
   max_share_non_explorable: 0.30       # above this, narrow the MVP to the

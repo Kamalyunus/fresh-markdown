@@ -41,15 +41,13 @@ CATALOGUE = [
   ("data_quality_waterfall", "count",
    "Rows and episodes remaining after each of the 16 filter stages, in order. "
    "The first entry is `raw`.", "every figure traces back through it"),
-  ("unclosed_episodes_dropped", "count",
-   "Episodes whose OUTCOME is unknown — the final row held still reports positive "
-   "`ending_inventory` while stock remained, so the source never closed the listing. "
-   "Read `rows_dropped` (the training signal given up — these are the LARGEST "
-   "episodes) and `share_window_ran_past_extract_end`: near 1.0 is edge truncation a "
-   "longer extract recovers, well below is a feed gap or a subset that never writes "
-   "off. **Read the numbers here, not in m11** — with the drop on, m11's `not_closed` "
-   "and `scrap_units_unknown_not_closed` are zero by construction.",
-   "every scrap and IL figure"),
+  ("edge_truncated_episodes_dropped", "count",
+   "ONLY the episodes the extract cut off mid-window. Episodes unclosed for any other "
+   "reason are KEPT and stay `not_closed`, because those are a feed problem no "
+   "re-download fixes and dropping them would zero out the evidence. "
+   "`share_of_unclosed_explained_by_edge` near 1.0 means the whole unknown-scrap "
+   "problem was the extract boundary; `rows_dropped` is the training signal given up, "
+   "and these are the LARGEST episodes.", "every scrap and IL figure"),
   ("episode_rule", "text",
    "The persisted definition of an episode: a maximal run of consecutive hourly "
    "rows for one SKU × FC over which the source hours-remaining counter "
@@ -108,9 +106,14 @@ CATALOGUE = [
   ("m11 · episode_endings", "count",
    "Splits episodes three ways — `completed` (leftover IS scrap), `sold_out_early` "
    "(no scrap by construction), `not_closed` (scrap UNKNOWN). With "
-   "`data.drop_unclosed_episodes` on, the third bucket is already gone and reads ZERO "
-   "here by construction — its counts live in the `unclosed_episodes_dropped` "
-   "waterfall row.", "every scrap and IL figure"),
+   "`data.drop_edge_truncated_episodes` on, the extract boundary has already been "
+   "removed upstream, so `not_closed` here counts ONLY episodes unclosed for a reason "
+   "a longer extract will not fix.", "every scrap and IL figure"),
+  ("m11 · not_closed_by_month / by_category", "count",
+   "Where the residual unknown scrap sits. Concentrated in one month reads as an "
+   "incident; spread evenly across every month reads as a standing property of the "
+   "feed; concentrated in a few categories names the subset. This is what tells you "
+   "whether a longer extract will help.", "the data-quality decision"),
   ("m11 · share_last_row_counter_at_zero", "rate",
    "How often `hours_remaining` actually reaches 0 on a final row. Measured at 0.52% "
    "— the counter is NOMINAL, so any rule keyed to it is measuring a rounding error. "

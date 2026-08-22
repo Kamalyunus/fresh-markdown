@@ -735,25 +735,35 @@ last row -- `common.episodes.leftover_units` is the only definition, and
 treat unknown as zero. Truncated episodes are excluded from scrap
 and IL aggregates, with the excluded share reported.
 
-**`not_closed` episodes are dropped in `prepare_data`** as of
-`data.drop_unclosed_episodes` (default true). Excluding them from IL alone
-left them half-in: contributing hours to the demand and dispersion fits while
-contributing nothing to the loss the system minimises, so no two figures were
-measured on the same rows. On production they were 3.38% of episodes holding
-**78.6% of all at-risk leftover units** (334,622 against 91,096) — they
-average 24.9 units each against 3.05, because a big slow-clearing window is
-the kind still open when an extract is cut.
+**Only EDGE-TRUNCATED episodes are dropped in `prepare_data`**
+(`data.drop_edge_truncated_episodes`, default true), and the narrowness is
+load-bearing. On production, unclosed episodes were 3.38% holding **78.6% of
+all at-risk leftover units** (334,622 against 91,096) — 24.9 units each
+against 3.05 — so what happens to them decides how much of the scrap picture
+is real. Two causes, opposite responses:
 
-Read the numbers in the **`unclosed_episodes_dropped` waterfall row**, not in
-`m11`: with the drop on, `m11.not_closed` and
-`scrap_units_unknown_not_closed` are ZERO BY CONSTRUCTION and say nothing.
-The stage reports `rows_dropped` — the training signal given up, and these
-are the largest episodes, so `mu_ref` and `r` are then fit without the slow,
-heavily-stocked windows — and `share_window_ran_past_extract_end`, which
-separates the causes: near 1.0 is ordinary edge truncation that a longer
-extract recovers; well below means the window closed inside the data with no
-sentinel, which is a feed gap or a subset that never writes off, and a longer
-extract fixes neither.
+| | Test | Response |
+| --- | --- | --- |
+| **edge** | last row's timestamp + `hours_remaining` runs past the extract's last hour (or the last row IS that hour) | **dropped** — unknowable here, only a longer extract closes it |
+| **not edge** | the window ended inside the data and no sentinel appeared | **kept**, still `not_closed` |
+
+**Do not "clean up" the second group.** Dropping it too drives
+`m11.not_closed` and `scrap_units_unknown_not_closed` to zero BY CONSTRUCTION
+and hides a systemic feed problem behind a tidy population — that mistake was
+made once already and caught in review. After this stage `not_closed` means
+"unclosed for a reason the extract boundary does not explain", which is the
+number to watch.
+
+Where to read what:
+
+- **`edge_truncated_episodes_dropped` waterfall row** —
+  `share_of_unclosed_explained_by_edge` (near 1.0 → the whole problem was the
+  extract cut), `unclosed_kept_not_edge`, and `rows_dropped`: the training
+  signal given up, and these are the LARGEST episodes, so `mu_ref` and `r`
+  are fit without the slow, heavily-stocked windows.
+- **`m11.not_closed_by_month` / `not_closed_by_category`** — whether the
+  residue is one incident, a standing property of the feed, or one corner of
+  the catalogue. Evenly loaded months mean no re-download will fix it.
 
 The DP horizon comes from the WINDOW, not the row count. `backtest` and
 `pipeline.shadow` call `common.episodes.extend_to_window` before predicting,
@@ -867,7 +877,7 @@ the tab.
 
 ### The metrics index
 
-`docs/metrics.html` is the reference for "what is this number": **132 metrics
+`docs/metrics.html` is the reference for "what is this number": **133 metrics
 across 17 components**, each with its unit, the component that writes it, and
 whether anything downstream is gated on it. Built, not hand-edited:
 

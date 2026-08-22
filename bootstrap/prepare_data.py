@@ -88,26 +88,36 @@ def restocked_episodes(d):
     return d.loc[restocked, "episode_id"].unique()
 
 
-def _drop_unclosed(d):
-    """Drop episodes whose outcome is unknown, and say what that cost.
+def _drop_edge_truncated(d):
+    """Drop ONLY the episodes the extract cut off mid-window. Keep the rest.
 
-    Unknown means the source's closure sentinel is absent on the final row we
-    hold -- `ending_inventory` still positive while stock remained -- so the
-    listing did not end there and what happened to the remainder is
-    unrecorded. Their leftover is neither scrap (that assumes no further
-    sales) nor zero (that assumes it all sold), which is why they were
-    excluded from IL rather than counted either way.
+    An episode with no closure sentinel on its final row -- `ending_inventory`
+    still positive while stock remained -- has an unknown outcome. There are
+    two very different reasons for that, and dropping both would delete the
+    evidence for telling them apart:
 
-    The figure to read is `share_window_ran_past_extract_end`, which separates
-    the two causes and points at different remedies:
+      EDGE      the nominal window still had hours to run when the extract was
+                cut. Unavoidable, not a defect, and nothing to learn from
+                keeping it: a longer extract is the only thing that closes it.
+                DROPPED here.
+      NOT EDGE  the window ended INSIDE the data and no sentinel appeared
+                anyway -- a gap in the hourly feed splitting one window into
+                fragments, or a subset whose feed never writes off. That is a
+                data-quality problem, it is not fixed by a longer extract, and
+                it must stay VISIBLE. KEPT, still classified `not_closed`, so
+                m11's not_closed share and scrap_units_unknown_not_closed
+                measure exactly this residue and nothing else.
 
-      near 1.0   the nominal window genuinely extended beyond the extract's
-                 last hour. Ordinary edge truncation -- a longer extract
-                 closes them and the units come back as known scrap.
-      well below the window should have ENDED inside the data and no sentinel
-                 appeared anyway. That is a gap in the hourly feed splitting
-                 one window into fragments, or a subset whose feed never
-                 writes off. A longer extract fixes neither.
+    So after this stage `not_closed` means "unclosed for a reason the extract
+    boundary does not explain", which is the number worth watching month to
+    month. Dropping all of them instead would have driven it to zero by
+    construction and hidden a systemic feed problem behind a clean population.
+
+    Edge is tested exactly rather than by a tolerance: the final row's
+    timestamp plus its remaining window against the extract's last hour. An
+    episode still being observed AT that last hour counts as edge whatever the
+    nominal counter says -- the counter reaches zero on ~0.5% of final rows,
+    so it cannot be trusted to mark a window's end.
     """
     last = episodes.last_rows(d)
     ids = last.episode_id.to_numpy()
@@ -122,28 +132,36 @@ def _drop_unclosed(d):
     left = pd.Series(
         episodes.leftover_units(last.starting_inventory, last.units_sold).to_numpy(),
         index=ids)
-    ran_past = ts + pd.to_timedelta(hr, unit="h") > extract_end
+    edge = ((ts + pd.to_timedelta(hr, unit="h") > extract_end)
+            | (ts >= extract_end))
 
-    n = len(unknown)
+    dropped = unknown[edge.loc[unknown].to_numpy()]
+    kept = unknown[~edge.loc[unknown].to_numpy()]
+    n_unknown = len(unknown)
     detail = {
-        "episodes_dropped": int(n),
-        # these are the LARGEST episodes, so this is well above their episode
-        # share -- it is the training signal the demand fit gives up
-        "rows_dropped": int(d.episode_id.isin(unknown).sum()),
-        "leftover_units_unknown": int(left.loc[unknown].sum()) if n else 0,
-        "share_window_ran_past_extract_end":
-            round(float(ran_past.loc[unknown].mean()), 4) if n else 0.0,
-        "median_hours_remaining_on_last_row":
-            float(hr.loc[unknown].median()) if n else 0.0,
+        "episodes_dropped": int(len(dropped)),
+        # the LARGEST episodes, so this runs well above their episode share --
+        # it is the training signal the demand fit gives up
+        "rows_dropped": int(d.episode_id.isin(dropped).sum()),
+        "leftover_units_dropped": int(left.loc[dropped].sum()) if len(dropped) else 0,
+        # what remains unknown for a reason the extract boundary does NOT
+        # explain. This is the number to watch: it is a feed problem, and a
+        # longer extract will not move it.
+        "unclosed_kept_not_edge": int(len(kept)),
+        "leftover_units_kept_unknown": int(left.loc[kept].sum()) if len(kept) else 0,
+        "share_of_unclosed_explained_by_edge":
+            round(float(len(dropped) / n_unknown), 4) if n_unknown else 0.0,
         "extract_last_hour": str(extract_end),
-        "note": ("Outcome unknown: no closure sentinel on the final row held. "
-                 "share_window_ran_past_extract_end near 1.0 means ordinary "
-                 "edge truncation and a longer extract recovers them; well "
-                 "below means the window closed inside the data without a "
-                 "sentinel -- a feed gap or a subset that never writes off, "
-                 "and a longer extract fixes neither."),
+        "note": ("Only extract-edge truncation is dropped. Episodes unclosed "
+                 "for any OTHER reason are kept and stay `not_closed`, so "
+                 "m11 measures the residue a longer extract cannot fix. Read "
+                 "share_of_unclosed_explained_by_edge: near 1.0 and the "
+                 "unknown-scrap problem is purely the extract boundary; well "
+                 "below and there is a feed gap or a subset that never writes "
+                 "off, spread across the whole period. "
+                 "m11.not_closed_by_month shows which."),
     }
-    return d[~d.episode_id.isin(unknown)], detail
+    return d[~d.episode_id.isin(dropped)], detail
 
 
 def load_and_filter(path, cfg=None):
@@ -332,28 +350,25 @@ def load_and_filter(path, cfg=None):
     d = d[~d.episode_id.isin(restocked_episodes(d))]
     d = step(d, "restocked_episodes_dropped")
 
-    # Episodes whose OUTCOME is unknown: the last row we hold still reports
-    # honest, positive ending inventory while stock remained, so the source
-    # never wrote the remainder off and the listing did not end there.
+    # Episodes the extract cut off mid-window. Their outcome is unknown and
+    # unknowable from this data -- nothing to learn from keeping them, and a
+    # longer extract is the only thing that closes them.
     #
-    # They were previously kept and excluded only from scrap and IL, which
-    # left them half-in: contributing hours to the demand fit and the
-    # dispersion fit while contributing nothing to the loss the system
-    # exists to minimise, so no two figures were measured on the same rows.
-    # On production they were 3.38% of episodes but held 78.6% of all
-    # at-risk leftover units -- 334,622 against 91,096 -- because a big,
-    # slow-clearing window is exactly the kind still open when an extract is
-    # cut.
+    # Deliberately NOT every episode with an unknown outcome. The others are
+    # unclosed for reasons the extract boundary does not explain -- a gap in
+    # the hourly feed, or a subset whose feed never writes off -- and those
+    # are a data-quality problem that must stay visible. Dropping them too
+    # would drive m11's not_closed share to zero by construction and hide a
+    # systemic issue behind a clean population.
     #
-    # THE COST, since it is real: their observed hours are good training
-    # data, and they are the LARGEST episodes. Dropping them trains mu_ref
-    # and r without the slow, heavily-stocked windows the DP will meet in
-    # production. `rows_dropped` below is how much that is; set
-    # `data.drop_unclosed_episodes: false` to keep them and go back to
-    # excluding them from IL only.
-    if cfg["data"].get("drop_unclosed_episodes", True):
-        d, unclosed = _drop_unclosed(d)
-        d = step(d, "unclosed_episodes_dropped")
+    # THE COST, since it is real: the dropped episodes' observed hours are
+    # good training data, and they are the LARGEST episodes. `rows_dropped`
+    # is how much mu_ref and r give up. Set
+    # `data.drop_edge_truncated_episodes: false` to keep them and go back to
+    # excluding all unclosed episodes from IL only.
+    if cfg["data"].get("drop_edge_truncated_episodes", True):
+        d, unclosed = _drop_edge_truncated(d)
+        d = step(d, "edge_truncated_episodes_dropped")
         wf[-1] = wf[-1] + (unclosed,)
 
     d["d_ref"] = d.category.map(lambda c: reference_discount(cfg, c))
