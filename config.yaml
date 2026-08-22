@@ -32,6 +32,13 @@ data:
     # authoritative definition. NOT keyed by calendar date: 36-hour windows
     # are common and a date key splits one economic episode into three.
   max_window_hours: 120                # SET  upper bound on a plausible FLC
+  manufacturing_window_hours: 24     # SET  standard clearance window for
+    # SKUs whose flc_window enters ALREADY negative -- a large negative
+    # constant rather than a countdown. Episodes matching that pattern are
+    # recovered with a synthetic countdown from this value instead of being
+    # dropped; any that run LONGER than this are not the pattern and are
+    # dropped with their count reported. Verify the cap against the extract
+    # before trusting it: the recovery rests on it.
     # window. flc_window carries occasional very large values from upstream
     # data issues; an episode claiming a window longer than this is not
     # trusted and is dropped whole (window_too_long_dropped in the waterfall).

@@ -22,7 +22,7 @@ import pytest
 from common.config import load_config
 from events.store import EventStore
 from pipeline import monitor as mon
-from pipeline.shadow import adjustment_reason
+from common.episodes import adjustment_reason
 from pipeline.update import grid_update
 
 P0, COST, PRICE = 10000.0, 4000.0, 7000.0

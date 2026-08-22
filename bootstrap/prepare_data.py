@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from common.config import load_config, reference_discount
+from common.episodes import adjustment_reason
 from common.provenance import stamp
 
 SOURCE_TO_PRD = {
@@ -163,6 +164,42 @@ def load_and_filter(path, cfg=None):
     d = d[d.original_price.notna() & (d.original_price > 0)]
     d = step(d, "zero_base_price_dropped")
 
+    # "Manufacturing" SKUs enter with a window counter that is ALREADY
+    # negative -- a large negative constant rather than a countdown from the
+    # window length. Dropping them outright is not neutral: they are
+    # concentrated in a handful of categories, so it selects on category and
+    # biases every per-category figure downstream.
+    #
+    # They are recoverable because they behave like a standard short window:
+    # an episode entering negative resolves -- sells out or is written off --
+    # inside `data.manufacturing_window_hours`. That claim is CHECKED here
+    # rather than trusted: any episode entering negative with MORE observed
+    # hours than the cap is not this pattern, is not recovered, and falls
+    # through to the drop below with its count reported.
+    #
+    # Recovery rewrites `hours_remaining` as a synthetic countdown from the
+    # cap (23, 22, ... at 24). It has to be a countdown rather than a clamp
+    # because the counter is load-bearing three ways: episode identification
+    # differences it, the DP takes its horizon from it, and
+    # `extend_to_window` generates the synthetic tail from it. A clamp would
+    # leave a flat counter that re-segmentation would then split every hour.
+    cap = int(cfg["data"]["manufacturing_window_hours"])
+    entry = d.groupby("episode_id")["hours_remaining"].transform("first")
+    length = d.groupby("episode_id")["hours_remaining"].transform("size")
+    recoverable = (entry < 0) & (length <= cap)
+    n_recovered_ep = int(d.loc[recoverable, "episode_id"].nunique())
+    if n_recovered_ep:
+        d = d.copy()
+        position = d.groupby("episode_id").cumcount()
+        d.loc[recoverable, "hours_remaining"] = (cap - 1) - position[recoverable]
+    recovery = {"episodes_recovered": n_recovered_ep,
+                "rows_recovered": int(recoverable.sum()),
+                "window_hours_assumed": cap,
+                "episodes_entering_negative_but_longer_than_cap":
+                    int(d.loc[(entry < 0) & (length > cap), "episode_id"].nunique())}
+    d = step(d, "negative_window_recovered")
+    wf[-1] = wf[-1] + (recovery,)
+
     bad = d.groupby("episode_id")["hours_remaining"].min().lt(0)
     d = d[~d.episode_id.isin(bad[bad].index)]
     d = step(d, "negative_window_dropped")
@@ -202,6 +239,25 @@ def load_and_filter(path, cfg=None):
     bad = d.loc[d.units_sold > d.starting_inventory, "episode_id"].unique()
     d = d[~d.episode_id.isin(bad)]
     d = step(d, "units_gt_inventory_dropped")
+
+    # Every hour must either reconcile -- ending == starting - sold -- or name
+    # why it does not. `common.episodes.adjustment_reason` is the same
+    # function `pipeline.shadow` uses to build outcomes and the same rule
+    # `events.store` enforces in production, so the analysis population cannot
+    # contain a break that production would quarantine.
+    #
+    # Recognised BY THE ZERO, never by position. The source writes stock off
+    # at ITS OWN window boundary, and once a window is merged across midnight
+    # that row sits in the MIDDLE of ours -- a "only the last hour may break
+    # the chain" test drops those episodes in bulk. A partial shortfall
+    # (0 < ending < leftover) matches no convention: that is unexplained
+    # inventory loss, and it is what this stage exists to remove.
+    reconciles = (d.starting_inventory - d.units_sold) == d.ending_inventory
+    documented = [adjustment_reason(s_, u, e) is not None for s_, u, e
+                  in zip(d.starting_inventory, d.units_sold, d.ending_inventory)]
+    broken = ~(reconciles | np.array(documented))
+    d = d[~d.episode_id.isin(d.loc[broken, "episode_id"].unique())]
+    d = step(d, "chain_break_dropped")
 
     # re-segment: the filters above drop rows, which can punch a hole in a
     # window that was contiguous in the raw extract
@@ -334,6 +390,19 @@ def split_frames(d, cfg):
     }
 
 
+def waterfall_rows(waterfall):
+    """The waterfall as JSON rows. One definition, because two consumers write
+    it -- the split manifest and phase 0 -- and a stage that reports a detail
+    block would otherwise appear in one and crash the other.
+
+    Most stages are (label, rows, episodes). A stage may carry a fourth
+    element, a dict merged into its row: the flc_window recovery reports what
+    it recovered, which a row count cannot show because it changes no counts.
+    """
+    return [dict({"step": t[0], "rows": t[1], "episodes": t[2]},
+                 **(t[3] if len(t) > 3 else {})) for t in waterfall]
+
+
 def write_manifest(path, cfg, waterfall):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
@@ -342,8 +411,7 @@ def write_manifest(path, cfg, waterfall):
             "split": cfg["data"]["split"],
             "exclusion_window": cfg["data"]["exclusion_window"],
             "config_version": cfg["meta"]["config_version"],
-            "data_quality_waterfall": [
-                {"step": s, "rows": r, "episodes": e} for s, r, e in waterfall],
+            "data_quality_waterfall": waterfall_rows(waterfall),
         }, cfg, None, "bootstrap.prepare_data"), f, indent=2)
 
 
@@ -362,8 +430,13 @@ def main():
     d.to_parquet(args.out, index=False)
     write_manifest(args.manifest, cfg, wf)
 
-    for s, r, e in wf:
-        print(f"{s:32s} rows {r:>10,}  episodes {e:>9,}")
+    for row in waterfall_rows(wf):
+        detail = {k: v for k, v in row.items()
+                  if k not in ("step", "rows", "episodes")}
+        print(f"{row['step']:32s} rows {row['rows']:>10,}  "
+              f"episodes {row['episodes']:>9,}")
+        for k, v in detail.items():
+            print(f"{'':32s}   {k}: {v}")
     print(f"wrote {args.out} and {args.manifest}")
 
 

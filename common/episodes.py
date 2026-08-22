@@ -88,6 +88,36 @@ def leftover_units(starting_inventory, units_sold):
     return pd.Series(out, index=idx)
 
 
+def adjustment_reason(starting_inventory, units_sold, ending_inventory):
+    """Why an outcome's inventory does not reconcile, or None.
+
+    The event store quarantines any non-reconciling outcome that carries no
+    reason, and a quarantined outcome never lands -- so an unnamed but
+    legitimate break sinks event completeness and fails the shadow gate.
+
+      restock     ending EXCEEDS what was left: stock was added.
+      write-off   ending is exactly ZERO while stock remained. That is the
+                  source's own convention -- it writes the remainder off and
+                  reports 0 -- and it is recognised BY THE ZERO ITSELF, not
+                  by position in the episode.
+
+    Keying the write-off to "our last observed hour" was wrong and quarantined
+    real outcomes in bulk: the source zeroes at ITS episode boundary, and once
+    a window is merged across midnight that row sits in the MIDDLE of ours.
+    Position is our bookkeeping; the zero is the source's fact.
+
+    A PARTIAL shortfall -- ending above zero but below the leftover -- is
+    unexplained inventory loss, matches no convention, and returns None on
+    purpose so it quarantines and stays visible.
+    """
+    leftover = max(starting_inventory - units_sold, 0)
+    if ending_inventory > leftover:
+        return "intraday_restock"
+    if ending_inventory == 0 and leftover > 0:
+        return "episode_close_write_off"
+    return None
+
+
 def write_off_convention(last):
     """Is the source's closure sentinel present in this frame?
 

@@ -512,7 +512,7 @@ def test_adjustment_reason_names_every_legitimate_break():
     """Anything legitimate but unnamed quarantines, and a quarantined outcome
     never lands -- so a naming gap shows up as failed event completeness, not
     as a labelling bug."""
-    from pipeline.shadow import adjustment_reason as why
+    from common.episodes import adjustment_reason as why
 
     # a reported ZERO with stock remaining is the source's write-off, wherever
     # it falls. Position must NOT matter: the source zeroes at its own episode

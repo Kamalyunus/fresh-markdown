@@ -64,12 +64,12 @@ def test_filter_chain_waterfall(workspace):
     wf = manifest["data_quality_waterfall"]
     rows = [s["rows"] for s in wf if s["step"] != "contiguous_episodes_built"]
     assert rows == sorted(rows, reverse=True)
-    # every stage is named and counted -- 13 of them plus the raw row. The
+    # every stage is named and counted -- 15 of them plus the raw row. The
     # count is asserted so that adding or removing a filter has to be a
     # deliberate edit here, and so the figure quoted in the walkthrough and
     # design doc has something holding it to the code.
     assert wf[0]["step"] == "raw"
-    assert len(wf) == 14, [s["step"] for s in wf]
+    assert len(wf) == 16, [s["step"] for s in wf]
     d = pd.read_parquet("data/prepared.parquet")
     assert d.category.notna().all()
     assert (d.units_sold <= d.starting_inventory).all()
@@ -663,3 +663,99 @@ def test_restocked_episodes_are_dropped():
     steep.loc[steep.hour_of_day == 15, "units_sold"] = 8
     steep.loc[steep.hour_of_day > 15, "starting_inventory"] = 0
     assert len(restocked_episodes(steep)) == 0
+
+
+def test_negative_entry_window_is_recovered_not_dropped(workspace, tmp_path):
+    """A window counter that enters ALREADY negative is a known source
+    pattern, not a defect, and dropping it is not neutral.
+
+    Those episodes concentrate in a handful of categories, so dropping them
+    selects on category and biases every per-category figure -- the prior, the
+    per-subcategory `r`, the category IL split. They behave like a standard
+    short window, so they are recovered with a synthetic countdown instead.
+
+    The claim is CHECKED, not trusted: an episode entering negative that runs
+    LONGER than the assumed window is not the pattern, is not recovered, and
+    is dropped with its count reported.
+    """
+    _chdir(workspace)
+    from bootstrap.prepare_data import load_and_filter
+
+    cfg = yaml.safe_load(open("config.yaml"))
+    cap = cfg["data"]["manufacturing_window_hours"]
+    raw = pd.read_parquet("data/flc.parquet")
+
+    # make one whole episode enter negative, keeping it short enough to qualify
+    keys = ["skuseq", "fc", "date"]
+    victim = raw[keys].iloc[0]
+    mask = (raw.skuseq == victim.skuseq) & (raw.fc == victim.fc) \
+        & (raw.date == victim.date)
+    assert 0 < mask.sum() <= cap, mask.sum()
+    holed = raw.copy()
+    holed.loc[mask, "flc_window"] = -242        # the observed constant, roughly
+    path = tmp_path / "neg.parquet"
+    holed.to_parquet(path)
+
+    d, wf = load_and_filter(str(path), cfg)
+    rows = {t[0]: t for t in wf}
+    rec = rows["negative_window_recovered"][3]
+    assert rec["episodes_recovered"] >= 1
+    assert rec["window_hours_assumed"] == cap
+
+    # recovered rows survive, and carry a real countdown rather than a clamp:
+    # episode identification, the DP horizon and extend_to_window all
+    # difference this column, so a flat value would re-segment every hour
+    assert (d.hours_remaining >= 0).all()
+    surv = d[(d.sku_id == victim.skuseq) & (d.fc == victim.fc)]
+    if len(surv):
+        for _, g in surv.groupby("episode_id"):
+            steps = set(g.sort_values(["date", "hour_of_day"])
+                        .hours_remaining.diff().dropna())
+            assert steps <= {-1.0}, steps
+
+
+def test_an_unreconciled_hour_drops_the_episode(workspace, tmp_path):
+    """Every hour must reconcile or name why not, using the SAME function
+    production enforces -- so the analysis population cannot contain a break
+    `events.store` would quarantine.
+
+    Recognised by the ZERO, never by position: the source writes stock off at
+    ITS window boundary, and once a window is merged across midnight that row
+    sits in the MIDDLE of ours. A "only the last hour may break the chain"
+    test drops those episodes in bulk.
+    """
+    _chdir(workspace)
+    from bootstrap.prepare_data import load_and_filter
+    from common.episodes import adjustment_reason
+
+    cfg = yaml.safe_load(open("config.yaml"))
+    raw = pd.read_parquet("data/flc.parquet")
+    _, clean_wf = load_and_filter("data/flc.parquet", cfg)
+    clean = {t[0]: t[2] for t in clean_wf}
+
+    # a PARTIAL shortfall mid-episode: matches no convention, so it is
+    # unexplained inventory loss and the episode must go
+    holed = raw.copy()
+    row = holed.index[len(holed) // 2]
+    start, sold = holed.at[row, "inventory"], holed.at[row, "units_sold"]
+    holed.at[row, "ending_inventory"] = max(start - sold - 1, 0)
+    assert adjustment_reason(start, sold, holed.at[row, "ending_inventory"]) is None
+    path = tmp_path / "broken.parquet"
+    holed.to_parquet(path)
+
+    _, wf = load_and_filter(str(path), cfg)
+    got = {t[0]: t[2] for t in wf}
+    assert got["chain_break_dropped"] < got["units_gt_inventory_dropped"], \
+        "the unexplained shortfall did not drop its episode"
+    assert got["chain_break_dropped"] == clean["chain_break_dropped"] - 1
+
+    # ...while a write-off at the SAME position is documented and survives
+    ok = raw.copy()
+    ok.at[row, "ending_inventory"] = 0
+    if adjustment_reason(start, sold, 0) is not None:
+        path2 = tmp_path / "writeoff.parquet"
+        ok.to_parquet(path2)
+        _, wf2 = load_and_filter(str(path2), cfg)
+        got2 = {t[0]: t[2] for t in wf2}
+        assert got2["chain_break_dropped"] == clean["chain_break_dropped"], \
+            "a write-off recognised by the zero must not be treated as a break"

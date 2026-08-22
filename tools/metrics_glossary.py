@@ -39,7 +39,7 @@ CATALOGUE = [
 ("Population", "bootstrap.prepare_data → artifacts/split_manifest.json",
  "The rows every other number is measured on. Frozen at launch.", [
   ("data_quality_waterfall", "count",
-   "Rows and episodes remaining after each of the 13 filter stages, in order. "
+   "Rows and episodes remaining after each of the 15 filter stages, in order. "
    "The first entry is `raw`.", "every figure traces back through it"),
   ("episode_rule", "text",
    "The persisted definition of an episode: a maximal run of consecutive hourly "

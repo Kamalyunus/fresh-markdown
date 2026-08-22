@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 
 from common.config import load_config, design_effect
-from bootstrap.prepare_data import load_and_filter
+from bootstrap.prepare_data import load_and_filter, waterfall_rows
 from common import episodes
 
 PCTS = [10, 25, 50, 75, 90]
@@ -409,8 +409,7 @@ def main():
     cfg = load_config(args.config)
     d, waterfall = load_and_filter(args.input, cfg)
 
-    res = {"data_quality_waterfall": [
-        {"step": s, "rows": r, "episodes": e} for s, r, e in waterfall]}
+    res = {"data_quality_waterfall": waterfall_rows(waterfall)}
     res.update(run_all(d, cfg))
 
     import os

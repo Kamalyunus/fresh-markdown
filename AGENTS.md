@@ -475,13 +475,44 @@ which is worse than losing the episode.
 | `negative_quantities_dropped` | episode | impossible quantities: negative inventory or sales, and **`cost <= 0`** — note the `<=`. See the note below the table |
 | `null_category_dropped` | rows | missing category/subcategory (no reference discount, no dispersion cell) |
 | `zero_base_price_dropped` | rows | `original_price` still null/zero after ffill+bfill within the episode |
-| `negative_window_dropped` | episode | any `hours_remaining < 0` |
+| `negative_window_recovered` | episode | **not a drop.** A counter entering ALREADY negative is a known source pattern, not a defect — see the note below the table |
+| `negative_window_dropped` | episode | any `hours_remaining` still `< 0` after recovery |
 | `window_too_long_dropped` | episode | `hours_remaining` above `data.max_window_hours` (**120**) — flc_window carries very large values from upstream data issues. Raised from 48 by the owner: 48 was cutting legitimate multi-day windows, not only defects |
 | `below_cost_dropped` | episode | any hour whose OFFERED price is under cost — legacy already violated the floor, so the episode is not evidence about a system that cannot. Test `original_price × (1 − discount)`, NEVER `applied_price`: the source zeroes that on zero-sale rows (~78% of rows), so a filter reading it is blind on exactly those and below-cost hours survive to be rejected one-by-one at decision time |
 | `non_priceable_dropped` | episode | `cost >= original_price`, i.e. `d_max <= 0`: no feasible tier exists |
 | `units_gt_inventory_dropped` | episode | sales exceed the inventory on hand |
+| `chain_break_dropped` | episode | an hour where `ending != starting − sold` that `common.episodes.adjustment_reason` cannot name — unexplained inventory loss |
 | `contiguous_episodes_built` | — | re-segmentation, not a filter: episode count can RISE here because earlier drops split windows |
 | `restocked_episodes_dropped` | episode | an hour opens with more stock than the previous hour left — mid-window replenishment breaks the one-inventory-pool assumption the DP rests on. Runs AFTER re-segmentation; across a data gap the jump would read as a restock |
+
+**A counter that enters ALREADY negative is recovered, not dropped.** Some
+SKUs arrive with `flc_window` set to a large negative constant rather than a
+countdown. Dropping them is not neutral — they concentrate in a handful of
+categories, so it selects on category and biases the prior, the per-subcategory
+`r`, and every category-level IL figure. They behave like a standard short
+window, so `negative_window_recovered` rewrites the counter as a synthetic
+countdown from `data.manufacturing_window_hours`.
+
+**The cap is a claim about the data, and the stage checks it rather than
+trusting it.** An episode entering negative that runs LONGER than the cap is
+not the pattern: it is not recovered, it falls through to
+`negative_window_dropped`, and its count is reported as
+`episodes_entering_negative_but_longer_than_cap`. **If that count is not
+near-zero on your extract, the cap is wrong — fix the cap, do not widen the
+recovery.** Recovery writes a countdown, never a clamp: the counter is
+load-bearing three ways (episode identification differences it, the DP takes
+its horizon from it, `extend_to_window` generates the tail from it), and a flat
+value would make re-segmentation split every hour.
+
+**`chain_break_dropped` uses the SAME rule production enforces.** Every hour
+must reconcile — `ending == starting − sold` — or `adjustment_reason` must
+name why not, exactly as `events.store._validate_outcome` requires of a live
+outcome. Without it the analysis population could contain breaks production
+would quarantine. Recognised **by the zero, never by position**: the source
+writes stock off at ITS window boundary, and once a window is merged across
+midnight that row sits in the MIDDLE of ours, so a "only the last hour may
+break the chain" test drops those episodes in bulk. A partial shortfall
+(`0 < ending < leftover`) matches no convention and is what this stage removes.
 
 **`negative_quantities_dropped` tests `cost <= 0`, not `cost < 0`, and the
 `=` is load-bearing.** It was `< 0` until a zero cost crashed the solver, and

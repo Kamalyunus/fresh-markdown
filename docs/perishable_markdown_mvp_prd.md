@@ -430,7 +430,7 @@ Three load-bearing properties:
 
 ### 9.2 Filter chain
 
-Deterministic, auditable order — **thirteen named stages**, each counted into the waterfall. **Almost every stage drops the WHOLE EPISODE, not the offending row**: a hole punched mid-window re-segments into a spurious short episode, which is worse than losing the episode.
+Deterministic, auditable order — **fifteen named stages**, each counted into the waterfall. **Almost every stage drops the WHOLE EPISODE, not the offending row**: a hole punched mid-window re-segments into a spurious short episode, which is worse than losing the episode.
 
 | # | Stage | Scope | Drops |
 | --- | --- | --- | --- |
@@ -440,13 +440,15 @@ Deterministic, auditable order — **thirteen named stages**, each counted into 
 | 4 | `negative_quantities_dropped` | episode | impossible quantities: negative inventory or sales, and **`cost <= 0`** — a zero cost is a *missing* cost, not a free good |
 | 5 | `null_category_dropped` | rows | missing category/subcategory |
 | 6 | `zero_base_price_dropped` | rows | `original_price` still null or zero after ffill+bfill within the episode |
-| 7 | `negative_window_dropped` | episode | any `hours_remaining < 0` |
-| 8 | `window_too_long_dropped` | episode | `hours_remaining` above `data.max_window_hours` |
-| 9 | `below_cost_dropped` | episode | any hour whose **offered** price is under cost — tested on `original_price × (1 − discount)`, never `applied_price`, which the source zeroes on zero-sale rows |
-| 10 | `non_priceable_dropped` | episode | `cost >= original_price`, i.e. `d_max <= 0`: no feasible tier exists |
-| 11 | `units_gt_inventory_dropped` | episode | sales exceed the inventory on hand |
-| 12 | `contiguous_episodes_built` | — | re-segmentation, not a filter: episode count can RISE here because earlier drops split windows |
-| 13 | `restocked_episodes_dropped` | episode | an hour opens with more stock than the previous hour left |
+| 7 | `negative_window_recovered` | episode | **not a drop.** An episode whose counter enters ALREADY negative and runs no longer than `data.manufacturing_window_hours` is a known source pattern, not a defect; its counter is rewritten as a synthetic countdown. The stage reports what it recovered, since it changes no counts |
+| 8 | `negative_window_dropped` | episode | any `hours_remaining` still `< 0` after recovery |
+| 9 | `window_too_long_dropped` | episode | `hours_remaining` above `data.max_window_hours` |
+| 10 | `below_cost_dropped` | episode | any hour whose **offered** price is under cost — tested on `original_price × (1 − discount)`, never `applied_price`, which the source zeroes on zero-sale rows |
+| 11 | `non_priceable_dropped` | episode | `cost >= original_price`, i.e. `d_max <= 0`: no feasible tier exists |
+| 12 | `units_gt_inventory_dropped` | episode | sales exceed the inventory on hand |
+| 13 | `chain_break_dropped` | episode | an hour where `ending != starting − sold` and `common.episodes.adjustment_reason` names no reason — unexplained inventory loss. The SAME rule `events.store` enforces in production, so the analysis population cannot hold a break production would quarantine |
+| 14 | `contiguous_episodes_built` | — | re-segmentation, not a filter: episode count can RISE here because earlier drops split windows |
+| 15 | `restocked_episodes_dropped` | episode | an hour opens with more stock than the previous hour left |
 
 Two of these deserve their reasoning stated, because both were written after the omission caused a defect.
 

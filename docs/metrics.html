@@ -114,7 +114,7 @@ footer code{font-family:var(--data)}
 <p class="src">bootstrap.prepare_data → artifacts/split_manifest.json</p>
 <p class="intro">The rows every other number is measured on. Frozen at launch.</p>
 <div class="rows">
-<div class="row" data-gate="0"><div class="nm">data_quality_waterfall<span class="u">n</span></div><div class="mn">Rows and episodes remaining after each of the 13 filter stages, in order. The first entry is <code>raw</code>.<span class="rd">every figure traces back through it</span></div></div>
+<div class="row" data-gate="0"><div class="nm">data_quality_waterfall<span class="u">n</span></div><div class="mn">Rows and episodes remaining after each of the 15 filter stages, in order. The first entry is <code>raw</code>.<span class="rd">every figure traces back through it</span></div></div>
 <div class="row" data-gate="0"><div class="nm">episode_rule<span class="u">…</span></div><div class="mn">The persisted definition of an episode: a maximal run of consecutive hourly rows for one SKU × FC over which the source hours-remaining counter decrements by one per elapsed hour. NOT keyed by date.<span class="rd">production must derive identical boundaries</span></div></div>
 <div class="row" data-gate="0"><div class="nm">split.train / calib / test<span class="u">…</span></div><div class="mn">Date windows, fixed before any model was fit. An episode belongs wholly to the split its window STARTED in.<span class="rd">the calibration gate, which must not grade its own fit</span></div></div>
 </div>
