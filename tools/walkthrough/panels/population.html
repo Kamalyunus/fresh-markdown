@@ -1,0 +1,109 @@
+
+<section class="prose" style="padding-top:34px">
+  <div class="step-head"><h2>What the business actually looks like</h2></div>
+  <p class="lede">
+    The previous tab is about how the population was <em>built</em> — which rows survive and
+    why. This one is about what survived: how much of it there is, where the money sits, how
+    much room to discount exists before the cost floor bites, and whether the data supports
+    the structure the rest of the system assumes.
+  </p>
+  <p>
+    Every figure below is read live from <code>reports/eda.json</code> when this page is
+    built, so nothing here can drift from the extract the way a typed number can. The full
+    fifteen panels live in <strong>docs/eda.html</strong>; these are the ones that change a
+    decision.
+  </p>
+</section>
+
+<x-filecard path="reports/eda.json" holds="fifteen descriptive panels on the population, and the chart series behind them" state="per run" reader="docs/eda.html and this tab"></x-filecard>
+
+<x-eda-chips></x-eda-chips>
+
+<section class="prose">
+  <h3 style="margin-top:34px">The money is concentrated, and that decides where to spend attention</h3>
+  <p>
+    Inventory Loss is currency, and the exploration budget is a currency amount. So the
+    question "which SKUs matter" has a precise answer: the ones carrying the exposure. A
+    deliberately non-optimal price on a tail SKU costs the same slice of budget as one on a
+    head SKU and buys a fraction of the measurable evidence.
+  </p>
+  <p>
+    The curve below is cumulative COGS at risk — unit cost times opening stock, counted once
+    per episode — against SKUs ordered by it. The dashed diagonal is what a perfectly even
+    business would look like. The gap between them is the whole point.
+  </p>
+</section>
+
+<x-eda-chart key="pareto"></x-eda-chart>
+
+<section class="prose">
+  <h3 style="margin-top:34px">How much room there is before the cost floor</h3>
+  <p>
+    The agent may never price below cost, and that is structural rather than a rule it
+    follows: the action set is built from <span class="term">d_max = 1 − cost/price</span>,
+    so a below-cost price is not expressible. What that costs is <em>options</em>. An episode
+    whose cost ratio is high has few feasible tiers, and one with fewer than two cannot be
+    experimented on at any price.
+  </p>
+</section>
+
+<x-eda-chart key="cost_geometry"></x-eda-chart>
+
+<div class="callout">
+  <h3>The deep entry arm is not always there</h3>
+  <p>
+    Entry offers five arms, from 15pp shallower than the category reference to one 5pp step
+    deeper. The single deeper arm is the escape valve for the clearance/scrap trade — the
+    only way the agent can choose to clear harder rather than protect margin. The cost floor
+    removes it wherever the cost ratio is high, and until this panel existed nobody had
+    measured how often.
+  </p>
+  <p style="margin-top:14px">
+    Read this as a statement about <em>capability</em>, not about data quality. Where the
+    deep arm is absent, the DP is choosing from a shorter menu, and the clearance figure it
+    produces on those episodes is the best it could do rather than the best there is.
+  </p>
+</div>
+
+<x-eda-chart key="entry_arms"></x-eda-chart>
+
+<section class="prose">
+  <h3 style="margin-top:34px">Does the hierarchy have anything to work with?</h3>
+  <p>
+    Three separate mechanisms fall back to a parent when a cell is too thin: dispersion
+    (subcategory → category → global), level calibration (shrunk toward the parent by the
+    evidence behind it), and the posterior cell map. Each has its own minimum. Whether those
+    minimums are cleared decides whether the system is really operating at subcategory grain
+    or has quietly collapsed to global.
+  </p>
+  <p>
+    A low share here is <strong>not a failure</strong> — the hierarchy is built for it, and a
+    factor fit on a handful of rows is noise that gets projected onto prices. It is a fact
+    about what grain the answers are really at.
+  </p>
+</section>
+
+<x-eda-chart key="cells"></x-eda-chart>
+
+<section class="prose">
+  <h3 style="margin-top:34px">And whether the level held still</h3>
+  <p>
+    The last one earns its place by history. The calibration factors are fit on one window
+    and applied forward, and the fortnight originally chosen turned out to be the most
+    anomalous stretch in five months — so the factors inherited the anomaly and pushed the
+    gate the wrong way. It took a round of debugging to find. This plot would have shown it
+    in a second.
+  </p>
+</section>
+
+<x-eda-chart key="drift"></x-eda-chart>
+
+<section class="prose">
+  <p style="margin-top:22px">
+    None of this decides anything. It produces no gate, no threshold, and no value that gets
+    pasted into the configuration — <code>bootstrap.measure</code> owns those, and a second
+    source for one of them is exactly the kind of quiet disagreement this system has a
+    checker for. What it does is make the population legible before any model is fit on it,
+    which is the only point at which a surprise is cheap.
+  </p>
+</section>

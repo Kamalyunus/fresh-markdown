@@ -191,3 +191,53 @@ def test_it_runs_end_to_end_from_the_command_line(frame, tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     assert json.loads((tmp_path / "eda.json").read_text())["panels"]
     assert (tmp_path / "eda.html").read_text().startswith("<!doctype html>")
+
+
+# ------------------------------------------------- the walkthrough's EDA tab
+
+def test_the_walkthrough_builds_without_a_report(tmp_path, monkeypatch):
+    """`reports/` is gitignored, so a fresh clone has none. The tab must still
+    build, and must say what is missing rather than render an empty space that
+    reads like a finding of zero."""
+    import importlib
+    from tools.walkthrough import panels as P
+
+    monkeypatch.setattr(P, "EDA_REPORT", tmp_path / "absent.json")
+    html = P._expand(open(P.PANEL_DIR / "population.html").read())
+    assert "not built yet" in html
+    assert "python3 -m tools.eda" in html
+    assert 'class="chart"' not in html, "an empty chart is worse than a note"
+
+
+def test_the_tab_renders_from_the_report_when_there_is_one(tmp_path, monkeypatch,
+                                                           report):
+    from tools.walkthrough import panels as P
+
+    path = tmp_path / "eda.json"
+    path.write_text(json.dumps(report))
+    monkeypatch.setattr(P, "EDA_REPORT", path)
+    html = P._expand(open(P.PANEL_DIR / "population.html").read())
+    assert "not built yet" not in html
+    assert html.count('class="chart"') >= 4
+    # every chip resolves against a real field, or it is silently absent --
+    # which would be the walkthrough quietly losing a figure
+    for label, key, _, _ in P.CHIPS:
+        assert label in html, f"chip {label} ({key}) did not resolve"
+
+
+def test_the_tab_and_the_eda_page_share_one_chart_renderer():
+    """Two renderers for one series is two chances to draw it differently."""
+    import inspect
+    from tools.walkthrough import panels as P
+    assert "from tools.eda_page import KINDS" in inspect.getsource(P._eda_chart)
+
+
+def test_every_chart_the_tab_asks_for_exists(report):
+    import re
+    from tools.walkthrough import panels as P
+    wanted = re.findall(r'<x-eda-chart key="([a-z_]+)">',
+                        open(P.PANEL_DIR / "population.html").read())
+    assert wanted, "the tab asks for no charts at all"
+    for key in wanted:
+        assert key in report["panels"], f"tab wants chart {key}, no such panel"
+        assert report["panels"][key].get("chart"), f"panel {key} draws nothing"

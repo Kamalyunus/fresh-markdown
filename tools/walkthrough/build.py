@@ -81,6 +81,24 @@ TAB_CSS = """
   /* a sub-label inside a prose table cell */
   td .sub { display: block; color: var(--muted); font-weight: 400; font-size: 12px; }
 
+  /* charts rendered from reports/eda.json by tools.eda_page -- one renderer,
+     two pages, so the walkthrough and docs/eda.html cannot draw the same
+     series two different ways. Only the palette differs. */
+  .chart { width: 100%; height: auto; overflow: visible; display: block; }
+  .chart .grid { stroke: var(--rule); stroke-width: 1; }
+  .chart .ref { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 4;
+    opacity: .6; }
+  .chart .tick { fill: var(--muted); font-size: 10px; font-family: var(--data); }
+  .chart .axis { fill: var(--muted); font-size: 10px; letter-spacing: .06em;
+    text-transform: uppercase; font-family: var(--body); }
+  .chart .bar { fill: var(--green); opacity: .85; }
+  .chart polyline { fill: none; stroke-width: 1.8; }
+  .chart .s0 { stroke: var(--green); }
+  .chart .s1 { stroke: var(--loss); }
+  .chart .legend { font-size: 11px; font-family: var(--body); }
+  .chart .s0t { fill: var(--green); }
+  .chart .s1t { fill: var(--loss); }
+
   /* the file an artifact lives in, stated once at the top of its tab */
   .filecard {
     display: flex; flex-wrap: wrap; gap: 6px 26px; align-items: baseline;
@@ -181,6 +199,7 @@ TABS = [
     # key stays "map" so any shared #map link keeps working
     ("map",   "Architecture",     "the whole system"),
     ("data",  "Data",             "split_manifest.json"),
+    ("population", "Population",  "what the business looks like"),
     ("model", "Demand",           "baseline_model.txt"),
     ("calib", "Calibration",      "calibration.json"),
     ("var",   "Variance",         "r_lookup · rho"),

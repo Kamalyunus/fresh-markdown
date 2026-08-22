@@ -930,6 +930,27 @@ claim instead of leaving it stale. `reports/eda.json` carries every number
 including the chart series; `docs/eda.html` is a pure view over it and cannot
 show a figure the report does not contain.
 
+It is also a **walkthrough tab** ("Population", after Data). That tab is
+authored prose with the figures read LIVE from `reports/eda.json` at build
+time via two tags the panel loader expands:
+
+```html
+<x-eda-chips></x-eda-chips>
+<x-eda-chart key="pareto"></x-eda-chart>
+```
+
+Charts come from `tools.eda_page.KINDS`, the same renderer `docs/eda.html`
+uses — two pages, one definition, so the same series cannot be drawn two
+different ways. Nothing on that tab is typed, so it cannot go stale the way
+the Replay tab's figures can (which is why those needed
+`tools/walkthrough/figures.py` and this does not).
+
+`reports/` is gitignored, so a fresh clone has no report: the tags then render
+a visible "not built yet" note naming the command. **Never make the
+walkthrough build depend on a pipeline run** — an empty chart reads like a
+finding of zero, and a build that fails without artifacts is a build nobody
+can do.
+
 The panels worth reading first on a fresh extract:
 
 - **anchors** — anchor rows per subcategory in BOTH bands (`tier_step/2` for
