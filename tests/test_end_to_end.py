@@ -106,6 +106,24 @@ def test_prepared_data_is_priceable_and_self_consistent(workspace):
     assert (d.hours_remaining >= 0).all()
     assert (d.hours_remaining <= cfg["data"]["max_window_hours"]).all()
 
+    # No episode may sell more than it opened with. This is NOT a filter --
+    # it is the joint consequence of two that are: per-hour
+    # `sold <= starting_inventory`, and a chain that never increases
+    # (restocked_episodes_dropped). By induction those give
+    # `start_t <= start_1 - sum(sold before t)`, so the episode total cannot
+    # exceed the opening stock.
+    #
+    # An earlier hand-written cleaner checked the episode total directly. It
+    # is redundant here ONLY while both of those hold, and the subsumption
+    # breaks silently if the chain is reordered -- moving the restock stage
+    # before re-segmentation, or dropping the per-hour test -- so the
+    # invariant is asserted on the output rather than argued in a comment.
+    g = d.sort_values(["episode_id", "date", "hour_of_day"]).groupby("episode_id")
+    over = g.units_sold.sum() > g.starting_inventory.first()
+    assert not over.any(), (
+        f"{int(over.sum())} episodes sell more than they opened with -- the "
+        "per-hour and restock stages no longer cover the episode total")
+
     # the exclusion window is removed whole-episode, so no survivor may have
     # ANY hour inside it
     excl = cfg["data"]["exclusion_window"]

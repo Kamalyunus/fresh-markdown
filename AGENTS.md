@@ -482,6 +482,17 @@ which is worse than losing the episode.
 | `non_priceable_dropped` | episode | `cost >= original_price`, i.e. `d_max <= 0`: no feasible tier exists |
 | `units_gt_inventory_dropped` | episode | sales exceed the inventory on hand |
 | `chain_break_dropped` | episode | an hour where `ending != starting − sold` that `common.episodes.adjustment_reason` cannot name — unexplained inventory loss |
+
+**There is deliberately no episode-total check.** "Episode `Σ sold` exceeds
+its opening stock" is not a separate defect: it is the joint consequence of
+`units_gt_inventory_dropped` (per hour, `sold <= start`) and
+`restocked_episodes_dropped` (the chain never increases). By induction those
+give `start_t <= start_1 − Σ sold before t`, so the total cannot exceed the
+opening stock — verified at 0 of 1,714 episodes on the prepared output. The
+subsumption holds ONLY while both stages are in force and the restock test
+compares consecutive rows inside an episode, so
+`test_prepared_data_is_priceable_and_self_consistent` asserts the invariant on
+the output rather than trusting the argument.
 | `contiguous_episodes_built` | — | re-segmentation, not a filter: episode count can RISE here because earlier drops split windows |
 | `restocked_episodes_dropped` | episode | an hour opens with more stock than the previous hour left — mid-window replenishment breaks the one-inventory-pool assumption the DP rests on. Runs AFTER re-segmentation; across a data gap the jump would read as a restock |
 
