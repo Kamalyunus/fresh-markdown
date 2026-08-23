@@ -526,3 +526,65 @@ def test_shrink_and_restock_in_one_episode_are_both_counted(cfg):
     assert scrap_units(d).iloc[0] == 3.0
     # and the business gets told where to look
     assert detail["unreconciled_anomalies"]["units_unaccounted"] == 2
+
+
+# --------------------------------------------- clearance excludes unfinished
+
+def _closed_and_unclosed():
+    """Two episodes with the write-off convention in force, so `classify_last`
+    can actually read closure: A finished, B cut off mid-window."""
+    rows = [("A", 10, 3, 10, 4, 6), ("A", 11, 2, 6, 3, 3), ("A", 12, 1, 3, 0, 0),
+            ("B", 10, 9, 10, 1, 9), ("B", 11, 8, 9, 1, 8)]
+    d = pd.DataFrame(rows, columns=[
+        "episode_id", "hour_of_day", "hours_remaining",
+        "starting_inventory", "units_sold", "ending_inventory"])
+    d["date"] = "2026-03-01"
+    d["category"] = "MEAT"
+    d["cost"] = 4000.0
+    d["original_price"] = 10_000.0
+    d["total_discount"] = 0.25
+    return d
+
+
+def test_an_unfinished_episode_has_no_clearance_to_report(cfg):
+    """"Sold so far" is not clearance, and averaging it in biases ONE way.
+
+    A window that has not ended has by definition sold less than it will, and
+    unclosed episodes are the LARGEST in the extract -- 3.38% of the count
+    holding 78.6% of at-risk leftover units on production. So the drag is far
+    bigger than the share. Here one unclosed episode pulled the mean from 0.70
+    to 0.45 before it was excluded.
+    """
+    from common import episodes as E
+    from tools.eda import p_clearance
+    d = _closed_and_unclosed()
+
+    assert E.classify(d)["B"] == E.NOT_CLOSED
+    # B passes eligibility -- identity holds, final hour clean -- which is why
+    # eligibility alone was not enough to keep it out
+    assert E.episode_flow(d).loc["B", "eligible"]
+
+    out = p_clearance(d, cfg)
+    assert out["mean_clearance"] == pytest.approx(0.70), \
+        "an unfinished episode is being averaged into clearance again"
+    assert out["supply"]["episodes_excluded_unclosed"] == 1
+    assert out["supply"]["max_clearance"] <= 1.0
+
+
+def test_the_backtest_grades_on_known_outcomes_only(cfg):
+    """The same bias, and worse, because the two arms are asymmetric.
+
+    For an unfinished episode the ACTUAL arm carries only the observed sales
+    -- synthetic extension rows carry `units_sold = 0` -- and no scrap, since
+    `outcome_known` zeroes it. Both SIMULATED arms run the full extended
+    horizon and book scrap at the end. So the actual arm is truncated while
+    the arms it is graded against are not, and the DP looks better by exactly
+    the tail the extract did not cover.
+    """
+    import inspect
+    from backtest import replay
+    src = inspect.getsource(replay.policy_replay)
+    assert "ep = ep_all[ep_all.outcome_known]" in src, \
+        "the backtest is aggregating over unfinished episodes again"
+    assert "episodes_excluded_unclosed" in src, \
+        "the exclusion must be counted, not silent"

@@ -336,20 +336,27 @@ def p_clearance(d, cfg):
     cleared and counted in `share_fully_cleared`, while it scrapped 4 units.
     The histogram clipped at 1.0, so nothing showed.
 
-    `episodes.episode_flow` nets the hourly discrepancies before calling
-    anything an arrival, so a sale the feed bucketed an hour late -- a +1 and
-    a -1 that cancel -- does not inflate supply. Clearance cannot exceed 1.
+    Clearance cannot exceed 1: supply counts everything that arrived.
     """
     op = _openings(d)
     all_flow = episodes.episode_flow(d).reindex(op.episode_id)
-    # an episode whose flow does not reconcile has no trustworthy clearance --
-    # that is the whole reason the identity is checked -- so it is counted and
-    # excluded rather than averaged in
-    keep = all_flow.eligible.to_numpy()
+    kind = episodes.classify(d).reindex(op.episode_id)
+
+    # Two exclusions, both counted rather than quietly averaged in.
+    #
+    #   NOT ELIGIBLE   the close is ambiguous, so no figure here is safe.
+    #   NOT CLOSED     the window has not ended. Its "clearance" is only
+    #                  sold-so-far, and the bias runs ONE way -- an unfinished
+    #                  episode has by definition sold less than it will. These
+    #                  are also the largest episodes in the extract, so the
+    #                  drag is far bigger than their count suggests: on a
+    #                  two-episode example one unclosed window pulled the mean
+    #                  from 0.70 to 0.45.
+    unclosed = (kind == episodes.NOT_CLOSED).to_numpy()
+    keep = all_flow.eligible.to_numpy() & ~unclosed
     flow = all_flow[keep]
     rate = flow.clearance.to_numpy()
-    kind = episodes.classify_last(_closings(d))
-    counts = kind.value_counts()
+    counts = episodes.classify_last(_closings(d)).value_counts()
     frame = pd.DataFrame({"category": op.category.to_numpy()[keep],
                           "rate": rate})
     n = max(len(flow), 1)
@@ -371,7 +378,10 @@ def p_clearance(d, cfg):
             "supply_over_opening": round(
                 float(flow.supply.sum() / max(flow.opening.sum(), 1)), 4),
             "max_clearance": round(float(rate.max()) if len(rate) else 0.0, 4),
-            "episodes_excluded_not_eligible": int((~keep).sum()),
+            "episodes_excluded_not_eligible": int(
+                (~all_flow.eligible.to_numpy()).sum()),
+            "episodes_excluded_unclosed": int(
+                (kind == episodes.NOT_CLOSED).sum()),
             "note": ("clearance = sold / (opening + net arrivals), over the "
                      "episodes whose flow identity holds. Against opening "
                      "stock alone a restocked episode reads above 1.0 -- and "

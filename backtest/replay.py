@@ -569,9 +569,32 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
         for day, costs in spreads:
             ledger.add(day, costs)
 
-    ep = pd.DataFrame(rows)
-    if not len(ep):
+    ep_all = pd.DataFrame(rows)
+    if not len(ep_all):
         raise RuntimeError("no episodes replayed")
+
+    # EVERY aggregate is taken over episodes whose outcome is KNOWN, and the
+    # rest are counted rather than quietly averaged in. An unclosed episode is
+    # not half an episode, it is an unfinished one, and it biases the
+    # comparison one way only:
+    #
+    #   the ACTUAL arm carries just the observed sales -- the synthetic
+    #   extension rows carry `units_sold = 0` -- and no scrap, since
+    #   `outcome_known` zeroes it;
+    #   the two SIMULATED arms run the full extended horizon and book the
+    #   scrap at the end of it.
+    #
+    # So the actual arm is truncated while the arms it is graded against are
+    # not. Its clearance reads as "sold so far", its IL is missing the scrap
+    # term entirely, and the DP looks better than it is by exactly the amount
+    # of window the extract did not cover. These are the LARGEST episodes in
+    # the data, so the effect is not small.
+    ep = ep_all[ep_all.outcome_known]
+    if not len(ep):
+        raise RuntimeError(
+            "no episode in this sample has a known outcome -- every aggregate "
+            "would compare a truncated actual arm against two full-horizon "
+            "simulated ones")
 
     def money(col):
         return round(float(ep[col].sum()), 1)
@@ -579,7 +602,13 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
     lg_il, dp_il = float(ep.legacy_model_il.sum()), float(ep.dp_il.sum())
     block = {
         "episodes_replayed": int(len(ep)),
-        "share_outcome_known": round(float(ep.outcome_known.mean()), 4),
+        "episodes_excluded_unclosed": int(len(ep_all) - len(ep)),
+        "share_outcome_known": round(float(ep_all.outcome_known.mean()), 4),
+        "basis_note": ("every figure below is over episodes with a KNOWN "
+                       "outcome. An unfinished one gives the actual arm only "
+                       "the hours the extract covered while both simulated "
+                       "arms run the full window, which flatters the DP by "
+                       "exactly the missing tail."),
         "actual_il": money("actual_il"),
         "actual_discount_cost": money("actual_discount_cost"),
         "actual_scrap_cost": money("actual_scrap_cost"),
