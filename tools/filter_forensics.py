@@ -50,7 +50,7 @@ from bootstrap.prepare_data import cogs_at_risk
 from common import episodes
 from common.config import load_config
 
-CHAIN = "chain_break_dropped"
+CHAIN = "episode_universe"
 
 
 def _slice(d, ids):
@@ -68,7 +68,13 @@ def _money(d, ids, raw_cogs):
 # ----------------------------------------------------------------- chain break
 
 def chain_break(before, raw_cogs):
-    """The two things the stage drops, told apart and priced."""
+    """What the episode universe removes, and where the shrink sits.
+
+    The stage drops ONE thing now -- a discontinuous chain. Hour-level shrink
+    is no longer a drop at all: it settles into scrap at the episode level.
+    But the shrink question the business has to answer is unchanged, so it is
+    still decomposed here.
+    """
     before = before.sort_values(["sku_id", "fc", "date", "hour_of_day"])
     start = before.starting_inventory.to_numpy()
     sold = before.units_sold.to_numpy()
@@ -80,7 +86,8 @@ def chain_break(before, raw_cogs):
     disc = episodes.continuity_breaks(before)
     broken = short | disc
     if not broken.any():
-        return {"episodes": 0, "note": "no episode trips this stage"}
+        return {"episodes": 0,
+                "note": "no episode carries shrink or a broken chain"}
 
     hit = before.episode_id.isin(before.loc[broken, "episode_id"].unique())
     ids = before.loc[hit, "episode_id"].unique()

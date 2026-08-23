@@ -137,10 +137,6 @@ def test_a_partial_shortfall_is_decomposed_not_just_counted(cfg, tmp_path):
     cause = blk["cause"]
     assert cause["rows_unexplained_shortfall"] > 0
     assert blk["shortfall"]["share_of_1_unit"] == 1.0
-    # a shortfall almost always breaks continuity too -- the next hour opens
-    # from a figure this hour disputes -- so the two causes must overlap
-    # heavily rather than partition
-    assert cause["rows_both"] > 0
     assert cause["cogs_shortfall"]["cogs_at_risk"] > 0
 
 
@@ -154,7 +150,7 @@ def test_the_tool_prices_whole_episode_scoping_separately(cfg, tmp_path):
     cost = blk["episode_scoping_cost"]
     assert cost["episodes_with_exactly_one_broken_hour"] > 0
     assert cost["share"] > 0.5, \
-        "scattered single-hour breaks should dominate a scattered injection"
+        "scattered single-hour shrink should dominate a scattered injection"
     assert cost["median_episode_length_hours"] > cost["median_broken_hours"]
     # the money behind them is reported, not just the count
     assert cost["cogs_in_single_broken_hour_episodes"]["cogs_at_risk"] > 0

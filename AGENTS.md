@@ -666,12 +666,11 @@ spread in the data.
 | `exclusion_window_removed` | episode | any episode with ANY hour in the known demand-issue window. SCOPE, not integrity: the rows are fine, the period is not |
 | `discount_out_of_range_dropped` | episode | discount outside [0,1] — the percent->fraction conversion applied twice or not at all |
 | `negative_quantities_dropped` | episode | impossible quantities: negative inventory or sales. **Not `cost <= 0`** — that is a flag now; see the note below |
-| `null_category_dropped` | rows | missing category/subcategory (no reference discount, no dispersion cell) |
-| `zero_base_price_dropped` | rows | `original_price` still null/zero after ffill+bfill within the episode |
+| `null_category_dropped` | episode | missing category/subcategory (no reference discount, no dispersion cell). EPISODE-scoped: row scoping punched a hole mid-window, which re-segmentation then had to clean up — and it manufactured chain breaks, 20 of them on the fixture, that the feed never had |
+| `zero_base_price_dropped` | episode | `original_price` still null/zero after ffill+bfill within the episode. EPISODE-scoped, same reason |
 | `negative_window_recovered` | episode | **not a drop.** A counter entering ALREADY negative is a known source pattern, not a defect — see the note below the table |
-| `units_gt_inventory_dropped` | episode | sales exceed the inventory on hand |
-| `chain_break_dropped` | episode | an hour where `ending != starting − sold` that `common.episodes.adjustment_reason` cannot name — unexplained inventory loss. **The single largest filter in the chain: 168,108 episodes, 33.6pp of COGS** on the Aug-21 extract, and the episodes it takes average ₩133.8k of exposure against ₩29.5k for the ones it keeps — a 4.5× size selection, so it is removing a subpopulation, not noise. Run `tools.filter_forensics` before defending it |
-| `contiguous_episodes_built` | — | re-segmentation, not a filter: episode count and COGS both MOVE here because earlier drops split windows, and one opening row becomes two |
+| `episode_universe` | episode | the three conditions that make an episode's inventory readable, evaluated once and BEFORE any filter with an opinion about price, category or cost. Only continuity DROPS; see below |
+| `contiguous_episodes_built` | — | re-segmentation. Now a NO-OP: every drop after the ids are assigned is episode-scoped, so nothing punches a hole for it to clean up. Kept as the check that this stays true |
 | `dp_eligible` | — | **not a drop.** The terminal SUMMARY row: how much of the surviving population the DP can act on, with a per-reason breakdown in its detail block |
 
 ### The source's inventory convention

@@ -204,7 +204,17 @@ def episode_flow(d):
     status = hour_status(d.starting_inventory, d.units_sold, d.ending_inventory)
     disc = ((d.starting_inventory.to_numpy() - d.ending_inventory.to_numpy())
             - d.units_sold.to_numpy())
-    disc = np.where(status == WRITE_OFF, 0, disc)
+    # The write-off exemption applies to the LAST ROW ONLY. The source zeroes
+    # `ending` when a listing closes, so that row's arithmetic must not be
+    # read as stock vanishing -- but mid-episode a zero ending with stock
+    # still owed is not a close, it is shrink, and exempting it loses those
+    # units. Found by brute force: 282 of 4,000 randomly generated CONTINUOUS
+    # episodes failed the identity, all of them because a mid-episode row was
+    # being waved through as a write-off.
+    # `d` is already in time order, so the last occurrence of each id is its
+    # final hour.
+    is_last_row = ~d.episode_id.duplicated(keep="last").to_numpy()
+    disc = np.where((status == WRITE_OFF) & is_last_row, 0, disc)
 
     g = pd.DataFrame({"episode_id": d.episode_id.to_numpy(), "disc": disc,
                       "sold": d.units_sold.to_numpy(),

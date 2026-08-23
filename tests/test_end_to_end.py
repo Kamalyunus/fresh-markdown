@@ -1094,84 +1094,54 @@ def test_negative_entry_window_is_recovered_not_dropped(workspace, tmp_path):
             assert steps <= {-1.0}, steps
 
 
-def test_an_unreconciled_hour_drops_the_episode(workspace, tmp_path):
-    """Every hour must reconcile or name why not, using the SAME function
-    production enforces -- so the analysis population cannot contain a break
-    `events.store` would quarantine.
+def test_an_unreconciled_hour_becomes_shrink_not_a_drop(workspace, tmp_path):
+    """Stock that vanishes is COUNTED, not deleted with its episode.
 
-    Recognised by the ZERO, never by position: the source writes stock off at
-    ITS window boundary, and once a window is merged across midnight that row
-    sits in the MIDDLE of ours. A "only the last hour may break the chain"
-    test drops those episodes in bulk.
+    A partial shortfall -- `0 < ending < starting - sold` -- is stock that
+    left unsold and unwritten-off. It used to drop the whole window, which on
+    the production extract took 33.6pp of COGS and selected the largest
+    episodes 4.5 to 1, because a sale is likelier to straddle an hour boundary
+    the more the SKU sells.
+
+    It now settles into the episode identity: scrap is the last hour's
+    leftover PLUS the shrink, so `supply == sold + scrap` still closes and the
+    units are on the books instead of in a deleted episode. Only the DP is
+    shut out, its state transition assuming stock leaves solely by sale.
     """
     _chdir(workspace)
     from bootstrap.prepare_data import load_and_filter
-    from common.episodes import adjustment_reason
+    from common import episodes as E
 
     cfg = yaml.safe_load(open("config.yaml"))
     raw = pd.read_parquet("data/flc.parquet")
-    _, clean_wf = load_and_filter("data/flc.parquet", cfg)
-    clean = {t[0]: t[2] for t in clean_wf}
+    clean, clean_wf = load_and_filter("data/flc.parquet", cfg)
+    clean_eps = {t[0]: t[2] for t in clean_wf}
 
-    # a PARTIAL shortfall mid-episode: matches no convention, so it is
-    # unexplained inventory loss and the episode must go
+    # one unit vanishes mid-episode
     holed = raw.copy()
     row = holed.index[len(holed) // 2]
     start, sold = holed.at[row, "inventory"], holed.at[row, "units_sold"]
     holed.at[row, "ending_inventory"] = max(start - sold - 1, 0)
-    assert adjustment_reason(start, sold, holed.at[row, "ending_inventory"]) is None
-    path = tmp_path / "broken.parquet"
+    # keep the chain continuous, or the CONTINUITY rule takes it first
+    nxt = holed.index[holed.index.get_loc(row) + 1]
+    same = (holed.at[nxt, "skuseq"] == holed.at[row, "skuseq"]
+            and holed.at[nxt, "fc"] == holed.at[row, "fc"])
+    if same:
+        holed.at[nxt, "inventory"] = holed.at[row, "ending_inventory"]
+    path = tmp_path / "shrunk.parquet"
     holed.to_parquet(path)
 
-    _, wf = load_and_filter(str(path), cfg)
+    d, wf = load_and_filter(str(path), cfg)
     got = {t[0]: t[2] for t in wf}
-    assert got["chain_break_dropped"] < got["negative_window_recovered"], \
-        "the unexplained shortfall did not drop its episode"
-    assert got["chain_break_dropped"] == clean["chain_break_dropped"] - 1
 
-    # A write-off zero at the SAME position is now ALSO a break, and that is
-    # the corrected convention rather than a regression. `adjustment_reason`
-    # still names the row -- the zero is the source's own sentinel and nothing
-    # about that changed -- but the row is mid-episode, so the NEXT hour opens
-    # from a positive figure this hour says was written off. The two fields
-    # contradict each other about one instant, and no business event explains
-    # that.
-    #
-    # This is what makes the write-off effectively last-hour-only without a
-    # position test anywhere: a genuine close has no next hour to disagree
-    # with, so continuity cannot fire on it. Position used to be rejected as
-    # "our bookkeeping"; the continuity rule derives it from the source's own
-    # arithmetic instead.
-    ok = raw.copy()
-    ok.at[row, "ending_inventory"] = 0
-    assert adjustment_reason(start, sold, 0) == "episode_close_write_off"
-    path2 = tmp_path / "writeoff.parquet"
-    ok.to_parquet(path2)
-    _, wf2 = load_and_filter(str(path2), cfg)
-    got2 = {t[0]: t[2] for t in wf2}
-    assert got2["chain_break_dropped"] == clean["chain_break_dropped"] - 1, \
-        "a mid-episode write-off leaves the next hour opening from stock it " \
-        "just wrote off -- the source contradicting itself, not a convention"
+    # the episode SURVIVES the universe -- shrink is not a drop
+    assert got["episode_universe"] == clean_eps["episode_universe"], \
+        "a shortfall dropped its episode again; it is shrink, and shrink is scrap"
 
-    # ...and the same zero on the episode's LAST hour is the real thing: no
-    # next hour, so nothing to contradict, and it survives untouched
-    last_ix = (raw[(raw.skuseq == raw.at[row, "skuseq"])
-                   & (raw.fc == raw.at[row, "fc"])]
-               .sort_values(["date", "hour"]).index[-1])
-    closing = raw.copy()
-    l_start = closing.at[last_ix, "inventory"]
-    l_sold = min(closing.at[last_ix, "units_sold"], max(l_start - 1, 0))
-    closing.at[last_ix, "units_sold"] = l_sold
-    closing.at[last_ix, "ending_inventory"] = 0
-    if l_start - l_sold > 0:
-        path3 = tmp_path / "closing.parquet"
-        closing.to_parquet(path3)
-        _, wf3 = load_and_filter(str(path3), cfg)
-        got3 = {t[0]: t[2] for t in wf3}
-        assert got3["chain_break_dropped"] == clean["chain_break_dropped"], \
-            "a write-off on the FINAL hour is how a listing closes and must " \
-            "never be treated as a break"
-
+    # ...and the units are accounted for rather than lost
+    flow = E.episode_flow(d)
+    assert (flow.opening + flow.arrived == flow.sold + flow.scrap).all()
+    assert len(E.flow_identity_violations(d)) == 0
 
 def test_the_episode_identity_holds_on_every_episode(workspace):
     """opening + restocked == sold + shrink + leftover_at_last_hour.

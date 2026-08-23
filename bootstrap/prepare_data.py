@@ -317,13 +317,82 @@ def load_and_filter(path, cfg=None, probe=None):
     d = d[~d.episode_id.isin(d.loc[neg, "episode_id"].unique())]
     d = step(d, "negative_quantities_dropped")
 
-    d = d[d.category.notna() & d.subcategory.notna()]
+    d_before_universe = d
+    # ------------------------------------------------------------------
+    # THE EPISODE UNIVERSE. Three conditions, evaluated once, together, and
+    # before any filter that has an opinion about price, category or cost.
+    # They are the only things that decide whether an episode's INVENTORY can
+    # be read at all, and everything downstream -- scrap, clearance, IL,
+    # censoring -- is arithmetic on top of them.
+    #
+    #   1. CONTINUITY   ending[t] == starting[t+1]. No legitimate exception:
+    #                   `ending` already carries any restock forward. A
+    #                   violation is the feed contradicting itself about one
+    #                   instant, and it makes the chain unreadable. DROPS.
+    #   2. IDENTITY     opening + restocked == sold + scrap, where scrap is
+    #                   the last hour's leftover plus the shrink. Provable
+    #                   once (1) holds, so it is a guard on this arithmetic
+    #                   rather than a test of the feed -- and it has caught
+    #                   two bugs, so it stays.
+    #   3. CLEAN CLOSE  starting >= sold on the LAST row, so the episode ends
+    #                   in exactly one of two states: sold out (censored, no
+    #                   leftover) or stock left (not censored, and that
+    #                   leftover is scrap). FLAGS `final_hour_restock`.
+    #
+    # Two hour-level tests used to live here and neither was right. An hour
+    # selling more than it opened with is a RESTOCK, not an impossible
+    # quantity -- deleting it took 18.1pp of the extract's COGS. And an hour
+    # whose ending falls short is shrink, which nets into scrap at the
+    # episode level; dropping the episode for it deleted the fastest-selling
+    # windows first, since a sale is likelier to straddle a bucket boundary
+    # the more the SKU sells.
+    d = d.sort_values(["sku_id", "fc", "date", "hour_of_day"])
+    discontinuous = episodes.continuity_breaks(d)
+    d = d[~d.episode_id.isin(d.loc[discontinuous, "episode_id"].unique())]
+    d = step(d, "episode_universe")
+
+    flow0 = episodes.episode_flow(d)
+    status0 = episodes.hour_status(d.starting_inventory, d.units_sold,
+                                   d.ending_inventory)
+    wf[-1] = wf[-1] + ({
+        "rule": ("continuity AND identity AND a clean final hour -- the three "
+                 "things that make an episode's inventory readable"),
+        "rows_chain_discontinuous_dropped": int(discontinuous.sum()),
+        "episodes_dropped": int(len(set(
+            d_before_universe.episode_id) - set(d.episode_id))),
+        "identity_violations": int(len(episodes.flow_identity_violations(d))),
+        "episodes_final_hour_not_clean": int((~flow0.final_hour_clean).sum()),
+        "episodes_with_restock": int((flow0.arrived > 0).sum()),
+        "episodes_with_shrink": int((flow0.vanished > 0).sum()),
+        "rows_restock": int((status0 == episodes.RESTOCK).sum()),
+        "rows_write_off": int((status0 == episodes.WRITE_OFF).sum()),
+        "rows_hour_shortfall_NOT_dropped": int(
+            (status0 == episodes.SHORTFALL).sum()),
+        "note": ("Only continuity DROPS here. The identity is provable once "
+                 "it holds, so a violation means the supply arithmetic is "
+                 "broken rather than the feed; a dirty final hour FLAGS "
+                 "final_hour_restock and gates the eligible population. An "
+                 "hour-level restock or shrink is neither -- both are real "
+                 "events, counted gross and settled at the episode level."),
+    },)
+
+
+    # EPISODE-scoped, like every other drop after the ids are assigned. Row
+    # scoping punched a hole mid-window and left re-segmentation to clean up
+    # after it, which contradicts the chain's own doctrine ("a hole punched
+    # mid-window re-segments into a spurious short episode, which is worse
+    # than losing the episode") and would invalidate the episode universe
+    # defined above it.
+    bad = d.loc[d.category.isna() | d.subcategory.isna(), "episode_id"].unique()
+    d = d[~d.episode_id.isin(bad)]
     d = step(d, "null_category_dropped")
 
     d = d.copy()
     d["original_price"] = (d.groupby("episode_id")["original_price"]
                            .transform(lambda s: s.replace(0, np.nan).ffill().bfill()))
-    d = d[d.original_price.notna() & (d.original_price > 0)]
+    bad = d.loc[d.original_price.isna() | (d.original_price <= 0),
+                "episode_id"].unique()
+    d = d[~d.episode_id.isin(bad)]
     d = step(d, "zero_base_price_dropped")
 
     # "Manufacturing" SKUs enter with a window counter that is ALREADY
@@ -380,53 +449,6 @@ def load_and_filter(path, cfg=None, probe=None):
     # before the reconciler was ever asked, taking 18.1pp of the extract's
     # COGS with it. These episodes are now flagged `restocked` like any other.
 
-    # ONE hard integrity rule survives at the hour level, and it is the only
-    # one with no legitimate exception: `ending` already carries any restock
-    # forward, so it MUST be the next hour's `starting`. A violation is the
-    # feed contradicting itself about a single instant, which no business
-    # event explains, and it makes the whole inventory chain unreadable.
-    #
-    # Nothing tested this before the source convention was understood --
-    # restock was INFERRED from the next hour's opening, which quietly assumed
-    # the continuity it should have been checking.
-    d = d.sort_values(["sku_id", "fc", "date", "hour_of_day"])
-    status = episodes.hour_status(d.starting_inventory, d.units_sold,
-                                  d.ending_inventory)
-    discontinuous = episodes.continuity_breaks(d)
-
-    # An hour-level SHORTFALL is deliberately NOT a drop any more. On the
-    # production feed a sale is routinely bucketed one hour off the inventory
-    # snapshot: the stock leaves at hour t and the sale is recorded at t+1, so
-    # t reads as a shortfall of one unit and t+1 as a restock of one, and they
-    # cancel exactly. Dropping on the hour deleted those episodes -- and since
-    # a sale is likelier to straddle a bucket boundary the more the SKU sells,
-    # it deleted the fastest-selling windows first. That is the 4.5x size
-    # selection in the waterfall.
-    #
-    # What matters is whether the EPISODE reconciles, and that is tested below
-    # in `tag_dp_eligibility` against the flow identity
-    # `supply = sold + remaining`. Skew nets to zero there; a genuine loss
-    # does not.
-    detail = {
-        "episodes_dropped": int(d.loc[discontinuous, "episode_id"].nunique()),
-        "rows_chain_discontinuous": int(discontinuous.sum()),
-        "rows_restock": int((status == episodes.RESTOCK).sum()),
-        "rows_write_off": int((status == episodes.WRITE_OFF).sum()),
-        "rows_hour_shortfall_NOT_dropped": int(
-            (status == episodes.SHORTFALL).sum()),
-        "note": ("Drops ONE thing: a feed that disagrees with itself about "
-                 "one instant (ending != next starting). An hour-level "
-                 "shortfall is left alone -- it is usually a sale bucketed an "
-                 "hour late, which cancels against the restock it creates in "
-                 "the next hour. The episode-level flow identity in "
-                 "dp_eligible.unreconciled is what catches genuine loss. "
-                 "A restock is not a break either: ending is the final "
-                 "quantity after it, so units_sold > starting_inventory is "
-                 "the restock signal, not an impossible value."),
-    }
-    d = d[~d.episode_id.isin(d.loc[discontinuous, "episode_id"].unique())]
-    d = step(d, "chain_break_dropped")
-    wf[-1] = wf[-1] + (detail,)
 
     # re-segment: the filters above drop rows, which can punch a hole in a
     # window that was contiguous in the raw extract
