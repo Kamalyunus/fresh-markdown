@@ -679,10 +679,12 @@ DP_INELIGIBLE = (
      "episode's final hour. If the source also zeroed `ending` to write the "
      "remainder off, how much arrived and how much was scrapped are two "
      "unknowns with one equation -- the close is a guess, so the episode's "
-     "scrap is NaN and it is out of every IL and clearance figure. This is "
-     "the one condition that also gates `episode_eligible`, the frozen-"
-     "artifact population, because a censored/not-censored call cannot be "
-     "made on an ambiguous final hour"),
+     "scrap is NaN and it is out of every IL and clearance figure. Gates "
+     "`episode_eligible` too, because a censored/not-censored call cannot be "
+     "made on an ambiguous final hour. Two of the six gates do that -- this "
+     "one and `outcome_unknown` -- and they are exactly conditions 2 and 3 of "
+     "`eligible`; the other four are solver requirements the demand model "
+     "cannot see"),
 )
 
 # Reported, NOT gating. A below-cost hour is a price the LEGACY policy set,
@@ -972,11 +974,15 @@ def population(d, cfg, which=None):
       integrity     everything that survived the filter chain. Rows that can
                     be believed; nothing said about whether the episode's
                     accounting closes.
-      eligible      the episode identity holds AND its final hour is clean,
-                    so `units_sold` can be believed and the close is exactly
-                    one of two states -- censored or not. This is what a
-                    FROZEN ARTIFACT needs: the censored likelihood is only
-                    correct if we know which hours ran out.
+      eligible      THREE conditions, all in `episodes.episode_flow`: the
+                    identity holds (`accounting_closes`), the final hour is
+                    clean (`final_hour_clean`), and the episode CLOSED
+                    (`closed`, i.e. `ending_inventory == 0` on the last row).
+                    So `units_sold` can be believed, the close is exactly one
+                    of two states -- censored or not -- and it actually
+                    happened. This is what a FROZEN ARTIFACT needs: the
+                    censored likelihood is only correct if we know which
+                    hours ran out.
       dp_eligible   `eligible` plus everything the SOLVER additionally
                     requires -- a feasible tier, a horizon it can read, one
                     inventory pool. Strictly narrower, and none of its extra
