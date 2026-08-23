@@ -509,19 +509,35 @@ def pre_launch(d, cfg):
 # as whichever test happened to run last.
 DP_INELIGIBLE = (
     ("cost_missing",
-     "cost <= 0 -- a MISSING cost, not a free good. d_max reads 1.0, i.e. "
-     "maximally priceable, and scrap (cost x leftover) reads zero"),
+     "cost <= 0 -- a MISSING cost, not a free good. d_max reads 1.0, so the "
+     "DP would discount to the tier cap believing scrap is free, and IL "
+     "(scrap = cost x leftover) reads zero"),
     ("non_priceable",
-     "cost >= original_price, so d_max <= 0 and no discount tier exists"),
-    ("below_cost",
-     "some hour's OFFERED price is under cost. Tested on "
-     "original_price x (1 - d), never applied_price, which the source zeroes "
-     "on the ~78% of rows that sold nothing"),
+     "cost >= original_price, so d_max <= 0 and feasible_tiers is EMPTY -- "
+     "there is no price for the DP to choose"),
     ("window_too_long",
-     "hours_remaining above data.max_window_hours. Only extend_to_window "
-     "reads the counter, and only backtest and shadow call it -- the three "
-     "artifact fits never do"),
+     "hours_remaining above data.max_window_hours. extend_to_window RAISES "
+     "above the cap, so this is a crash rather than a refusal. Only backtest "
+     "and shadow extend; the artifact fits never read the counter"),
 )
+
+# Reported, NOT gating. A below-cost hour is a price the LEGACY policy set,
+# and the agent is already constrained never to set one -- so this is a
+# property of the history, not a defect in it, and neither harness needs the
+# episode removed:
+#
+#   backtest  the DP arm is self-anchored (`anchor = d_t`, its own previous
+#             choice), so it never sees the legacy price at all.
+#   shadow    the legacy price IS the anchor, so from the hour it crosses
+#             below cost the action set is empty and `validate_state` refuses
+#             every remaining hour. That refusal is CORRECT behaviour on real
+#             data, counted in `rejected_reasons` -- and the hours before the
+#             crossing are perfectly good decisions the old chain threw away
+#             with the whole episode.
+BELOW_COST_HOURS = (
+    "some hour's OFFERED price is under cost. Tested on "
+    "original_price x (1 - d), never applied_price, which the source zeroes "
+    "on the ~78% of rows that sold nothing")
 
 
 def tag_dp_eligibility(d, cfg):
@@ -544,7 +560,6 @@ def tag_dp_eligibility(d, cfg):
     tests = {
         "cost_missing": d.cost <= 0,
         "non_priceable": d.cost >= d.original_price,
-        "below_cost": d.offered_price < d.cost - 1e-9,
         "window_too_long": d.hours_remaining > cap,
     }
     reason = pd.Series(pd.NA, index=d.index, dtype="object")
@@ -560,12 +575,29 @@ def tag_dp_eligibility(d, cfg):
     d = d.copy()
     d["dp_ineligible_reason"] = reason
     d["dp_eligible"] = reason.isna()
+    # informational: kept IN dp_eligible, because the DP refusing a below-cost
+    # anchor is the constraint working, not a reason to delete the episode
+    below = d.episode_id.isin(
+        d.loc[d.offered_price < d.cost - 1e-9, "episode_id"].unique())
+    d["below_cost_hours"] = below
+    detail["below_cost_hours"] = {
+        "episodes": int(d.loc[below, "episode_id"].nunique()),
+        "rows": int(below.sum()),
+        "cogs_at_risk": round(cogs_at_risk(d[below]), 1),
+        "still_dp_eligible": int(
+            d.loc[below & d.dp_eligible, "episode_id"].nunique()),
+        "why": BELOW_COST_HOURS,
+    }
     detail["episodes_dp_eligible"] = int(
         d.loc[d.dp_eligible, "episode_id"].nunique())
     detail["episodes_dp_ineligible"] = int(
         d.loc[~d.dp_eligible, "episode_id"].nunique())
     detail["note"] = (
         "FLAGGED, NOT DROPPED. Every row above is still in the population. "
+        "below_cost_hours is REPORTED ONLY and stays dp_eligible: the "
+        "backtest's DP arm is self-anchored so it never sees the legacy "
+        "price, and in shadow the refusal from the crossing hour onward is "
+        "the cost floor working, counted in rejected_reasons. "
         "The three artifact fits read baseline_model.train_population "
         "('integrity' = all of it, 'dp_eligible' = this subset); the DP, the "
         "calibration gate and the A/B always read dp_eligible. Reasons are "

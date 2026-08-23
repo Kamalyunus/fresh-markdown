@@ -49,7 +49,6 @@ def _frame(**over):
 @pytest.mark.parametrize("name,over", [
     ("cost_missing", {"cost": 0.0}),
     ("non_priceable", {"cost": 12_000.0}),
-    ("below_cost", {"total_discount": 0.9}),
     ("window_too_long", {"hours_remaining": [500.0, 499.0]}),
 ])
 def test_each_condition_flags_and_names_itself(name, over, cfg):
@@ -68,26 +67,50 @@ def test_a_clean_episode_is_eligible(cfg):
 
 
 def test_the_flag_is_episode_scoped_not_row_scoped(cfg):
-    """One below-cost hour poisons the window: the monotonicity anchor
-    carries that price into every later hour."""
+    """One bad hour flags the whole window: the monotonicity anchor carries
+    that hour's price into every later one."""
     d = _frame()
-    d.loc[1, "total_discount"] = 0.95
-    d["offered_price"] = d.original_price * (1 - d.total_discount)
+    d.loc[1, "cost"] = 0.0
     tagged, _ = tag_dp_eligibility(d, cfg)
     assert not tagged.dp_eligible.any(), "only the offending row was flagged"
 
 
+def test_below_cost_is_reported_but_does_not_gate(cfg):
+    """A below-cost price is one the LEGACY policy set, and the agent is
+    already constrained never to set one -- so it is a property of the
+    history, not a defect in it.
+
+    The backtest's DP arm is self-anchored and never sees the legacy price.
+    Shadow uses it as the anchor and therefore refuses every hour from the
+    crossing onward -- which is the cost floor working, and the hours BEFORE
+    the crossing are good decisions the old chain deleted with the episode.
+    """
+    d = _frame()
+    d.loc[1, "total_discount"] = 0.95
+    d["offered_price"] = d.original_price * (1 - d.total_discount)
+    tagged, detail = tag_dp_eligibility(d, cfg)
+
+    assert tagged.dp_eligible.all(), "below-cost must not gate eligibility"
+    assert tagged.below_cost_hours.all()
+    assert tagged.dp_ineligible_reason.isna().all()
+    assert detail["below_cost_hours"]["episodes"] == 1
+    assert detail["below_cost_hours"]["still_dp_eligible"] == 1
+    assert "below_cost" not in [n for n, _ in DP_INELIGIBLE]
+
+
 def test_nothing_is_dropped(cfg):
-    for over in ({"cost": 0.0}, {"cost": 12_000.0}, {"total_discount": 0.9}):
+    for over in ({"cost": 0.0}, {"cost": 12_000.0}, {"total_discount": 0.9},
+                 {"hours_remaining": [500.0, 499.0]}):
         before = _frame(**over)
         after, _ = tag_dp_eligibility(before, cfg)
         assert len(after) == len(before)
 
 
 def test_reasons_are_first_match_so_the_column_reads_as_a_cause(cfg):
-    """A zero cost is ALSO below cost and ALSO non-priceable. The label has
-    to be the fundamental one, not whichever test ran last."""
-    d, _ = tag_dp_eligibility(_frame(cost=0.0, total_discount=0.9), cfg)
+    """A zero cost is ALSO non-priceable by the `cost >= price` test... no,
+    it is not -- but it IS the more fundamental fact whenever both fire. The
+    label has to be the cause, not whichever test ran last."""
+    d, _ = tag_dp_eligibility(_frame(cost=0.0), cfg)
     assert (d.dp_ineligible_reason == "cost_missing").all()
     assert [n for n, _ in DP_INELIGIBLE][0] == "cost_missing"
 

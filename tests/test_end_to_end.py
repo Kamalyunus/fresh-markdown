@@ -218,12 +218,13 @@ def test_prepared_data_is_priceable_and_self_consistent(workspace):
     assert (d.cost > 0).all()
     assert (d.cost < d.original_price).all() and (d.d_max > 0).all()
     assert (d.d_max < 1.0).all()
-    # and no surviving HOUR is priced under cost. The filter must test the
-    # offered price: applied_price is 0 on zero-sale rows (~78% of them), so
-    # a filter reading it is blind on exactly those, and the survivors reach
-    # the planner as an anchor no feasible tier can match.
-    assert (d.total_discount <= d.d_max + 1e-9).all()
-    assert (d.offered_price >= d.cost - 1e-9).all()
+    # A dp_eligible episode MAY contain an hour the LEGACY policy priced under
+    # cost -- that is history, and the agent is constrained never to repeat
+    # it. What must hold is that such an hour is FLAGGED, so the refusal it
+    # causes in shadow is expected rather than a surprise.
+    under = d.offered_price < d.cost - 1e-9
+    assert (~under | d.below_cost_hours).all(), \
+        "a below-cost hour survived without below_cost_hours being set"
     assert d.category.notna().all() and d.subcategory.notna().all()
     assert (d.hours_remaining >= 0).all()
     assert (d.hours_remaining <= cfg["data"]["max_window_hours"]).all()

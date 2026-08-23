@@ -121,17 +121,23 @@ baseline_model:
     #
     # "integrity"    every episode that survived the filter chain, including
     #                those the DP cannot price (cost missing, cost above
-    #                price, some hour below cost, window over the cap).
+    #                price, window over the cap).
     # "dp_eligible"  only the priceable subset -- what the pipeline did
     #                before these became flags rather than drops.
     #
     # Default "integrity", for a reason that is checkable rather than
     # aesthetic: FEATURES carries neither `cost` nor `hours_remaining`, so
     # the model cannot SEE what makes an episode DP-ineligible. Such an
-    # episode is an ordinary demand observation to it. And the elasticity
-    # prior is the most variation-starved quantity in the system, while
-    # below-cost hours are the widest price spread the extract contains --
-    # dropping them threw away the observations the bracket most needed.
+    # episode is an ordinary demand observation to it.
+    #
+    # Note a below-cost HOUR is not one of the three conditions. It is a
+    # price the legacy policy set and the agent is constrained never to set,
+    # so it is a property of the history rather than a defect: the backtest's
+    # DP arm is self-anchored and never sees it, and in shadow the refusal it
+    # causes from that hour onward is the cost floor working. Those episodes
+    # stay dp_eligible and carry `below_cost_hours` for the record -- which
+    # also means the widest price spread in the extract now reaches the
+    # elasticity bracket, the quantity most starved of variation.
     #
     # The risk of "integrity" is covariate shift: the model is fit on a
     # distribution wider than the one it serves. That is measurable, not

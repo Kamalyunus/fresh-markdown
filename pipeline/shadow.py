@@ -255,6 +255,25 @@ def _shadow_one(ep, ctx):
         if q <= 0:                        # restock gap: no decision this hour
             anchor = float(ep["total_discount"][t])
             continue
+
+        row_day = str(ep["date"][t])
+        legacy_d = float(ep["total_discount"][t])
+        sold = int(ep["units_sold"][t])
+        ending = int(ep["ending_inventory"][t])
+
+        # WHAT THE BUSINESS DID, recorded before we ask what the agent would
+        # have done -- and deliberately NOT conditioned on the answer. A
+        # rejected hour still carried its discount and still ended holding
+        # what it ended holding. Gating these on decision success
+        # under-counted the IL the exploration budget is a share of, and
+        # pointed the scrap classifier at the last DECIDED row instead of the
+        # last OBSERVED one. Both were latent; including below-cost episodes,
+        # whose later hours the cost floor correctly refuses, is what would
+        # have made them bite.
+        out["il_by_day"][row_day] = out["il_by_day"].get(row_day, 0.0) + \
+            float(ep["original_price"][t]) * legacy_d * sold
+        last_obs = (q, sold, float(ep["cost"][t]), ending, row_day)
+
         state = {
             "episode_id": ep["episode_id"], "sku_id": int(ep["sku_id"][t]),
             "fc": ep["fc"][t], "category": ep["category"][t],
@@ -266,7 +285,6 @@ def _shadow_one(ep, ctx):
             "mu_ref_path": list(ep["mu_ref_hat"][t:]),
             "current_discount": anchor,
         }
-        row_day = str(ep["date"][t])
         spreads_here = []
         try:
             evt = decide(state, posterior, store, cfg, rng, tau,
@@ -297,15 +315,12 @@ def _shadow_one(ep, ctx):
             out["raw_information"] += mu_rec * lr ** 2
         if evt["affordable_set_size"] == 0:
             out["empty_affordable"] += 1
-        legacy_d = float(ep["total_discount"][t])
         out["rec_disc"] += evt["applied_discount"]
         out["leg_disc"] += legacy_d
         if abs(evt["applied_discount"] - legacy_d) > 1e-9:
             out["differs"] += 1
 
         # outcome = what actually happened under the LEGACY price
-        sold = int(ep["units_sold"][t])
-        ending = int(ep["ending_inventory"][t])
         outcome = {
             "event": "outcome",
             "outcome_id": f"shadow-{evt['decision_id']}",
@@ -332,12 +347,6 @@ def _shadow_one(ep, ctx):
         out["drift"]["r"].append(float(ep["r_val"][t]))
         out["drift"]["q"].append(q)
         out["drift"]["sold"].append(sold)
-
-        # discount given away at the LEGACY price -- no price was applied,
-        # so this is the markdown IL the business actually carried
-        hour_il = float(ep["original_price"][t]) * legacy_d * sold
-        out["il_by_day"][row_day] = out["il_by_day"].get(row_day, 0.0) + hour_il
-        last_obs = (q, sold, float(ep["cost"][t]), ending, row_day)
 
         anchor = legacy_d                 # reality's price is the next anchor
 

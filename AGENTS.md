@@ -52,8 +52,19 @@ step                                          writes                            
 ### Two populations, and who reads which
 
 `prepare_data` emits ONE parquet carrying `dp_eligible` (bool) and
-`dp_ineligible_reason` (`cost_missing` | `non_priceable` | `below_cost` |
-`window_too_long`, first match in that order). Nothing economic is dropped.
+`dp_ineligible_reason` (`cost_missing` | `non_priceable` | `window_too_long`,
+first match in that order). Nothing economic is dropped.
+
+**A below-cost hour is NOT one of the three.** It is a price the legacy policy
+set, and the agent is constrained never to set one, so it is a property of the
+history rather than a defect in it. Neither harness needs the episode removed:
+the backtest's DP arm is **self-anchored** (`anchor = d_t`, its own previous
+choice) and never sees the legacy price, and in shadow the legacy price IS the
+anchor, so from the crossing hour the action set is empty and `validate_state`
+refuses every remaining hour — the cost floor working, counted in
+`rejected_reasons`. The hours *before* the crossing are good decisions the old
+chain deleted along with the episode. Those episodes stay `dp_eligible` and
+carry `below_cost_hours` for the record.
 
 | Consumer | Population |
 | --- | --- |
@@ -451,7 +462,14 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
     are mediators of the episode's own price path and corrupt the learned
     elasticity; hours-remaining is planner state; one overwritten price
     feature is the auditable maximum (see design doc 5.4).
-13. **An INTEGRITY defect and an ECONOMIC condition are not the same thing.**
+13. **Never gate on a condition the constraint already handles.** A
+    below-cost legacy hour needs no filter: the DP cannot express that price,
+    so it refuses and says so. Dropping the episode instead deleted the good
+    hours with the bad one, and deleted the widest price variation the
+    extract has from the elasticity bracket. Ask what actually happens if the
+    row stays — a loud refusal counted in a report is usually better than a
+    silent removal upstream.
+14. **An INTEGRITY defect and an ECONOMIC condition are not the same thing.**
     Integrity means the row cannot be believed — negative stock, a null
     category, sales above inventory, an unexplained chain break. Those are
     **dropped**, for everyone, frozen artifacts included. Economic means the
@@ -467,7 +485,7 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
     filter, ask which of the two it is. The test is simple: **can the demand
     model see it?** `FEATURES` carries neither `cost` nor `hours_remaining`,
     so all four economic conditions are invisible to it.
-14. **Cut this data by episode, never by row.** Use
+15. **Cut this data by episode, never by row.** Use
     `common.episodes.window_slice`, which assigns an episode by the date its
     window OPENED. `d[d.date >= start]` keeps the tail of a window that
     opened the evening before as its own short episode — no entry decision,
@@ -475,7 +493,7 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
     midnight-seam failure the whole episode definition exists to prevent,
     and it was live in `pipeline.shadow`'s `--date-start` until the hold-out
     work. `split_frames` and shadow both call the one function.
-15. **Nothing pre-launch may see past `split.test_end`.** The three artifact
+16. **Nothing pre-launch may see past `split.test_end`.** The three artifact
     fits are bounded by `split_frames`, but two paths were not and neither
     announced itself: `policy_replay` / `derive_tau_initial` ran on the whole
     frame, so `tau_initial` — a MEASURED launch value — was being fitted on
@@ -485,7 +503,7 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
     `fidelity.by_week` and `by_window["all"]` therefore stop at `test_end` —
     if a week past it appears there again, something upstream of the slice
     has changed. The hold-out is read once, by `pipeline.shadow --holdout`.
-16. **A number a procedure solves for is not evidence about that number.**
+17. **A number a procedure solves for is not evidence about that number.**
     `backtest.derive_tau_initial` bisects until implied spend equals budget,
     so it reports 1.00× on any population — including one where the answer
     is eight times wrong. It hid the entry-only scoping bug for the whole
