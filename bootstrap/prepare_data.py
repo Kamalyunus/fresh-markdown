@@ -725,6 +725,26 @@ def tag_dp_eligibility(d, cfg):
         d.loc[edge & d.dp_eligible, "episode_id"].nunique())
     detail["edge_truncated"] = edge_detail
 
+    # THE EPISODE IDENTITY, checked rather than assumed.
+    #
+    #     opening + restocked == sold + shrink + leftover_at_last_hour
+    #
+    # Provably true once the chain is continuous, so a violation is a bug in
+    # `episode_flow` rather than a defect in the feed -- which is exactly why
+    # it is worth a line in the manifest: a silent arithmetic error here would
+    # move every scrap, clearance and IL figure at once.
+    violations = episodes.flow_identity_violations(d)
+    detail["flow_identity"] = {
+        "rule": "opening + restocked == sold + shrink + leftover_at_last_hour",
+        "episodes_checked": int(d.episode_id.nunique()),
+        "violations": int(len(violations)),
+        "holds": not len(violations),
+        "note": ("Every unit is accounted for by exactly one of three fates: "
+                 "sold, shrunk, or still on the shelf at the last hour. "
+                 "Guaranteed by chain continuity, so a violation means the "
+                 "supply arithmetic is broken, not the source."),
+    }
+
     # ARE THE SHRINKS AND RESTOCKS PAIRED? A window that loses a unit at one
     # hour and gains one at the next may be two real events or one sale the
     # feed bucketed an hour off the inventory snapshot. Nothing here decides

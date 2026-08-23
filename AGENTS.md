@@ -719,10 +719,19 @@ so the pairing is visible without anything being explained away.
 What is tested instead is the episode:
 
 ```
-supply    = opening + arrivals             (gross, never netted)
-supply    = sold + shrink + remaining      <-- THE IDENTITY
-clearance = sold / supply                  <-- cannot exceed 1
+opening + restocked  ==  sold + shrink + leftover_at_last_hour
 ```
+
+Every unit an episode ever had ends up in exactly one of three places. There
+is no fourth, so this is not a heuristic with a tolerance — it balances or the
+arithmetic is broken. Clearance is `sold / (opening + restocked)`, which
+cannot exceed 1, and an episode that sold everything it had carries no scrap.
+
+`common.episodes.flow_identity_violations` enforces it, `dp_eligible.flow_identity`
+in the manifest reports it every run, and `tests/test_end_to_end` asserts it on
+every episode of the prepared frame. Chain continuity makes the two sides
+provably equal, so a violation is a bug in the supply arithmetic rather than a
+defect in the feed — worth checking anyway, since it caught one.
 
 `common.episodes.episode_flow` computes `remaining` two ways — `supply − sold`,
 and off the final hour (`ending_inventory`, or `starting − sold` where the

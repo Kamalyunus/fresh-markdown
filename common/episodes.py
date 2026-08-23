@@ -279,6 +279,14 @@ def episode_flow(d):
         index=last.episode_id.to_numpy())
     agg["remaining"] = agg.supply - agg.sold - agg.vanished
     agg["remaining_from_last_row"] = tail_leftover.reindex(agg.index).to_numpy()
+    #
+    #   THE EPISODE IDENTITY
+    #
+    #       opening + restocked  ==  sold + shrink + leftover_at_last_hour
+    #
+    # Every unit an episode ever had is accounted for by exactly one of three
+    # fates. It is the whole specification for episode-level data quality, and
+    # `flow_identity_violations` is how it is enforced.
     # `accounting_closes` is an arithmetic SELF-CHECK, not a data test: once
     # the chain is continuous the two sides are provably equal, so a
     # disagreement means this function has a bug rather than the feed. It
@@ -291,6 +299,34 @@ def episode_flow(d):
     # units are neither sold, nor scrapped, nor still there.
     agg["reconciled"] = (agg.vanished == 0) & agg.accounting_closes
     return agg.drop(columns=["net"])
+
+
+def flow_identity_violations(d):
+    """Episodes failing `opening + restocked == sold + shrink + leftover`.
+
+    Every unit an episode ever had -- what it opened with, plus anything that
+    arrived -- ends up in exactly one of three places: sold, shrunk, or still
+    on the shelf at the last hour. There is no fourth option, so the identity
+    is not a heuristic with a tolerance; it either balances or the arithmetic
+    is wrong.
+
+    And it IS the arithmetic that would be wrong, not the feed. Once the chain
+    is continuous -- `starting[t+1] == ending[t]`, which `chain_break_dropped`
+    guarantees -- the two sides are provably equal, because the per-hour
+    discrepancies telescope to exactly the last row's leftover. A violation
+    therefore means `episode_flow` has a bug.
+
+    That is worth checking rather than assuming: it caught one. Reading the
+    last row's leftover as `starting - sold` is wrong on a final hour that
+    restocked, and an episode that opened its last hour with 27, sold 30 and
+    ended holding 26 came out as an anomaly it had no business being.
+
+    Returns the offending rows of `episode_flow`, empty when all is well.
+    """
+    flow = episode_flow(d)
+    lhs = flow.opening + flow.arrived
+    rhs = flow.sold + flow.vanished + flow.remaining_from_last_row
+    return flow[lhs != rhs]
 
 
 def censored_hours(starting_inventory, units_sold, ending_inventory):

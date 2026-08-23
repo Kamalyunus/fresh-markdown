@@ -1171,3 +1171,54 @@ def test_an_unreconciled_hour_drops_the_episode(workspace, tmp_path):
         assert got3["chain_break_dropped"] == clean["chain_break_dropped"], \
             "a write-off on the FINAL hour is how a listing closes and must " \
             "never be treated as a break"
+
+
+def test_the_episode_identity_holds_on_every_episode(workspace):
+    """opening + restocked == sold + shrink + leftover_at_last_hour.
+
+    The whole specification for episode-level data quality, in one line. Every
+    unit an episode ever had ends up sold, shrunk, or still on the shelf at
+    the last hour -- there is no fourth option, so this is not a heuristic
+    with a tolerance.
+
+    Asserted on the REAL prepared frame rather than a fixture, because what it
+    protects is the arithmetic: chain continuity makes the two sides provably
+    equal, so a violation means the supply accounting is broken, and a silent
+    break there moves every scrap, clearance and IL figure at once.
+    """
+    _chdir(workspace)
+    from common import episodes as E
+    d = pd.read_parquet("data/prepared.parquet")
+
+    bad = E.flow_identity_violations(d)
+    assert len(bad) == 0, bad.head(10).to_string()
+
+    flow = E.episode_flow(d)
+    assert (flow.opening + flow.arrived
+            == flow.sold + flow.vanished + flow.remaining_from_last_row).all()
+
+    # the two consequences the owner named, on the whole population
+    assert (flow.clearance <= 1.0).all(), "clearance above 1 is never valid"
+    assert (flow[flow.clearance >= 1.0].remaining_from_last_row == 0).all(), \
+        "an episode that sold everything it had cannot also carry scrap"
+
+    # and the frame carries the columns the identity is built from
+    for col in ("units_restocked", "units_shrink", "episode_supply",
+                "episode_clearance", "flow_reconciled"):
+        assert col in d.columns, col
+    per_ep = d.groupby("episode_id").first()
+    assert (per_ep.episode_supply
+            == flow.opening.reindex(per_ep.index)
+            + flow.arrived.reindex(per_ep.index)).all()
+
+
+def test_the_manifest_reports_the_identity(workspace):
+    """It is checked on every run, not only in the test suite."""
+    _chdir(workspace)
+    with open("artifacts/split_manifest.json") as f:
+        wf = json.load(f)["data_quality_waterfall"]
+    ident = [s for s in wf if s["step"] == "dp_eligible"][0]["flow_identity"]
+    assert ident["holds"] is True
+    assert ident["violations"] == 0
+    assert ident["episodes_checked"] > 0
+    assert "opening + restocked" in ident["rule"]
