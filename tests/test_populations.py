@@ -315,29 +315,6 @@ def test_supply_not_opening_stock_is_the_clearance_denominator():
     assert flow.loc["R", "clearance"] <= 1.0
 
 
-def test_a_sale_bucketed_an_hour_late_is_not_an_arrival():
-    """The owner's episode. +1 at one hour and -1 at the next cancel, so
-    supply is the opening stock and clearance is 11/12 -- not 11/14, which is
-    what counting gross arrivals would give."""
-    from common.episodes import episode_flow
-    rows = [(0, 12, 0, 12), (1, 12, 0, 12), (2, 12, 0, 12), (3, 12, 0, 12),
-            (4, 12, 0, 12), (5, 12, 0, 12), (6, 12, 0, 12), (7, 12, 0, 12),
-            (8, 12, 1, 11), (9, 11, 0, 11), (10, 11, 0, 11), (11, 11, 0, 10),
-            (12, 10, 1, 10), (13, 10, 0, 10), (14, 10, 0, 10), (15, 10, 1, 9),
-            (16, 9, 1, 8), (17, 8, 0, 7), (18, 7, 1, 7), (19, 7, 0, 7),
-            (20, 7, 4, 3), (21, 3, 2, 0)]
-    d = pd.DataFrame(rows, columns=["hour_of_day", "starting_inventory",
-                                    "units_sold", "ending_inventory"])
-    d["episode_id"] = "S"
-    d["date"] = "2026-03-01"
-    flow = episode_flow(d)
-    assert flow.loc["S", "arrived"] == 0, \
-        "a one-hour bucket lag was counted as stock arriving"
-    assert flow.loc["S", "vanished"] == 0
-    assert flow.loc["S", "supply"] == 12
-    assert flow.loc["S", "clearance"] == pytest.approx(11 / 12)
-
-
 def test_stock_that_genuinely_vanishes_does_not_net_away():
     """The netting must not launder a real loss into a clean episode."""
     from common.episodes import episode_flow
@@ -441,7 +418,7 @@ def test_an_unreconciled_episode_is_kept_flagged_and_kept_out_of_scrap(cfg):
 
     tagged, detail = tag_dp_eligibility(v, cfg)
     assert (tagged.dp_ineligible_reason == "unreconciled").all()
-    assert tagged.units_unreconciled.eq(1).all()
+    assert tagged.units_shrink.eq(1).all()
     assert not tagged.flow_reconciled.any()
     # out of the DP-side population...
     assert "V" not in set(population(tagged, cfg, "dp_eligible").episode_id)
@@ -463,14 +440,17 @@ def test_units_restocked_is_on_the_prepared_frame(cfg):
     assert tagged.groupby("episode_id").episode_supply.first()["R"] == 23
 
 
-def test_bucket_skew_does_not_flag_an_episode_as_restocked(cfg):
-    """The owner's real episode, end to end.
+def test_shrink_and_restock_in_one_episode_are_both_counted(cfg):
+    """The owner's real episode, and the correction that produced this test.
 
-    Hours 11/12 and 17/18 are pairs: a unit leaves inventory in one hour and
-    the sale is recorded in the next. The hour-level test called each pair a
-    shortfall AND a restock, which pushed a perfectly reconciled window out of
-    `dp_eligible` while its own `units_restocked` read 0 -- the flag and the
-    quantity contradicting each other. `restocked_episodes` nets first.
+    Hours 12 and 18 each take a unit in; hours 11 and 17 each lose one. An
+    earlier version NETTED those to zero on the theory that each pair was one
+    sale bucketed an hour late -- an inference dressed as arithmetic. It read
+    a window with 2 units restocked and 2 units shrunk as having neither,
+    which let a restocked episode into the DP-side population and priced its
+    clearance against a supply short by the 2 that arrived.
+
+    Gross, both of them, and the episode is flagged on both counts.
     """
     rows = [(0, 24, 12, 0, 12), (1, 23, 12, 0, 12), (2, 22, 12, 0, 12),
             (3, 21, 12, 0, 12), (4, 20, 12, 0, 12), (5, 19, 12, 0, 12),
@@ -492,31 +472,37 @@ def test_bucket_skew_does_not_flag_an_episode_as_restocked(cfg):
     d["offered_price"] = d.original_price * (1 - d.total_discount)
     d["d_max"] = 1.0 - d.cost / d.original_price
 
-    from common.episodes import classify, scrap_units
+    from common.episodes import classify, scrap_units, episode_flow
+    flow = episode_flow(d)
+    assert flow.loc["W", "arrived"] == 2, "the restock hours were netted away"
+    assert flow.loc["W", "vanished"] == 2, "the shrink hours were netted away"
+    assert flow.loc["W", "supply"] == 14      # 12 opened + 2 arrived
+    assert flow.loc["W", "clearance"] == pytest.approx(11 / 14)
+    # supply = sold + shrink + remaining, with every term named
+    assert flow.loc["W", "remaining"] == 1
+    assert 14 == 11 + 2 + 1
+
     tagged, detail = tag_dp_eligibility(d, cfg)
     t = tagged.iloc[0]
+    assert int(t.units_restocked) == 2
+    assert int(t.units_shrink) == 2
+    assert int(t.episode_supply) == 14
+    assert not bool(t.flow_reconciled)
 
-    # the numbers the owner asked for
-    assert int(t.episode_supply) == 12
-    assert int(d.units_sold.sum()) == 11
-    assert float(t.episode_clearance) == pytest.approx(11 / 12)
+    # BOTH conditions are counted, whichever one wins the first-match label
+    assert detail["restocked"]["episodes"] == 1
+    assert detail["unreconciled"]["episodes"] == 1
+    assert detail["shrink_and_restock_together"]["episodes"] == 1
+    assert detail["shrink_and_restock_together"]["units_arrived"] == 2
+    assert detail["shrink_and_restock_together"]["units_shrunk"] == 2
+
+    # out of everything that prices or compares
+    assert not bool(t.dp_eligible)
+    assert "W" not in set(population(tagged, cfg, "dp_eligible").episode_id)
+    assert "W" in set(population(tagged, cfg, "integrity").episode_id)
+    # the listing did close, but 2 units went missing, so scrap is not a
+    # number to book IL against
     assert classify(d).iloc[0] == "completed"
-    assert scrap_units(d).iloc[0] == 1.0
-
-    # nothing arrived and nothing vanished: the pairs cancel
-    assert int(t.units_restocked) == 0
-    assert int(t.units_unreconciled) == 0
-    assert bool(t.flow_reconciled)
-
-    # so it is fully usable -- artifacts AND backtest/shadow/IL
-    assert bool(t.dp_eligible), \
-        "a reconciled episode was gated out; bucket skew is not a restock"
-    assert pd.isna(t.dp_ineligible_reason)
-    assert "unreconciled_anomalies" not in detail
-
-    # ...and the wobble is still REPORTED, so netting cannot launder a real
-    # arrival against a real loss without anyone seeing it
-    w = detail["hour_wobble_netted_to_zero"]
-    assert w["episodes"] == 1
-    assert w["gross_units_in"] == 2 and w["gross_units_out"] == 2
-    assert w["max_gross_per_episode"] == 4
+    assert np.isnan(scrap_units(d).iloc[0])
+    # and the business gets told where to look
+    assert detail["unreconciled_anomalies"]["units_unaccounted"] == 2

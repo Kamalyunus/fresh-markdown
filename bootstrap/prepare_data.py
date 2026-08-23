@@ -88,12 +88,12 @@ def restocked_episodes(d):
     an hour selling MORE than it opened with has a negative net, and clipping
     it to zero makes any ending look ordinary.
 
-    Read on the NET arrival over the episode, not on the hour. The hour-level
-    test fires on bucket skew: a sale recorded an hour after the stock left
-    shows a shortfall at t and a restock of the same size at t+1, and nothing
-    arrived. Gating on that pushed a perfectly reconciled window out of
-    `dp_eligible` while its own `units_restocked` read 0 -- the flag and the
-    quantity contradicting each other. `episode_flow` nets first.
+    Counted GROSS over the episode, never netted against the shrink hours. A
+    window can genuinely take 2 units in and lose 2 units to shrink, and
+    netting those to zero read it as an ordinary episode -- which let it into
+    the DP-side population and priced its clearance against a supply short by
+    the 2 that arrived. Both figures stand on their own: `units_restocked`
+    and `units_shrink`.
 
     FLAGS, never filters (`dp_ineligible_reason = "restocked"`). What a
     restock breaks is the DP's state transition, which assumes one pool
@@ -607,7 +607,7 @@ DP_INELIGIBLE = (
      "trustworthy clearance -- it would read above 1, or show scrap on a "
      "window that sold everything it had -- and therefore no trustworthy "
      "scrap and no trustworthy IL. Kept in the population and FLAGGED so the "
-     "business can find out what moved; `units_unreconciled` is how many"),
+     "business can find out what moved; `units_shrink` is how many"),
     ("restocked",
      "an hour opens with more stock than the previous hour left behind. The "
      "DP's state transition is V(p, q - min(k,q), h-1) over ONE inventory "
@@ -670,7 +670,7 @@ def tag_dp_eligibility(d, cfg):
     # denominator for clearance now that a window can gain stock
     flow = episodes.episode_flow(d)
     for col, src in (("units_restocked", "arrived"),
-                     ("units_unreconciled", "vanished"),
+                     ("units_shrink", "vanished"),
                      ("episode_supply", "supply"),
                      ("episode_clearance", "clearance")):
         d = d.copy()
@@ -725,33 +725,26 @@ def tag_dp_eligibility(d, cfg):
         d.loc[edge & d.dp_eligible, "episode_id"].nunique())
     detail["edge_truncated"] = edge_detail
 
-    # WHAT THE NETTING ABSORBED. An episode can reconcile at the episode level
-    # while its hours wobble, and the wobble is almost always a sale bucketed
-    # an hour off the inventory snapshot. Almost always is not always: netting
-    # could in principle cancel a real arrival against a real loss hours
-    # apart. Rather than invent an adjacency window, the gross movement is
-    # reported against the net so the case is visible.
-    #
-    # Read `median_gross_per_episode`: ones and twos are bucket skew. If it
-    # climbs, something other than skew is being cancelled out.
-    netted = flow[(flow.gross_in + flow.gross_out > 0)
-                  & (flow.arrived == 0) & (flow.vanished == 0)]
-    detail["hour_wobble_netted_to_zero"] = {
-        "episodes": int(len(netted)),
-        "share_of_episodes": round(float(len(netted)) / max(len(flow), 1), 6),
-        "gross_units_in": int(netted.gross_in.sum()),
-        "gross_units_out": int(netted.gross_out.sum()),
-        "median_gross_per_episode": float(
-            (netted.gross_in + netted.gross_out).median()) if len(netted) else 0.0,
-        "max_gross_per_episode": int(
-            (netted.gross_in + netted.gross_out).max()) if len(netted) else 0,
-        "note": ("Episodes whose hours do not individually reconcile but "
-                 "whose EPISODE does. The sale left inventory in one hour and "
-                 "was recorded in the next, so a shortfall and a restock of "
-                 "the same size cancel. These are fully trusted -- they keep "
-                 "their scrap, clearance and IL, and they are NOT flagged "
-                 "restocked, because nothing arrived. Small ones and twos are "
-                 "skew; a large gross netting to zero is worth a look."),
+    # ARE THE SHRINKS AND RESTOCKS PAIRED? A window that loses a unit at one
+    # hour and gains one at the next may be two real events or one sale the
+    # feed bucketed an hour off the inventory snapshot. Nothing here decides
+    # -- an earlier version NETTED such pairs away and was wrong to, since
+    # that read a window with 2 units restocked and 2 shrunk as having
+    # neither. Both are counted in full, and the adjacency is reported so the
+    # business has the shape of it when they go looking.
+    paired = flow[(flow.arrived > 0) & (flow.vanished > 0)]
+    detail["shrink_and_restock_together"] = {
+        "episodes": int(len(paired)),
+        "share_of_episodes": round(float(len(paired)) / max(len(flow), 1), 6),
+        "units_arrived": int(paired.arrived.sum()),
+        "units_shrunk": int(paired.vanished.sum()),
+        "episodes_equal_in_and_out": int((paired.arrived == paired.vanished).sum()),
+        "note": ("Episodes with BOTH an arrival and a loss. Where the two are "
+                 "equal and the hours adjacent, a sale recorded an hour after "
+                 "the stock moved would look identical -- but that is a guess, "
+                 "and the counts here are not netted on the strength of it. "
+                 "Both figures stand, the episode is flagged restocked AND "
+                 "unreconciled, and it stays out of the DP-side population."),
     }
 
     # WHERE THE ANOMALIES SIT, so the business can go and find out what moved.
@@ -763,7 +756,7 @@ def tag_dp_eligibility(d, cfg):
     if bad.any():
         ep = d[bad].groupby("episode_id").agg(
             month=("date", lambda s: str(pd.to_datetime(s.iloc[0]))[:7]),
-            units=("units_unreconciled", "first"),
+            units=("units_shrink", "first"),
             # `category` is always present on the real chain; guarded so a
             # caller tagging a bare frame is not forced to invent one
             **({"category": ("category", "first")} if "category" in d else {}))

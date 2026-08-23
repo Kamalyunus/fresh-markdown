@@ -702,27 +702,36 @@ named those rows `intraday_restock` if the stage had not run first.
 
 ### The episode is the unit of reconciliation
 
-An hour-level shortfall is NOT a drop, because on the production feed a sale
-is routinely bucketed one hour off the inventory snapshot: stock leaves at
-hour *t*, the sale is recorded at *t+1*, and *t* reads as a shortfall of one
-while *t+1* reads as a restock of one. **They cancel exactly.** A sale is
-likelier to straddle a bucket boundary the more the SKU sells, so dropping on
-the hour deleted the fastest-selling windows first — that is the 4.5× size
-selection the waterfall shows.
+An hour-level shortfall is NOT a drop. An hour can genuinely take stock in
+(`ending > starting − sold`) or genuinely lose it (`0 < ending < starting −
+sold`), and both are events the source is reporting rather than defects. What
+matters is whether the EPISODE's accounting closes.
+
+**Both are counted GROSS, never netted against each other.** A window that
+takes 2 units in and loses 2 to shrink has 2 of each, not zero of both. An
+earlier version netted adjacent pairs away on the theory that each was one
+sale bucketed an hour late — an inference dressed as arithmetic. It read a
+restocked episode as ordinary, let it into the DP-side population, and priced
+its clearance against a supply short by the units that arrived.
+`shrink_and_restock_together` in the manifest reports episodes carrying both,
+so the pairing is visible without anything being explained away.
 
 What is tested instead is the episode:
 
 ```
-supply    = opening + net arrivals          (net, so bucket skew cancels)
-supply    = sold + remaining                <-- THE IDENTITY
-clearance = sold / supply                   <-- cannot exceed 1
+supply    = opening + arrivals             (gross, never netted)
+supply    = sold + shrink + remaining      <-- THE IDENTITY
+clearance = sold / supply                  <-- cannot exceed 1
 ```
 
 `common.episodes.episode_flow` computes `remaining` two ways — `supply − sold`,
 and off the final hour (`ending_inventory`, or `starting − sold` where the
 write-off zeroed it). Two arithmetic paths over different fields, so agreement
 is evidence and **no tolerance constant has to be invented**. Where they
-disagree the episode is flagged `unreconciled`.
+disagree the arithmetic here has a bug -- it caught one, reading the last
+row's leftover as `starting − sold` on an hour that restocked. The DATA test
+is `shrink == 0`: an episode that lost units has no trustworthy scrap or IL,
+and is flagged `unreconciled`.
 
 Three consequences, all asserted in `tests/test_populations.py`:
 
@@ -733,7 +742,7 @@ Three consequences, all asserted in `tests/test_populations.py`:
 - **fuzzy episodes reach no scrap, IL, clearance, backtest or shadow figure**,
   because `scrap_units` returns NaN for them
 
-The prepared frame carries `units_restocked`, `units_unreconciled`,
+The prepared frame carries `units_restocked`, `units_shrink`,
 `episode_supply`, `episode_clearance` and `flow_reconciled`.
 
 ### The flags (`tag_dp_eligibility`)

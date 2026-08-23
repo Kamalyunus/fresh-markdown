@@ -62,8 +62,9 @@ CATALOGUE = [
    "Units that ARRIVED mid-window, and the resulting supply = opening + arrivals. "
    "Opening stock stopped being an episode's supply once restocked episodes were "
    "kept, and clearance against it read 300% on a window that scrapped 4 units. "
-   "Arrivals are NETTED, so a sale the feed bucketed an hour late -- a +1 at one hour "
-   "and a -1 at the next -- is not counted as stock arriving.",
+   "Counted GROSS: an episode that takes 2 units in and loses 2 to shrink has 2 of "
+   "each, not zero of both. `shrink_and_restock_together` reports the ones carrying "
+   "both.",
    "clearance, and the DP state the solver cannot model"),
   ("dp_eligible · edge_truncated", "count",
    "Episodes the extract cut off mid-window, FLAGGED not dropped: only the ENDING is "

@@ -224,18 +224,23 @@ def episode_flow(d):
                       "start": d.starting_inventory.to_numpy()})
     agg = g.groupby("episode_id", sort=False).agg(
         net=("disc", "sum"), sold=("sold", "sum"), opening=("start", "first"))
-    # GROSS movement, before netting. Kept because netting can in principle
-    # cancel a real arrival against a real loss hours apart, and the only
-    # honest answer to that is to report it rather than to invent an
-    # adjacency window. A large gross against a zero net is the thing to look
-    # at; ones and twos on adjacent hours are the bucket skew.
-    agg["gross_in"] = g[g.disc < 0].groupby("episode_id", sort=False).disc.sum(
-        ).reindex(agg.index).fillna(0).abs().astype("int64")
-    agg["gross_out"] = g[g.disc > 0].groupby("episode_id", sort=False).disc.sum(
+    # GROSS, never netted. An hour where `ending` exceeds `starting - sold`
+    # is a restock; an hour where it falls short is stock gone missing. Both
+    # are real events the source is reporting, and they are counted as they
+    # happen.
+    #
+    # An earlier version NETTED them, on the theory that a shortfall at one
+    # hour followed by a restock of the same size at the next was one sale
+    # bucketed an hour late. That was an inference dressed as arithmetic, and
+    # it was wrong: it read a window with 2 units restocked and 2 units shrunk
+    # as having neither, which let a restocked episode into the DP-side
+    # population and priced its clearance against the wrong supply. The gross
+    # figures are what the data says; nothing here is entitled to explain them
+    # away.
+    agg["arrived"] = (-g[g.disc < 0].groupby("episode_id", sort=False).disc.sum()
+                      ).reindex(agg.index).fillna(0).astype("int64")
+    agg["vanished"] = g[g.disc > 0].groupby("episode_id", sort=False).disc.sum(
         ).reindex(agg.index).fillna(0).astype("int64")
-
-    agg["arrived"] = np.clip(-agg.net, 0, None)
-    agg["vanished"] = np.clip(agg.net, 0, None)
     agg["supply"] = agg.opening + agg.arrived
     agg["clearance"] = np.divide(
         agg.sold.to_numpy(), agg.supply.to_numpy(),
@@ -272,10 +277,19 @@ def episode_flow(d):
                          - last.units_sold.to_numpy(), 0, None),
                  last.ending_inventory.to_numpy()),
         index=last.episode_id.to_numpy())
-    agg["remaining"] = agg.supply - agg.sold
+    agg["remaining"] = agg.supply - agg.sold - agg.vanished
     agg["remaining_from_last_row"] = tail_leftover.reindex(agg.index).to_numpy()
-    agg["reconciled"] = (agg.vanished == 0) & (
-        agg.remaining == agg.remaining_from_last_row)
+    # `accounting_closes` is an arithmetic SELF-CHECK, not a data test: once
+    # the chain is continuous the two sides are provably equal, so a
+    # disagreement means this function has a bug rather than the feed. It
+    # earned its place by catching one -- reading the last row's leftover as
+    # `starting - sold` on an hour that restocked.
+    agg["accounting_closes"] = agg.remaining == agg.remaining_from_last_row
+    # TRUSTWORTHY is the stricter thing, and it is what scrap, IL and
+    # clearance require: nothing left this episode unexplained. A restock does
+    # not spoil them -- supply accounts for it -- but shrink does, because the
+    # units are neither sold, nor scrapped, nor still there.
+    agg["reconciled"] = (agg.vanished == 0) & agg.accounting_closes
     return agg.drop(columns=["net"])
 
 
