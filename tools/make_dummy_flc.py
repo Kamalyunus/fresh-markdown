@@ -37,6 +37,13 @@ code path that reads it never executed:
 
 `main` counts both on every run. If either prints zero, the fixture is not
 exercising what it claims to.
+
+DIRT IS INJECTED AT THE SCOPE THE DEFECT REALLY HAS. Null category, null
+subcategory, zero base price and the multi-lot over-sell are ROW properties
+and are injected per row. A negative `flc_window` is a WINDOW property -- an
+episode entering already negative -- and is injected across whole windows,
+because `assign_episode_ids` differences the counter hour to hour and a single
+bad value reads as a window boundary rather than as bad data.
 """
 
 import argparse
@@ -183,6 +190,7 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02):
     start = dt.date(2026, 3, 1)
 
     records = []
+    windows = []          # (start, end) row range of each emitted window
     for _, sku in master.iterrows():
         spec = CATALOG[sku.category]
         eps_true = spec["epsilon"] * float(np.exp(rng.normal(0, 0.12)))
@@ -203,6 +211,7 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02):
                 continue
 
             inv = int(rng.integers(1, 32))
+            window_start = len(records)   # for whole-window dirt injection
 
             if policy == "legacy":
                 entry_d = min(d_ref, d_max)
@@ -278,6 +287,8 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02):
                 last = list(records[-1])
                 last[10] = 0.0
                 records[-1] = tuple(last)
+            if len(records) > window_start:
+                windows.append((window_start, len(records)))
 
     df = pd.DataFrame(records, columns=[f.name for f in SCHEMA])
 
@@ -285,13 +296,46 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02):
     n = len(df)
     if n and dirty_frac > 0:
         k = max(1, int(n * dirty_frac))
-        idx = rng.choice(n, size=k * 5, replace=False)
-        a, b, c, d_, e = np.array_split(idx, 5)
+        idx = rng.choice(n, size=k * 4, replace=False)
+        a, b, c, e = np.array_split(idx, 4)
         df.loc[a, "category"] = None                      # null category
         df.loc[b, "subcategory"] = None                   # null subcategory
         df.loc[c, "normal_asp"] = 0.0                     # zero base price
-        df.loc[d_, "flc_window"] = -1.0                   # negative window
         df.loc[e, "units_sold"] = df.loc[e, "inventory"].astype(int) + 3  # multi-lot
+
+        # NEGATIVE WINDOW -- injected on WHOLE WINDOWS, from the first hour.
+        #
+        # It used to be written onto RANDOM ROWS, and that did not model the
+        # source at all: a single corrupted counter mid-window reads as a
+        # window BOUNDARY to `assign_episode_ids`, which differences the
+        # counter hour to hour. One bad value shredded a clean 4-hour window
+        # into three fragments -- 3, 2, [-1], 0 -- and the fragments that did
+        # not carry the closing row came out `not_closed`. It manufactured
+        # 62 of the fixture's 65 unclosed episodes, so `edge_truncated` read 0
+        # against them and `share_of_unclosed_explained_by_edge` read 0: the
+        # diagnostic that is supposed to say "the extract boundary explains
+        # these" was being answered by an injection artifact instead. With
+        # dirt off, unclosed fell from 3.9% to 0.2%.
+        #
+        # The real pattern is an episode ENTERING already negative, and it
+        # stays an episode: the counter still decrements by one per hour, so
+        # segmentation keeps the window whole, `negative_window_recovered`
+        # rewrites it as a countdown from `manufacturing_window_hours`, and
+        # the episode keeps its closing row.
+        #
+        # The source's other negative shape -- a flat negative CONSTANT on
+        # every row -- is deliberately NOT injected. A flat counter differences
+        # to zero, so it segments into one-row episodes; only the one holding
+        # the window's final row would close, and the rest would come out
+        # `not_closed`. That is the same artifact this change removes, so
+        # injecting it here would put the noise back under a better name.
+        if windows:
+            k_win = max(1, int(len(windows) * dirty_frac))
+            for w in rng.choice(len(windows), size=min(k_win, len(windows)),
+                                replace=False):
+                s, t = windows[w]
+                entry = -float(rng.integers(1, 40))       # enters below zero
+                df.loc[s:t - 1, "flc_window"] = entry - np.arange(t - s)
 
     df = df.sort_values(["skuseq", "fc", "date", "hour"]).reset_index(drop=True)
     return df, master
@@ -345,6 +389,8 @@ def main():
           f"— MUST be > 0 or every episode reads unclosed)")
     print(f"shrink rows       : {shrink_rows:,} "
           f"(0 < ending < starting-sold, {shrink_rows/max(len(df),1):.2%})")
+    print(f"negative-window   : {int((df.flc_window < 0).sum()):,} rows "
+          f"(whole windows entering below zero, never a single row)")
     print(f"median d_max      : {(1 - df.cogs_wo_vat/df.normal_asp.replace(0,np.nan)).median():.3f}")
     print(f"corr(discount,hour) within episode: {corr_within(df):.3f}")
     print(f"wrote             : {args.out}")

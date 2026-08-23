@@ -93,6 +93,51 @@ def test_the_generator_emits_both_source_inventory_conventions():
     assert ((off.ending_inventory > 0) & (off.ending_inventory < net_off)).sum() == 0
 
 
+def test_the_negative_window_dirt_lands_on_WHOLE_windows(): # noqa: N802
+    """A negative counter is a property of a window, not of one row.
+
+    It used to be written onto random rows, and `assign_episode_ids`
+    differences the counter hour to hour -- so one bad value read as a window
+    BOUNDARY and shredded a clean window into fragments (3, 2, [-1], 0). The
+    fragments that did not carry the closing row came out `not_closed`, which
+    manufactured 62 of the fixture's 65 unclosed episodes and drove
+    `share_of_unclosed_explained_by_edge` to 0: the diagnostic meant to say
+    "the extract boundary explains these" was answering an injection artifact.
+
+    The real pattern is an episode ENTERING already negative and staying an
+    episode, so the counter must still decrement by exactly one per hour.
+    """
+    import pandas as pd
+    from tools.make_dummy_flc import generate
+
+    df, _ = generate(n_skus=60, n_days=60, policy="randomized", seed=5,
+                     dirty_frac=0.02)
+    neg = df[df.flc_window < 0]
+    assert len(neg) > 0, "no negative-window dirt was injected at all"
+
+    for key, g in neg.groupby(["skuseq", "fc", "date"]):
+        g = g.sort_values("hour")
+        # EVERY row of the window is negative -- it entered that way
+        assert (g.flc_window < 0).all(), f"{key} is negative only part-way in"
+        # and the countdown is intact, so segmentation keeps the window whole
+        steps = set(g.flc_window.diff().dropna().astype(int))
+        assert steps <= {-1}, f"{key} does not decrement by one: {steps}"
+
+    # the payoff: unclosed episodes are no longer an artifact of the injection
+    from bootstrap.prepare_data import load_and_filter
+    from common import episodes as E
+    from common.config import load_config
+    import pyarrow as pa, pyarrow.parquet as pq, tempfile, os
+
+    tmp = os.path.join(tempfile.mkdtemp(), "f.parquet")
+    pq.write_table(pa.Table.from_pandas(df, schema=SCHEMA, preserve_index=False), tmp)
+    d, _ = load_and_filter(tmp, load_config())
+    flow = E.episode_flow(d)
+    assert (~flow.closed).mean() < 0.02, (
+        "unclosed episodes are being manufactured by the dirt injection again: "
+        f"{(~flow.closed).mean():.1%}")
+
+
 def test_exclusion_window_comes_from_config():
     from common.config import load_config
 

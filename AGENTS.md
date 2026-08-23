@@ -1346,6 +1346,19 @@ so read them off the reports directly. Two rules survive it:
 - Synthetic validation: `tools/make_dummy_flc.py --policy randomized` makes
   elasticity recoverable (estimator should RECOVER it); `--policy legacy`
   reproduces the production confound (estimator should DETECT it).
+- **Dirt is injected at the scope the defect really has.** Null category, null
+  subcategory, zero base price and the multi-lot over-sell are ROW properties.
+  A negative `flc_window` is a WINDOW property — an episode entering already
+  negative — and is injected across whole windows. Writing it to random rows
+  was wrong in a way that poisoned a diagnostic: `assign_episode_ids`
+  differences the counter hour to hour, so one bad value read as a window
+  BOUNDARY and shredded a clean window into fragments (3, 2, **−1**, 0). The
+  fragments without the closing row came out `not_closed`, manufacturing 62 of
+  the fixture's 65 unclosed episodes and driving
+  `share_of_unclosed_explained_by_edge` to 0 — the number that is supposed to
+  tell you whether the extract boundary explains the unclosed count was
+  answering an injection artifact. Fixed: unclosed fell 3.9% → **0.2%**, and
+  `negative_window_recovered` now recovers whole episodes as intended.
 - **The generator models both source inventory conventions, and must keep
   doing so** — the write-off sentinel (`ending == 0` while stock remained) and
   shrink (`0 < ending < starting − sold`, rate `--shrink-rate`, default 0.02).
