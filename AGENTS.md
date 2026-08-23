@@ -670,7 +670,7 @@ spread in the data.
 | `zero_base_price_dropped` | rows | `original_price` still null/zero after ffill+bfill within the episode |
 | `negative_window_recovered` | episode | **not a drop.** A counter entering ALREADY negative is a known source pattern, not a defect — see the note below the table |
 | `units_gt_inventory_dropped` | episode | sales exceed the inventory on hand |
-| `chain_break_dropped` | episode | an hour where `ending != starting − sold` that `common.episodes.adjustment_reason` cannot name — unexplained inventory loss. The biggest cut in the tail: 94,940 episodes, **11.05pp of COGS** on production |
+| `chain_break_dropped` | episode | an hour where `ending != starting − sold` that `common.episodes.adjustment_reason` cannot name — unexplained inventory loss. **The single largest filter in the chain: 168,108 episodes, 33.6pp of COGS** on the Aug-21 extract, and the episodes it takes average ₩133.8k of exposure against ₩29.5k for the ones it keeps — a 4.5× size selection, so it is removing a subpopulation, not noise. Run `tools.filter_forensics` before defending it |
 | `contiguous_episodes_built` | — | re-segmentation, not a filter: episode count and COGS both MOVE here because earlier drops split windows, and one opening row becomes two |
 | `dp_eligible` | — | **not a drop.** The terminal SUMMARY row: how much of the surviving population the DP can act on, with a per-reason breakdown in its detail block |
 
