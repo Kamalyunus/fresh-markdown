@@ -374,36 +374,51 @@ def load_and_filter(path, cfg=None, probe=None):
     # before the reconciler was ever asked, taking 18.1pp of the extract's
     # COGS with it. These episodes are now flagged `restocked` like any other.
 
-    # WITHIN the hour, exactly three things are legitimate -- see the
-    # convention block at the top of `common.episodes`. Anything else is stock
-    # that left without being sold and without being written off.
+    # ONE hard integrity rule survives at the hour level, and it is the only
+    # one with no legitimate exception: `ending` already carries any restock
+    # forward, so it MUST be the next hour's `starting`. A violation is the
+    # feed contradicting itself about a single instant, which no business
+    # event explains, and it makes the whole inventory chain unreadable.
+    #
+    # Nothing tested this before the source convention was understood --
+    # restock was INFERRED from the next hour's opening, which quietly assumed
+    # the continuity it should have been checking.
+    d = d.sort_values(["sku_id", "fc", "date", "hour_of_day"])
     status = episodes.hour_status(d.starting_inventory, d.units_sold,
                                   d.ending_inventory)
-    shortfall = status == episodes.SHORTFALL
-
-    # ACROSS hours there are NO legitimate exceptions: `ending` already
-    # carries the restock forward, so it must be the next hour's `starting`.
-    # Nothing tested this before -- restock was inferred from the next hour's
-    # opening, which quietly ASSUMED the continuity it should have checked, so
-    # a feed disagreeing with itself about one instant read as a restock.
-    d = d.sort_values(["sku_id", "fc", "date", "hour_of_day"])
     discontinuous = episodes.continuity_breaks(d)
 
-    broken = shortfall | discontinuous
+    # An hour-level SHORTFALL is deliberately NOT a drop any more. On the
+    # production feed a sale is routinely bucketed one hour off the inventory
+    # snapshot: the stock leaves at hour t and the sale is recorded at t+1, so
+    # t reads as a shortfall of one unit and t+1 as a restock of one, and they
+    # cancel exactly. Dropping on the hour deleted those episodes -- and since
+    # a sale is likelier to straddle a bucket boundary the more the SKU sells,
+    # it deleted the fastest-selling windows first. That is the 4.5x size
+    # selection in the waterfall.
+    #
+    # What matters is whether the EPISODE reconciles, and that is tested below
+    # in `tag_dp_eligibility` against the flow identity
+    # `supply = sold + remaining`. Skew nets to zero there; a genuine loss
+    # does not.
     detail = {
-        "episodes_dropped": int(d.loc[broken, "episode_id"].nunique()),
-        "rows_unexplained_shortfall": int(shortfall.sum()),
+        "episodes_dropped": int(d.loc[discontinuous, "episode_id"].nunique()),
         "rows_chain_discontinuous": int(discontinuous.sum()),
         "rows_restock": int((status == episodes.RESTOCK).sum()),
         "rows_write_off": int((status == episodes.WRITE_OFF).sum()),
-        "note": ("Only two things are dropped here: stock that vanished "
-                 "(0 < ending < starting - sold) and a feed that disagrees "
-                 "with itself about one instant (ending != next starting). "
-                 "A restock is NOT a break -- ending is the final quantity "
-                 "after it, so units_sold > starting_inventory is the restock "
-                 "signal, not an impossible value."),
+        "rows_hour_shortfall_NOT_dropped": int(
+            (status == episodes.SHORTFALL).sum()),
+        "note": ("Drops ONE thing: a feed that disagrees with itself about "
+                 "one instant (ending != next starting). An hour-level "
+                 "shortfall is left alone -- it is usually a sale bucketed an "
+                 "hour late, which cancels against the restock it creates in "
+                 "the next hour. The episode-level flow identity in "
+                 "dp_eligible.unreconciled is what catches genuine loss. "
+                 "A restock is not a break either: ending is the final "
+                 "quantity after it, so units_sold > starting_inventory is "
+                 "the restock signal, not an impossible value."),
     }
-    d = d[~d.episode_id.isin(d.loc[broken, "episode_id"].unique())]
+    d = d[~d.episode_id.isin(d.loc[discontinuous, "episode_id"].unique())]
     d = step(d, "chain_break_dropped")
     wf[-1] = wf[-1] + (detail,)
 
@@ -579,6 +594,14 @@ DP_INELIGIBLE = (
      "hours_remaining above data.max_window_hours. extend_to_window RAISES "
      "above the cap, so this is a crash rather than a refusal. Only backtest "
      "and shadow extend; the artifact fits never read the counter"),
+    ("unreconciled",
+     "the episode's flow identity fails: supply (opening + net arrivals) does "
+     "not equal units sold plus the stock left on the last row. Stock moved "
+     "that no sale, restock or write-off accounts for, so the episode has no "
+     "trustworthy clearance -- it would read above 1, or show scrap on a "
+     "window that sold everything it had -- and therefore no trustworthy "
+     "scrap and no trustworthy IL. Kept in the population and FLAGGED so the "
+     "business can find out what moved; `units_unreconciled` is how many"),
     ("restocked",
      "an hour opens with more stock than the previous hour left behind. The "
      "DP's state transition is V(p, q - min(k,q), h-1) over ONE inventory "
@@ -635,11 +658,26 @@ def tag_dp_eligibility(d, cfg):
     cannot mistake a data gap for a restock.
     """
     cap = cfg["data"]["max_window_hours"]
+    # the episode's supply accounting, computed once and attached to the frame
+    # -- `units_restocked` is the quantity the DP would have to model and the
+    # business will want to see, and `episode_supply` is the only correct
+    # denominator for clearance now that a window can gain stock
+    flow = episodes.episode_flow(d)
+    for col, src in (("units_restocked", "arrived"),
+                     ("units_unreconciled", "vanished"),
+                     ("episode_supply", "supply"),
+                     ("episode_clearance", "clearance")):
+        d = d.copy()
+        d[col] = d.episode_id.map(flow[src]).astype(
+            float if src == "clearance" else "int64")
+    d["flow_reconciled"] = d.episode_id.map(flow.reconciled).astype(bool)
+
     tests = {
         "cost_missing": d.cost <= 0,
         "non_priceable": d.cost >= d.original_price,
         "negative_window": d.hours_remaining < 0,
         "window_too_long": d.hours_remaining > cap,
+        "unreconciled": ~d.flow_reconciled,
         "restocked": d.episode_id.isin(restocked_episodes(d)),
     }
     reason = pd.Series(pd.NA, index=d.index, dtype="object")
@@ -680,6 +718,47 @@ def tag_dp_eligibility(d, cfg):
     edge_detail["still_dp_eligible"] = int(
         d.loc[edge & d.dp_eligible, "episode_id"].nunique())
     detail["edge_truncated"] = edge_detail
+
+    # WHERE THE ANOMALIES SIT, so the business can go and find out what moved.
+    # A count on its own says "the feed is imperfect" and stops there. Broken
+    # out by category and month it says whether this is one incident, one
+    # corner of the catalogue, or a standing property of the feed -- which are
+    # three different investigations.
+    bad = ~d.flow_reconciled
+    if bad.any():
+        ep = d[bad].groupby("episode_id").agg(
+            month=("date", lambda s: str(pd.to_datetime(s.iloc[0]))[:7]),
+            units=("units_unreconciled", "first"),
+            # `category` is always present on the real chain; guarded so a
+            # caller tagging a bare frame is not forced to invent one
+            **({"category": ("category", "first")} if "category" in d else {}))
+
+        def _by(col):
+            if col not in ep:
+                return {}
+            g = ep.groupby(col).agg(episodes=("units", "size"),
+                                    units=("units", "sum"))
+            g = g.sort_values("units", ascending=False).head(10) \
+                if col == "category" else g
+            return {str(k): {"episodes": int(r.episodes), "units": int(r.units)}
+                    for k, r in g.iterrows()}
+        detail["unreconciled_anomalies"] = {
+            "episodes": int(len(ep)),
+            "units_unaccounted": int(ep.units.sum()),
+            "cogs_at_risk": round(cogs_at_risk(d[bad]), 1),
+            "median_units_per_episode": float(ep.units.median()),
+            "by_category": _by("category"),
+            "by_month": _by("month"),
+            "note": ("supply != sold + remaining. Stock moved that no sale, "
+                     "restock or write-off accounts for. These episodes are "
+                     "KEPT and flagged, out of dp_eligible and out of every "
+                     "scrap/IL/clearance figure (scrap_units returns NaN for "
+                     "them). Concentrated in one month reads as an incident; "
+                     "spread evenly reads as a standing feed property; "
+                     "concentrated in a few categories names the subset. "
+                     "This is the list to hand back to the business."),
+        }
+
     detail["episodes_dp_eligible"] = int(
         d.loc[d.dp_eligible, "episode_id"].nunique())
     detail["episodes_dp_ineligible"] = int(

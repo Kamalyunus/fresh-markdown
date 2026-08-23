@@ -376,3 +376,88 @@ def test_a_restocked_episode_never_reaches_the_backtest(cfg):
         "on an inventory pool the solver never modelled"
     # ...and it is still there for the artifact fits
     assert "R" in set(population(tagged, cfg, "integrity").episode_id)
+
+
+def test_the_flow_identity_is_what_decides_a_trustworthy_episode(cfg):
+    """supply = sold + remaining, computed two ways that must agree.
+
+    `remaining` from the flow is `supply - sold`. `remaining_from_last_row` is
+    read off the final hour -- `ending_inventory`, or `starting - sold` where
+    the write-off zeroed it. Two arithmetic paths over different fields, so
+    agreement is evidence and no tolerance has to be invented.
+
+    The consequences the owner asked for fall straight out of it: clearance
+    can never exceed 1, and a fully cleared episode cannot carry scrap.
+    """
+    from common.episodes import episode_flow
+    cases = {
+        # sold everything: clearance 1, nothing left to scrap
+        "cleared": [(10, 5, 2, 3), (11, 3, 3, 0)],
+        # last hour RESTOCKED: opened 27, sold 30, ended holding 26
+        "last_restock": [(10, 27, 0, 27), (11, 27, 0, 27), (12, 27, 30, 26)],
+    }
+    frames = []
+    for k, rows in cases.items():
+        f = pd.DataFrame(rows, columns=["hour_of_day", "starting_inventory",
+                                        "units_sold", "ending_inventory"])
+        f["episode_id"] = k
+        f["date"] = "2026-03-01"
+        frames.append(f)
+    flow = episode_flow(pd.concat(frames, ignore_index=True))
+
+    assert flow.reconciled.all()
+    assert (flow.clearance <= 1.0).all(), "clearance above 1 is never valid"
+    assert (flow.remaining == flow.remaining_from_last_row).all()
+    # scrap cannot happen on a fully cleared episode
+    full = flow[flow.clearance >= 1.0]
+    assert (full.remaining == 0).all()
+    # and the last-hour restock is read off `ending`, not `starting - sold`,
+    # which would have given 0 and flagged a clean episode as an anomaly
+    assert flow.loc["last_restock", "remaining"] == 26
+    assert flow.loc["last_restock", "supply"] == 56
+
+
+def test_an_unreconciled_episode_is_kept_flagged_and_kept_out_of_scrap(cfg):
+    """Fuzzy episodes are no good for IL, scrap, clearance, backtest or
+    shadow -- and the business still needs to see them, so they are flagged
+    rather than deleted."""
+    from common.episodes import scrap_units
+    from bootstrap.prepare_data import population
+    # 1 unit vanishes: opened 10, sold 4, last row leaves 5, supply says 6
+    rows = [(10, 10, 1, 8), (11, 8, 0, 8), (12, 8, 3, 0)]
+    v = pd.DataFrame(rows, columns=["hour_of_day", "starting_inventory",
+                                    "units_sold", "ending_inventory"])
+    v["episode_id"] = "V"
+    v["date"] = "2026-01-01"
+    for col, val in (("cost", 4000.0), ("original_price", 10_000.0),
+                     ("total_discount", 0.25), ("hours_remaining", 3.0)):
+        v[col] = val
+    v["hours_remaining"] = [3.0, 2.0, 1.0]
+    v["offered_price"] = v.original_price * (1 - v.total_discount)
+    v["d_max"] = 1.0 - v.cost / v.original_price
+
+    # scrap is UNKNOWN, not guessed -- so IL cannot silently book either answer
+    assert np.isnan(scrap_units(v)["V"])
+
+    tagged, detail = tag_dp_eligibility(v, cfg)
+    assert (tagged.dp_ineligible_reason == "unreconciled").all()
+    assert tagged.units_unreconciled.eq(1).all()
+    assert not tagged.flow_reconciled.any()
+    # out of the DP-side population...
+    assert "V" not in set(population(tagged, cfg, "dp_eligible").episode_id)
+    # ...and still there, with somewhere for the business to look
+    assert "V" in set(population(tagged, cfg, "integrity").episode_id)
+    assert detail["unreconciled_anomalies"]["units_unaccounted"] == 1
+    assert detail["unreconciled_anomalies"]["by_month"]["2026-01"]["episodes"] == 1
+
+
+def test_units_restocked_is_on_the_prepared_frame(cfg):
+    """The owner asked for it by name: how much arrived, per episode."""
+    d = pd.concat([_frame(),
+                   _frame(episode_id="R", starting_inventory=[12, 20],
+                          ending_inventory=[20, 0])], ignore_index=True)
+    tagged, _ = tag_dp_eligibility(d, cfg)
+    got = tagged.groupby("episode_id").units_restocked.first()
+    assert got["e"] == 0
+    assert got["R"] == 11, "12 opened, 3 sold, ended 20 -> 11 arrived"
+    assert tagged.groupby("episode_id").episode_supply.first()["R"] == 23

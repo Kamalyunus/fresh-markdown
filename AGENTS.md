@@ -674,6 +674,68 @@ spread in the data.
 | `contiguous_episodes_built` | — | re-segmentation, not a filter: episode count and COGS both MOVE here because earlier drops split windows, and one opening row becomes two |
 | `dp_eligible` | — | **not a drop.** The terminal SUMMARY row: how much of the surviving population the DP can act on, with a per-reason breakdown in its detail block |
 
+### The source's inventory convention
+
+**`ending_inventory` is the FINAL quantity on hand at the close of the hour,
+AFTER anything that arrived during it.** It is not `starting − sold`; it is
+what the source counted at the end. Every hour-level rule follows from that
+one sentence, and `common.episodes.hour_status` is the only place it is
+written down:
+
+| | Meaning |
+| --- | --- |
+| `ending == starting − sold` | ordinary hour, nothing arrived |
+| `ending > starting − sold` | **RESTOCK.** Holds whenever stock arrived — including an hour that sold MORE than it opened with, where `starting − sold` goes negative and any ending exceeds it |
+| `ending == 0` and `net > 0` | the source wrote the remainder off: how a listing closes |
+| `0 < ending < starting − sold` | stock left unsold and unwritten-off |
+
+And ACROSS hours, with **no legitimate exception**: `starting[t+1] ==
+ending[t]`. `ending` already carries the restock forward, so the chain is
+continuous. This is the only hour-level rule that still DROPS — a violation is
+the feed contradicting itself about one instant.
+
+**`units_sold > starting_inventory` is not an impossible quantity.** It is the
+restock signal in its plainest form, and `units_gt_inventory_dropped` deleted
+18.1pp of the extract's COGS on the strength of calling it one — while
+`adjustment_reason`, the same rule `events.store` enforces live, would have
+named those rows `intraday_restock` if the stage had not run first.
+
+### The episode is the unit of reconciliation
+
+An hour-level shortfall is NOT a drop, because on the production feed a sale
+is routinely bucketed one hour off the inventory snapshot: stock leaves at
+hour *t*, the sale is recorded at *t+1*, and *t* reads as a shortfall of one
+while *t+1* reads as a restock of one. **They cancel exactly.** A sale is
+likelier to straddle a bucket boundary the more the SKU sells, so dropping on
+the hour deleted the fastest-selling windows first — that is the 4.5× size
+selection the waterfall shows.
+
+What is tested instead is the episode:
+
+```
+supply    = opening + net arrivals          (net, so bucket skew cancels)
+supply    = sold + remaining                <-- THE IDENTITY
+clearance = sold / supply                   <-- cannot exceed 1
+```
+
+`common.episodes.episode_flow` computes `remaining` two ways — `supply − sold`,
+and off the final hour (`ending_inventory`, or `starting − sold` where the
+write-off zeroed it). Two arithmetic paths over different fields, so agreement
+is evidence and **no tolerance constant has to be invented**. Where they
+disagree the episode is flagged `unreconciled`.
+
+Three consequences, all asserted in `tests/test_populations.py`:
+
+- **clearance can never exceed 1** — against opening stock a restocked episode
+  read 300% cleared *while scrapping 4 units*, and the histogram clipped at 1.0
+  so nothing showed
+- **a fully cleared episode carries no scrap** — `remaining == 0` falls out
+- **fuzzy episodes reach no scrap, IL, clearance, backtest or shadow figure**,
+  because `scrap_units` returns NaN for them
+
+The prepared frame carries `units_restocked`, `units_unreconciled`,
+`episode_supply`, `episode_clearance` and `flow_reconciled`.
+
 ### The flags (`tag_dp_eligibility`)
 
 Five conditions gate `dp_eligible`. Each names something the SOLVER cannot do,
@@ -687,7 +749,8 @@ trips, so the reason column reads as a cause.
 | `non_priceable` | `cost >= original_price`, so `d_max <= 0` and `feasible_tiers` is EMPTY |
 | `negative_window` | `hours_remaining` still `< 0` after recovery. The DP takes its horizon from the counter and `extend_to_window` builds the synthetic tail from it; neither can read a negative one |
 | `window_too_long` | `hours_remaining` above `data.max_window_hours` (**120**) — flc_window carries very large values from upstream data issues. Raised from 48 by the owner: 48 was cutting legitimate multi-day windows, not only defects. `extend_to_window` RAISES above the cap, so this is a crash rather than a refusal |
-| `restocked` | an hour opens with more stock than the previous hour left behind. The DP's transition is `V(p, q − min(k,q), h−1)` over ONE pool draining monotonically, so a mid-window replenishment leaves horizon, scrap and IL undefined |
+| `unreconciled` | the episode's flow identity fails: `supply != sold + remaining`. Stock moved that no sale, restock or write-off accounts for, so clearance would read above 1 or scrap would appear on a window that sold everything. No trustworthy clearance, scrap or IL — `scrap_units` returns NaN and `unreconciled_anomalies` in the manifest says where they sit, by category and month, for the business to deep-dive |
+| `restocked` | an hour opens with more stock than the previous hour left behind. The DP's transition is `V(p, q − min(k,q), h−1)` over ONE pool draining monotonically, so a mid-window replenishment leaves the horizon undefined |
 
 Two more are flagged and gate **nothing**:
 

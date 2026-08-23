@@ -230,6 +230,42 @@ def episode_flow(d):
     agg["clearance"] = np.divide(
         agg.sold.to_numpy(), agg.supply.to_numpy(),
         out=np.zeros(len(agg)), where=agg.supply.to_numpy() > 0)
+
+    # THE IDENTITY, and it validates itself. Everything an episode was given
+    # either sold or is still there:
+    #
+    #     supply = sold + remaining
+    #
+    # `remaining` computed from the flow is `supply - sold`. Computed the way
+    # scrap has always been read -- the last row's `starting - sold` -- it is
+    # a different arithmetic path over different fields. The two agree
+    # EXACTLY when the episode is internally consistent and differ by the
+    # unreconciled units when it is not, so no tolerance has to be invented:
+    # `reconciled` is just the two answers matching.
+    #
+    # An episode that fails it has no trustworthy clearance, no trustworthy
+    # scrap and therefore no trustworthy IL -- clearance would read above 1,
+    # or scrap would appear on a window that sold everything it had.
+    # The stock left at the close, read the OTHER way. `ending_inventory` is
+    # the authoritative final count -- that is the whole convention -- so it
+    # is the answer except on a write-off row, where the source zeroed it and
+    # `starting - sold` is what was written off. Reading `starting - sold`
+    # unconditionally was wrong on a last hour that RESTOCKED: one episode
+    # opened its final hour with 27, sold 30 and ended holding 26, and the
+    # subtraction gave 0.
+    last = d.groupby("episode_id", sort=False).tail(1)
+    last_status = hour_status(last.starting_inventory, last.units_sold,
+                              last.ending_inventory)
+    tail_leftover = pd.Series(
+        np.where(last_status == WRITE_OFF,
+                 np.clip(last.starting_inventory.to_numpy()
+                         - last.units_sold.to_numpy(), 0, None),
+                 last.ending_inventory.to_numpy()),
+        index=last.episode_id.to_numpy())
+    agg["remaining"] = agg.supply - agg.sold
+    agg["remaining_from_last_row"] = tail_leftover.reindex(agg.index).to_numpy()
+    agg["reconciled"] = (agg.vanished == 0) & (
+        agg.remaining == agg.remaining_from_last_row)
     return agg.drop(columns=["net"])
 
 
@@ -408,12 +444,28 @@ def classify(d):
 
 
 def scrap_units(d):
-    """Units scrapped per episode, NaN where the episode did not close here.
+    """Units scrapped per episode, NaN where the number cannot be trusted.
 
-    NaN propagates: a sum over a frame containing unfinished episodes must be
-    taken with those dropped, not silently treated as zero.
+    Two ways it cannot. The episode did not CLOSE inside this data, so the
+    stock is on the shelf rather than in the bin. Or its flow does not
+    RECONCILE -- `supply != sold + remaining` -- in which case the leftover on
+    the last row and the leftover the supply implies are two different
+    numbers, and picking either one is guessing. An episode like that has no
+    trustworthy scrap, no trustworthy clearance and therefore no trustworthy
+    IL, so it must not reach any of them.
+
+    NaN propagates: a sum over a frame containing such episodes must be taken
+    with those dropped, not silently treated as zero. Callers that report an
+    excluded count -- `bootstrap.measure.m6_il_pct` does -- keep the exclusion
+    visible instead of quietly shrinking the population.
     """
-    return scrap_units_last(last_rows(d))
+    out = scrap_units_last(last_rows(d))
+    flow = episode_flow(d)
+    bad = flow.index[~flow.reconciled]
+    if len(bad):
+        out = out.copy()
+        out[out.index.isin(bad)] = np.nan
+    return out
 
 
 def scrap_units_last(last):

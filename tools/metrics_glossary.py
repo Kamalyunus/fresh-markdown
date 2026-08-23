@@ -50,6 +50,21 @@ CATALOGUE = [
    "`cogs_dropped` appears at exactly one stage, `contiguous_episodes_built`, where "
    "re-segmentation turns one opening row into two.",
    "whether the surviving population still looks like the business"),
+  ("dp_eligible · unreconciled", "count",
+   "Episodes where supply != sold + remaining -- stock moved that no sale, restock "
+   "or write-off accounts for. Kept and FLAGGED, out of dp_eligible and out of every "
+   "scrap/IL/clearance figure (scrap_units returns NaN). Their clearance would read "
+   "above 1, or they would show scrap on a window that sold everything it had. "
+   "`unreconciled_anomalies` breaks them out by category and month: one incident, one "
+   "corner of the catalogue, or a standing feed property are three different "
+   "investigations.", "every scrap, IL and clearance figure"),
+  ("units_restocked / episode_supply", "count",
+   "Units that ARRIVED mid-window, and the resulting supply = opening + arrivals. "
+   "Opening stock stopped being an episode's supply once restocked episodes were "
+   "kept, and clearance against it read 300% on a window that scrapped 4 units. "
+   "Arrivals are NETTED, so a sale the feed bucketed an hour late -- a +1 at one hour "
+   "and a -1 at the next -- is not counted as stock arriving.",
+   "clearance, and the DP state the solver cannot model"),
   ("dp_eligible · edge_truncated", "count",
    "Episodes the extract cut off mid-window, FLAGGED not dropped: only the ENDING is "
    "unknown, the observed hours are ordinary priced demand, and these are the LARGEST "
