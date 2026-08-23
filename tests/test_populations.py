@@ -289,3 +289,90 @@ def test_an_unknown_outcome_reaches_the_harnesses_and_is_not_charged_scrap(cfg):
     # unknown ENDING says nothing about what the policy would have done
     for col in ("legacy_model_il", "dp_il"):
         assert row_u[col] == pytest.approx(row_k[col])
+
+
+# ------------------------------------- supply, and who is allowed to see it
+
+def test_supply_not_opening_stock_is_the_clearance_denominator():
+    """A restocked episode has more to sell than it opened with.
+
+    Against opening stock the ratio is nonsense in a specific and embarrassing
+    way: opened with 3, took 10 mid-flight, sold 9, scrapped 4 -- and the EDA
+    panel reported 300% cleared, counted it in `share_fully_cleared`, and hid
+    the overflow behind a histogram clipped at 1.0.
+    """
+    from common.episodes import episode_flow
+    d = pd.DataFrame({
+        "episode_id": ["R"] * 3, "date": ["2026-03-01"] * 3,
+        "hour_of_day": [10, 11, 12],
+        "starting_inventory": [3, 12, 8], "units_sold": [1, 4, 4],
+        "ending_inventory": [12, 8, 0]})
+    flow = episode_flow(d)
+    assert flow.loc["R", "opening"] == 3
+    assert flow.loc["R", "arrived"] == 10
+    assert flow.loc["R", "supply"] == 13
+    assert flow.loc["R", "clearance"] == pytest.approx(9 / 13)
+    assert flow.loc["R", "clearance"] <= 1.0
+
+
+def test_a_sale_bucketed_an_hour_late_is_not_an_arrival():
+    """The owner's episode. +1 at one hour and -1 at the next cancel, so
+    supply is the opening stock and clearance is 11/12 -- not 11/14, which is
+    what counting gross arrivals would give."""
+    from common.episodes import episode_flow
+    rows = [(0, 12, 0, 12), (1, 12, 0, 12), (2, 12, 0, 12), (3, 12, 0, 12),
+            (4, 12, 0, 12), (5, 12, 0, 12), (6, 12, 0, 12), (7, 12, 0, 12),
+            (8, 12, 1, 11), (9, 11, 0, 11), (10, 11, 0, 11), (11, 11, 0, 10),
+            (12, 10, 1, 10), (13, 10, 0, 10), (14, 10, 0, 10), (15, 10, 1, 9),
+            (16, 9, 1, 8), (17, 8, 0, 7), (18, 7, 1, 7), (19, 7, 0, 7),
+            (20, 7, 4, 3), (21, 3, 2, 0)]
+    d = pd.DataFrame(rows, columns=["hour_of_day", "starting_inventory",
+                                    "units_sold", "ending_inventory"])
+    d["episode_id"] = "S"
+    d["date"] = "2026-03-01"
+    flow = episode_flow(d)
+    assert flow.loc["S", "arrived"] == 0, \
+        "a one-hour bucket lag was counted as stock arriving"
+    assert flow.loc["S", "vanished"] == 0
+    assert flow.loc["S", "supply"] == 12
+    assert flow.loc["S", "clearance"] == pytest.approx(11 / 12)
+
+
+def test_stock_that_genuinely_vanishes_does_not_net_away():
+    """The netting must not launder a real loss into a clean episode."""
+    from common.episodes import episode_flow
+    d = pd.DataFrame({
+        "episode_id": ["V"] * 3, "date": ["2026-03-01"] * 3,
+        "hour_of_day": [10, 11, 12],
+        "starting_inventory": [10, 8, 8], "units_sold": [1, 0, 3],
+        "ending_inventory": [8, 8, 0]})
+    flow = episode_flow(d)
+    assert flow.loc["V", "vanished"] == 1
+    assert flow.loc["V", "arrived"] == 0
+    assert flow.loc["V", "supply"] == 10
+
+
+def test_a_restocked_episode_never_reaches_the_backtest(cfg):
+    """Asserted on BEHAVIOUR, not on a source grep.
+
+    A restocked episode is fine for the frozen artifacts -- the demand model
+    cannot see the inventory chain -- and wrong for anything that compares
+    policies or books IL, because the DP has no restock in its state
+    transition and clearance against opening stock goes above 1. `dp_eligible`
+    is what keeps them apart, and the other tests here check the flag; this
+    one checks that the consumer actually honours it.
+    """
+    from bootstrap.prepare_data import population
+    restocked = _frame(episode_id="R", starting_inventory=[12, 20],
+                       ending_inventory=[20, 0])
+    d = pd.concat([_frame(), restocked], ignore_index=True)
+    tagged, _ = tag_dp_eligibility(d, cfg)
+
+    assert set(tagged.loc[~tagged.dp_eligible, "episode_id"]) == {"R"}
+    eligible = population(tagged, cfg, "dp_eligible")
+    assert "R" not in set(eligible.episode_id), \
+        "a restocked episode reached the DP-side population -- clearance " \
+        "against opening stock would read above 1 and IL would book scrap " \
+        "on an inventory pool the solver never modelled"
+    # ...and it is still there for the artifact fits
+    assert "R" in set(population(tagged, cfg, "integrity").episode_id)

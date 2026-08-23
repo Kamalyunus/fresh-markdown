@@ -186,6 +186,53 @@ def hour_status(starting_inventory, units_sold, ending_inventory):
                                       WRITE_OFF, SHORTFALL)))
 
 
+def episode_flow(d):
+    """Per-episode supply accounting: what came in, what went missing.
+
+    `starting_inventory` on the opening row is NOT an episode's supply once a
+    restock is possible, and every ratio built on it breaks in the same
+    direction. A window that opened with 3, took 10 mid-flight and sold 9
+    reads as 300% cleared AND "fully cleared" while it scrapped 4 units. That
+    is not a rounding problem, it is a nonsense number reaching a chart.
+
+    The hour discrepancy is `(starting - ending) - sold`: what the inventory
+    says left, minus what sales claim. Summed over the episode it NETS, and
+    the netting is the point --
+
+      net <  0   stock genuinely ARRIVED. supply = opening + |net|.
+      net >  0   stock genuinely VANISHED, unsold and unwritten-off.
+      net == 0   internally consistent. Any hour-level wobble is the sales
+                 feed bucketing a sale an hour off the inventory snapshot:
+                 a +1 at one hour and a -1 at the next cancel exactly, and
+                 the episode neither gained nor lost anything.
+
+    The write-off row is excluded because the source zeroes its ending, which
+    would otherwise read as the whole remainder vanishing.
+
+    Returns a frame indexed by episode_id with `opening`, `arrived`,
+    `vanished`, `supply`, `sold` and `clearance`. `clearance` cannot exceed 1
+    by construction, which is the property the old ratio lacked.
+    """
+    d = d.sort_values(["date", "hour_of_day"])
+    status = hour_status(d.starting_inventory, d.units_sold, d.ending_inventory)
+    disc = ((d.starting_inventory.to_numpy() - d.ending_inventory.to_numpy())
+            - d.units_sold.to_numpy())
+    disc = np.where(status == WRITE_OFF, 0, disc)
+
+    g = pd.DataFrame({"episode_id": d.episode_id.to_numpy(), "disc": disc,
+                      "sold": d.units_sold.to_numpy(),
+                      "start": d.starting_inventory.to_numpy()})
+    agg = g.groupby("episode_id", sort=False).agg(
+        net=("disc", "sum"), sold=("sold", "sum"), opening=("start", "first"))
+    agg["arrived"] = np.clip(-agg.net, 0, None)
+    agg["vanished"] = np.clip(agg.net, 0, None)
+    agg["supply"] = agg.opening + agg.arrived
+    agg["clearance"] = np.divide(
+        agg.sold.to_numpy(), agg.supply.to_numpy(),
+        out=np.zeros(len(agg)), where=agg.supply.to_numpy() > 0)
+    return agg.drop(columns=["net"])
+
+
 def censored_hours(starting_inventory, units_sold, ending_inventory):
     """Hours where demand was only observed as a LOWER bound. Vectorised.
 

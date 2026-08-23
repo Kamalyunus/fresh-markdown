@@ -324,18 +324,29 @@ def p_entry_hour(d, cfg):
 
 @panel("clearance", "Clearance",
        informs=["monitoring.stop_conditions.scrap_deterioration_pct"],
-       lede="Units sold over opening stock. The quantity the whole system "
-            "trades against loss, and the one the business will watch first "
-            "if the agent holds prices higher.")
+       lede="Units sold over everything the episode had to sell. The quantity "
+            "the whole system trades against loss, and the one the business "
+            "will watch first if the agent holds prices higher.")
 def p_clearance(d, cfg):
+    """Denominator is SUPPLY, not opening stock.
+
+    Opening stock stopped being an episode's supply the moment restocked
+    episodes were kept in the population, and the failure is not subtle: a
+    window that opened with 3, took 10 mid-flight and sold 9 read as 300%
+    cleared and counted in `share_fully_cleared`, while it scrapped 4 units.
+    The histogram clipped at 1.0, so nothing showed.
+
+    `episodes.episode_flow` nets the hourly discrepancies before calling
+    anything an arrival, so a sale the feed bucketed an hour late -- a +1 and
+    a -1 that cancel -- does not inflate supply. Clearance cannot exceed 1.
+    """
     op = _openings(d)
-    sold = d.groupby("episode_id").units_sold.sum().reindex(op.episode_id)
-    start = op.starting_inventory.to_numpy()
-    rate = np.divide(sold.to_numpy(), start, out=np.zeros(len(op)),
-                     where=start > 0)
+    flow = episodes.episode_flow(d).reindex(op.episode_id)
+    rate = flow.clearance.to_numpy()
     kind = episodes.classify_last(_closings(d))
     counts = kind.value_counts()
     frame = pd.DataFrame({"category": op.category.to_numpy(), "rate": rate})
+    n = max(len(flow), 1)
     return {
         "clearance_rate": _pcts(rate),
         "mean_clearance": round(float(rate.mean()), 4),
@@ -344,8 +355,24 @@ def p_clearance(d, cfg):
         "endings": {str(k): int(v) for k, v in counts.items()},
         "by_category": {str(k): round(float(g.rate.mean()), 4)
                         for k, g in frame.groupby("category")},
+        # what the denominator correction is worth, so the number above can be
+        # compared with anything quoted before supply was accounted for
+        "supply": {
+            "episodes_restocked": int((flow.arrived > 0).sum()),
+            "share_restocked": round(float((flow.arrived > 0).sum()) / n, 4),
+            "units_arrived": int(flow.arrived.sum()),
+            "units_vanished": int(flow.vanished.sum()),
+            "supply_over_opening": round(
+                float(flow.supply.sum() / max(flow.opening.sum(), 1)), 4),
+            "max_clearance": round(float(rate.max()) if len(rate) else 0.0, 4),
+            "note": ("clearance = sold / (opening + net arrivals). Against "
+                     "opening stock alone a restocked episode reads above "
+                     "1.0 -- and can read above 1.0 while scrapping units, "
+                     "which is why max_clearance is reported: it must never "
+                     "exceed 1."),
+        },
         "chart": {"kind": "hist", "y_label": "episodes",
-                  "x_label": "units sold / opening stock",
+                  "x_label": "units sold / supply",
                   **_hist(rate, bins=25, lo=0, hi=1.0)},
     }
 
