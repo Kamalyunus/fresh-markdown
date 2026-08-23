@@ -728,17 +728,35 @@ asserts it on every episode of the prepared frame. Chain continuity makes the
 two sides provably equal, so a violation is a bug here rather than a defect in
 the feed — worth checking anyway, since it caught one.
 
-**The final hour must be clean: `starting >= sold` on the last row.** Then the
-episode ends in exactly one of two states and nothing else —
+### The close: two independent facts
 
-| Last row | Meaning |
-| --- | --- |
-| `sold == starting` | the shelf emptied. **CENSORED**, no leftover |
-| `sold < starting` | `starting − sold` is left, and that is scrap. Not censored |
+**DID IT CLOSE** is ONE condition — `ending_inventory == 0` on the last row.
+The source zeroes that field when a listing ends, whatever remained, so the
+zero IS the closure and its absence means the window was still running when
+the extract stopped. Nothing else is consulted: not `hours_remaining` (nominal,
+still positive on ~99.9% of final rows), not proximity to the extract's last
+timestamp, and no longer a frame-wide fallback that declared every episode
+closed when the sentinel was missing anywhere. That fallback was removed
+because it failed in the one direction nobody can see — a feed that STOPS
+emitting the sentinel reads as perfectly healthy — and it did exactly that: it
+hid a synthetic fixture that had never modelled the convention at all, so the
+closure path went unexercised for months. `ending_summary.
+write_off_convention_in_force` is the flag to read before believing an
+unclosed share.
 
-`sold > starting` there proves stock arrived during the final hour, and if the
-source also zeroed `ending` to write the remainder off, how much arrived and
-how much was scrapped are two unknowns with one equation.
+**WHAT THE CLOSE WAS** is the sign of the leftover on the last row, read
+**UNCLIPPED** — `starting − sold`, not `max(0, starting − sold)`:
+
+| Last row | `close_outcome` | Meaning |
+| --- | --- | --- |
+| `sold < starting` | `scrap` | `starting − sold` is left, and that is scrap |
+| `sold == starting` | `censored` | the shelf emptied. True demand is only known to be `>= sold` |
+| `sold > starting` | `final_hour_restock` | stock ARRIVED during the close. With `ending` also zeroed, how much arrived and how much was scrapped are two unknowns with one equation |
+
+Clipping folds the third case into the second, which is how a restocked close
+spent months reading as a clean sell-out. The two axes are independent on
+purpose: an episode can be censored and unclosed at once, and one three-way
+label could not say so.
 
 **Censoring is decided at the LAST ROW only.** It cannot happen anywhere else:
 the source stops emitting rows once inventory reaches zero — which is why
@@ -752,8 +770,23 @@ row that breaks it.
 | | What it guarantees | Who reads it |
 | --- | --- | --- |
 | `integrity` | rows that can be believed | nothing, by default |
-| **`eligible`** | the identity holds, the final hour is clean, AND the episode FINISHED — so `units_sold`, the censoring call and the outcome are all sound | **the frozen artifacts** (`baseline_model.train_population`, default) |
+| **`eligible`** | **three conditions, stated once in `episode_flow`** — see below | **the frozen artifacts** (`baseline_model.train_population`, default) |
 | `dp_eligible` | `eligible` plus what the SOLVER needs — a feasible tier, a readable horizon, one inventory pool | the DP, calibration gate, backtest, shadow, A/B |
+
+`eligible` is **three conditions and no more**, all three evaluated in
+`common.episodes.episode_flow` and exposed as one column:
+
+| # | Condition | Column |
+| --- | --- | --- |
+| 1 | the episode reconciles — `opening + restocked == sold + scrap` | `accounting_closes` |
+| 2 | the final hour is clean — `starting − sold >= 0` on the last row | `final_hour_clean` |
+| 3 | the episode CLOSED — `ending_inventory == 0` on the last row | `closed` |
+
+All three were live before this; the third was assembled independently at each
+consumer — `prepare_data` ANDed `outcome_known` in, `eda` and `scrap_units`
+each re-derived it — which is three chances to forget it and no single place
+to read the definition. `scrap_units` returns NaN on exactly `~eligible` now,
+rather than on its own two-way list that had drifted from this one.
 
 The middle tier exists because of the censored likelihood, and that corrected
 an earlier mistake in this file. The argument used to be that the demand model
@@ -770,8 +803,8 @@ mid-window restock and mid-window shrink all leave the sales and the censoring
 call intact.
 
 The prepared frame carries `units_restocked`, `units_shrink`,
-`episode_supply`, `episode_scrap`, `episode_clearance`, `final_hour_clean` and
-`episode_eligible`.
+`episode_supply`, `episode_scrap`, `episode_clearance`, `final_hour_clean`,
+`outcome_known` and `episode_eligible`.
 
 ### The flags (`tag_dp_eligibility`)
 

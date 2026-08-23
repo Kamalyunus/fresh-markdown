@@ -572,9 +572,14 @@ def test_an_unfinished_episode_has_no_clearance_to_report(cfg):
     d = _closed_and_unclosed()
 
     assert E.classify(d)["B"] == E.NOT_CLOSED
-    # B passes eligibility -- identity holds, final hour clean -- which is why
-    # eligibility alone was not enough to keep it out
-    assert E.episode_flow(d).loc["B", "eligible"]
+    # B satisfies the OTHER two conditions -- the identity holds and its final
+    # hour is clean -- so for a long time it passed `eligible`, and every
+    # consumer had to remember to exclude it separately. Two of them forgot.
+    # Closure is the third condition now, checked in one place.
+    flow = E.episode_flow(d)
+    assert flow.loc["B", "accounting_closes"] and flow.loc["B", "final_hour_clean"]
+    assert not flow.loc["B", "closed"]
+    assert not flow.loc["B", "eligible"]
 
     out = p_clearance(d, cfg)
     assert out["mean_clearance"] == pytest.approx(0.70), \

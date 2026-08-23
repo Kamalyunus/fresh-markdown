@@ -349,6 +349,14 @@ Four conditions are flagged and gate nothing:
 | `restocked` | units arrived mid-window. Does NOT gate: the replay re-solves hourly and applies the episode's own per-hour adjustment, so the DP meets an arrival exactly as it does live |
 | `shrink` | units left unsold and unwritten-off. Does NOT gate: they are counted into scrap, so `supply == sold + scrap` still closes |
 
+`eligible` — the middle population — is **three conditions and no more**, all
+evaluated in `common.episodes.episode_flow` and exposed as one column:
+`accounting_closes` (the identity `opening + restocked == sold + scrap`
+balances), `final_hour_clean` (`starting − sold >= 0` on the last row), and
+`closed` (`ending_inventory == 0` on the last row). All three were live
+before; closure used to be re-derived independently at each consumer, which is
+one chance per consumer to forget it, and two did.
+
 Which population a consumer reads is one decision, in
 `baseline_model.train_population` (default `integrity`), resolved through
 `prepare_data.population`. The three artifact fits read the config; the DP,
@@ -1612,14 +1620,26 @@ rule of its own. (An intermediate version inferred closure from proximity to
 the extract's last timestamp; the sentinel supersedes it and handles per-FC
 feed lag for free.)
 
-The sentinel is **detected, not assumed**. A final row reporting
-`ending_inventory = 0` while stock remained can only be a write-off, so one
-such row proves the convention is in force. A feed that reports honest
-inventory throughout has no sentinel to read, and treating every episode as
-unclosed there would move all scrap into UNKNOWN — the same silent emptying
-this module already suffered once. `ending_summary` reports
-`write_off_convention_in_force` and
-`final_rows_without_closure_sentinel` so the fallback can never be silent.
+Closure is **one condition and nothing else**: `ending_inventory == 0` on the
+last row. There used to be a frame-wide fallback — no sentinel anywhere in the
+frame, so treat every episode as closed — on the reasoning that a feed
+reporting honest inventory throughout would otherwise move all scrap into
+UNKNOWN. It has been **removed**. It failed in the one direction nobody can
+see: a feed that *stops* emitting the sentinel reads as perfectly healthy
+under it, and that is exactly what happened to the synthetic fixture, which
+had never modelled the convention at all and so left the closure path
+unexercised for months while every test passed. Missing sentinel now reads as
+unclosed everywhere — loudly — and `ending_summary` reports
+`write_off_convention_in_force` and `final_rows_without_closure_sentinel` to
+name the cause, so the number is not mistaken for a finding about the
+business.
+
+Closure and **outcome** are separate axes. Once closed, the sign of the
+*unclipped* `starting − sold` on the last row says which close it was:
+positive is scrap, zero is censored, negative means stock arrived during the
+final hour (`close_outcome` → `scrap` / `censored` / `final_hour_restock`).
+Clipping at zero folds the third into the second, so a restocked close reads
+as a clean sell-out.
 
 Two consequences worth being explicit about. First, the old rule's effect was
 **anti-conservative in measurement and conservative in reporting**: the

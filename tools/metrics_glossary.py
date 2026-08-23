@@ -336,9 +336,11 @@ CATALOGUE = [
    "GATE — whether tau is affordable before the pilot"),
   ("exploration_budget · daily_budget", "won",
    "`budget_share_of_il` × daily markdown IL over the SAME episodes and days. "
-   "Scrap is included via `classify_last`, whose no-sentinel fallback is "
-   "load-bearing: without it a feed that reports honest ending inventory "
-   "throughout loses ALL scrap and the budget reads ~10× too small.", ""),
+   "Scrap is included via `classify_last`, which charges it only on a CLOSED "
+   "episode — `ending_inventory == 0` on the last row. If the feed ever stops "
+   "emitting that sentinel every episode reads unclosed, ALL scrap drops out "
+   "and this reads ~10× too small; `ending_summary."
+   "write_off_convention_in_force` is the flag that says so.", ""),
   ("exploration_budget · spend_over_budget", "ratio",
    "Spend ÷ budget. Above `exploration_cost_vs_budget` (2×) the stop condition "
    "would suspend exploration on day one of the pilot; between 1× and 2× the "

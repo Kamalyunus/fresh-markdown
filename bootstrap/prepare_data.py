@@ -754,10 +754,12 @@ def tag_dp_eligibility(d, cfg):
     # averaged in "sold so far", and the backtest graded a truncated actual
     # arm against two full-horizon simulated ones. A category that needs
     # special-casing at every consumer belongs excluded at the source.
-    kind = episodes.classify(d)
-    d["outcome_known"] = d.episode_id.map(kind.ne(episodes.NOT_CLOSED)).astype(bool)
-    d["episode_eligible"] = (d.episode_id.map(flow.eligible)
-                             & d.outcome_known).astype(bool)
+    # `flow.eligible` now carries all three conditions -- reconciles, clean
+    # final hour, CLOSED -- so this no longer ANDs closure in on the side.
+    # `outcome_known` stays as its own column because the DP gate reports on
+    # it by name and the flag is worth reading alone.
+    d["outcome_known"] = d.episode_id.map(flow.closed).astype(bool)
+    d["episode_eligible"] = d.episode_id.map(flow.eligible).astype(bool)
 
     tests = {
         "cost_missing": d.cost <= 0,

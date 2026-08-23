@@ -385,25 +385,64 @@ def test_scrap_is_keyed_to_the_closure_sentinel_not_the_nominal_counter():
     assert scrap.sum() == 12
 
 
-def test_missing_write_off_convention_does_not_empty_every_scrap_figure():
-    """A feed that reports honest ending_inventory throughout has no sentinel
-    to read. Treating every episode as unclosed would move ALL scrap into
-    UNKNOWN -- the exact silent emptying this module already suffered once."""
+def test_a_feed_with_no_closure_sentinel_reads_unclosed_and_says_so():
+    """Closure is `ending_inventory == 0` on the last row and NOTHING else.
+
+    This used to have a frame-wide fallback: no sentinel anywhere, so treat
+    every episode as closed. It was removed because it failed in the one
+    direction that cannot be noticed -- a feed that STOPS emitting the
+    sentinel, and a synthetic fixture that never emitted one, both read as
+    perfectly healthy while every scrap figure came from an episode nobody had
+    established was over. The fallback hid a stale fixture for months.
+
+    The replacement is loud: unclosed everywhere, plus a flag that names the
+    cause so the number is not mistaken for a finding about the business.
+    """
     from common import episodes
 
     honest = _last_row_frame([("a", 3, 9, 4, 5), ("b", 2, 6, 6, 0)])
-    assert not episodes.write_off_convention(honest)
+    assert not episodes.write_off_convention(honest)     # <- read this first
     kind = episodes.classify(honest)
-    assert kind["a"] == episodes.COMPLETED       # not NOT_CLOSED
+    assert kind["a"] == episodes.NOT_CLOSED
+    # "b" sold out AND its ending is genuinely 0, so it closed on its own
+    # evidence -- the sentinel's absence elsewhere does not touch it
     assert kind["b"] == episodes.SOLD_OUT_EARLY
-    assert episodes.scrap_units(honest)["a"] == 5
+    assert pd.isna(episodes.scrap_units(honest)["a"])
 
-    # one write-off row is enough to prove the convention, and then a final
-    # row still reporting inventory genuinely means "not closed"
     mixed = _last_row_frame([("a", 3, 9, 4, 5), ("w", 1, 8, 2, 0)])
     assert episodes.write_off_convention(mixed)
     assert episodes.classify(mixed)["a"] == episodes.NOT_CLOSED
     assert pd.isna(episodes.scrap_units(mixed)["a"])
+
+
+def test_closure_and_outcome_are_independent_axes():
+    """`ending == 0` says WHETHER it closed; the UNCLIPPED leftover says with
+    what. Entangling them is how a restocked close read as a clean sell-out:
+    `max(0, starting - sold)` folds `< 0` into `== 0`."""
+    from common import episodes
+
+    d = _last_row_frame([
+        ("scrap",     9, 9, 4, 0),   # closed, leftover +5
+        ("censored",  9, 5, 5, 0),   # closed, leftover  0 -- shelf emptied
+        ("restocked", 9, 3, 7, 0),   # closed, leftover -4 -- stock ARRIVED
+        ("open",      9, 9, 4, 5),   # not closed
+    ])
+
+    out = episodes.close_outcome(d)
+    assert out["scrap"] == episodes.CLOSE_SCRAP
+    assert out["censored"] == episodes.CLOSE_CENSORED
+    assert out["restocked"] == episodes.CLOSE_RESTOCK
+    # the outcome axis does not consult closure at all
+    assert out["open"] == episodes.CLOSE_SCRAP
+
+    kind = episodes.classify(d)
+    assert kind["restocked"] == episodes.COMPLETED       # it DID close
+    assert kind["censored"] == episodes.SOLD_OUT_EARLY
+    assert kind["open"] == episodes.NOT_CLOSED
+
+    # ...but HOW MUCH it scrapped is unknowable, and that is what gates
+    assert pd.isna(episodes.scrap_units(d)["restocked"])
+    assert episodes.scrap_units(d)["scrap"] == 5
 
 
 def test_state_rejected_when_planning_horizon_disagrees_with_recorded_one():

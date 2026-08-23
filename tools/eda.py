@@ -342,9 +342,11 @@ def p_clearance(d, cfg):
     all_flow = episodes.episode_flow(d).reindex(op.episode_id)
     kind = episodes.classify(d).reindex(op.episode_id)
 
-    # Two exclusions, both counted rather than quietly averaged in.
+    # ONE exclusion -- `eligible` -- which already carries both reasons, and
+    # both are still counted separately below rather than quietly averaged in.
     #
-    #   NOT ELIGIBLE   the close is ambiguous, so no figure here is safe.
+    #   NOT ELIGIBLE   the close is ambiguous or the identity does not
+    #                  balance, so no figure here is safe.
     #   NOT CLOSED     the window has not ended. Its "clearance" is only
     #                  sold-so-far, and the bias runs ONE way -- an unfinished
     #                  episode has by definition sold less than it will. These
@@ -352,8 +354,8 @@ def p_clearance(d, cfg):
     #                  drag is far bigger than their count suggests: on a
     #                  two-episode example one unclosed window pulled the mean
     #                  from 0.70 to 0.45.
-    unclosed = (kind == episodes.NOT_CLOSED).to_numpy()
-    keep = all_flow.eligible.to_numpy() & ~unclosed
+    unclosed = ~all_flow.closed.to_numpy()
+    keep = all_flow.eligible.to_numpy()
     flow = all_flow[keep]
     rate = flow.clearance.to_numpy()
     counts = episodes.classify_last(_closings(d)).value_counts()
@@ -380,8 +382,7 @@ def p_clearance(d, cfg):
             "max_clearance": round(float(rate.max()) if len(rate) else 0.0, 4),
             "episodes_excluded_not_eligible": int(
                 (~all_flow.eligible.to_numpy()).sum()),
-            "episodes_excluded_unclosed": int(
-                (kind == episodes.NOT_CLOSED).sum()),
+            "episodes_excluded_unclosed": int(unclosed.sum()),
             "note": ("clearance = sold / (opening + net arrivals), over the "
                      "episodes whose flow identity holds. Against opening "
                      "stock alone a restocked episode reads above 1.0 -- and "

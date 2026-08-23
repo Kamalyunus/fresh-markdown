@@ -53,18 +53,36 @@ shelf emptied. It cannot happen anywhere else -- the source stops emitting
 rows once inventory reaches zero -- and `censoring_off_last_row` checks that
 the feed keeps holding to it.
 
-The sentinel is DETECTED, not assumed (`write_off_convention`): a feed that
-reports honest ending_inventory throughout has none to read, and treating
-every episode as unfinished would move all scrap into UNKNOWN -- the same
-silent emptying this module already suffered once.
+CLOSURE IS ONE CONDITION: `ending_inventory == 0` on the last row. That is the
+source zeroing the field when a listing ends, and its absence means the window
+was still running when the extract stopped. `write_off_convention` still
+reports whether the sentinel appears anywhere in a frame, but it is now a
+DIAGNOSTIC and no longer a fallback -- as a fallback it declared every episode
+closed whenever the sentinel was missing, which is exactly the state a feed is
+in when something has gone wrong with it, and it kept a synthetic fixture that
+had never modelled the convention looking perfectly healthy for months.
+
+Closure and OUTCOME are separate axes. Once closed, the sign of the UNCLIPPED
+`starting - sold` on the last row says which close it was: positive is scrap,
+zero is censored, negative means stock arrived during the final hour. Clipping
+folds the third into the second, so a restocked close reads as a clean sell-out
+-- see `net_leftover`.
 """
 
 import numpy as np
 import pandas as pd
 
+# DID IT CLOSE -- decided by `ending_inventory == 0` on the last row, alone.
 COMPLETED = "completed"
 SOLD_OUT_EARLY = "sold_out_early"
 NOT_CLOSED = "not_closed"
+
+# WHAT THE CLOSE WAS -- decided by the SIGN of the unclipped last-row leftover.
+# A separate axis from the one above, on purpose: an episode can be censored
+# and unclosed at once, and one three-way label could not say so.
+CLOSE_SCRAP = "scrap"                    # leftover > 0
+CLOSE_CENSORED = "censored"              # leftover == 0
+CLOSE_RESTOCK = "final_hour_restock"     # leftover < 0 -- same name as the DP gate
 
 
 def window_slice(d, start=None, end=None):
@@ -133,22 +151,40 @@ WRITE_OFF = "episode_close_write_off"
 SHORTFALL = "unexplained_shortfall"
 
 
+def net_leftover(starting_inventory, units_sold):
+    """`starting_inventory - units_sold`, UNCLIPPED. Its SIGN is the answer.
+
+    On a last row the three cases are exhaustive and mutually exclusive, and
+    together they are the whole of what a close can be:
+
+        > 0   stock was left. It is scrap.
+        == 0  the shelf emptied through sales. CENSORED -- true demand is only
+              known to be `>= sold`.
+        < 0   the hour sold more than it opened with, so stock ARRIVED during
+              it. How much arrived and how much was left are two unknowns with
+              one equation once the ending has been zeroed.
+
+    Clipping destroys the third case by folding it into the second, which is
+    how a restocked close spent months reading as a clean sell-out.
+    """
+    start = np.asarray(starting_inventory, dtype=float)
+    sold = np.asarray(units_sold, dtype=float)
+    return pd.Series(start - sold, index=getattr(starting_inventory, "index", None))
+
+
 def leftover_units(starting_inventory, units_sold):
     """Stock still on hand at the close of the last hour.
 
-    `max(0, starting_inventory - units_sold)`. NOT `ending_inventory`, which
-    the source zeroes on the last row when it writes the remainder off.
+    `max(0, net_leftover)`. NOT `ending_inventory`, which the source zeroes on
+    the last row when it writes the remainder off.
 
     EXACT except on a last hour that also took a restock, where the arriving
     quantity is not recoverable once the ending has been zeroed. Those
     episodes fail `final_hour_clean` and are gated out of `eligible`, so no
-    figure rests on the ambiguity.
+    figure rests on the ambiguity -- but read the sign from `net_leftover`,
+    never from this, or the ambiguous case is invisible.
     """
-    start = np.asarray(starting_inventory, dtype=float)
-    sold = np.asarray(units_sold, dtype=float)
-    out = np.clip(start - sold, 0, None)
-    idx = getattr(starting_inventory, "index", None)
-    return pd.Series(out, index=idx)
+    return net_leftover(starting_inventory, units_sold).clip(lower=0)
 
 
 def hour_status(starting_inventory, units_sold, ending_inventory):
@@ -291,12 +327,31 @@ def episode_flow(d):
         (last.starting_inventory.to_numpy() >= last.units_sold.to_numpy()),
         index=last.episode_id.to_numpy()).reindex(agg.index).to_numpy()
 
-    # ELIGIBLE: the units sold can be believed and the close is unambiguous,
-    # which is what a frozen artifact needs. NOT the same as dp_eligible --
-    # the DP has further requirements of its own (a feasible tier, a horizon
-    # it can read, one inventory pool) that say nothing about whether the
-    # demand observations are sound.
-    agg["eligible"] = agg.accounting_closes & agg.final_hour_clean
+    # AND THE EPISODE MUST HAVE CLOSED: `ending_inventory == 0` on the last
+    # row. Without it the window was still running when the extract stopped,
+    # so `sold` is sold-SO-FAR and `leftover` is stock still on the shelf that
+    # may yet sell. The identity balances either way -- it is arithmetic on
+    # what was observed -- which is exactly why closure has to be asked
+    # separately.
+    agg["closed"] = pd.Series(
+        (last.ending_inventory.to_numpy() == 0),
+        index=last.episode_id.to_numpy()).reindex(agg.index).to_numpy()
+
+    # ELIGIBLE: three conditions, stated ONCE, here.
+    #
+    #   1. the episode reconciles      opening + restocked == sold + scrap
+    #   2. the final hour is clean     starting - sold >= 0 on the last row
+    #   3. the episode closed          ending_inventory == 0 on the last row
+    #
+    # All three were live before this; the third was assembled independently
+    # at each consumer (`prepare_data` ANDed `outcome_known` in, `eda` and
+    # `scrap_units` each re-derived it), which is three chances to forget it
+    # and no single place to read the definition. It is one flag now.
+    #
+    # NOT the same as dp_eligible -- the DP has further requirements of its
+    # own (a feasible tier, a horizon it can read, one inventory pool) that
+    # say nothing about whether the demand observations are sound.
+    agg["eligible"] = agg.accounting_closes & agg.final_hour_clean & agg.closed
     return agg.drop(columns=["net"])
 
 
@@ -478,39 +533,75 @@ def adjustment_reason(starting_inventory, units_sold, ending_inventory):
 
 
 def write_off_convention(last):
-    """Is the source's closure sentinel present in this frame?
+    """Is the source's closure sentinel present in this frame? DIAGNOSTIC ONLY.
 
     A final row reporting `ending_inventory == 0` while stock remained can only
     be a write-off, so a single such row proves the convention is in force.
-    Detected rather than assumed: a feed that reports honest ending_inventory
-    throughout has no sentinel to read, and treating every episode as unclosed
-    would move ALL scrap into UNKNOWN -- the same silent emptying this module
-    already suffered once.
+
+    This used to feed `classify_last` as a fallback -- absent a sentinel, treat
+    every episode as closed. It no longer does, because the fallback was
+    load-bearing in the worst way: it silently kept a fixture that had never
+    modelled the convention looking healthy, and would have done the same for a
+    real feed that stopped emitting the sentinel. Closure is now read from the
+    zero and nothing else, so a feed without the sentinel reports every episode
+    unclosed -- loudly, which is the point. Read this before believing that
+    number.
     """
     left = leftover_units(last.starting_inventory, last.units_sold).to_numpy()
     return bool(((last.ending_inventory.to_numpy() == 0) & (left > 0)).any())
 
 
-def classify_last(last):
-    """Ending type per episode, from a frame of FINAL rows.
+def _last_index(last):
+    return last.episode_id.to_numpy() if "episode_id" in last else last.index
 
-    The source zeroes `ending_inventory` when a listing closes, so THE ZERO IS
-    THE CLOSURE SIGNAL and its absence means the episode did not close inside
-    this data. That is the source's own fact; earlier versions inferred closure
-    from `hours_remaining == 0` (fires on ~0.1% of episodes -- the counter is
-    nominal) and then from proximity to the extract's last timestamp (a
-    heuristic with a tolerance constant). The sentinel needs neither.
+
+def close_outcome(last):
+    """What the close WAS, from the sign of the unclipped leftover.
+
+    Orthogonal to `classify_last`, which answers whether the episode closed at
+    all. These two facts are independent and were previously entangled in one
+    three-way test that could not express, say, a censored close on a window
+    still running.
     """
-    left = leftover_units(last.starting_inventory, last.units_sold).to_numpy()
+    net = net_leftover(last.starting_inventory, last.units_sold).to_numpy()
+    return pd.Series(np.where(net > 0, CLOSE_SCRAP,
+                              np.where(net == 0, CLOSE_CENSORED,
+                                       CLOSE_RESTOCK)),
+                     index=_last_index(last))
+
+
+def classify_last(last):
+    """Did the episode CLOSE, and with what, from a frame of FINAL rows.
+
+    ONE condition decides closure: `ending_inventory == 0` on the last row.
+    The source zeroes that field when a listing ends, whatever remained, so the
+    zero IS the closure and its absence means the window is still running at
+    the edge of this extract. Nothing else is consulted -- not
+    `hours_remaining` (nominal, still positive on ~99.9% of final rows), not
+    proximity to the extract's last timestamp (a heuristic with a tolerance
+    constant), and no longer a frame-wide fallback for feeds missing the
+    sentinel.
+
+    The leftover then says which kind of close it was, and it is read UNCLIPPED
+    because the sign carries the whole answer:
+
+        NOT_CLOSED       ending != 0. Still running; scrap unknown.
+        SOLD_OUT_EARLY   closed, leftover == 0. The shelf emptied. CENSORED.
+        COMPLETED        closed, leftover != 0. The remainder was written off.
+
+    COMPLETED covers the `leftover < 0` close too -- stock arrived during the
+    final hour -- because it did close, and refusing to say so would be a
+    second lie on top of the unknown quantity. What is NOT knowable there is
+    HOW MUCH was scrapped, and that is gated separately and everywhere it
+    matters: `final_hour_clean` is False, so `eligible`, `scrap_units` and the
+    DP population all exclude it. `close_outcome` names it CLOSE_RESTOCK.
+    """
+    net = net_leftover(last.starting_inventory, last.units_sold).to_numpy()
     closed = last.ending_inventory.to_numpy() == 0
-    if not write_off_convention(last):
-        # nothing to read: fall back to treating every episode as closed, which
-        # is what this data can support. `ending_summary` reports the fallback.
-        closed = np.ones(len(last), dtype=bool)
     return pd.Series(
-        np.where(left <= 0, SOLD_OUT_EARLY,
-                 np.where(closed, COMPLETED, NOT_CLOSED)),
-        index=last.episode_id.to_numpy() if "episode_id" in last else last.index)
+        np.where(~closed, NOT_CLOSED,
+                 np.where(net == 0, SOLD_OUT_EARLY, COMPLETED)),
+        index=_last_index(last))
 
 
 def classify(d):
@@ -527,26 +618,30 @@ def scrap_units(d):
     nor on the shelf -- and no way to close the books. With it in, the
     identity holds: `supply == sold + scrap`.
 
-    NaN where the number cannot be trusted, and there are exactly two ways:
+    NaN where the number cannot be trusted, which is exactly `~eligible` --
+    the same three conditions, not a second list that has to be kept in step:
 
-      NOT CLOSED         the episode did not finish inside this data, so the
-                         stock is on the shelf rather than in the bin.
+      NOT CLOSED         `ending != 0` on the last row. The episode did not
+                         finish inside this data, so the stock is on the shelf
+                         rather than in the bin.
       DIRTY FINAL HOUR   the last row sold more than it opened with, proving
                          stock arrived during it. If the source also zeroed
                          `ending` to write the remainder off, how much arrived
                          and how much was scrapped are two unknowns with one
                          equation, and any answer is a guess.
+      DOES NOT RECONCILE the identity does not balance, so `scrap` is the
+                         residue of arithmetic that is already known to be
+                         wrong. This one is newly excluded: the old two-way
+                         test let an unbalanced episode through with a
+                         confident-looking figure.
 
     NaN propagates: a sum over a frame containing such episodes must be taken
     with those dropped, not silently treated as zero. Callers that report an
     excluded count -- `bootstrap.measure.m6_il_pct` does -- keep the exclusion
     visible instead of quietly shrinking the population.
     """
-    kind = classify(d)
     flow = episode_flow(d)
-    scrap = flow.scrap.astype(float).reindex(kind.index)
-    usable = (kind != NOT_CLOSED) & flow.final_hour_clean.reindex(kind.index)
-    return scrap.where(usable, np.nan)
+    return flow.scrap.astype(float).where(flow.eligible, np.nan)
 
 
 def _unknown_by(last, kind, left, by, top=8):
@@ -588,13 +683,18 @@ def ending_summary(d):
     hr = pd.Series(last.hours_remaining.to_numpy(),
                    index=last.episode_id.to_numpy())
     counts = kind.value_counts()
+    outcome = close_outcome(last).value_counts()
     n = max(len(last), 1)
     return {
         "episodes": int(len(last)),
-        # if this is false the source is NOT marking closure, so truncation is
-        # undetectable and every episode is treated as closed. Read it before
-        # trusting the not_closed share.
+        # if this is FALSE the source is not marking closure at all, and every
+        # episode below will read not_closed. That is no longer papered over
+        # with a fallback, so read this FIRST: false here means the feed
+        # changed or the extract is wrong, not that nothing ever closed.
         "write_off_convention_in_force": write_off_convention(last),
+        # the outcome axis, independent of closure: scrap / censored /
+        # final_hour_restock by the SIGN of the unclipped last-row leftover
+        "close_outcomes": {str(k): int(v) for k, v in outcome.items()},
         "final_rows_without_closure_sentinel": int(
             (last.ending_inventory.to_numpy() != 0).sum()),
         "shares": {k: round(float(counts.get(k, 0)) / n, 4)

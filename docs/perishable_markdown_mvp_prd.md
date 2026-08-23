@@ -469,6 +469,8 @@ Four more are flagged and gate **nothing**:
 | `restocked` | units arrived mid-window. Does NOT gate: the replay re-solves hourly and applies the episode's own per-hour adjustment, so the DP meets an arrival exactly as it does live |
 | `shrink` | units left unsold and unwritten-off. Does NOT gate: they are counted into scrap, so `supply == sold + scrap` still closes |
 
+`eligible` — the middle population — is **three conditions and no more**, all evaluated in `common.episodes.episode_flow` and exposed as one column: `accounting_closes` (the identity `opening + restocked == sold + scrap` balances), `final_hour_clean` (`starting − sold >= 0` on the last row), and `closed` (`ending_inventory == 0` on the last row — the source's write-off sentinel, the single test for closure). All three were live before; closure used to be re-derived independently at each consumer, which is one chance per consumer to forget it, and two did. `scrap_units` returns NaN on exactly `~eligible`.
+
 Which population a consumer reads is one decision, `baseline_model.train_population` (default `integrity`), resolved through `prepare_data.population`. The three artifact fits read the config; the DP, the calibration gate, the backtest and shadow always pass `"dp_eligible"` — for them it is a precondition, not a choice.
 
 Two of these deserve their reasoning stated, because both were written after the omission caused a defect.

@@ -351,9 +351,10 @@ def _shadow_one(ep, ctx):
         anchor = legacy_d                 # reality's price is the next anchor
 
     # Scrap is an end-of-episode quantity, so the final row is kept and
-    # classified after the loop, all episodes together -- the sentinel
-    # test needs the whole frame to know whether the convention is in
-    # force at all.
+    # classified after the loop, all episodes together -- one frame, so
+    # `write_off_convention` can report whether the sentinel is present at
+    # all. Shadow runs on `dp_eligible`, which requires `closed`, so it
+    # should always be: a false there means the population gate is broken.
     if last_obs is not None:
         start, sold_last, unit_cost, ending_last, close_day = last_obs
         out["last_row"] = {"episode_id": ep["episode_id"],
@@ -430,9 +431,9 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     ledger = explore.SpreadLedger()
     # one FINAL row per episode -- bounded by episode count, not row count --
     # so scrap can be classified by `common.episodes.classify_last` rather
-    # than by a copy of it. An inline copy was tried and dropped ALL scrap on
-    # a feed with no write-off sentinel, which is the exact silent emptying
-    # that function's fallback exists to prevent.
+    # than by a copy of it. The row carries the SOURCE's `ending_inventory`,
+    # not a simulated one, because closure is the source's fact and the
+    # classifier reads it directly: `ending == 0` and nothing else.
     last_rows = []
     latencies = []
     drift = {"mu": [], "r": [], "q": [], "sold": []}
