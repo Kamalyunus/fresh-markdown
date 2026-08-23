@@ -72,6 +72,63 @@ def assign_episode_ids(df):
             + start_ts.dt.strftime("%Y-%m-%dT%H"))
 
 
+def gap_split_windows(df):
+    """Episode ids belonging to a source window a MISSING HOUR split in two.
+
+    `assign_episode_ids` starts a new episode when the clock or the counter
+    breaks step. A hole in the hourly feed breaks the clock, so one source
+    window arrives as two or more episodes -- and neither is a real episode:
+
+      the FIRST fragment ends with no closure sentinel, so it reads
+      `not_closed`, its scrap is unknown, and its clearance is a partial
+      figure against a window that did not end;
+      the SECOND fragment opens mid-window. Its `starting_inventory` is
+      whatever was left at the gap rather than the opening stock, its counter
+      starts mid-countdown, and -- worst -- its first row looks like an ENTRY
+      row. `bootstrap.estimate_prior` fits elasticity on entry rows ONLY, so a
+      feed gap injects a fabricated entry observation, with the wrong opening
+      state, straight into the quantity most starved of variation.
+
+    Detected from the counter, which is the source's own view of the window.
+    Across a gap the clock jumps by `n` hours and `hours_remaining` falls by
+    exactly the same `n`: the window kept running, we simply did not see it.
+    A genuinely new window RESETS the counter upward instead, so the two are
+    never confused.
+
+    Returns the ids of EVERY fragment of every affected window -- dropping
+    only one of them would leave the other looking like a whole episode.
+    """
+    ts = pd.to_datetime(df.date) + pd.to_timedelta(df.hour_of_day, unit="h")
+    grp = [df.sku_id, df.fc]
+    dt_h = ts.groupby(grp).diff().dt.total_seconds() / 3600.0
+    hr_drop = -df.hours_remaining.groupby(grp).diff()
+    # the clock skipped hours and the counter ran down by exactly as many
+    gap = (dt_h > 1) & (dt_h == hr_drop)
+    if not gap.any():
+        return np.array([], dtype=object), {}
+
+    # walk fragments into windows: a row opens a NEW window only if it starts
+    # a new episode for some reason OTHER than the gap
+    starts = df.episode_id.ne(df.episode_id.groupby(grp).shift())
+    window = df.episode_id.where(starts & ~gap).groupby(grp).ffill()
+    per_window = df.groupby(window).episode_id.nunique()
+    broken = per_window.index[per_window > 1]
+    ids = df.loc[window.isin(broken), "episode_id"].unique()
+    detail = {
+        "windows_split_by_a_feed_gap": int(len(broken)),
+        "fragments_dropped": int(len(ids)),
+        "missing_hours": int((dt_h[gap] - 1).sum()),
+        "note": ("A hole in the hourly feed splits one source window into "
+                 "fragments. Every fragment is dropped, not just the "
+                 "unclosed one: the second opens mid-window with the wrong "
+                 "starting stock and a counter part-way through, and its "
+                 "first row would be read as an ENTRY row by the elasticity "
+                 "fit. Detected from the counter falling in step with the "
+                 "clock, which a genuinely new window never does."),
+    }
+    return ids, detail
+
+
 def cogs_at_risk(d):
     """Money on the shelf: unit cost x opening stock, ONCE per episode.
 
@@ -231,6 +288,17 @@ def load_and_filter(path, cfg=None):
     def step(d, label):
         wf.append((label, len(d), d.episode_id.nunique(), cogs_at_risk(d)))
         return d
+
+    # A hole in the hourly feed splits one source window into fragments, and a
+    # fragment is not an episode. Runs FIRST, before anything else looks at an
+    # episode, because everything downstream assumes an episode_id is a whole
+    # window.
+    gap_ids, gap_detail = gap_split_windows(df)
+    d = df[~df.episode_id.isin(gap_ids)]
+    d = step(d, "gap_split_windows_dropped")
+    if gap_detail:
+        wf[-1] = wf[-1] + (gap_detail,)
+    df = d
 
     # Episode-scoped, not row-scoped: a window running past midnight can
     # straddle the boundary, and removing only its inside hours would leave a

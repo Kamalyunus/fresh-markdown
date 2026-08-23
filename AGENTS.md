@@ -657,12 +657,13 @@ extract's COGS** from every fit, including the elasticity prior — which is
 starved of price variation and for which below-cost hours are the widest
 spread in the data.
 
-### The chain (12 waterfall rows)
+### The chain (13 waterfall rows)
 
 | Step | Scope | Drops |
 | --- | --- | --- |
 | `raw` | — | the starting count, before any drop |
 | `duplicate_hour_rows_dropped` | rows (both copies) | two states for one sku x fc x hour; no way to choose, and they collide two runs into one episode id |
+| `gap_split_windows_dropped` | episode, **every fragment** | a hole in the hourly feed splits one source window into two episodes, and neither is one. The first ends with no closure sentinel — `not_closed`, scrap unknown, clearance a partial figure against a window that did not end. The second opens MID-WINDOW: wrong starting stock, counter part-way down, and its first row reads as an ENTRY row, which `estimate_prior` fits elasticity on. Detected from the counter, which across a gap falls in step with the clock; a genuinely new window resets it upward instead |
 | `exclusion_window_removed` | episode | any episode with ANY hour in the known demand-issue window. SCOPE, not integrity: the rows are fine, the period is not |
 | `discount_out_of_range_dropped` | episode | discount outside [0,1] — the percent->fraction conversion applied twice or not at all |
 | `negative_quantities_dropped` | episode | impossible quantities: negative inventory or sales. **Not `cost <= 0`** — that is a flag now; see the note below |

@@ -64,14 +64,17 @@ def test_filter_chain_waterfall(workspace):
     wf = manifest["data_quality_waterfall"]
     rows = [s["rows"] for s in wf if s["step"] != "contiguous_episodes_built"]
     assert rows == sorted(rows, reverse=True)
-    # every stage is named and counted -- 8 drops, the raw row, the
-    # re-segmentation row, and the dp_eligible SUMMARY row, which drops
-    # nothing. The count is asserted so that adding or removing a filter has
-    # to be a deliberate edit here, and so the figure quoted in the
-    # walkthrough and design doc has something holding it to the code.
+    # every stage is named and counted -- 7 drops, the raw row, the
+    # negative-window recovery, the re-segmentation guard, and the
+    # dp_eligible SUMMARY row. The count is asserted so that adding or
+    # removing a filter has to be a deliberate edit here, and so the figure
+    # quoted in the walkthrough and design doc has something holding it to
+    # the code.
     assert wf[0]["step"] == "raw"
     assert wf[-1]["step"] == "dp_eligible"
-    assert len(wf) == 11, [s["step"] for s in wf]
+    assert len(wf) == 12, [s["step"] for s in wf]
+    # a fragment of a gap-split window is not an episode, and both halves go
+    assert "gap_split_windows_dropped" in [x["step"] for x in wf]
     # Everything that is not an integrity or scope rule is a FLAG. None of
     # these may come back as a drop: each one removes population from every
     # frozen artifact while the thing it protects (the DP's state space, or a
@@ -1258,3 +1261,86 @@ def test_a_row_scoped_drop_is_caught_rather_than_silently_re_segmenting(
     cfg = yaml.safe_load(open("config.yaml"))
     with pytest.raises(AssertionError, match="re-segmentation moved"):
         pdm.load_and_filter("data/flc.parquet", cfg)
+
+
+def test_a_missing_hour_drops_the_whole_window_not_just_a_fragment(
+        workspace, tmp_path):
+    """A fragment is not an episode, and neither fragment is usable.
+
+    `assign_episode_ids` starts a new episode when the clock breaks step, so a
+    hole in the hourly feed turns one source window into two. The first ends
+    with no closure sentinel -- `not_closed`, scrap unknown, clearance a
+    partial figure. The second opens MID-WINDOW: wrong starting stock, counter
+    part-way down, and its first row reads as an ENTRY row, which
+    `estimate_prior` fits elasticity on. Both go.
+    """
+    _chdir(workspace)
+    from bootstrap.prepare_data import load_and_filter
+
+    cfg = yaml.safe_load(open("config.yaml"))
+    raw = pd.read_parquet("data/flc.parquet")
+    clean, clean_wf = load_and_filter("data/flc.parquet", cfg)
+    base = next((t[4] for t in clean_wf
+                 if t[0] == "gap_split_windows_dropped" and len(t) > 4), {})
+
+    # punch one hour out of the middle of a surviving multi-hour window
+    sizes = clean.groupby("episode_id").size()
+    eid = sizes[sizes >= 6].index[0]
+    g = clean[clean.episode_id == eid].sort_values(["date", "hour_of_day"])
+    mid = g.iloc[len(g) // 2]
+    holed = raw[~((raw.skuseq == g.sku_id.iloc[0]) & (raw.fc == g.fc.iloc[0])
+                  & (raw.date == mid.date) & (raw.hour == mid.hour_of_day))]
+    path = tmp_path / "gap.parquet"
+    holed.to_parquet(path)
+
+    d, wf = load_and_filter(str(path), cfg)
+    got = next(t[4] for t in wf if t[0] == "gap_split_windows_dropped")
+
+    # exactly one more window broken, and BOTH its fragments are gone
+    assert got["windows_split_by_a_feed_gap"] == \
+        base.get("windows_split_by_a_feed_gap", 0) + 1
+    assert got["fragments_dropped"] == base.get("fragments_dropped", 0) + 2
+    assert got["missing_hours"] == base.get("missing_hours", 0) + 1
+
+    surviving = d[(d.sku_id == g.sku_id.iloc[0]) & (d.fc == g.fc.iloc[0])
+                  & d.date.astype(str).isin(g.date.astype(str))]
+    assert len(surviving) == 0, \
+        "a fragment of the split window survived -- on its own it looks like " \
+        "a whole episode, which is the failure this filter exists to prevent"
+
+
+def test_a_new_window_is_not_mistaken_for_a_gap(workspace):
+    """The counter is what tells them apart, and it must.
+
+    Across a feed gap the clock jumps `n` hours and `hours_remaining` falls by
+    the same `n` -- the window kept running unobserved. A genuinely new window
+    RESETS the counter upward instead. Confusing the two would delete every
+    back-to-back pair of windows in the extract.
+    """
+    _chdir(workspace)
+    from bootstrap.prepare_data import gap_split_windows, assign_episode_ids
+
+    def frame(rows):
+        d = pd.DataFrame(rows, columns=["hour_of_day", "hours_remaining"])
+        d["date"] = "2026-03-01"
+        d["sku_id"] = "S"
+        d["fc"] = "F"
+        d["episode_id"] = assign_episode_ids(d)
+        return d
+
+    # one window, hour 13 missing: clock +2, counter -2 -> a GAP
+    ids, detail = gap_split_windows(
+        frame([(10, 5), (11, 4), (12, 3), (14, 1)]))
+    assert detail["windows_split_by_a_feed_gap"] == 1
+    assert len(ids) == 2, "both fragments must be named"
+    assert detail["missing_hours"] == 1
+
+    # two back-to-back windows, one idle hour between: the counter RESETS
+    ids, detail = gap_split_windows(
+        frame([(10, 3), (11, 2), (12, 1), (14, 9), (15, 8)]))
+    assert len(ids) == 0, "a new window was deleted as if it were a gap"
+
+    # and two windows with no idle hour at all
+    ids, detail = gap_split_windows(
+        frame([(10, 3), (11, 2), (12, 1), (13, 9), (14, 8)]))
+    assert len(ids) == 0
