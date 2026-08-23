@@ -400,10 +400,32 @@ def load_and_filter(path, cfg=None):
     # COGS with it. These episodes are now flagged `restocked` like any other.
 
 
-    # re-segment: the filters above drop rows, which can punch a hole in a
-    # window that was contiguous in the raw extract
+    # RE-SEGMENTATION, WHICH MUST BE A NO-OP -- and is checked, not assumed.
+    #
+    # It used to do real work: `null_category` and `zero_base_price` were
+    # row-scoped, so they punched holes mid-window and left episodes that were
+    # no longer contiguous runs. Re-deriving the ids split those into
+    # fragments, which is why this is the one stage where episode count and
+    # COGS could RISE -- one opening row becoming two, the same stock counted
+    # twice.
+    #
+    # Every drop after the ids are assigned is episode-scoped now, so nothing
+    # punches a hole. That invariant is load-bearing and invisible:
+    # `episode_universe` runs BEFORE this, so if a future row-scoped drop
+    # re-split anything, the continuity check would have been made against ids
+    # that no longer exist -- stale, and silent. Hence the assertion rather
+    # than the bare recompute.
     d = d.sort_values(["sku_id", "fc", "date", "hour_of_day"]).copy()
-    d["episode_id"] = assign_episode_ids(d)
+    resegmented = assign_episode_ids(d)
+    moved = int((resegmented != d.episode_id).sum())
+    if moved:
+        raise AssertionError(
+            f"re-segmentation moved {moved} rows to a different episode. A "
+            "filter after the ids are assigned is dropping ROWS rather than "
+            "whole episodes, which punches a hole in a window -- and "
+            "episode_universe already ran, so its continuity check and every "
+            "flag keyed to those ids are now stale. Make that filter "
+            "episode-scoped.")
     wf.append(("contiguous_episodes_built", len(d), d.episode_id.nunique(),
                cogs_at_risk(d)))
 

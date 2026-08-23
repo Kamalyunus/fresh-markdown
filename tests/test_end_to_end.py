@@ -1209,3 +1209,52 @@ def test_the_manifest_reports_the_identity(workspace):
     assert ident["violations"] == 0
     assert ident["episodes_checked"] > 0
     assert "opening + restocked" in ident["rule"]
+
+
+def test_re_segmentation_is_a_no_op_and_says_so_if_it_stops_being_one(workspace):
+    """`contiguous_episodes_built` guards an invisible invariant.
+
+    It used to split windows that row-scoped drops had holed. Nothing drops
+    rows after the ids are assigned any more, so it must change nothing -- and
+    `episode_universe` runs BEFORE it, so if a future row-scoped filter did
+    re-split an episode, the continuity check and every flag keyed to those
+    ids would be stale with no error. The stage raises instead.
+    """
+    _chdir(workspace)
+    from bootstrap.prepare_data import load_and_filter, assign_episode_ids
+
+    with open("artifacts/split_manifest.json") as f:
+        wf = json.load(f)["data_quality_waterfall"]
+    steps = [s["step"] for s in wf]
+    i = steps.index("contiguous_episodes_built")
+    assert wf[i]["rows"] == wf[i - 1]["rows"]
+    assert wf[i]["episodes"] == wf[i - 1]["episodes"]
+    assert wf[i]["cogs_dropped"] == pytest.approx(0.0, abs=0.2)
+
+    # and the ids on the output are their own fixed point
+    d = pd.read_parquet("data/prepared.parquet")
+    d = d.sort_values(["sku_id", "fc", "date", "hour_of_day"])
+    assert (assign_episode_ids(d) == d.episode_id).all()
+
+
+def test_a_row_scoped_drop_is_caught_rather_than_silently_re_segmenting(
+        workspace, tmp_path, monkeypatch):
+    """The guard fires. Simulated by punching a hole the way a row-scoped
+    filter would -- which is exactly the failure mode it exists for."""
+    _chdir(workspace)
+    import bootstrap.prepare_data as pdm
+
+    real = pdm.assign_episode_ids
+    calls = {"n": 0}
+
+    def holed(df):
+        calls["n"] += 1
+        out = real(df)
+        # on the LAST call -- the re-segmentation -- pretend a row went
+        # missing mid-window, so the ids come back different
+        return out.str.replace("T1", "T9", regex=False) if calls["n"] > 1 else out
+
+    monkeypatch.setattr(pdm, "assign_episode_ids", holed)
+    cfg = yaml.safe_load(open("config.yaml"))
+    with pytest.raises(AssertionError, match="re-segmentation moved"):
+        pdm.load_and_filter("data/flc.parquet", cfg)

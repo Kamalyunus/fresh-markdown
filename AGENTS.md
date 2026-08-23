@@ -670,7 +670,7 @@ spread in the data.
 | `zero_base_price_dropped` | episode | `original_price` still null/zero after ffill+bfill within the episode. EPISODE-scoped, same reason |
 | `negative_window_recovered` | episode | **not a drop.** A counter entering ALREADY negative is a known source pattern, not a defect — see the note below the table |
 | `episode_universe` | episode | the three conditions that make an episode's inventory readable, evaluated once and BEFORE any filter with an opinion about price, category or cost. Only continuity DROPS; see below |
-| `contiguous_episodes_built` | — | re-segmentation. Now a NO-OP: every drop after the ids are assigned is episode-scoped, so nothing punches a hole for it to clean up. Kept as the check that this stays true |
+| `contiguous_episodes_built` | — | re-segmentation, and now a NO-OP that RAISES if it ever stops being one. It used to split windows that row-scoped drops had holed; every drop after the ids are assigned is episode-scoped, so nothing punches a hole. The invariant is load-bearing and invisible — `episode_universe` runs BEFORE this, so a future row-scoped filter would leave its continuity check and every id-keyed flag stale, silently. Hence an assertion rather than a bare recompute |
 | `dp_eligible` | — | **not a drop.** The terminal SUMMARY row: how much of the surviving population the DP can act on, with a per-reason breakdown in its detail block |
 
 ### The source's inventory convention
