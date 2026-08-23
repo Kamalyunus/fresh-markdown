@@ -600,14 +600,23 @@ DP_INELIGIBLE = (
      "hours_remaining above data.max_window_hours. extend_to_window RAISES "
      "above the cap, so this is a crash rather than a refusal. Only backtest "
      "and shadow extend; the artifact fits never read the counter"),
+    ("final_hour_restock",
+     "the LAST row sold more than it opened with, so stock arrived during the "
+     "episode's final hour. If the source also zeroed `ending` to write the "
+     "remainder off, how much arrived and how much was scrapped are two "
+     "unknowns with one equation -- the close is a guess, so the episode's "
+     "scrap is NaN and it is out of every IL and clearance figure. This is "
+     "the one condition that also gates `episode_eligible`, the frozen-"
+     "artifact population, because a censored/not-censored call cannot be "
+     "made on an ambiguous final hour"),
     ("unreconciled",
-     "the episode's flow identity fails: supply (opening + net arrivals) does "
-     "not equal units sold plus the stock left on the last row. Stock moved "
-     "that no sale, restock or write-off accounts for, so the episode has no "
-     "trustworthy clearance -- it would read above 1, or show scrap on a "
-     "window that sold everything it had -- and therefore no trustworthy "
-     "scrap and no trustworthy IL. Kept in the population and FLAGGED so the "
-     "business can find out what moved; `units_shrink` is how many"),
+     "units went missing: they left the shelf without being sold and without "
+     "being written off. They ARE counted -- scrap is the last hour's "
+     "leftover plus the shrink, so the identity still closes and IL is right "
+     "-- but the DP's state transition assumes stock leaves only by sale, so "
+     "it cannot replay the window. Kept in the population and in "
+     "`episode_eligible`, since the sales and the censoring call are both "
+     "sound; `unreconciled_anomalies` says where they sit for the business"),
     ("restocked",
      "an hour opens with more stock than the previous hour left behind. The "
      "DP's state transition is V(p, q - min(k,q), h-1) over ONE inventory "
@@ -672,18 +681,25 @@ def tag_dp_eligibility(d, cfg):
     for col, src in (("units_restocked", "arrived"),
                      ("units_shrink", "vanished"),
                      ("episode_supply", "supply"),
+                     ("episode_scrap", "scrap"),
                      ("episode_clearance", "clearance")):
         d = d.copy()
         d[col] = d.episode_id.map(flow[src]).astype(
             float if src == "clearance" else "int64")
-    d["flow_reconciled"] = d.episode_id.map(flow.reconciled).astype(bool)
+    # ELIGIBLE: the accounting closes AND the final hour is clean, so the
+    # units sold can be believed and the close is one of exactly two states.
+    # This is the frozen-artifact gate; `dp_eligible` is a strict subset with
+    # further requirements of the SOLVER on top.
+    d["final_hour_clean"] = d.episode_id.map(flow.final_hour_clean).astype(bool)
+    d["episode_eligible"] = d.episode_id.map(flow.eligible).astype(bool)
 
     tests = {
         "cost_missing": d.cost <= 0,
         "non_priceable": d.cost >= d.original_price,
         "negative_window": d.hours_remaining < 0,
         "window_too_long": d.hours_remaining > cap,
-        "unreconciled": ~d.flow_reconciled,
+        "final_hour_restock": ~d.final_hour_clean,
+        "unreconciled": d.units_shrink > 0,
         "restocked": d.episode_id.isin(restocked_episodes(d)),
     }
     reason = pd.Series(pd.NA, index=d.index, dtype="object")
@@ -772,7 +788,7 @@ def tag_dp_eligibility(d, cfg):
     # out by category and month it says whether this is one incident, one
     # corner of the catalogue, or a standing property of the feed -- which are
     # three different investigations.
-    bad = ~d.flow_reconciled
+    bad = d.units_shrink > 0
     if bad.any():
         ep = d[bad].groupby("episode_id").agg(
             month=("date", lambda s: str(pd.to_datetime(s.iloc[0]))[:7]),
@@ -831,14 +847,31 @@ def population(d, cfg, which=None):
     """The rows a consumer is entitled to. ONE definition, so a consumer
     states which population it wants rather than re-deriving it.
 
-    `which` is 'integrity' (everything that survived the filter chain) or
-    'dp_eligible'. Passing None reads baseline_model.train_population, which
-    is what the artifact fits do; the DP-side callers pass 'dp_eligible'
-    explicitly because for them it is not a choice.
+    THREE NESTED POPULATIONS, widest first:
+
+      integrity     everything that survived the filter chain. Rows that can
+                    be believed; nothing said about whether the episode's
+                    accounting closes.
+      eligible      the episode identity holds AND its final hour is clean,
+                    so `units_sold` can be believed and the close is exactly
+                    one of two states -- censored or not. This is what a
+                    FROZEN ARTIFACT needs: the censored likelihood is only
+                    correct if we know which hours ran out.
+      dp_eligible   `eligible` plus everything the SOLVER additionally
+                    requires -- a feasible tier, a horizon it can read, one
+                    inventory pool. Strictly narrower, and none of its extra
+                    conditions says anything about whether the demand
+                    observations are sound.
+
+    Passing None reads baseline_model.train_population, which is what the
+    artifact fits do; the DP-side callers pass 'dp_eligible' explicitly
+    because for them it is not a choice.
     """
     which = which or cfg["baseline_model"]["train_population"]
     if which == "integrity":
         return d
+    if which == "eligible":
+        return d[d.episode_eligible] if "episode_eligible" in d else d
     if which == "dp_eligible":
         return d[d.dp_eligible] if "dp_eligible" in d else d
     raise ValueError(f"unknown population {which!r}")

@@ -66,8 +66,7 @@ def fit_dispersion(d, cfg):
     ratio = (1 - calib.total_discount.to_numpy()) / (1 - calib.d_ref.to_numpy())
     calib["mu_hat"] = np.clip(mu_ref * ratio ** eps0,
                               cfg["pricing"]["demand_floor"], None)
-    calib["censored"] = episodes.censored_hours(
-        calib.starting_inventory, calib.units_sold, calib.ending_inventory)
+    calib["censored"] = episodes.censored_hours(calib)
 
     bounds = dc["r_search_bounds"]
     min_rows = dc["min_rows_per_group"]

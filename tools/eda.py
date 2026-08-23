@@ -345,7 +345,7 @@ def p_clearance(d, cfg):
     # an episode whose flow does not reconcile has no trustworthy clearance --
     # that is the whole reason the identity is checked -- so it is counted and
     # excluded rather than averaged in
-    keep = all_flow.reconciled.to_numpy()
+    keep = all_flow.eligible.to_numpy()
     flow = all_flow[keep]
     rate = flow.clearance.to_numpy()
     kind = episodes.classify_last(_closings(d))
@@ -371,16 +371,16 @@ def p_clearance(d, cfg):
             "supply_over_opening": round(
                 float(flow.supply.sum() / max(flow.opening.sum(), 1)), 4),
             "max_clearance": round(float(rate.max()) if len(rate) else 0.0, 4),
-            "episodes_excluded_unreconciled": int((~keep).sum()),
+            "episodes_excluded_not_eligible": int((~keep).sum()),
             "note": ("clearance = sold / (opening + net arrivals), over the "
                      "episodes whose flow identity holds. Against opening "
                      "stock alone a restocked episode reads above 1.0 -- and "
                      "can read above 1.0 while scrapping units, which is why "
                      "max_clearance is reported: it must never exceed 1. "
-                     "Episodes where supply != sold + remaining are excluded "
-                     "and counted: their clearance is not a number anyone "
-                     "should act on. See the unreconciled_anomalies block in "
-                     "the split manifest for where they sit."),
+                     "Episodes whose final hour is ambiguous -- it sold more "
+                     "than it opened with, so the close rests on an assumption "
+                     "-- are excluded and counted. Scrap is the last hour's "
+                     "leftover PLUS the shrink, so supply = sold + scrap."),
         },
         "chart": {"kind": "hist", "y_label": "episodes",
                   "x_label": "units sold / supply",

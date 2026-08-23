@@ -113,7 +113,7 @@ def grid_update(pairs, cell_record, cfg):
     # stock was. `ending_inventory` is required on every outcome, so the same
     # rule the offline fits use applies live -- see episodes.censored_hours.
     end = np.array([o["ending_inventory"] for _, o, _ in pairs])
-    censored = episodes.censored_hours(inv, k, end)
+    censored = episodes.is_censored_hour(inv, k, end)
     lgamma_const = gammaln(k + r) - gammaln(r) - gammaln(k + 1)
 
     loglik = np.empty(len(grid))

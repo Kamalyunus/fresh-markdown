@@ -201,9 +201,12 @@ def test_every_condition_carries_a_stated_reason():
 def test_population_resolves_the_config_default(cfg):
     d, _ = tag_dp_eligibility(pd.concat([_frame(), _frame(cost=0.0)
                                          .assign(episode_id="bad")]), cfg)
-    assert cfg["baseline_model"]["train_population"] == "integrity"
-    assert len(population(d, cfg)) == len(d)                      # the default
+    assert cfg["baseline_model"]["train_population"] == "eligible"
     assert len(population(d, cfg, "integrity")) == len(d)
+    # three nested populations, widest first
+    assert (len(population(d, cfg, "dp_eligible"))
+            <= len(population(d, cfg, "eligible"))
+            <= len(population(d, cfg, "integrity")))
     assert len(population(d, cfg, "dp_eligible")) < len(d)
     with pytest.raises(ValueError):
         population(d, cfg, "whatever")
@@ -382,15 +385,14 @@ def test_the_flow_identity_is_what_decides_a_trustworthy_episode(cfg):
         frames.append(f)
     flow = episode_flow(pd.concat(frames, ignore_index=True))
 
-    assert flow.reconciled.all()
+    assert flow.accounting_closes.all()
+    assert (flow.supply == flow.sold + flow.scrap).all()
     assert (flow.clearance <= 1.0).all(), "clearance above 1 is never valid"
-    assert (flow.remaining == flow.remaining_from_last_row).all()
     # scrap cannot happen on a fully cleared episode
-    full = flow[flow.clearance >= 1.0]
-    assert (full.remaining == 0).all()
-    # and the last-hour restock is read off `ending`, not `starting - sold`,
+    assert (flow[flow.clearance >= 1.0].scrap == 0).all()
+    # and the last-hour leftover is read off `ending`, not `starting - sold`,
     # which would have given 0 and flagged a clean episode as an anomaly
-    assert flow.loc["last_restock", "remaining"] == 26
+    assert flow.loc["last_restock", "leftover"] == 26
     assert flow.loc["last_restock", "supply"] == 56
 
 
@@ -413,16 +415,22 @@ def test_an_unreconciled_episode_is_kept_flagged_and_kept_out_of_scrap(cfg):
     v["offered_price"] = v.original_price * (1 - v.total_discount)
     v["d_max"] = 1.0 - v.cost / v.original_price
 
-    # scrap is UNKNOWN, not guessed -- so IL cannot silently book either answer
-    assert np.isnan(scrap_units(v)["V"])
+    # the unit IS counted: scrap is the last hour's leftover plus the shrink,
+    # so the economics close rather than leaving a hole
+    assert scrap_units(v)["V"] == 6.0        # 5 left on the shelf + 1 shrunk
 
     tagged, detail = tag_dp_eligibility(v, cfg)
     assert (tagged.dp_ineligible_reason == "unreconciled").all()
     assert tagged.units_shrink.eq(1).all()
-    assert not tagged.flow_reconciled.any()
+    # sales and the censoring call are both sound, so it still trains the
+    # frozen artifacts -- only the DP is shut out, its transition assuming
+    # stock leaves solely by sale
+    assert tagged.episode_eligible.all()
     # out of the DP-side population...
     assert "V" not in set(population(tagged, cfg, "dp_eligible").episode_id)
-    # ...and still there, with somewhere for the business to look
+    # ...and still there for the artifacts, with somewhere for the business
+    # to look
+    assert "V" in set(population(tagged, cfg, "eligible").episode_id)
     assert "V" in set(population(tagged, cfg, "integrity").episode_id)
     assert detail["unreconciled_anomalies"]["units_unaccounted"] == 1
     assert detail["unreconciled_anomalies"]["by_month"]["2026-01"]["episodes"] == 1
@@ -478,16 +486,17 @@ def test_shrink_and_restock_in_one_episode_are_both_counted(cfg):
     assert flow.loc["W", "vanished"] == 2, "the shrink hours were netted away"
     assert flow.loc["W", "supply"] == 14      # 12 opened + 2 arrived
     assert flow.loc["W", "clearance"] == pytest.approx(11 / 14)
-    # supply = sold + shrink + remaining, with every term named
-    assert flow.loc["W", "remaining"] == 1
-    assert 14 == 11 + 2 + 1
+    # supply = sold + scrap, with scrap = leftover + shrink
+    assert flow.loc["W", "leftover"] == 1
+    assert flow.loc["W", "scrap"] == 3          # 1 left on the shelf + 2 shrunk
+    assert 14 == 11 + 3
 
     tagged, detail = tag_dp_eligibility(d, cfg)
     t = tagged.iloc[0]
     assert int(t.units_restocked) == 2
     assert int(t.units_shrink) == 2
     assert int(t.episode_supply) == 14
-    assert not bool(t.flow_reconciled)
+    assert int(t.episode_scrap) == 3
 
     # BOTH conditions are counted, whichever one wins the first-match label
     assert detail["restocked"]["episodes"] == 1
@@ -500,9 +509,9 @@ def test_shrink_and_restock_in_one_episode_are_both_counted(cfg):
     assert not bool(t.dp_eligible)
     assert "W" not in set(population(tagged, cfg, "dp_eligible").episode_id)
     assert "W" in set(population(tagged, cfg, "integrity").episode_id)
-    # the listing did close, but 2 units went missing, so scrap is not a
-    # number to book IL against
+    # the listing closed and every unit is accounted for: 1 left on the shelf
+    # and 2 shrunk, both scrap
     assert classify(d).iloc[0] == "completed"
-    assert np.isnan(scrap_units(d).iloc[0])
+    assert scrap_units(d).iloc[0] == 3.0
     # and the business gets told where to look
     assert detail["unreconciled_anomalies"]["units_unaccounted"] == 2

@@ -162,8 +162,7 @@ def m4_demand_density(d):
 
 def m5_censoring(d):
     d = d.copy()
-    d["censored"] = episodes.censored_hours(
-        d.starting_inventory, d.units_sold, d.ending_inventory)
+    d["censored"] = episodes.censored_hours(d)
     # end-of-episode inventory only. Checking .any() across all hours returns a
     # spurious 1.0 because inventory dips to zero transiently before restock.
     # Ordered by (date, hour): hour_of_day alone puts a 36-hour window's

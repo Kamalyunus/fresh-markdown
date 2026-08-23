@@ -104,20 +104,31 @@ baseline_model:
   num_boost_round: 400                 # SET
   num_leaves: 63                       # SET
   min_data_in_leaf: 50                 # SET
-  train_population: "integrity"        # SET  which rows the FROZEN ARTIFACTS
+  train_population: "eligible"         # SET  which rows the FROZEN ARTIFACTS
     # are fit on -- mu_ref, the dispersion r, rho, the elasticity prior and
     # the level factors.
     #
     # "integrity"    every episode that survived the filter chain, including
-    #                those the DP cannot price (cost missing, cost above
-    #                price, window over the cap).
-    # "dp_eligible"  only the priceable subset -- what the pipeline did
-    #                before these became flags rather than drops.
+    #                those whose accounting does not close.
+    # "eligible"     the episode identity holds -- opening + restocked ==
+    #                sold + scrap -- AND the final hour is clean
+    #                (starting >= sold). DEFAULT.
+    # "dp_eligible"  "eligible" plus what the SOLVER additionally needs: a
+    #                feasible tier, a readable horizon, one inventory pool.
     #
-    # Default "integrity", for a reason that is checkable rather than
-    # aesthetic: FEATURES carries neither `cost` nor `hours_remaining`, so
-    # the model cannot SEE what makes an episode DP-ineligible. Such an
-    # episode is an ordinary demand observation to it.
+    # Default "eligible", and the reason is the CENSORED LIKELIHOOD. The
+    # demand model cannot see the inventory chain -- FEATURES carries neither
+    # `cost` nor `hours_remaining` -- so for a while the argument was that
+    # every surviving episode is an ordinary demand observation to it. That
+    # is wrong in one place: the likelihood treats an hour as censored when
+    # the shelf ran out, and that call is read off the inventory. An episode
+    # whose units went missing, or whose final hour is ambiguous, has a
+    # censoring flag that cannot be trusted -- and a wrong censoring flag
+    # biases demand directly.
+    #
+    # Everything the DP additionally rejects IS invisible to the model, so
+    # those episodes stay in: a missing cost, an unreadable horizon and a
+    # mid-window restock all leave the sales and the censoring intact.
     #
     # Note a below-cost HOUR is not one of the three conditions. It is a
     # price the legacy policy set and the agent is constrained never to set,

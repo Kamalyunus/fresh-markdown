@@ -108,8 +108,7 @@ def estimate_prior(d, cfg, seed=0):
     # the bracket is the quantity most starved of variation -- so this is
     # the fit that gains most from train_population "integrity"
     train = population(split_frames(d, cfg)["train"], cfg).copy()
-    train["censored"] = episodes.censored_hours(
-        train.starting_inventory, train.units_sold, train.ending_inventory)
+    train["censored"] = episodes.censored_hours(train)
     train["r"] = [lookup_r(r_lookup, s, c)
                   for s, c in zip(train.subcategory, train.category)]
 

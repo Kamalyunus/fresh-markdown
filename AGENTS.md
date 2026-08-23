@@ -704,8 +704,7 @@ named those rows `intraday_restock` if the stage had not run first.
 
 An hour-level shortfall is NOT a drop. An hour can genuinely take stock in
 (`ending > starting − sold`) or genuinely lose it (`0 < ending < starting −
-sold`), and both are events the source is reporting rather than defects. What
-matters is whether the EPISODE's accounting closes.
+sold`), and both are events the source is reporting rather than defects.
 
 **Both are counted GROSS, never netted against each other.** A window that
 takes 2 units in and loses 2 to shrink has 2 of each, not zero of both. An
@@ -713,46 +712,66 @@ earlier version netted adjacent pairs away on the theory that each was one
 sale bucketed an hour late — an inference dressed as arithmetic. It read a
 restocked episode as ordinary, let it into the DP-side population, and priced
 its clearance against a supply short by the units that arrived.
-`shrink_and_restock_together` in the manifest reports episodes carrying both,
-so the pairing is visible without anything being explained away.
-
-What is tested instead is the episode:
 
 ```
-opening + restocked  ==  sold + shrink + leftover_at_last_hour
+opening + restocked  ==  sold + scrap          where scrap = leftover + shrink
+clearance            ==  sold / supply         cannot exceed 1
 ```
 
-Every unit an episode ever had ends up in exactly one of three places. There
-is no fourth, so this is not a heuristic with a tolerance — it balances or the
-arithmetic is broken. Clearance is `sold / (opening + restocked)`, which
-cannot exceed 1, and an episode that sold everything it had carries no scrap.
+Every unit an episode ever had has exactly one fate: it sold, or it is scrap.
+Shrink is scrap — those units were paid for and returned no revenue, and
+keeping them out left the economics with a hole in the middle. There is no
+third fate, so this is not a heuristic with a tolerance: it balances or the
+arithmetic is broken. `common.episodes.flow_identity_violations` enforces it,
+`dp_eligible.flow_identity` reports it every run, and `tests/test_end_to_end`
+asserts it on every episode of the prepared frame. Chain continuity makes the
+two sides provably equal, so a violation is a bug here rather than a defect in
+the feed — worth checking anyway, since it caught one.
 
-`common.episodes.flow_identity_violations` enforces it, `dp_eligible.flow_identity`
-in the manifest reports it every run, and `tests/test_end_to_end` asserts it on
-every episode of the prepared frame. Chain continuity makes the two sides
-provably equal, so a violation is a bug in the supply arithmetic rather than a
-defect in the feed — worth checking anyway, since it caught one.
+**The final hour must be clean: `starting >= sold` on the last row.** Then the
+episode ends in exactly one of two states and nothing else —
 
-`common.episodes.episode_flow` computes `remaining` two ways — `supply − sold`,
-and off the final hour (`ending_inventory`, or `starting − sold` where the
-write-off zeroed it). Two arithmetic paths over different fields, so agreement
-is evidence and **no tolerance constant has to be invented**. Where they
-disagree the arithmetic here has a bug -- it caught one, reading the last
-row's leftover as `starting − sold` on an hour that restocked. The DATA test
-is `shrink == 0`: an episode that lost units has no trustworthy scrap or IL,
-and is flagged `unreconciled`.
+| Last row | Meaning |
+| --- | --- |
+| `sold == starting` | the shelf emptied. **CENSORED**, no leftover |
+| `sold < starting` | `starting − sold` is left, and that is scrap. Not censored |
 
-Three consequences, all asserted in `tests/test_populations.py`:
+`sold > starting` there proves stock arrived during the final hour, and if the
+source also zeroed `ending` to write the remainder off, how much arrived and
+how much was scrapped are two unknowns with one equation.
 
-- **clearance can never exceed 1** — against opening stock a restocked episode
-  read 300% cleared *while scrapping 4 units*, and the histogram clipped at 1.0
-  so nothing showed
-- **a fully cleared episode carries no scrap** — `remaining == 0` falls out
-- **fuzzy episodes reach no scrap, IL, clearance, backtest or shadow figure**,
-  because `scrap_units` returns NaN for them
+**Censoring is decided at the LAST ROW only.** It cannot happen anywhere else:
+the source stops emitting rows once inventory reaches zero — which is why
+`extend_to_window` exists — so an empty shelf ends the episode. Measured on
+the extract: 259 of 259 rows with `starting == sold` are final rows, and no row
+anywhere has `starting_inventory == 0`. `censoring_off_last_row` reports any
+row that breaks it.
+
+### Three nested populations
+
+| | What it guarantees | Who reads it |
+| --- | --- | --- |
+| `integrity` | rows that can be believed | nothing, by default |
+| **`eligible`** | the identity holds AND the final hour is clean, so `units_sold` and the censoring call are both sound | **the frozen artifacts** (`baseline_model.train_population`, default) |
+| `dp_eligible` | `eligible` plus what the SOLVER needs — a feasible tier, a readable horizon, one inventory pool | the DP, calibration gate, backtest, shadow, A/B |
+
+The middle tier exists because of the censored likelihood, and that corrected
+an earlier mistake in this file. The argument used to be that the demand model
+cannot see the inventory chain — `FEATURES` carries neither `cost` nor
+`hours_remaining` — so every surviving episode is an ordinary observation to
+it. That is wrong in one place: the likelihood treats an hour as censored when
+the shelf ran out, and **that call is read off the inventory**. An ambiguous
+final hour means an untrustworthy censoring flag, and a wrong censoring flag
+biases demand directly.
+
+Everything `dp_eligible` additionally rejects IS invisible to the model, so
+those episodes stay in `eligible`: a missing cost, an unreadable horizon, a
+mid-window restock and mid-window shrink all leave the sales and the censoring
+call intact.
 
 The prepared frame carries `units_restocked`, `units_shrink`,
-`episode_supply`, `episode_clearance` and `flow_reconciled`.
+`episode_supply`, `episode_scrap`, `episode_clearance`, `final_hour_clean` and
+`episode_eligible`.
 
 ### The flags (`tag_dp_eligibility`)
 

@@ -1194,17 +1194,30 @@ def test_the_episode_identity_holds_on_every_episode(workspace):
     assert len(bad) == 0, bad.head(10).to_string()
 
     flow = E.episode_flow(d)
-    assert (flow.opening + flow.arrived
-            == flow.sold + flow.vanished + flow.remaining_from_last_row).all()
+    assert (flow.opening + flow.arrived == flow.sold + flow.scrap).all()
+    # scrap is the last hour's leftover PLUS the shrink -- both are units paid
+    # for that returned no revenue
+    assert (flow.scrap == flow.leftover + flow.vanished).all()
 
     # the two consequences the owner named, on the whole population
     assert (flow.clearance <= 1.0).all(), "clearance above 1 is never valid"
-    assert (flow[flow.clearance >= 1.0].remaining_from_last_row == 0).all(), \
+    assert (flow[flow.clearance >= 1.0].scrap == 0).all(), \
         "an episode that sold everything it had cannot also carry scrap"
+
+    # censoring is decided at the LAST ROW, and can only happen there: the
+    # source stops emitting rows once inventory reaches zero
+    off = E.censoring_off_last_row(d)
+    assert off["rows_shelf_emptied_mid_episode"] == 0
+    assert off["rows_with_zero_starting_inventory"] == 0
+
+    # three nested populations
+    assert (set(d[d.dp_eligible].episode_id)
+            <= set(d[d.episode_eligible].episode_id)
+            <= set(d.episode_id))
 
     # and the frame carries the columns the identity is built from
     for col in ("units_restocked", "units_shrink", "episode_supply",
-                "episode_clearance", "flow_reconciled"):
+                "episode_scrap", "episode_clearance", "episode_eligible"):
         assert col in d.columns, col
     per_ep = d.groupby("episode_id").first()
     assert (per_ep.episode_supply
