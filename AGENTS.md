@@ -49,6 +49,35 @@ step                                          writes                            
 11. bootstrap.seal                            artifacts/bundle.json                   every frozen artifact
 ```
 
+### Two populations, and who reads which
+
+`prepare_data` emits ONE parquet carrying `dp_eligible` (bool) and
+`dp_ineligible_reason` (`cost_missing` | `non_priceable` | `below_cost` |
+`window_too_long`, first match in that order). Nothing economic is dropped.
+
+| Consumer | Population |
+| --- | --- |
+| `mu_ref`, `r`, `rho`, elasticity prior, level factors | `baseline_model.train_population` — **default `integrity`** |
+| `m1` / gate 1 | **integrity, always** — on `dp_eligible` it reads ~0 and cannot fail |
+| `m6` IL% | **both**, in `by_population`: integrity is what the business loses, `dp_eligible` is what the MVP addresses |
+| `backtest`, `pipeline.shadow`, `tau`, the calibration **gate**, the A/B | **`dp_eligible`, always** — not a choice; the DP has no feasible tier otherwise, and `extend_to_window` refuses a counter above the cap |
+
+Use `bootstrap.prepare_data.population(d, cfg[, which])` — never re-derive the
+filter. `dp_eligible` selects rows and **never relaxes a safety property**:
+the cost floor is structural in `pricing.dp.feasible_tiers`, and
+`validate_state` still rejects an unpriceable state at decision time.
+
+The waterfall's last row, `dp_eligible`, drops nothing — it reports the
+subset, per reason, with episodes, rows and COGS. Read it next to the
+`cogs_dropped` column to see what the MVP addresses as a share of the
+business.
+
+Choosing between the two train populations is a **two-run comparison**, not a
+field in one report: flip `train_population`, re-run, compare
+`calibration_gate_value` (which is on `dp_eligible` either way). The backtest
+records `artifact_versions.train_population` so the two reports cannot be
+confused.
+
 `scripts/run_bootstrap.sh <raw>` runs 1–6 in order, then 10 and 11, then prints
 `pipeline.status` so a run ends with where it stands rather than with the last
 step's log. **It retrains the baseline every time.** To iterate on one step, run
@@ -422,7 +451,23 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
     are mediators of the episode's own price path and corrupt the learned
     elasticity; hours-remaining is planner state; one overwritten price
     feature is the auditable maximum (see design doc 5.4).
-13. **Cut this data by episode, never by row.** Use
+13. **An INTEGRITY defect and an ECONOMIC condition are not the same thing.**
+    Integrity means the row cannot be believed — negative stock, a null
+    category, sales above inventory, an unexplained chain break. Those are
+    **dropped**, for everyone, frozen artifacts included. Economic means the
+    row is believable and merely **unpriceable** — cost missing, cost above
+    price, an hour below cost, a window over the cap. Those are **flagged**
+    `dp_eligible=False` and kept.
+    Conflating them cost most of the COGS in the extract: every frozen
+    artifact was fit on the priceable subset, including the elasticity prior,
+    for which below-cost hours are the widest price variation the data has.
+    And it made gate 1 undecidable — `share_non_explorable` counts episodes
+    whose cost floor leaves too few tiers, and the chain deleted exactly those
+    before `m1` looked, so it read 0.0 and could not fail. Before adding a
+    filter, ask which of the two it is. The test is simple: **can the demand
+    model see it?** `FEATURES` carries neither `cost` nor `hours_remaining`,
+    so all four economic conditions are invisible to it.
+14. **Cut this data by episode, never by row.** Use
     `common.episodes.window_slice`, which assigns an episode by the date its
     window OPENED. `d[d.date >= start]` keeps the tail of a window that
     opened the evening before as its own short episode — no entry decision,
@@ -430,7 +475,7 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
     midnight-seam failure the whole episode definition exists to prevent,
     and it was live in `pipeline.shadow`'s `--date-start` until the hold-out
     work. `split_frames` and shadow both call the one function.
-14. **Nothing pre-launch may see past `split.test_end`.** The three artifact
+15. **Nothing pre-launch may see past `split.test_end`.** The three artifact
     fits are bounded by `split_frames`, but two paths were not and neither
     announced itself: `policy_replay` / `derive_tau_initial` ran on the whole
     frame, so `tau_initial` — a MEASURED launch value — was being fitted on
@@ -440,7 +485,7 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
     `fidelity.by_week` and `by_window["all"]` therefore stop at `test_end` —
     if a week past it appears there again, something upstream of the slice
     has changed. The hold-out is read once, by `pipeline.shadow --holdout`.
-15. **A number a procedure solves for is not evidence about that number.**
+16. **A number a procedure solves for is not evidence about that number.**
     `backtest.derive_tau_initial` bisects until implied spend equals budget,
     so it reports 1.00× on any population — including one where the answer
     is eight times wrong. It hid the entry-only scoping bug for the whole

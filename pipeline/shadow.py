@@ -358,6 +358,13 @@ def _shadow_one(ep, ctx):
 def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
                window_basis=HOLDOUT_BASIS, workers=None):
     _require_shadow_config(cfg)
+    # Precondition, not a choice: the DP cannot price these, and
+    # extend_to_window below refuses a counter above the cap. Inside
+    # run_shadow rather than main so a programmatic caller cannot skip it.
+    from bootstrap.prepare_data import population
+    d = population(d, cfg, "dp_eligible")
+    if d.empty:
+        raise RuntimeError("no DP-eligible episodes in this window")
     model = BaselineModel(cfg)
     posterior = PosteriorStore(cfg)
     with open(cfg["dispersion"]["r_lookup_path"]) as f:

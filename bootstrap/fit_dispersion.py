@@ -31,7 +31,7 @@ from scipy.stats import nbinom
 
 from common.config import load_config, design_effect
 from common.provenance import stamp
-from bootstrap.prepare_data import split_frames
+from bootstrap.prepare_data import population, split_frames
 from bootstrap.train_baseline import BaselineModel
 
 
@@ -52,7 +52,7 @@ def fit_r(k, mu, censored, bounds):
 
 def fit_dispersion(d, cfg):
     dc = cfg["dispersion"]
-    calib = split_frames(d, cfg)["calib"].copy()
+    calib = population(split_frames(d, cfg)["calib"], cfg).copy()
     # rows with no stock carry no demand information and would be mis-scored
     # as "demand >= 1" by the censored likelihood
     calib = calib[calib.starting_inventory >= 1]

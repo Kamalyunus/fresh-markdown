@@ -38,21 +38,31 @@ PCTS = [10, 25, 50, 75, 90]
 # ------------------------------------------------------------------ measurement
 
 def m1_cost_ratio(d, cfg):
-    """Cost ratio and feasible ceiling. Decides exploration viability."""
+    """Cost ratio and feasible ceiling. Decides exploration viability.
+
+    MUST be measured on the INTEGRITY population, never on the DP-eligible
+    subset. `share_non_explorable` counts episodes whose cost floor leaves
+    too few tiers to experiment on -- and those are precisely the episodes
+    the old chain deleted before this ran, so gate 1 read 0.0 and could not
+    fail. A gate answered by the filter that removes its subject is not a
+    gate.
+    """
     tier_step = cfg["pricing"]["tier_step"]
     min_tiers = cfg["exploration"]["min_feasible_tiers"]
-    ep = d.groupby("episode_id").agg(
-        category=("category", "first"),
-        cost=("cost", "first"),
-        original_price=("original_price", "first"),
-        d_max=("d_max", "first"),
-    )
+    agg = dict(category=("category", "first"), cost=("cost", "first"),
+               original_price=("original_price", "first"),
+               d_max=("d_max", "first"))
+    if "dp_eligible" in d:
+        agg["dp_eligible"] = ("dp_eligible", "first")
+    ep = d.groupby("episode_id").agg(**agg)
     ep["cost_ratio"] = ep.cost / ep.original_price
     ep["n_feasible"] = np.floor(ep.d_max.clip(lower=0) / tier_step).astype(int) + 1
 
     def block(g):
         return {
             "episodes": int(len(g)),
+            "share_dp_ineligible": round(float(1 - g.dp_eligible.mean()), 4)
+                if "dp_eligible" in g else None,
             "cost_ratio_pct": {f"p{p}": round(float(np.percentile(g.cost_ratio, p)), 4)
                                for p in PCTS},
             "d_max_pct": {f"p{p}": round(float(np.percentile(g.d_max, p)), 4)
@@ -191,7 +201,12 @@ def m6_il_pct(d):
         cost=("cost", "first"),
         discount_cost=("discount_cost", "sum"),
         units_sold=("units_sold", "sum"),
+        **({"dp_eligible": ("dp_eligible", "first")} if "dp_eligible" in d else {}),
     )
+    # A missing cost makes scrap read zero, which deflates IL rather than
+    # widening the population. Out of both baselines, counted separately.
+    cost_missing = int((ep.cost <= 0).sum())
+    ep = ep[ep.cost > 0]
     # An episode that sold out early scrapped nothing. One that ended with
     # stock on hand disposed of it -- the listing ending IS the disposal,
     # whatever the nominal counter says. Only an episode sitting at the
@@ -204,6 +219,7 @@ def m6_il_pct(d):
 
     zero_denom_share = float((ep.denom <= 0).mean())
     excluded = {"episodes_excluded_not_closed": dropped,
+                "episodes_excluded_cost_missing": cost_missing,
                 "excluded_share": round(dropped / max(dropped + len(ep), 1), 4)}
 
     def ratio_of_sums(g):
@@ -223,11 +239,33 @@ def m6_il_pct(d):
     resid = unit.il - R * unit.denom
     var_ratio = (float(resid.var(ddof=1)) / (n * dbar ** 2)) if n > 1 and dbar > 0 else np.nan
 
+    # TWO baselines, both real, and they answer different questions. The
+    # integrity figure is what the business loses. The dp_eligible figure is
+    # what this MVP can address -- it is the arm the A/B measures and the only
+    # one a policy claim may be compared against. Reporting one alone was how
+    # a sub-population figure came to be quoted as the business baseline.
+    # Episodes with a missing cost are excluded from BOTH: scrap is
+    # `cost x leftover`, so a zero cost silently deflates IL rather than
+    # widening the population.
+    dp = ep[ep.dp_eligible] if "dp_eligible" in ep else ep
+    by_population = {
+        "integrity": {"episodes": int(len(ep)), "il_pct": ratio_of_sums(ep),
+                      "il_absolute": round(float(ep.il.sum()), 1)},
+        "dp_eligible": {"episodes": int(len(dp)), "il_pct": ratio_of_sums(dp),
+                        "il_absolute": round(float(dp.il.sum()), 1)},
+    }
+
     return {
         "denominator_definition": "original_price * units_sold (endogenous)",
         "il_pct_aggregate": ratio_of_sums(ep),
         "il_pct_denominator_total": float(ep.denom.sum()),
         "il_absolute_total": float(ep.il.sum()),
+        "by_population": by_population,
+        "population_note": (
+            "il_pct_aggregate is the INTEGRITY population -- what the business "
+            "loses. by_population.dp_eligible is what this MVP can address, and "
+            "is the figure the A/B and any policy comparison must use. Quoting "
+            "the wrong one overstates or understates the addressable loss."),
         "share_episodes_zero_denominator": round(zero_denom_share, 4),
         "scrap_basis": excluded,
         "by_category": {k: {"il_pct": ratio_of_sums(g),
@@ -349,6 +387,11 @@ def gates(res, cfg):
     return {
         "gate_1_exploration_viable": {
             "share_non_explorable": m1["share_non_explorable"],
+            "measured_on": "integrity population",
+            "note": ("Read on every episode that survived the filter chain, "
+                     "INCLUDING those the DP cannot price. Measured on the "
+                     "dp_eligible subset instead this reads ~0 by "
+                     "construction and the gate cannot fail."),
             "verdict": "REVIEW — narrow MVP scope to explorable subset"
                        if m1["share_non_explorable"]
                        > g["max_share_non_explorable"] else "PASS",

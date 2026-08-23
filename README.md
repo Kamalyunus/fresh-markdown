@@ -15,7 +15,7 @@ randomized exploration.
 | `config.yaml` | §7 | Every tunable parameter. Single source of truth; no numeric literals in code. |
 | `common/config.py` | §7 | Loader; strict mode refuses to start on null MEASURED values. |
 | `bootstrap/download_flc.py` | §9.1 | Redshift extract of the raw hourly FLC feed into `data/flc_raw.parquet`, aliased to the column names step 1 renames. Credentials from `REDSHIFT_*` in `~/.env`; the exclusion window from `config.yaml`. |
-| `bootstrap/prepare_data.py` | §9.1–9.2 | Schema mapping, 16-stage filter chain, window-keyed episode construction (not date-keyed — 36-hour windows are common), waterfall, split manifest. |
+| `bootstrap/prepare_data.py` | §9.1–9.2 | Schema mapping, 13-stage integrity filter chain plus the `dp_eligible` flag (economic conditions are flagged, never dropped, so the frozen artifacts keep the population the DP cannot price), window-keyed episode construction (not date-keyed — 36-hour windows are common), waterfall, split manifest. |
 | `common/episodes.py` | §9.2 | One definition of episode endings and true leftover: `ending_inventory` is written off to zero on an episode's last row, so scrap is `max(0, starting − sold)`. Also extends episodes to their full window so the DP horizon is not shortened by a realised sellout. |
 | `bootstrap/measure.py` | §8, App. A | Phase-0 measurement suite (m1–m8, m10, m11 episode endings) and reassessment gates. |
 | `bootstrap/train_baseline.py` | §9.3 | Frozen LightGBM/Tweedie `mu_ref`; price features overwritten to `d_ref` at inference; level-calibration factor fit. |

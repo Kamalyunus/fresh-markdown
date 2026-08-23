@@ -32,7 +32,7 @@ import pandas as pd
 
 from common.config import load_config, reference_discount
 from common.provenance import stamp
-from bootstrap.prepare_data import pre_launch, split_frames
+from bootstrap.prepare_data import population, pre_launch, split_frames
 from pricing.demand import expected_min_demand_inventory_vec
 
 # Feature order is authoritative in feature_schema.json; this list only seeds
@@ -115,7 +115,10 @@ class BaselineModel:
 def train(d, cfg):
     bm = cfg["baseline_model"]
     splits = split_frames(d, cfg)
-    train_d = add_derived(splits["train"])
+    # baseline_model.train_population: "integrity" keeps the episodes the
+    # DP cannot price -- FEATURES carries neither cost nor hours_remaining,
+    # so the model cannot see what makes them ineligible.
+    train_d = add_derived(population(splits["train"], cfg))
 
     levels = {c: sorted(train_d[c].astype(str).unique().tolist()) for c in CATEGORICAL}
     X = pd.DataFrame(index=train_d.index)
@@ -183,6 +186,7 @@ def fit_level_calibration(d, cfg):
     model = BaselineModel(cfg)
     splits = split_frames(d, cfg)
     fit_window = cfg["baseline_model"]["calibration_fit_window"]
+    splits = {k: population(v, cfg) for k, v in splits.items()}
     if fit_window == "calib":
         calib = splits["calib"].copy()
     elif fit_window == "train+calib":
@@ -191,7 +195,7 @@ def fit_level_calibration(d, cfg):
         # "all" means all PRE-LAUNCH data, never the hold-out. Without the
         # bound this one branch quietly fits the level factors on the window
         # reserved for grading them.
-        calib = pre_launch(d, cfg).copy()
+        calib = population(pre_launch(d, cfg), cfg).copy()
     elif fit_window == "trailing":
         # the last N weeks ENDING WHERE THE GATE WINDOW BEGINS: recent enough
         # to track a moving level, and disjoint from what the gate evaluates

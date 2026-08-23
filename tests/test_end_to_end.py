@@ -64,12 +64,20 @@ def test_filter_chain_waterfall(workspace):
     wf = manifest["data_quality_waterfall"]
     rows = [s["rows"] for s in wf if s["step"] != "contiguous_episodes_built"]
     assert rows == sorted(rows, reverse=True)
-    # every stage is named and counted -- 16 of them plus the raw row. The
-    # count is asserted so that adding or removing a filter has to be a
-    # deliberate edit here, and so the figure quoted in the walkthrough and
-    # design doc has something holding it to the code.
+    # every stage is named and counted -- 13 drops, the raw row, and the
+    # dp_eligible SUMMARY row, which drops nothing. The count is asserted so
+    # that adding or removing a filter has to be a deliberate edit here, and
+    # so the figure quoted in the walkthrough and design doc has something
+    # holding it to the code.
     assert wf[0]["step"] == "raw"
-    assert len(wf) == 17, [s["step"] for s in wf]
+    assert wf[-1]["step"] == "dp_eligible"
+    assert len(wf) == 15, [s["step"] for s in wf]
+    # the economic conditions are FLAGS now: none of them may appear as a drop
+    for gone in ("below_cost_dropped", "non_priceable_dropped",
+                 "window_too_long_dropped"):
+        assert gone not in [x["step"] for x in wf], \
+            f"{gone} is back to dropping -- it must flag, or every frozen " \
+            "artifact loses that population again"
     d = pd.read_parquet("data/prepared.parquet")
     assert d.category.notna().all()
     assert (d.units_sold <= d.starting_inventory).all()
@@ -175,17 +183,34 @@ def test_m11_still_reports_where_the_unknown_scrap_sits(workspace):
 
 
 def test_prepared_data_is_priceable_and_self_consistent(workspace):
-    """Postconditions of the filter chain: anything that survives must be
-    something the system can actually price and measure."""
+    """Postconditions of the filter chain.
+
+    Two tiers now, and the split is the point. INTEGRITY properties hold on
+    every surviving row -- a discount in range, non-negative quantities, a
+    real category. PRICEABILITY properties hold only on `dp_eligible`, because
+    an episode the DP cannot price is deliberately still in the population:
+    the demand model cannot see cost or hours_remaining, so it is an ordinary
+    observation to every frozen artifact.
+    """
     _chdir(workspace)
-    d = pd.read_parquet("data/prepared.parquet")
+    full = pd.read_parquet("data/prepared.parquet")
     cfg = yaml.safe_load(open("config.yaml"))
 
-    assert d.total_discount.between(0, 1).all()      # percent -> fraction once
-    assert (d.starting_inventory >= 0).all()
-    assert (d.units_sold >= 0).all()
+    # integrity: true of everything
+    assert full.total_discount.between(0, 1).all()
+    assert (full.starting_inventory >= 0).all() and (full.units_sold >= 0).all()
+    assert full.category.notna().all() and full.subcategory.notna().all()
+    assert (full.original_price > 0).all()
+    assert full.dp_eligible.dtype == bool
+    # and the flag agrees with the reason column, in both directions
+    assert (full.dp_ineligible_reason.isna() == full.dp_eligible).all()
+    assert not full[~full.dp_eligible].dp_ineligible_reason.isna().any()
+
+    # priceability: true of the subset the DP acts on
+    d = full[full.dp_eligible]
+    assert len(d) and len(d) < len(full) or len(d) == len(full)
+
     assert (d.units_sold <= d.starting_inventory).all()
-    assert (d.original_price > 0).all()
     # every surviving episode has at least one feasible discount tier, and a
     # cost we actually know. A zero cost is a MISSING cost -- it reads as
     # maximally priceable (d_max = 1.0), and it contributes no scrap to IL,
@@ -827,20 +852,18 @@ def test_true_leftover_on_the_production_worked_example():
     assert int(episodes.last_rows(d).hours_remaining.iloc[0]) == 0
 
 
-def test_zero_cost_episodes_are_dropped_whole(workspace, tmp_path):
+def test_zero_cost_episodes_are_flagged_whole_not_dropped(workspace, tmp_path):
     """A zero cost is a MISSING cost -- nobody gives perishable stock away.
 
-    Caught by `negative_quantities_dropped`, whose cost test is `<= 0` rather
-    than `< 0` -- the `=` is the whole point. Nothing downstream catches a
-    zero: `non_priceable` tests `cost >= original_price`, so zero reads as
-    MAXIMALLY priceable. The damage ran two ways. It put `d_max = 1.0` in the
-    action set, which raised ZeroDivisionError out of the demand model on the
-    full-population shadow run. And scrap is `cost x leftover`, so these
-    episodes contributed discount cost and no scrap -- quietly deflating every
-    IL figure measured over them.
+    It is fatal to exactly two consumers and harmless to the rest, which is
+    why it FLAGS rather than drops. Fatal to the action set (`d_max` reads
+    1.0, i.e. maximally priceable, which raised ZeroDivisionError out of the
+    demand model on the first full-population shadow run) and to IL (scrap is
+    `cost x leftover`, so it contributes discount cost and no scrap). Harmless
+    to every frozen artifact, because FEATURES carries no `cost` at all.
 
-    Dropped WHOLE, like its neighbours: a hole punched mid-window re-segments
-    into a spurious short episode.
+    Flagged WHOLE, at episode grain: one bad hour poisons the window, since
+    the monotonicity anchor carries its price into every later hour.
     """
     _chdir(workspace)
     from bootstrap.prepare_data import load_and_filter
@@ -861,13 +884,25 @@ def test_zero_cost_episodes_are_dropped_whole(workspace, tmp_path):
     holed.to_parquet(path)
     d, wf = load_and_filter(str(path), cfg)
 
-    assert (d.cost > 0).all()
-    # the drop lands at THIS stage, not somewhere incidental downstream
-    before = episodes_at(wf, "discount_out_of_range_dropped")
-    after = episodes_at(wf, "negative_quantities_dropped")
-    assert after == before - 1, (before, after)
-    assert after == episodes_at(clean_wf, "negative_quantities_dropped") - 1, \
-        "one zeroed hour must remove one whole episode, not just that row"
+    # STILL PRESENT -- that is the change. It is in the population every
+    # frozen artifact trains on, and out of the one the DP acts on.
+    assert not (d.cost > 0).all(), "the zero-cost episode was dropped again"
+    assert episodes_at(wf, "negative_quantities_dropped") == \
+        episodes_at(clean_wf, "negative_quantities_dropped"), \
+        "a missing cost is economic, not an integrity defect -- it must not " \
+        "be dropped by negative_quantities"
+
+    # flagged WHOLE: every hour of that window, not just the zeroed row
+    holed_eps = d.loc[d.cost <= 0, "episode_id"].unique()
+    assert len(holed_eps) == 1
+    ep = d[d.episode_id == holed_eps[0]]
+    assert len(ep) > 1 and not ep.dp_eligible.any()
+    assert (ep.dp_ineligible_reason == "cost_missing").all()
+
+    # and the DP-eligible subset is exactly one episode smaller than a clean run
+    clean, _ = load_and_filter("data/flc.parquet", cfg)
+    assert int(d[d.dp_eligible].episode_id.nunique()) == \
+        int(clean[clean.dp_eligible].episode_id.nunique()) - 1
 
 
 def test_restocked_episodes_are_dropped():

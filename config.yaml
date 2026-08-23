@@ -70,12 +70,14 @@ data:
     # mu_ref and r are fit without the slow, heavily-stocked windows.
   max_window_hours: 120                # SET  upper bound on a plausible FLC
     # window. flc_window carries occasional very large values from upstream
-    # data issues; an episode claiming a window longer than this is not
-    # trusted and is dropped whole (window_too_long_dropped in the waterfall).
-    # The bound is also a safety rail: episodes are extended to their full
-    # window before mu_ref prediction, so an unbounded counter would generate
-    # unbounded synthetic rows. extend_to_window raises rather than hanging if
-    # a frame ever reaches it above this bound.
+    # data issues; an episode claiming a window longer than this is FLAGGED
+    # window_too_long and excluded from dp_eligible -- not dropped. The bound
+    # is a DP-side safety rail, not an integrity test: episodes are extended
+    # to their full window before mu_ref PREDICTION, so an unbounded counter
+    # would generate unbounded synthetic rows, and extend_to_window raises
+    # rather than hanging above this bound. Only backtest and shadow extend,
+    # and both filter to dp_eligible first. The three artifact fits never
+    # extend and never read the counter, so a long window costs them nothing.
     # Raised 48 -> 120 by the owner: 48 was cutting legitimate multi-day
     # windows, not just defects. Note the cost -- this bound also sizes the
     # synthetic tail, so the widest window drives DP horizon and prediction
@@ -113,6 +115,34 @@ baseline_model:
   num_boost_round: 400                 # SET
   num_leaves: 63                       # SET
   min_data_in_leaf: 50                 # SET
+  train_population: "integrity"        # SET  which rows the FROZEN ARTIFACTS
+    # are fit on -- mu_ref, the dispersion r, rho, the elasticity prior and
+    # the level factors.
+    #
+    # "integrity"    every episode that survived the filter chain, including
+    #                those the DP cannot price (cost missing, cost above
+    #                price, some hour below cost, window over the cap).
+    # "dp_eligible"  only the priceable subset -- what the pipeline did
+    #                before these became flags rather than drops.
+    #
+    # Default "integrity", for a reason that is checkable rather than
+    # aesthetic: FEATURES carries neither `cost` nor `hours_remaining`, so
+    # the model cannot SEE what makes an episode DP-ineligible. Such an
+    # episode is an ordinary demand observation to it. And the elasticity
+    # prior is the most variation-starved quantity in the system, while
+    # below-cost hours are the widest price spread the extract contains --
+    # dropping them threw away the observations the bracket most needed.
+    #
+    # The risk of "integrity" is covariate shift: the model is fit on a
+    # distribution wider than the one it serves. That is measurable, not
+    # arguable -- `fidelity.by_dp_eligibility` reports the anchor ratio on
+    # the DP-eligible subset either way. Run both, read that number, keep the
+    # winner.
+    #
+    # NOT a choice anywhere else. The DP, the calibration GATE, tau and the
+    # A/B always read dp_eligible: they act on, or grade, the priceable book
+    # only. The cost floor is unaffected either way -- it is structural in
+    # `pricing.dp.feasible_tiers`, not a filter.
   freeze_at_launch: true               # SET  no retraining in MVP window
   model_path: "artifacts/baseline_model.txt"
   feature_schema_path: "artifacts/feature_schema.json"

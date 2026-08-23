@@ -247,19 +247,18 @@ def load_and_filter(path, cfg=None):
     d = d[~d.episode_id.isin(bad)]
     d = step(d, "discount_out_of_range_dropped")
 
-    # Cost is tested `<= 0`, not `< 0`. A zero cost is a MISSING cost -- nobody
-    # gives perishable stock away -- and it is the one impossible value that
-    # looks plausible, so nothing downstream catches it: `non_priceable`
-    # tests `cost >= original_price`, and zero reads as MAXIMALLY priceable
-    # (d_max = 1.0). It did damage in two directions. It put a 100% discount
-    # in the action set, where mu(d) = mu_ref * ((1-d)/(1-d_ref))^eps is
-    # 0 ** negative; `pricing.dp.feasible_tiers` now refuses that tier
-    # independently, since that layer owns which prices are legal and must
-    # protect a production caller this filter never sees. And scrap is
-    # `cost x leftover`, so these episodes contributed discount cost and NO
-    # SCRAP -- quietly deflating every IL figure measured over them, which was
-    # the expensive half.
-    neg = (d.starting_inventory < 0) | (d.units_sold < 0) | (d.cost <= 0)
+    # Negative stock or negative sales are IMPOSSIBLE, so they go. A missing
+    # cost (`cost <= 0`) used to go with them and no longer does: it is an
+    # ECONOMIC condition, not an integrity one. The demand model cannot see
+    # cost -- it is not in FEATURES -- so such an episode is an ordinary
+    # demand observation to every frozen artifact. It is fatal only to IL
+    # (scrap is `cost x leftover`) and to the action set (`d_max = 1.0` reads
+    # as maximally priceable, which put a 100% discount in front of
+    # mu(d) = mu_ref * ((1-d)/(1-d_ref))^eps, i.e. 0 ** negative). Both of
+    # those consumers now filter on `dp_eligible`, and `pricing.dp` refuses a
+    # non-positive price independently, since that layer owns which prices
+    # are legal and must protect a production caller no filter here sees.
+    neg = (d.starting_inventory < 0) | (d.units_sold < 0)
     d = d[~d.episode_id.isin(d.loc[neg, "episode_id"].unique())]
     d = step(d, "negative_quantities_dropped")
 
@@ -311,38 +310,6 @@ def load_and_filter(path, cfg=None):
     bad = d.groupby("episode_id")["hours_remaining"].min().lt(0)
     d = d[~d.episode_id.isin(bad[bad].index)]
     d = step(d, "negative_window_dropped")
-
-    # flc_window carries occasional very large values from upstream data
-    # issues. An episode claiming an implausible window is not trusted: its
-    # counter drives episode identification, the DP horizon, and the window
-    # extension, so a bad value propagates everywhere rather than staying
-    # local. Dropped whole rather than clamped -- clamping would invent a
-    # window end the data never recorded.
-    cap = cfg["data"]["max_window_hours"]
-    bad = d.loc[d.hours_remaining > cap, "episode_id"].unique()
-    d = d[~d.episode_id.isin(bad)]
-    d = step(d, "window_too_long_dropped")
-
-    # Test the OFFERED price, not applied_price. The source sets
-    # applied_price to 0 on zero-sale rows -- ~78% of rows -- so a filter
-    # reading it is blind on exactly those, and deep-discount zero-sale hours
-    # priced under cost survive. They then reach the planner as an anchor no
-    # feasible tier can match, and every remaining hour of the episode is
-    # rejected at decision time instead of being excluded here.
-    offered = d.original_price * (1 - d.total_discount)
-    below = offered < d.cost - 1e-9
-    bad = d.loc[below, "episode_id"].unique()
-    d = d[~d.episode_id.isin(bad)]
-    d = step(d, "below_cost_dropped")
-
-    # cost at or above the full price leaves d_max <= 0: no discount tier is
-    # feasible, so the episode cannot be priced by this system at all. It was
-    # being caught only incidentally, whenever such a row also happened to
-    # carry a discount; a zero-discount row at cost == price slipped through
-    # and polluted the cost-ratio and IL measurements.
-    bad = d.loc[d.cost >= d.original_price, "episode_id"].unique()
-    d = d[~d.episode_id.isin(bad)]
-    d = step(d, "non_priceable_dropped")
 
     bad = d.loc[d.units_sold > d.starting_inventory, "episode_id"].unique()
     d = d[~d.episode_id.isin(bad)]
@@ -406,6 +373,10 @@ def load_and_filter(path, cfg=None):
     d["d_ref"] = d.category.map(lambda c: reference_discount(cfg, c))
     d["d_max"] = 1.0 - d.cost / d.original_price
     d["offered_price"] = d.original_price * (1 - d.total_discount)
+    d, economic = tag_dp_eligibility(d, cfg)
+    wf.append(("dp_eligible", int(d.dp_eligible.sum()),
+               int(d.loc[d.dp_eligible, "episode_id"].nunique()),
+               cogs_at_risk(d[d.dp_eligible]), economic))
     d = add_ref_rate_features(d, cfg)
     # Guarantee window order on the way out. Several consumers take .first()
     # / .last() / .iloc[-1] per episode without re-sorting, and the feature
@@ -524,6 +495,100 @@ def pre_launch(d, cfg):
     Episode-scoped, so a window opening before the boundary is kept whole.
     """
     return episodes.window_slice(d, None, cfg["data"]["split"]["test_end"])
+
+
+
+# The four conditions that make an episode unpriceable. Each is ECONOMIC, not
+# an integrity defect: the demand model's FEATURES carry neither `cost` nor
+# `hours_remaining`, so it cannot see any of them, and an episode failing one
+# is an ordinary demand observation to every frozen artifact. They are fatal
+# to exactly two things -- the action set, and any figure with scrap in it.
+#
+# Reasons are ordered by how fundamental they are, and an episode is labelled
+# with the FIRST it trips, so the reason column reads as a cause rather than
+# as whichever test happened to run last.
+DP_INELIGIBLE = (
+    ("cost_missing",
+     "cost <= 0 -- a MISSING cost, not a free good. d_max reads 1.0, i.e. "
+     "maximally priceable, and scrap (cost x leftover) reads zero"),
+    ("non_priceable",
+     "cost >= original_price, so d_max <= 0 and no discount tier exists"),
+    ("below_cost",
+     "some hour's OFFERED price is under cost. Tested on "
+     "original_price x (1 - d), never applied_price, which the source zeroes "
+     "on the ~78% of rows that sold nothing"),
+    ("window_too_long",
+     "hours_remaining above data.max_window_hours. Only extend_to_window "
+     "reads the counter, and only backtest and shadow call it -- the three "
+     "artifact fits never do"),
+)
+
+
+def tag_dp_eligibility(d, cfg):
+    """Flag the episodes the DP cannot price. Flag, never drop.
+
+    Dropping them was costing more than it saved. It removed most of the COGS
+    in the extract from every frozen artifact, including the elasticity prior
+    -- which is starved of price variation and for which below-cost hours are
+    the WIDEST spread in the data. And it answered a gate with the filter that
+    removes the gate's subject: `reassessment_gates.max_share_non_explorable`
+    exists to say "too many episodes have a cost floor too tight to explore
+    against", and `share_non_explorable` measured 0.0 because those episodes
+    were already gone.
+
+    Episode-scoped: one below-cost hour makes the whole window unpriceable,
+    because the monotonicity anchor carries that price into every later hour.
+    Runs after re-segmentation, so the ids it groups on are final.
+    """
+    cap = cfg["data"]["max_window_hours"]
+    tests = {
+        "cost_missing": d.cost <= 0,
+        "non_priceable": d.cost >= d.original_price,
+        "below_cost": d.offered_price < d.cost - 1e-9,
+        "window_too_long": d.hours_remaining > cap,
+    }
+    reason = pd.Series(pd.NA, index=d.index, dtype="object")
+    detail = {}
+    for name, _ in DP_INELIGIBLE:
+        hit = d.episode_id.isin(d.loc[tests[name], "episode_id"].unique())
+        detail[name] = {
+            "episodes": int(d.loc[hit, "episode_id"].nunique()),
+            "rows": int(hit.sum()),
+            "cogs_at_risk": round(cogs_at_risk(d[hit]), 1),
+        }
+        reason = reason.mask(hit & reason.isna(), name)
+    d = d.copy()
+    d["dp_ineligible_reason"] = reason
+    d["dp_eligible"] = reason.isna()
+    detail["episodes_dp_eligible"] = int(
+        d.loc[d.dp_eligible, "episode_id"].nunique())
+    detail["episodes_dp_ineligible"] = int(
+        d.loc[~d.dp_eligible, "episode_id"].nunique())
+    detail["note"] = (
+        "FLAGGED, NOT DROPPED. Every row above is still in the population. "
+        "The three artifact fits read baseline_model.train_population "
+        "('integrity' = all of it, 'dp_eligible' = this subset); the DP, the "
+        "calibration gate and the A/B always read dp_eligible. Reasons are "
+        "first-match in the order " + ", ".join(n for n, _ in DP_INELIGIBLE)
+        + ". Counts overlap, so they do not sum to episodes_dp_ineligible.")
+    return d, detail
+
+
+def population(d, cfg, which=None):
+    """The rows a consumer is entitled to. ONE definition, so a consumer
+    states which population it wants rather than re-deriving it.
+
+    `which` is 'integrity' (everything that survived the filter chain) or
+    'dp_eligible'. Passing None reads baseline_model.train_population, which
+    is what the artifact fits do; the DP-side callers pass 'dp_eligible'
+    explicitly because for them it is not a choice.
+    """
+    which = which or cfg["baseline_model"]["train_population"]
+    if which == "integrity":
+        return d
+    if which == "dp_eligible":
+        return d[d.dp_eligible] if "dp_eligible" in d else d
+    raise ValueError(f"unknown population {which!r}")
 
 
 def split_frames(d, cfg):
