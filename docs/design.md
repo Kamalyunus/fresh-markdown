@@ -316,6 +316,7 @@ artifact. Dropping them removed **>70% of the extract's COGS** from every fit.
 | Step | Drops |
 | --- | --- |
 | `duplicate_hour_rows_dropped` | both copies of any repeated (SKU, FC, hour) — no principled way to choose, and they collide two runs into one episode id |
+| `gap_split_windows_dropped` | **every fragment** of a source window a missing hour split in two. Neither fragment is an episode: the first ends unclosed, the second opens mid-window with the wrong starting stock, a counter part-way down, and a first row that reads as an ENTRY row — which `estimate_prior` fits elasticity on. Detected from the counter, which across a gap falls in step with the clock; a genuinely new window resets it upward |
 | `exclusion_window_removed` | any episode with *any* hour in the known bad-data window. Scope, not integrity: the rows are fine, the period is not |
 | `discount_out_of_range_dropped` | discount outside [0,1] — the percent→fraction conversion applied twice or not at all |
 | `negative_quantities_dropped` | impossible quantities: negative inventory or sales. **Not `cost <= 0`** — that is the `cost_missing` flag |
@@ -330,20 +331,23 @@ artifact. Dropping them removed **>70% of the extract's COGS** from every fit.
 `dp_eligible`, each naming something the *solver* cannot do; an episode is
 labelled with the first it trips.
 
-| Flag | Why the DP cannot price it |
+| Flag | Why the DP cannot act on it |
 | --- | --- |
-| `cost_missing` | `cost <= 0` — a *missing* cost, not a free good. It reads as maximally priceable (`d_max = 1.0`), so nothing downstream catches it; and since scrap is `cost × leftover`, these episodes contribute discount cost and no scrap, deflating every IL figure measured over them |
-| `non_priceable` | `cost >= original_price`, so `d_max <= 0` and no tier is feasible |
-| `negative_window` | any `hours_remaining < 0` after recovery. With the recovery in force this is 2,268 episodes rather than 384,073 — a recovery stage changes no counts of its own, so its whole effect shows up here as a flag that was not set |
-| `window_too_long` | window above `data.max_window_hours` (**120**, raised from 48 — the shorter bound was cutting legitimate multi-day windows). `extend_to_window` raises above the cap, so this is a crash rather than a refusal |
-| `restocked` | an hour opening with more stock than the previous hour left behind. The DP's transition assumes one pool draining monotonically; the demand observations themselves are fine, each censored against its own opening stock. 70,883 episodes, **2.69pp of COGS** on production |
+| `cost_missing` | `cost <= 0` — a *missing* cost, not a free good. `d_max` reads 1.0, so the DP would discount to the tier cap believing scrap is free, and IL reads zero |
+| `non_priceable` | `cost >= original_price`, so `d_max <= 0` and `feasible_tiers` is EMPTY |
+| `negative_window` | `hours_remaining` still `< 0` after recovery — the DP takes its horizon from the counter and `extend_to_window` builds the synthetic tail from it |
+| `window_too_long` | above `data.max_window_hours` (**120**) — `extend_to_window` RAISES above the cap, so this is a crash rather than a refusal |
+| `outcome_unknown` | the episode never closed inside this data. Gates `eligible` as well: an unfinished episode is not a complete observation of anything, and two consumers silently mis-weighted one before this existed |
+| `final_hour_restock` | the last row sold more than it opened with, so stock arrived during the close and the leftover is a guess. Gates `eligible` too |
 
-Two conditions are flagged and gate nothing:
+Four conditions are flagged and gate nothing:
 
 | Flag | Why it does not gate |
 | --- | --- |
-| `below_cost_hours` | any hour whose **offered** price is under cost — tested on `original_price × (1 − discount)`, never `applied_price`, which the source zeroes on zero-sale rows. A price the legacy policy set, which the agent is constrained never to set. The backtest's DP arm is self-anchored and never sees it; shadow anchors on it and refuses from the crossing hour, which is the cost floor working |
-| `edge_truncated` | the extract cut the window off mid-flight, so only the *ending* is unknown. The observed hours are ordinary priced demand and these are the largest episodes in the extract (24.9 units of opening stock against 3.05). Episodes unclosed for any other reason are flagged `False` and stay `not_closed`, because those are a feed problem a longer extract will not fix. Reports `episodes_unclosed`, `episodes_unclosed_not_edge` and `share_of_unclosed_explained_by_edge` |
+| `below_cost_hours` | a price the LEGACY policy set, which the agent is constrained never to set |
+| `edge_truncated` | of the unfinished episodes, the ones the extract boundary explains — the diagnostic that says whether the count is the boundary or a feed problem |
+| `restocked` | units arrived mid-window. Does NOT gate: the replay re-solves hourly and applies the episode's own per-hour adjustment, so the DP meets an arrival exactly as it does live |
+| `shrink` | units left unsold and unwritten-off. Does NOT gate: they are counted into scrap, so `supply == sold + scrap` still closes |
 
 Which population a consumer reads is one decision, in
 `baseline_model.train_population` (default `integrity`), resolved through

@@ -786,8 +786,9 @@ trips, so the reason column reads as a cause.
 | `non_priceable` | `cost >= original_price`, so `d_max <= 0` and `feasible_tiers` is EMPTY |
 | `negative_window` | `hours_remaining` still `< 0` after recovery. The DP takes its horizon from the counter and `extend_to_window` builds the synthetic tail from it; neither can read a negative one |
 | `window_too_long` | `hours_remaining` above `data.max_window_hours` (**120**) — flc_window carries very large values from upstream data issues. Raised from 48 by the owner: 48 was cutting legitimate multi-day windows, not only defects. `extend_to_window` RAISES above the cap, so this is a crash rather than a refusal |
+| `outcome_unknown` | the episode never closed inside this data — no write-off sentinel on its last row. Gates `eligible` too: an unfinished episode is not a complete observation of anything, and two consumers silently mis-weighted one before this flag existed |
+| `final_hour_restock` | the last row sold more than it opened with, so stock arrived during the close and the leftover is a guess — two unknowns, one equation. Gates `eligible` too |
 | `unreconciled` | the episode's flow identity fails: `supply != sold + remaining`. Stock moved that no sale, restock or write-off accounts for, so clearance would read above 1 or scrap would appear on a window that sold everything. No trustworthy clearance, scrap or IL — `scrap_units` returns NaN and `unreconciled_anomalies` in the manifest says where they sit, by category and month, for the business to deep-dive |
-| `restocked` | an hour opens with more stock than the previous hour left behind. The DP's transition is `V(p, q − min(k,q), h−1)` over ONE pool draining monotonically, so a mid-window replenishment leaves the horizon undefined |
 
 Two more are flagged and gate **nothing**:
 

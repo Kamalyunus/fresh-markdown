@@ -437,6 +437,7 @@ Deterministic, auditable order — **twelve named waterfall rows**, each counted
 | # | Stage | Scope | Drops |
 | --- | --- | --- | --- |
 | 1 | `raw` | — | the starting count |
+| 2 | `gap_split_windows_dropped` | episode, **every fragment** | a hole in the hourly feed splits one source window into two episodes, and neither is one — the first ends unclosed, the second opens mid-window with the wrong starting stock and a first row that reads as an ENTRY row. Detected from the counter falling in step with the clock |
 | 2 | `duplicate_hour_rows_dropped` | rows, **both** copies | two states for one `sku × fc × hour`; no principled way to choose, and they collide two runs into one episode id |
 | 3 | `exclusion_window_removed` | episode | any episode with ANY hour in the known demand-issue window. SCOPE, not integrity |
 | 4 | `discount_out_of_range_dropped` | episode | discount outside `[0, 1]` — the percent→fraction conversion applied twice or not at all |
@@ -450,20 +451,23 @@ Deterministic, auditable order — **twelve named waterfall rows**, each counted
 
 `tag_dp_eligibility` then labels the surviving frame. Five conditions set `dp_eligible = False` and `dp_ineligible_reason` to the **first** they trip; the rows stay in the frame.
 
-| Flag | Test | Why the DP cannot price it |
-| --- | --- | --- |
-| `cost_missing` | `cost <= 0` | a *missing* cost, not a free good: `d_max` reads 1.0, so the DP would discount to the tier cap believing scrap is free, and IL reads zero |
-| `non_priceable` | `cost >= original_price` | `d_max <= 0`: no feasible tier exists |
-| `negative_window` | any `hours_remaining < 0` after recovery | the DP takes its horizon from the counter and `extend_to_window` builds the synthetic tail from it |
-| `window_too_long` | `hours_remaining` above `data.max_window_hours` | `extend_to_window` RAISES above the cap — a crash, not a refusal |
-| `restocked` | an hour opens with more stock than the previous hour left | the state transition assumes one pool draining monotonically |
+| Flag | Why the DP cannot act on it |
+| --- | --- |
+| `cost_missing` | `cost <= 0` — a *missing* cost, not a free good. `d_max` reads 1.0, so the DP would discount to the tier cap believing scrap is free, and IL reads zero |
+| `non_priceable` | `cost >= original_price`, so `d_max <= 0` and `feasible_tiers` is EMPTY |
+| `negative_window` | `hours_remaining` still `< 0` after recovery — the DP takes its horizon from the counter and `extend_to_window` builds the synthetic tail from it |
+| `window_too_long` | above `data.max_window_hours` (**120**) — `extend_to_window` RAISES above the cap, so this is a crash rather than a refusal |
+| `outcome_unknown` | the episode never closed inside this data. Gates `eligible` as well: an unfinished episode is not a complete observation of anything, and two consumers silently mis-weighted one before this existed |
+| `final_hour_restock` | the last row sold more than it opened with, so stock arrived during the close and the leftover is a guess. Gates `eligible` too |
 
-Two more are flagged and gate **nothing**:
+Four more are flagged and gate **nothing**:
 
-| Flag | Test | Why it does not gate |
-| --- | --- | --- |
-| `below_cost_hours` | any hour whose **offered** price is under cost — tested on `original_price × (1 − discount)`, never `applied_price`, which the source zeroes on zero-sale rows | a price the LEGACY policy set, which the agent is constrained never to set. The backtest's DP arm is self-anchored and never sees it; shadow anchors on it and refuses from the crossing hour onward, which is the cost floor working (§11) |
-| `edge_truncated` | the last row's timestamp plus `hours_remaining` runs past the extract's last hour | only the *outcome* is missing, and every consumer of an outcome already excludes it: `scrap_units` returns NaN, replay zeroes scrap under `outcome_known`, shadow charges scrap only on `COMPLETED` |
+| Flag | Why it does not gate |
+| --- | --- |
+| `below_cost_hours` | a price the LEGACY policy set, which the agent is constrained never to set |
+| `edge_truncated` | of the unfinished episodes, the ones the extract boundary explains — the diagnostic that says whether the count is the boundary or a feed problem |
+| `restocked` | units arrived mid-window. Does NOT gate: the replay re-solves hourly and applies the episode's own per-hour adjustment, so the DP meets an arrival exactly as it does live |
+| `shrink` | units left unsold and unwritten-off. Does NOT gate: they are counted into scrap, so `supply == sold + scrap` still closes |
 
 Which population a consumer reads is one decision, `baseline_model.train_population` (default `integrity`), resolved through `prepare_data.population`. The three artifact fits read the config; the DP, the calibration gate, the backtest and shadow always pass `"dp_eligible"` — for them it is a precondition, not a choice.
 
