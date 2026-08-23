@@ -209,7 +209,7 @@ def edge_truncated_episodes(d):
     return at_edge, detail
 
 
-def load_and_filter(path, cfg=None):
+def load_and_filter(path, cfg=None, probe=None):
     """Section 9.1 mapping + section 9.2 filter chain. Returns (df, waterfall).
 
     Every stage that DROPS is an integrity or scope rule: the row is
@@ -223,6 +223,14 @@ def load_and_filter(path, cfg=None):
 
     Filter order is deterministic and auditable; the waterfall records row,
     episode and COGS-at-risk counts after every step.
+
+    `probe`, if given, is called as `probe(label, before, after)` at every
+    DROP stage, where `before` is the frame as it entered that stage. It is a
+    hook for `tools.filter_forensics`, which decomposes a stage's casualties
+    into named causes -- a waterfall says how much a filter took, never what
+    it took or whether it was right to. Both frames are shallow copies, so a
+    probe that writes cannot move the population. It does not fire for
+    `contiguous_episodes_built` or `dp_eligible`, which drop nothing.
     """
     cfg = cfg or load_config()
     excl = cfg["data"]["exclusion_window"]
@@ -250,8 +258,19 @@ def load_and_filter(path, cfg=None):
           ("duplicate_hour_rows_dropped", len(df), df.episode_id.nunique(),
            cogs_at_risk(df))]
 
+    # the frame handed to the PREVIOUS step is the frame this one filtered,
+    # so `before` needs no extra bookkeeping at the call sites
+    entering = [df]
+
     def step(d, label):
         wf.append((label, len(d), d.episode_id.nunique(), cogs_at_risk(d)))
+        if probe is not None:
+            # shallow copies: copy-on-write shares the data blocks, so this
+            # costs nothing on a 10M-row frame, but a probe that writes gets
+            # its own block and the chain carries on unperturbed. A diagnostic
+            # hook that can move the population is worse than no hook.
+            probe(label, entering[0].copy(deep=False), d.copy(deep=False))
+        entering[0] = d
         return d
 
     # Episode-scoped, not row-scoped: a window running past midnight can
