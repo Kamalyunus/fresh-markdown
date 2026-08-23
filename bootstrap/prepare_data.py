@@ -662,6 +662,18 @@ DP_INELIGIBLE = (
      "hours_remaining above data.max_window_hours. extend_to_window RAISES "
      "above the cap, so this is a crash rather than a refusal. Only backtest "
      "and shadow extend; the artifact fits never read the counter"),
+    ("outcome_unknown",
+     "the episode never closed inside this data: its last row carries no "
+     "write-off sentinel, so it is still holding stock and nothing about how "
+     "it ENDED is observed. Only the extract's final hours can do this "
+     "legitimately -- split boundaries cannot, since window_slice assigns "
+     "episodes whole by opening date -- so on a 175-day extract of ~36h "
+     "windows this should be under 1% of episodes. Gates `eligible` as well "
+     "as `dp_eligible`: an unfinished episode is not a complete observation "
+     "of anything, and every consumer that met one silently mis-weighted it "
+     "(clearance read sold-so-far, and the backtest graded a truncated actual "
+     "arm against two full-horizon simulated ones). KEPT in the integrity "
+     "population so m11 can still count the residue"),
     ("final_hour_restock",
      "the LAST row sold more than it opened with, so stock arrived during the "
      "episode's final hour. If the source also zeroed `ending` to write the "
@@ -735,13 +747,24 @@ def tag_dp_eligibility(d, cfg):
     # This is the frozen-artifact gate; `dp_eligible` is a strict subset with
     # further requirements of the SOLVER on top.
     d["final_hour_clean"] = d.episode_id.map(flow.final_hour_clean).astype(bool)
-    d["episode_eligible"] = d.episode_id.map(flow.eligible).astype(bool)
+    # An unfinished episode is not a complete observation of anything. It used
+    # to stay eligible on the grounds that its OBSERVED hours are ordinary
+    # demand and `scrap_units` already returns NaN -- true, and not enough:
+    # two consumers met one and silently mis-weighted it. The clearance panel
+    # averaged in "sold so far", and the backtest graded a truncated actual
+    # arm against two full-horizon simulated ones. A category that needs
+    # special-casing at every consumer belongs excluded at the source.
+    kind = episodes.classify(d)
+    d["outcome_known"] = d.episode_id.map(kind.ne(episodes.NOT_CLOSED)).astype(bool)
+    d["episode_eligible"] = (d.episode_id.map(flow.eligible)
+                             & d.outcome_known).astype(bool)
 
     tests = {
         "cost_missing": d.cost <= 0,
         "non_priceable": d.cost >= d.original_price,
         "negative_window": d.hours_remaining < 0,
         "window_too_long": d.hours_remaining > cap,
+        "outcome_unknown": ~d.outcome_known,
         "final_hour_restock": ~d.final_hour_clean,
     }
     reason = pd.Series(pd.NA, index=d.index, dtype="object")

@@ -129,40 +129,52 @@ def test_below_cost_is_reported_but_does_not_gate(cfg):
     assert "below_cost" not in [n for n, _ in DP_INELIGIBLE]
 
 
-def test_an_unclosed_ending_is_reported_but_does_not_gate(cfg):
-    """`edge_truncated` marks a missing OUTCOME, not a limit on the DP.
+def test_an_unfinished_episode_is_kept_but_gated_out_of_everything(cfg):
+    """This reverses an earlier decision in this file, deliberately.
 
-    The extract stopping mid-window says nothing about the hours it did
-    capture: they are ordinary, fully-priced demand observations, and these
-    are the LARGEST episodes in the data (~25 units of opening stock against
-    ~3 for the population). What is missing is the ending, and every consumer
-    of an ending already handles that on its own -- `scrap_units` returns NaN,
-    `backtest.replay` zeroes scrap under `outcome_known`, `pipeline.shadow`
-    charges scrap only on COMPLETED. Gating on it would buy nothing and cost
-    the demand fit its best-observed windows.
+    The old argument: an unclosed episode's OBSERVED hours are ordinary
+    priced demand, `scrap_units` already returns NaN, and these are the
+    LARGEST episodes in the extract -- so gating buys nothing and costs the
+    demand fit its best-observed windows.
+
+    True, and not enough. TWO consumers met one and silently mis-weighted it:
+    the clearance panel averaged in "sold so far", and the backtest graded a
+    truncated actual arm against two full-horizon simulated ones. A category
+    that needs special-casing at every consumer belongs excluded at the
+    source, not defended at each one.
+
+    And the count should be tiny. Only the EXTRACT's last hours can leave an
+    episode unfinished -- split boundaries cannot, because `window_slice`
+    assigns episodes whole by opening date -- so on a 175-day extract of ~36h
+    windows this is under 1% of episodes if the feed is healthy. Production
+    measured 3.38%, which is the feed problem `edge_truncated` splits out,
+    not a population worth protecting.
+
+    KEPT in `integrity`, so m11 can still count the residue.
     """
-    # TWO episodes, because closure is read from the source's own sentinel and
-    # a frame with no sentinel anywhere proves nothing -- `classify_last`
-    # rightly falls back to treating every episode as closed rather than
-    # sweeping all the scrap into UNKNOWN. `e` carries the sentinel; `u` ends
-    # holding honest stock with hours still on its counter, so it is unclosed
-    # AND at the extract's edge.
+    from bootstrap.prepare_data import population
     unclosed = _frame(episode_id="u", ending_inventory=[9, 7])
     d = pd.concat([_frame(), unclosed], ignore_index=True)
     tagged, detail = tag_dp_eligibility(d, cfg)
 
     assert (tagged.edge_truncated == (tagged.episode_id == "u")).all()
-    assert tagged.dp_eligible.all(), "an unclosed ending must not gate the DP"
-    assert tagged.dp_ineligible_reason.isna().all()
-    assert "edge_truncated" not in [n for n, _ in DP_INELIGIBLE]
+    assert (tagged.outcome_known == (tagged.episode_id == "e")).all()
 
+    # gated out of BOTH working populations...
+    assert (tagged.dp_ineligible_reason.isna()
+            == (tagged.episode_id == "e")).all()
+    assert set(population(tagged, cfg, "eligible").episode_id) == {"e"}
+    assert set(population(tagged, cfg, "dp_eligible").episode_id) == {"e"}
+    # ...and still visible where the residue is measured
+    assert set(population(tagged, cfg, "integrity").episode_id) == {"e", "u"}
+
+    # the edge-vs-feed split survives the gating -- it is what says whether
+    # the count is the extract boundary or something to chase
     edge = detail["edge_truncated"]
     assert edge["episodes_unclosed"] == 1
     assert edge["episodes_edge_truncated"] == 1
-    assert edge["episodes_unclosed_not_edge"] == 0
     assert edge["share_of_unclosed_explained_by_edge"] == 1.0
-    assert edge["still_dp_eligible"] == 1
-
+    assert "edge_truncated" not in [n for n, _ in DP_INELIGIBLE]
 
 def test_a_closed_episode_is_never_flagged_edge_truncated(cfg):
     """The flag has to mean 'the extract stopped', or the residue it is meant

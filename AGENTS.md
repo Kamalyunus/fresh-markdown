@@ -752,7 +752,7 @@ row that breaks it.
 | | What it guarantees | Who reads it |
 | --- | --- | --- |
 | `integrity` | rows that can be believed | nothing, by default |
-| **`eligible`** | the identity holds AND the final hour is clean, so `units_sold` and the censoring call are both sound | **the frozen artifacts** (`baseline_model.train_population`, default) |
+| **`eligible`** | the identity holds, the final hour is clean, AND the episode FINISHED — so `units_sold`, the censoring call and the outcome are all sound | **the frozen artifacts** (`baseline_model.train_population`, default) |
 | `dp_eligible` | `eligible` plus what the SOLVER needs — a feasible tier, a readable horizon, one inventory pool | the DP, calibration gate, backtest, shadow, A/B |
 
 The middle tier exists because of the censored likelihood, and that corrected
@@ -794,7 +794,7 @@ Two more are flagged and gate **nothing**:
 | Flag | Why it does not gate |
 | --- | --- |
 | `below_cost_hours` | any hour whose OFFERED price is under cost. That is a price the LEGACY policy set and the agent is constrained never to set, so it is a property of the history, not a defect in it. The backtest's DP arm is self-anchored (`anchor = d_t`) and never sees it; in shadow the legacy price IS the anchor, so from the crossing hour the action set is empty and `validate_state` refuses — correct behaviour, counted in `rejected_reasons`, and the hours BEFORE the crossing are good decisions the old chain deleted with the whole episode. Test `original_price × (1 − discount)`, NEVER `applied_price`: the source zeroes that on zero-sale rows (~78% of rows) |
-| `edge_truncated` | the extract cut the window off mid-flight, so the ENDING is unknown. Not a limit on the DP: the observed hours are ordinary demand data and these are the LARGEST episodes in the extract (~24.9 units of opening stock against ~3.05 for the population). Every consumer of an outcome already excludes an unclosed ending on its own — `scrap_units` returns NaN, `backtest.replay` zeroes scrap under `outcome_known`, `pipeline.shadow` charges scrap only on COMPLETED |
+| `edge_truncated` | of the unfinished episodes, the ones the extract boundary explains. Does not gate on its own — `outcome_unknown` already did — but it is the diagnostic that says whether the unfinished count is the boundary or a feed problem. Only the extract's last hours can leave an episode unfinished, since `window_slice` assigns episodes whole by opening date, so on a 175-day extract of ~36h windows the count should be under 1%. Production measured 3.38% |
 
 Who reads which population is ONE decision, in `baseline_model.train_population`
 (default **`integrity`**), resolved through `prepare_data.population(d, cfg,
