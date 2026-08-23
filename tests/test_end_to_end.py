@@ -935,7 +935,7 @@ def test_zero_cost_episodes_are_flagged_whole_not_dropped(workspace, tmp_path):
         int(clean[clean.dp_eligible].episode_id.nunique()) - 1
 
 
-def test_restocked_episodes_are_flagged_not_dropped():
+def test_a_restock_is_detected_from_the_source_convention():
     """The detector, and the fact that its output only ever sets a flag.
 
     A restock breaks the DP's state transition -- one pool draining
@@ -944,10 +944,10 @@ def test_restocked_episodes_are_flagged_not_dropped():
     them cost the demand fit 2.7% of the extract's COGS to protect a solver
     that reads `dp_eligible` anyway.
     """
-    from bootstrap.prepare_data import restocked_episodes
+    from common.episodes import episode_flow
 
     clean = _observed_episode()
-    assert len(restocked_episodes(clean)) == 0
+    assert episode_flow(clean).arrived.eq(0).all()
 
     # 4 units arrive during hour 16, which opened with 5 and sold none. The
     # source reports the FINAL count, so ending goes to 9 and hour 17 opens
@@ -958,7 +958,7 @@ def test_restocked_episodes_are_flagged_not_dropped():
     restocked.loc[h16, "ending_inventory"] += 4
     restocked.loc[restocked.hour_of_day > 16, "starting_inventory"] += 4
     restocked.loc[restocked.hour_of_day.between(17, 19), "ending_inventory"] += 4
-    assert list(restocked_episodes(restocked)) == ["m"]
+    assert episode_flow(restocked).loc["m", "arrived"] == 4
 
     # the plainest restock of all: an hour selling MORE than it opened with.
     # `sold >= starting` is not an impossible quantity, it is stock arriving.
@@ -966,7 +966,7 @@ def test_restocked_episodes_are_flagged_not_dropped():
     h15 = oversell.hour_of_day == 15
     oversell.loc[h15, "units_sold"] = 12          # opened with 8
     oversell.loc[h15, "ending_inventory"] = 5     # so 9 arrived
-    assert list(restocked_episodes(oversell)) == ["m"]
+    assert episode_flow(oversell).loc["m", "arrived"] == 9
 
     # selling stock down is never a restock, however steep the drop
     steep = clean.copy()
@@ -975,7 +975,7 @@ def test_restocked_episodes_are_flagged_not_dropped():
     steep.loc[steep.hour_of_day > 15, "starting_inventory"] = 0
     steep.loc[steep.hour_of_day > 15, "ending_inventory"] = 0
     steep.loc[steep.hour_of_day > 15, "units_sold"] = 0
-    assert len(restocked_episodes(steep)) == 0
+    assert episode_flow(steep).arrived.eq(0).all()
 
 
 def test_a_restock_survives_the_real_chain_and_stays_dp_eligible(

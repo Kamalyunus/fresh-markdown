@@ -801,16 +801,13 @@ which)`. The three artifact fits read the config; the DP, the calibration gate,
 the backtest and shadow always pass `"dp_eligible"` explicitly, because for
 them it is a precondition rather than a choice.
 
-**There is deliberately no episode-total check.** "Episode `Σ sold` exceeds
-its opening stock" is not a separate defect: on `dp_eligible` it is the joint
-consequence of `units_gt_inventory_dropped` (per hour, `sold <= start`) and
-the `restocked` flag (the chain never increases). By induction those give
-`start_t <= start_1 − Σ sold before t`, so the total cannot exceed the opening
-stock. It holds on that subset ONLY — a restocked episode is kept in the
-population and can of course sell more than it opened with — and it holds only
-while the restock test runs after re-segmentation, so
-`test_prepared_data_is_priceable_and_self_consistent` asserts the invariant on
-the output rather than trusting the argument.
+**"Episode `Σ sold` exceeds its opening stock" is not a defect at all.** It is
+what a restock looks like. The invariant that does hold is against SUPPLY —
+`sold <= opening + restocked` — and it follows from the identity rather than
+from any filter, since scrap is non-negative.
+`test_prepared_data_is_priceable_and_self_consistent` asserts it on the output.
+The older form, against opening stock, was simply false the moment restocked
+episodes stopped being excluded: 13 episodes tripped it, every one correctly.
 
 **A counter that enters ALREADY negative is recovered, not dropped.** Some
 SKUs arrive with `flc_window` set to a large negative constant rather than a
@@ -830,15 +827,21 @@ counter is load-bearing three ways (episode identification differences it, the
 DP takes its horizon from it, `extend_to_window` generates the tail from it),
 and a flat value would make re-segmentation split every hour.
 
-**`chain_break_dropped` uses the SAME rule production enforces.** Every hour
-must reconcile — `ending == starting − sold` — or `adjustment_reason` must
-name why not, exactly as `events.store._validate_outcome` requires of a live
-outcome. Without it the analysis population could contain breaks production
-would quarantine. Recognised **by the zero, never by position**: the source
-writes stock off at ITS window boundary, and once a window is merged across
-midnight that row sits in the MIDDLE of ours, so a "only the last hour may
-break the chain" test drops those episodes in bulk. A partial shortfall
-(`0 < ending < leftover`) matches no convention and is what this stage removes.
+**Only CONTINUITY drops, and it uses a rule production also enforces.**
+`ending[t]` must be `starting[t+1]`, and separately every live outcome must
+reconcile or name a reason via `adjustment_reason`, exactly as
+`events.store._validate_outcome` requires. The write-off is recognised **by
+the zero** — the source writes stock off at its own window close — but the
+exemption applies to the LAST ROW only: mid-episode a zero ending with stock
+still owed is shrink, not a close, and exempting it there loses those units.
+
+Two hour-level tests used to live beside it and neither was right. An hour
+selling more than it opened with is a RESTOCK, and deleting it took 18.1pp of
+the extract's COGS while `adjustment_reason` — the production reconciler —
+would have named those rows `intraday_restock` had it been asked. An hour
+whose ending falls short is shrink, which settles into scrap at the episode
+level; dropping the episode for it deleted the fastest-selling windows first,
+since a sale is likelier to straddle an hour boundary the more the SKU sells.
 
 **`cost_missing` tests `cost <= 0`, not `cost < 0`, and the `=` is
 load-bearing.** It was `< 0` until a zero cost crashed the solver, and the

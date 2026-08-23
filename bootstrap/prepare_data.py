@@ -72,41 +72,6 @@ def assign_episode_ids(df):
             + start_ts.dt.strftime("%Y-%m-%dT%H"))
 
 
-def restocked_episodes(d):
-    """Episode ids with at least one hour that took a restock.
-
-    Read WITHIN the hour, from the source's own convention: `ending_inventory`
-    is the final quantity after anything that arrived, so `ending > starting -
-    sold` IS the restock, stated by the source rather than inferred by us.
-
-    This used to be read ACROSS hours -- next hour's opening against this
-    hour's computed leftover -- which was the same quantity at one remove,
-    since `ending` becomes the next `starting`. Two things were wrong with it.
-    It could not see a restock in an episode's FINAL hour, there being no next
-    hour, so those went undetected and their leftover was booked as scrap. And
-    it inherited a `clip(lower=0)` that erased the plainest restock of all:
-    an hour selling MORE than it opened with has a negative net, and clipping
-    it to zero makes any ending look ordinary.
-
-    Counted GROSS over the episode, never netted against the shrink hours. A
-    window can genuinely take 2 units in and lose 2 units to shrink, and
-    netting those to zero read it as an ordinary episode -- which priced its
-    clearance against a supply short by the 2 that arrived.
-
-    REPORTS ONLY; it gates nothing. A restock used to make an episode
-    DP-ineligible, on the grounds that the solver's transition assumes one
-    pool draining monotonically. That confused the SOLVE with the REPLAY.
-    Within a single solve the DP does assume monotone draining over the
-    remaining horizon, and it must: production cannot see a future delivery
-    either. But the replay re-solves every hour against the stock actually on
-    hand, and `backtest.replay` applies the real episode's own per-hour
-    adjustment -- so the DP learns about an arrival at the next hour, exactly
-    as it does live, because `ending[t]` IS `starting[t+1]`.
-    """
-    flow = episodes.episode_flow(d)
-    return flow.index[flow.arrived > 0].to_numpy()
-
-
 def cogs_at_risk(d):
     """Money on the shelf: unit cost x opening stock, ONCE per episode.
 
@@ -221,7 +186,7 @@ def edge_truncated_episodes(d):
     return at_edge, detail
 
 
-def load_and_filter(path, cfg=None, probe=None):
+def load_and_filter(path, cfg=None):
     """Section 9.1 mapping + section 9.2 filter chain. Returns (df, waterfall).
 
     Every stage that DROPS is an integrity or scope rule: the row is
@@ -236,13 +201,6 @@ def load_and_filter(path, cfg=None, probe=None):
     Filter order is deterministic and auditable; the waterfall records row,
     episode and COGS-at-risk counts after every step.
 
-    `probe`, if given, is called as `probe(label, before, after)` at every
-    DROP stage, where `before` is the frame as it entered that stage. It is a
-    hook for `tools.filter_forensics`, which decomposes a stage's casualties
-    into named causes -- a waterfall says how much a filter took, never what
-    it took or whether it was right to. Both frames are shallow copies, so a
-    probe that writes cannot move the population. It does not fire for
-    `contiguous_episodes_built` or `dp_eligible`, which drop nothing.
     """
     cfg = cfg or load_config()
     excl = cfg["data"]["exclusion_window"]
@@ -270,19 +228,8 @@ def load_and_filter(path, cfg=None, probe=None):
           ("duplicate_hour_rows_dropped", len(df), df.episode_id.nunique(),
            cogs_at_risk(df))]
 
-    # the frame handed to the PREVIOUS step is the frame this one filtered,
-    # so `before` needs no extra bookkeeping at the call sites
-    entering = [df]
-
     def step(d, label):
         wf.append((label, len(d), d.episode_id.nunique(), cogs_at_risk(d)))
-        if probe is not None:
-            # shallow copies: copy-on-write shares the data blocks, so this
-            # costs nothing on a 10M-row frame, but a probe that writes gets
-            # its own block and the chain carries on unperturbed. A diagnostic
-            # hook that can move the population is worse than no hook.
-            probe(label, entering[0].copy(deep=False), d.copy(deep=False))
-        entering[0] = d
         return d
 
     # Episode-scoped, not row-scoped: a window running past midnight can
@@ -754,6 +701,37 @@ def tag_dp_eligibility(d, cfg):
             "still_dp_eligible": int(
                 d.loc[hit & d.dp_eligible, "episode_id"].nunique()),
         }
+
+    # SHRINK OR SKEW -- the one question the counts cannot answer, and the
+    # business needs it before deciding what to chase. Shrink is roughly
+    # independent of how fast a SKU sells. Skew between a transaction feed and
+    # a stock snapshot is NOT: it grows with `units_sold`, because a sale is
+    # likelier to straddle the hour boundary the more there are.
+    adj = episodes.hour_adjustment(d).to_numpy()
+    lost, sold = -adj[adj < 0], d.units_sold.to_numpy()
+    corr = None
+    if len(lost) > 2:
+        s_sold = sold[adj < 0]
+        if lost.std() > 0 and s_sold.std() > 0:
+            c = np.corrcoef(lost, s_sold)[0, 1]
+            # None, never NaN: json.dump writes a bare NaN literal that no
+            # strict parser reads back
+            corr = round(float(c), 4) if np.isfinite(c) else None
+    detail["shrink"]["diagnosis"] = {
+        "units_p50": float(np.median(lost)) if len(lost) else 0.0,
+        "units_p90": float(np.percentile(lost, 90)) if len(lost) else 0.0,
+        "share_of_1_unit": round(float((lost == 1).mean()), 4) if len(lost) else 0.0,
+        "shrink_vs_sold_corr": corr,
+        "mean_sold_on_shrink_rows": round(
+            float(sold[adj < 0].mean()), 3) if len(lost) else 0.0,
+        "mean_sold_on_clean_rows": round(float(sold[adj == 0].mean()), 3)
+            if (adj == 0).any() else 0.0,
+        "reading": ("corr near 0 with small absolute losses reads as real "
+                    "SHRINK -- damage, transfer, sampling. corr well above 0, "
+                    "or shrink rows selling far more than clean ones, reads as "
+                    "TIMING SKEW between the sales feed and the stock "
+                    "snapshot: a join to fix upstream, not shrink to chase."),
+    }
 
     # also reported-only, and for a different reason: an unclosed ending is
     # not a limit on the DP, it is a missing OUTCOME, and every consumer of an

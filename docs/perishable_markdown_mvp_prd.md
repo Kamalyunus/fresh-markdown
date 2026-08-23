@@ -444,8 +444,7 @@ Deterministic, auditable order — **twelve named waterfall rows**, each counted
 | 6 | `null_category_dropped` | rows | missing category/subcategory |
 | 7 | `zero_base_price_dropped` | rows | `original_price` still null or zero after ffill+bfill within the episode |
 | 8 | `negative_window_recovered` | episode | **not a drop.** An episode whose counter enters ALREADY negative and runs no longer than `data.manufacturing_window_hours` is a known source pattern, not a defect; its counter is rewritten as a synthetic countdown. The stage reports what it recovered, since it changes no counts |
-| 9 | `units_gt_inventory_dropped` | episode | sales exceed the inventory on hand |
-| 10 | `chain_break_dropped` | episode | an hour where `ending != starting − sold` and `common.episodes.adjustment_reason` names no reason — unexplained inventory loss. The SAME rule `events.store` enforces in production, so the analysis population cannot hold a break production would quarantine |
+| 9 | `episode_universe` | episode | the three conditions that make an episode's inventory readable — CONTINUITY (`ending[t] == starting[t+1]`, the only one that drops), the IDENTITY (`opening + restocked == sold + scrap`), and a CLEAN CLOSE (`starting >= sold` on the last row). `units_sold > starting_inventory` is a RESTOCK, not an impossible quantity |
 | 11 | `contiguous_episodes_built` | — | re-segmentation, not a filter: episode count and COGS both move here because earlier drops split windows |
 | 12 | `dp_eligible` | — | **not a drop.** The terminal summary row: how much of the surviving population the DP can act on, with the per-flag breakdown in its detail block |
 
@@ -1106,7 +1105,7 @@ None of these should start before the learning loop is demonstrably working.
 
 This is the working implementation of §8. It ran successfully against production data; the three defects found on review of that run are fixed here. Measurements 9 and 10 require the fitted baseline and are skipped until step 4 of §1a is complete.
 
-> **The `load_and_filter` listing below is a historical snapshot and is superseded by `bootstrap/prepare_data.py`.** It is kept because the measurement code around it is still the reference for §8. Two things in it are now wrong: episode ids are keyed on `sku|fc|date`, which splits a window that runs past midnight (§9.1 gives the contiguous-run rule that replaced it), and `negative_window_dropped` / `below_cost_dropped` are drops, which §9.2 above has since reclassified as flags. Read §9.2, not this code, for the filter chain.
+> **The `load_and_filter` listing below is a historical snapshot and is superseded by `bootstrap/prepare_data.py`.** It is kept because the measurement code around it is still the reference for §8. Three things in it are now wrong: episode ids are keyed on `sku|fc|date`, which splits a window that runs past midnight (§9.1 gives the contiguous-run rule that replaced it); `negative_window_dropped`, `below_cost_dropped` and `units_gt_inventory_dropped` are drops, and §9.2 has since reclassified all three (the last is a RESTOCK, not a defect); and there is no episode-level reconciliation. Read §9.2, not this code, for the filter chain.
 
 ```python
 """
