@@ -11,17 +11,21 @@ And it made gate 1 undecidable. `share_non_explorable` counts episodes whose
 cost floor leaves too few tiers to explore against, and the chain deleted
 exactly those before `m1` looked, so the gate read 0.0 and could not fail.
 
-Five conditions gate `dp_eligible`, and each one names something the SOLVER
-cannot do -- no feasible tier (`cost_missing`, `non_priceable`), no trustable
-horizon (`negative_window`, `window_too_long`), no single draining pool
-(`restocked`). None of them names anything the demand model can see: FEATURES
-carries neither `cost` nor `hours_remaining` nor anything about the inventory
-chain.
+What gates `dp_eligible` is now only what the SOLVER cannot do -- no feasible
+tier (`cost_missing`, `non_priceable`) and no trustable horizon
+(`negative_window`, `window_too_long`) -- plus `final_hour_restock`, which
+makes the CLOSE ambiguous and so gates `eligible` too.
 
-Two more conditions are flagged and gate NOTHING. `below_cost_hours` is a
-price the legacy policy set and the agent is constrained never to repeat.
-`edge_truncated` is a missing OUTCOME rather than a limit on the DP, and every
-consumer of an outcome already excludes it by the closure sentinel.
+Nothing about the inventory PATH gates any more. A restock or a shrink used to,
+on the grounds that the DP's transition assumes one pool draining
+monotonically. That confused the solve with the replay: within one solve the DP
+does assume it, and must, because production cannot see a future delivery
+either -- but the replay re-solves hourly against the stock on hand and applies
+the episode's own per-hour adjustment, so the DP learns of an arrival at the
+next hour exactly as it does live.
+
+`below_cost_hours`, `edge_truncated`, `restocked` and `shrink` are all reported
+and gate nothing.
 """
 
 import inspect
@@ -74,10 +78,9 @@ def _frame(**over):
     ("non_priceable", {"cost": 12_000.0}),
     ("negative_window", {"hours_remaining": [-242.0, -243.0]}),
     ("window_too_long", {"hours_remaining": [500.0, 499.0]}),
-    # 11 units arrive during hour 1: it opened with 12, sold 3, and the
-    # source reports the FINAL count of 20. Hour 2 then opens with 20, so the
-    # chain stays continuous -- that is what makes it a restock, not a break.
-    ("restocked", {"starting_inventory": [12, 20], "ending_inventory": [20, 0]}),
+    # the last row sells more than it opened with, so the close is ambiguous
+    ("final_hour_restock", {"starting_inventory": [12, 9],
+                            "units_sold": [3, 12], "ending_inventory": [9, 0]}),
 ])
 def test_each_condition_flags_and_names_itself(name, over, cfg):
     d, detail = tag_dp_eligibility(_frame(**over), cfg)
@@ -276,6 +279,7 @@ def test_an_unknown_outcome_reaches_the_harnesses_and_is_not_charged_scrap(cfg):
         "units_sold": [2, 2, 2], "mu_ref_hat": [2.0] * 3,
         "r": [3.0] * 3, "eps": [-2.0] * 3,
     })
+    g["ending_inventory"] = g.starting_inventory - g.units_sold
     known = _episode_frame(g)
     unknown = _episode_frame(g, unfinished=frozenset({"e"}))
     assert known["outcome_known"] and not unknown["outcome_known"]
@@ -332,30 +336,34 @@ def test_stock_that_genuinely_vanishes_does_not_net_away():
     assert flow.loc["V", "supply"] == 10
 
 
-def test_a_restocked_episode_never_reaches_the_backtest(cfg):
-    """Asserted on BEHAVIOUR, not on a source grep.
+def test_a_restocked_episode_does_reach_the_backtest(cfg):
+    """It used to be excluded, and that was wrong.
 
-    A restocked episode is fine for the frozen artifacts -- the demand model
-    cannot see the inventory chain -- and wrong for anything that compares
-    policies or books IL, because the DP has no restock in its state
-    transition and clearance against opening stock goes above 1. `dp_eligible`
-    is what keeps them apart, and the other tests here check the flag; this
-    one checks that the consumer actually honours it.
+    The exclusion rested on the DP's transition assuming one pool draining
+    monotonically -- which confuses the SOLVE with the REPLAY. Within a single
+    solve the DP does assume that, and it should: production cannot see a
+    future delivery either. But the replay re-solves every hour against the
+    stock on hand and applies the episode's own per-hour adjustment, so the DP
+    learns about an arrival at the next hour, exactly as it does live because
+    `ending[t]` IS `starting[t+1]`.
+
+    Excluding them also selected against precisely the fast-moving SKUs that
+    get replenished, which is the bias this whole chain has been unwinding.
     """
     from bootstrap.prepare_data import population
     restocked = _frame(episode_id="R", starting_inventory=[12, 20],
                        ending_inventory=[20, 0])
     d = pd.concat([_frame(), restocked], ignore_index=True)
-    tagged, _ = tag_dp_eligibility(d, cfg)
+    tagged, detail = tag_dp_eligibility(d, cfg)
 
-    assert set(tagged.loc[~tagged.dp_eligible, "episode_id"]) == {"R"}
-    eligible = population(tagged, cfg, "dp_eligible")
-    assert "R" not in set(eligible.episode_id), \
-        "a restocked episode reached the DP-side population -- clearance " \
-        "against opening stock would read above 1 and IL would book scrap " \
-        "on an inventory pool the solver never modelled"
-    # ...and it is still there for the artifact fits
-    assert "R" in set(population(tagged, cfg, "integrity").episode_id)
+    assert tagged.dp_eligible.all(), "a restock must not gate the DP"
+    assert "R" in set(population(tagged, cfg, "dp_eligible").episode_id)
+    assert "R" in set(population(tagged, cfg, "eligible").episode_id)
+    # reported, though -- 11 units arrived and the DP had to be told
+    assert detail["restocked"]["episodes"] == 1
+    assert detail["restocked"]["units"] == 11
+    assert detail["restocked"]["still_dp_eligible"] == 1
+    assert "restocked" not in [n for n, _ in DP_INELIGIBLE]
 
 
 def test_the_flow_identity_is_what_decides_a_trustworthy_episode(cfg):
@@ -396,7 +404,7 @@ def test_the_flow_identity_is_what_decides_a_trustworthy_episode(cfg):
     assert flow.loc["last_restock", "supply"] == 56
 
 
-def test_an_unreconciled_episode_is_kept_flagged_and_kept_out_of_scrap(cfg):
+def test_shrink_is_counted_as_scrap_and_gates_nothing(cfg):
     """Fuzzy episodes are no good for IL, scrap, clearance, backtest or
     shadow -- and the business still needs to see them, so they are flagged
     rather than deleted."""
@@ -420,18 +428,19 @@ def test_an_unreconciled_episode_is_kept_flagged_and_kept_out_of_scrap(cfg):
     assert scrap_units(v)["V"] == 6.0        # 5 left on the shelf + 1 shrunk
 
     tagged, detail = tag_dp_eligibility(v, cfg)
-    assert (tagged.dp_ineligible_reason == "unreconciled").all()
     assert tagged.units_shrink.eq(1).all()
+    # shrink gates NOTHING now: the replay applies the same per-hour
+    # adjustment, so the DP sees the unit go missing exactly as production
+    # would -- at the next hour, in a smaller q
+    assert tagged.dp_eligible.all()
+    assert detail["shrink"]["units"] == 1
     # sales and the censoring call are both sound, so it still trains the
     # frozen artifacts -- only the DP is shut out, its transition assuming
     # stock leaves solely by sale
     assert tagged.episode_eligible.all()
-    # out of the DP-side population...
-    assert "V" not in set(population(tagged, cfg, "dp_eligible").episode_id)
-    # ...and still there for the artifacts, with somewhere for the business
-    # to look
+    assert "V" in set(population(tagged, cfg, "dp_eligible").episode_id)
     assert "V" in set(population(tagged, cfg, "eligible").episode_id)
-    assert "V" in set(population(tagged, cfg, "integrity").episode_id)
+    # and the business still gets told where the missing units are
     assert detail["unreconciled_anomalies"]["units_unaccounted"] == 1
     assert detail["unreconciled_anomalies"]["by_month"]["2026-01"]["episodes"] == 1
 
@@ -498,17 +507,19 @@ def test_shrink_and_restock_in_one_episode_are_both_counted(cfg):
     assert int(t.episode_supply) == 14
     assert int(t.episode_scrap) == 3
 
-    # BOTH conditions are counted, whichever one wins the first-match label
+    # BOTH are counted, and neither gates
     assert detail["restocked"]["episodes"] == 1
-    assert detail["unreconciled"]["episodes"] == 1
+    assert detail["restocked"]["units"] == 2
+    assert detail["shrink"]["episodes"] == 1
+    assert detail["shrink"]["units"] == 2
     assert detail["shrink_and_restock_together"]["episodes"] == 1
     assert detail["shrink_and_restock_together"]["units_arrived"] == 2
     assert detail["shrink_and_restock_together"]["units_shrunk"] == 2
 
-    # out of everything that prices or compares
-    assert not bool(t.dp_eligible)
-    assert "W" not in set(population(tagged, cfg, "dp_eligible").episode_id)
-    assert "W" in set(population(tagged, cfg, "integrity").episode_id)
+    # and it is fully usable: artifacts AND backtest/shadow
+    assert bool(t.dp_eligible)
+    assert "W" in set(population(tagged, cfg, "dp_eligible").episode_id)
+    assert "W" in set(population(tagged, cfg, "eligible").episode_id)
     # the listing closed and every unit is accounted for: 1 left on the shelf
     # and 2 shrunk, both scrap
     assert classify(d).iloc[0] == "completed"

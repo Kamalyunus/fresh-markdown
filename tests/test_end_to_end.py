@@ -88,12 +88,15 @@ def test_filter_chain_waterfall(workspace):
     assert d.category.notna().all()
     assert d.total_discount.between(0, 1).all()      # percent -> fraction once
     assert (d.original_price > 0).all()
-    # `sold <= starting` holds on dp_eligible ONLY. In the integrity
-    # population an hour selling more than it opened with is a RESTOCK -- the
-    # source reports the final count in `ending_inventory` -- and asserting it
-    # on the whole frame is how a restock got deleted as an impossible value.
-    assert (d[d.dp_eligible].units_sold
-            <= d[d.dp_eligible].starting_inventory).all()
+    # `sold <= starting` is NOT an invariant anywhere any more. An hour
+    # selling more than it opened with is a RESTOCK -- the source reports the
+    # final count in `ending_inventory` -- and restocked episodes are
+    # dp_eligible, because the replay applies the same per-hour adjustment
+    # the real episode had. What must hold instead is that every such hour is
+    # accounted for as an arrival.
+    over = d.units_sold > d.starting_inventory
+    assert (d.loc[over, "units_restocked"] > 0).all(), \
+        "an hour sold more than it opened with and no arrival was recorded"
 
 
 def test_waterfall_reports_the_money_each_filter_removes(workspace):
@@ -209,6 +212,7 @@ def test_prepared_data_is_priceable_and_self_consistent(workspace):
     observation to every frozen artifact.
     """
     _chdir(workspace)
+    from common import episodes as episodes_mod
     full = pd.read_parquet("data/prepared.parquet")
     cfg = yaml.safe_load(open("config.yaml"))
 
@@ -226,7 +230,6 @@ def test_prepared_data_is_priceable_and_self_consistent(workspace):
     d = full[full.dp_eligible]
     assert len(d) and len(d) < len(full) or len(d) == len(full)
 
-    assert (d.units_sold <= d.starting_inventory).all()
     # every surviving episode has at least one feasible discount tier, and a
     # cost we actually know. A zero cost is a MISSING cost -- it reads as
     # maximally priceable (d_max = 1.0), and it contributes no scrap to IL,
@@ -245,26 +248,19 @@ def test_prepared_data_is_priceable_and_self_consistent(workspace):
     assert (d.hours_remaining >= 0).all()
     assert (d.hours_remaining <= cfg["data"]["max_window_hours"]).all()
 
-    # No episode may sell more than it opened with. This is NOT asserted
-    # directly anywhere -- it follows from the `restocked` flag gating
-    # dp_eligible. Outside a restock the source's convention is
-    # `ending == starting - sold` with a non-negative ending, so every hour
-    # has `sold <= starting`, and the chain never increases. By induction
-    # `start_t <= start_1 - sum(sold before t)`, so the episode total cannot
-    # exceed the opening stock. It holds on THIS subset only: a restocked
-    # episode is kept in the population and sells more than it opened with as
-    # a matter of course -- that IS the restock signal.
+    # No episode may sell more than it was SUPPLIED -- opening stock plus
+    # anything that arrived. Against opening stock alone this is simply false
+    # for a restocked window, and it was: 13 episodes tripped it the moment
+    # restocks became dp_eligible, every one of them correctly.
     #
-    # An earlier hand-written cleaner checked the episode total directly. It
-    # is redundant here ONLY while the restock flag holds, and the
-    # subsumption breaks silently if the flag is computed before
-    # re-segmentation, so the invariant is asserted on the output rather than
-    # argued in a comment.
-    g = d.sort_values(["episode_id", "date", "hour_of_day"]).groupby("episode_id")
-    over = g.units_sold.sum() > g.starting_inventory.first()
-    assert not over.any(), (
-        f"{int(over.sum())} episodes sell more than they opened with -- the "
-        "per-hour and restock stages no longer cover the episode total")
+    # It follows from the episode identity (`supply == sold + scrap`, scrap
+    # non-negative) rather than from any filter, which is why it is asserted
+    # on the output rather than argued in a comment.
+    flow = episodes_mod.episode_flow(d)
+    assert (flow.sold <= flow.supply).all(), (
+        f"{int((flow.sold > flow.supply).sum())} episodes sell more than they "
+        "were supplied -- the supply accounting has broken")
+    assert (flow.clearance <= 1.0).all()
 
     # the exclusion window is removed whole-episode, so no survivor may have
     # ANY hour inside it
@@ -608,8 +604,14 @@ def test_shadow_phase_harness(workspace):
         b["budget_share_of_il"] * b["markdown_il_total"] / b["days"], rel=1e-3)
     assert b["markdown_il_total"] == pytest.approx(
         b["markdown_il_discount"] + b["markdown_il_scrap"])
-    assert b["spend_over_budget"] == pytest.approx(   # reported to 2dp
-        b["implied_daily_spend"] / b["daily_budget"], abs=0.005)
+    # `spend_over_budget` is computed from UNROUNDED quantities and reported
+    # to 2dp; the recomputation here divides two fields each already rounded
+    # to 1dp. The tolerance is therefore the propagated error, derived rather
+    # than picked -- a constant was used before and passed by luck until the
+    # population changed underneath it.
+    tol = 0.005 + 0.05 / b["daily_budget"] * (1 + b["spend_over_budget"])
+    assert b["spend_over_budget"] == pytest.approx(
+        b["implied_daily_spend"] / b["daily_budget"], abs=tol)
 
     # SCRAP MUST BE IN THE PROJECTION. An inline copy of classify_last was
     # tried here and dropped every scrap won on a feed with no write-off
@@ -976,7 +978,7 @@ def test_restocked_episodes_are_flagged_not_dropped():
     assert len(restocked_episodes(steep)) == 0
 
 
-def test_a_restock_survives_the_real_chain_and_lands_out_of_dp_eligible(
+def test_a_restock_survives_the_real_chain_and_stays_dp_eligible(
         workspace, tmp_path):
     """The flag through the whole pipeline, not just the detector.
 
@@ -1025,17 +1027,19 @@ def test_a_restock_survives_the_real_chain_and_lands_out_of_dp_eligible(
     hit = d[(d.sku_id == g.sku_id.iloc[0]) & (d.fc == g.fc.iloc[0])
             & d.date.astype(str).isin(g.date.astype(str))]
     assert len(hit), "the restocked episode was dropped from the population"
-    assert not hit.dp_eligible.any()
-    assert (hit.dp_ineligible_reason == "restocked").all()
+    # STAYS dp_eligible. The replay re-solves each hour against the stock on
+    # hand and applies the episode's own per-hour adjustment, so the DP finds
+    # out about the arrival at the next hour -- which is what happens live.
+    assert hit.dp_eligible.all()
+    assert hit.units_restocked.gt(0).all()
 
     # and it cost the frozen artifacts nothing: same population, one fewer
     # DP-eligible episode
     assert d.episode_id.nunique() == clean.episode_id.nunique()
-    assert int(d[d.dp_eligible].episode_id.nunique()) < \
-        int(clean[clean.dp_eligible].episode_id.nunique())
     detail = next(t[4] for t in wf if t[0] == "dp_eligible")
     assert detail["restocked"]["episodes"] >= 1
     assert detail["restocked"]["cogs_at_risk"] > 0
+    assert detail["restocked"]["still_dp_eligible"] >= 1
 
 
 def test_negative_entry_window_is_recovered_not_dropped(workspace, tmp_path):

@@ -303,6 +303,32 @@ def episode_flow(d):
     return agg.drop(columns=["net"])
 
 
+def hour_adjustment(d):
+    """Per-hour EXOGENOUS inventory change: `+n` arrived, `-n` went missing.
+
+    The quantity that closes `q_next = q - sold + adjustment` into the
+    source's own `ending_inventory`, and the reason a restocked episode needs
+    no special handling anywhere. A replay does not have to MODEL a delivery;
+    it applies what happened and re-solves, which is exactly what production
+    does. The DP is never asked to anticipate stock arriving -- live it finds
+    out at the next hour, because `ending[t]` is `starting[t+1]`, and in
+    replay it finds out the same way.
+
+    Zero on a write-off row: the source zeroing `ending` at the close is a
+    disposal, not stock leaving during the window.
+
+    `d` must be in window order.
+    """
+    d = d.sort_values(["date", "hour_of_day"])
+    status = hour_status(d.starting_inventory, d.units_sold,
+                         d.ending_inventory)
+    is_last = ~d.episode_id.duplicated(keep="last").to_numpy()
+    disc = ((d.starting_inventory.to_numpy() - d.ending_inventory.to_numpy())
+            - d.units_sold.to_numpy())
+    return pd.Series(np.where((status == WRITE_OFF) & is_last, 0, -disc),
+                     index=d.index)
+
+
 def flow_identity_violations(d):
     """Episodes failing `opening + restocked == sold + shrink + leftover`.
 

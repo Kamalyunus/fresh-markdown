@@ -390,6 +390,19 @@ def _episode_frame(g, unfinished=frozenset()):
         # written-off zero on the last row -- take the true leftover
         "end_inv": max(int(obs_rows.starting_inventory.iloc[-1])
                        - int(obs_rows.units_sold.iloc[-1]), 0),
+        # EXOGENOUS inventory change per hour: `+n` arrived, `-n` went
+        # missing. Both simulated arms apply it, so neither is asked to
+        # anticipate a delivery -- they find out at the next hour exactly as
+        # production does, because `ending[t]` IS `starting[t+1]`. Synthetic
+        # extension rows carry 0.
+        "adjustment": np.where(
+            obs, episodes.hour_adjustment(g).to_numpy(), 0).astype(float),
+        # what the episode actually had to sell, and what it actually lost
+        "supply": int(g.starting_inventory.iloc[0])
+                  + int(np.clip(episodes.hour_adjustment(g).to_numpy()[obs],
+                                0, None).sum()),
+        "shrink": int(-np.clip(episodes.hour_adjustment(g).to_numpy()[obs],
+                               None, 0).sum()),
         "mu_ref_path": g.mu_ref_hat.to_numpy(),
         "r": float(g.r.iloc[0]),
         "eps": float(g.eps.iloc[0]),
@@ -417,27 +430,36 @@ def _replay_one(e, cfg):
     # an episode that ended holding stock disposed of it. Only an
     # unfinished one has no recorded ending, and charging that to scrap
     # would overstate the baseline the policy is compared to.
-    a_scrap = cost * max(e["end_inv"], 0) if e["outcome_known"] else 0.0
+    # scrap is the leftover at the close PLUS anything that went missing --
+    # both are units paid for that returned no revenue
+    a_scrap = (cost * (max(e["end_inv"], 0) + e["shrink"])
+               if e["outcome_known"] else 0.0)
     a_denom = p0 * float(a_sold.sum())
 
     # ---- LEGACY path under the MODEL's demand: same generator as the DP
     # simulation below, so the two policies are compared apples-to-apples
     # and model bias hits both arms identically
     q = float(e["q0"])
+    adj = e["adjustment"]
     lg_disc_cost = lg_sold_total = lg_disc_weighted = 0.0
     for t in range(e["hours"]):
         q_int = int(round(q))
-        if q_int <= 0:
+        # an empty shelf is not the end if stock is still to arrive -- the
+        # hour passes, nothing sells, and the delivery lands. Breaking here
+        # would end the episode before its own restock.
+        if q_int > 0:
+            d_t = float(e["actual_discounts"][t])
+            mu = mu_at(e["mu_ref_path"][t], d_t, e["d_ref"], e["eps"],
+                       pcfg["demand_floor"])
+            sold = min(expected_min_demand_inventory(mu, e["r"], q_int, max_k), q)
+            lg_disc_cost += p0 * d_t * sold
+            lg_disc_weighted += d_t * sold
+            lg_sold_total += sold
+            q -= sold
+        q = max(q + adj[t], 0.0)
+        if q <= 0 and not adj[t + 1:].any():
             break
-        d_t = float(e["actual_discounts"][t])
-        mu = mu_at(e["mu_ref_path"][t], d_t, e["d_ref"], e["eps"],
-                   pcfg["demand_floor"])
-        sold = min(expected_min_demand_inventory(mu, e["r"], q_int, max_k), q)
-        lg_disc_cost += p0 * d_t * sold
-        lg_disc_weighted += d_t * sold
-        lg_sold_total += sold
-        q -= sold
-    lg_scrap = cost * max(q, 0.0)
+    lg_scrap = cost * (max(q, 0.0) + e["shrink"])
 
     # ---- DP path, deterministic expected transitions
     q = float(e["q0"])
@@ -445,8 +467,16 @@ def _replay_one(e, cfg):
     dp_disc_cost, dp_sold_total, dp_disc_weighted = 0.0, 0.0, 0.0
     for t in range(e["hours"]):
         q_int = int(round(q))
+        # an empty shelf ends the episode only if nothing more is coming.
+        # The DP is never asked to ANTICIPATE a delivery -- it re-solves each
+        # hour against the stock it has, and finds out about an arrival at
+        # the next hour, which is exactly what happens in production because
+        # `ending[t]` is `starting[t+1]`.
         if q_int <= 0:
-            break
+            q = max(q + adj[t], 0.0)
+            if q <= 0 and not adj[t + 1:].any():
+                break
+            continue
         try:
             res = dp_mod.solve(p0, cost, q_int, list(e["mu_ref_path"][t:]),
                                e["d_ref"], e["eps"], e["r"], cfg,
@@ -470,14 +500,14 @@ def _replay_one(e, cfg):
         dp_disc_cost += p0 * d_t * sold
         dp_disc_weighted += d_t * sold
         dp_sold_total += sold
-        q -= sold
-    dp_scrap = cost * max(q, 0.0)
+        q = max(q - sold + adj[t], 0.0)
+    dp_scrap = cost * (max(q, 0.0) + e["shrink"])
     row = {
         "outcome_known": e["outcome_known"],
         "actual_il": a_disc_cost + a_scrap,
         "actual_discount_cost": a_disc_cost, "actual_scrap_cost": a_scrap,
         "actual_denom": a_denom,
-        "actual_cleared": float(a_sold.sum()) / e["q0"],
+        "actual_cleared": float(a_sold.sum()) / max(e["supply"], 1),
         "actual_mean_discount": float(np.average(
             e["actual_discounts"],
             weights=a_sold if a_sold.sum() else None)),
@@ -485,13 +515,13 @@ def _replay_one(e, cfg):
         "legacy_model_discount_cost": lg_disc_cost,
         "legacy_model_scrap_cost": lg_scrap,
         "legacy_model_denom": p0 * lg_sold_total,
-        "legacy_model_cleared": lg_sold_total / e["q0"],
+        "legacy_model_cleared": lg_sold_total / max(e["supply"], 1),
         "legacy_model_mean_discount": (lg_disc_weighted / lg_sold_total
                                        if lg_sold_total else 0.0),
         "dp_il": dp_disc_cost + dp_scrap,
         "dp_discount_cost": dp_disc_cost, "dp_scrap_cost": dp_scrap,
         "dp_denom": p0 * dp_sold_total,
-        "dp_cleared": dp_sold_total / e["q0"],
+        "dp_cleared": dp_sold_total / max(e["supply"], 1),
         "dp_mean_discount": (dp_disc_weighted / dp_sold_total
                              if dp_sold_total else 0.0),
         "date": e["date"],

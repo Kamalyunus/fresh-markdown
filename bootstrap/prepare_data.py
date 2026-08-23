@@ -90,15 +90,18 @@ def restocked_episodes(d):
 
     Counted GROSS over the episode, never netted against the shrink hours. A
     window can genuinely take 2 units in and lose 2 units to shrink, and
-    netting those to zero read it as an ordinary episode -- which let it into
-    the DP-side population and priced its clearance against a supply short by
-    the 2 that arrived. Both figures stand on their own: `units_restocked`
-    and `units_shrink`.
+    netting those to zero read it as an ordinary episode -- which priced its
+    clearance against a supply short by the 2 that arrived.
 
-    FLAGS, never filters (`dp_ineligible_reason = "restocked"`). What a
-    restock breaks is the DP's state transition, which assumes one pool
-    draining monotonically. The hours themselves are honest demand
-    observations -- each censored against its own opening stock.
+    REPORTS ONLY; it gates nothing. A restock used to make an episode
+    DP-ineligible, on the grounds that the solver's transition assumes one
+    pool draining monotonically. That confused the SOLVE with the REPLAY.
+    Within a single solve the DP does assume monotone draining over the
+    remaining horizon, and it must: production cannot see a future delivery
+    either. But the replay re-solves every hour against the stock actually on
+    hand, and `backtest.replay` applies the real episode's own per-hour
+    adjustment -- so the DP learns about an arrival at the next hour, exactly
+    as it does live, because `ending[t]` IS `starting[t+1]`.
     """
     flow = episodes.episode_flow(d)
     return flow.index[flow.arrived > 0].to_numpy()
@@ -631,24 +634,6 @@ DP_INELIGIBLE = (
      "the one condition that also gates `episode_eligible`, the frozen-"
      "artifact population, because a censored/not-censored call cannot be "
      "made on an ambiguous final hour"),
-    ("unreconciled",
-     "units went missing: they left the shelf without being sold and without "
-     "being written off. They ARE counted -- scrap is the last hour's "
-     "leftover plus the shrink, so the identity still closes and IL is right "
-     "-- but the DP's state transition assumes stock leaves only by sale, so "
-     "it cannot replay the window. Kept in the population and in "
-     "`episode_eligible`, since the sales and the censoring call are both "
-     "sound; `unreconciled_anomalies` says where they sit for the business"),
-    ("restocked",
-     "an hour opens with more stock than the previous hour left behind. The "
-     "DP's state transition is V(p, q - min(k,q), h-1) over ONE inventory "
-     "pool draining monotonically, so a mid-window replenishment leaves the "
-     "episode's horizon, scrap and IL undefined. The demand observations "
-     "themselves are fine -- censoring is per hour against that hour's own "
-     "opening stock -- which is why this flags rather than drops. Detected on "
-     "the inventory CHAIN, never on ending_inventory, which the source zeroes "
-     "at the window close; run after re-segmentation, since across a data gap "
-     "the jump would read as a restock"),
 )
 
 # Reported, NOT gating. A below-cost hour is a price the LEGACY policy set,
@@ -721,8 +706,6 @@ def tag_dp_eligibility(d, cfg):
         "negative_window": d.hours_remaining < 0,
         "window_too_long": d.hours_remaining > cap,
         "final_hour_restock": ~d.final_hour_clean,
-        "unreconciled": d.units_shrink > 0,
-        "restocked": d.episode_id.isin(restocked_episodes(d)),
     }
     reason = pd.Series(pd.NA, index=d.index, dtype="object")
     detail = {}
@@ -750,6 +733,28 @@ def tag_dp_eligibility(d, cfg):
             d.loc[below & d.dp_eligible, "episode_id"].nunique()),
         "why": BELOW_COST_HOURS,
     }
+    # An inventory that MOVED -- stock arrived, or went missing -- is
+    # reported and gates nothing. It used to gate, on the grounds that the
+    # DP's transition assumes one pool draining monotonically. That confused
+    # the SOLVE with the REPLAY. Within one solve the DP does assume monotone
+    # draining over the remaining horizon, and it should: production cannot
+    # see a future delivery either. But the replay re-solves every hour
+    # against the stock actually on hand, and `backtest.replay` now applies
+    # the same exogenous per-hour adjustment the real episode had. The DP
+    # finds out about an arrival at the next hour -- exactly as it does live,
+    # because `ending[t]` IS `starting[t+1]`.
+    for name, col in (("restocked", "units_restocked"),
+                      ("shrink", "units_shrink")):
+        hit = d[col] > 0
+        detail[name] = {
+            "episodes": int(d.loc[hit, "episode_id"].nunique()),
+            "rows": int(hit.sum()),
+            "cogs_at_risk": round(cogs_at_risk(d[hit]), 1),
+            "units": int(d.loc[~d.episode_id.duplicated() & hit, col].sum()),
+            "still_dp_eligible": int(
+                d.loc[hit & d.dp_eligible, "episode_id"].nunique()),
+        }
+
     # also reported-only, and for a different reason: an unclosed ending is
     # not a limit on the DP, it is a missing OUTCOME, and every consumer of an
     # outcome already handles it (scrap_units -> NaN, replay's outcome_known,
