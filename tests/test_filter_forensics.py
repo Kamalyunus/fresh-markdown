@@ -38,6 +38,8 @@ def test_the_probe_sees_every_drop_stage_in_order(cfg):
     expected = [t[0] for t in wf
                 if t[0] not in ("raw", "duplicate_hour_rows_dropped",
                                 "contiguous_episodes_built", "dp_eligible")]
+    assert "units_gt_inventory_dropped" not in seen, \
+        "the stage came back -- sold > starting is a restock, not a defect"
     assert seen == expected, (seen, expected)
 
 
@@ -82,33 +84,34 @@ def test_a_probe_cannot_change_the_output(cfg):
     assert "cost" in probed.columns
 
 
-# ------------------------------------------------------- units > inventory
+# ------------------------------------------------- the corrected convention
 
-def test_units_gt_inventory_is_measured_against_the_production_reconciler(cfg):
-    """The finding the tool exists to surface.
+def test_an_hour_selling_more_than_it_opened_with_is_a_restock_not_a_defect():
+    """The finding that removed a whole filter stage.
 
-    `adjustment_reason` -- the rule `events.store` enforces live -- names an
-    hour that sold more than it opened with as `intraday_restock`, because
-    leftover clips to 0 and any positive ending exceeds it. But
-    `units_gt_inventory_dropped` runs FIRST, so the reconciler is never asked.
-    The tool has to report that share, or the contradiction stays invisible.
+    `ending_inventory` is the FINAL count after anything that arrived, so
+    `sold > starting` is the restock signal in its plainest form. It used to
+    be deleted as an impossible quantity by a stage that ran BEFORE the
+    reconciler was asked, taking 18.1pp of the extract's COGS with it.
     """
-    report = ff.run(SYNTH, cfg)
-    blk = report[ff.UNITS_GT]
-    if not blk.get("total"):
-        pytest.skip("fixture trips no units>inventory episode")
-    named = blk["offending_hours"]
-    assert 0.0 <= named["share_named"] <= 1.0
-    assert named["named_intraday_restock_by_adjustment_reason"] <= named["rows"]
-    # the between-hours detector is reported beside it: same phenomenon or not
-    assert "also_flagged_restocked_between_hours" in blk
-
-
-def test_an_hour_selling_more_than_it_opened_with_is_named_a_restock():
-    """Pinned directly, since the whole argument rests on it."""
-    from common.episodes import adjustment_reason
+    from common.episodes import adjustment_reason, hour_status, RESTOCK
     assert adjustment_reason(5, 8, 3) == "intraday_restock"
-    assert adjustment_reason(10, 12, 2) == "intraday_restock"
+    assert adjustment_reason(1, 3, 0) == "intraday_restock"   # sold out after
+    # and a restock needs no over-sell at all: opened 3, sold 2, ended 5
+    assert adjustment_reason(3, 2, 5) == "intraday_restock"
+    assert list(hour_status([5, 1, 3], [8, 3, 2], [3, 0, 5])) == [RESTOCK] * 3
+
+
+def test_the_tool_reports_the_hour_status_mix(cfg, tmp_path):
+    """What "clean" means now, as four shares that must sum to one."""
+    path, _ = _with_shortfalls(tmp_path)
+    blk = ff.run(path, cfg)[ff.CHAIN]
+    mix = blk["hour_status"]
+    assert set(mix) == {"reconciles", "intraday_restock",
+                        "episode_close_write_off", "unexplained_shortfall"}
+    assert sum(v["share"] for v in mix.values()) == pytest.approx(1.0, abs=1e-4)
+    assert mix["intraday_restock"]["rows"] > 0, \
+        "the fixture has over-sell hours; they must classify as restocks"
 
 
 # ------------------------------------------------------------- chain break
@@ -131,12 +134,14 @@ def test_a_partial_shortfall_is_decomposed_not_just_counted(cfg, tmp_path):
     blk = ff.run(path, cfg)[ff.CHAIN]
     assert blk["total"]["episodes"] > 0
 
-    shape = blk["shape_of_broken_rows"]
-    assert shape["partial_shortfall_0_lt_ending_lt_leftover"] > 0
-    assert shape["share_partial_shortfall"] == 1.0, \
-        "an injected one-unit shortfall is the ONLY shape here; anything " \
-        "else means the classifier is mislabelling"
+    cause = blk["cause"]
+    assert cause["rows_unexplained_shortfall"] > 0
     assert blk["shortfall"]["share_of_1_unit"] == 1.0
+    # a shortfall almost always breaks continuity too -- the next hour opens
+    # from a figure this hour disputes -- so the two causes must overlap
+    # heavily rather than partition
+    assert cause["rows_both"] > 0
+    assert cause["cogs_shortfall"]["cogs_at_risk"] > 0
 
 
 def test_the_tool_prices_whole_episode_scoping_separately(cfg, tmp_path):
@@ -159,12 +164,12 @@ def test_recovery_options_are_priced_but_the_report_recommends_nothing(cfg, tmp_
     path, _ = _with_shortfalls(tmp_path)
     blk = ff.run(path, cfg)[ff.CHAIN]
     rec = blk["recovery_if"]
-    for key in ("partial_shortfall_named_and_flagged", "tolerance_1_unit",
+    for key in ("shortfall_named_and_flagged", "tolerance_1_unit",
                 "tolerance_2_units"):
         assert rec[key]["cogs_at_risk"] >= 0
     # a 1-unit tolerance cannot recover more than naming the whole shape
     assert rec["tolerance_1_unit"]["cogs_at_risk"] <= \
-        rec["partial_shortfall_named_and_flagged"]["cogs_at_risk"]
+        rec["shortfall_named_and_flagged"]["cogs_at_risk"]
 
 
 # ------------------------------------------------------------------- output

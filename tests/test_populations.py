@@ -74,8 +74,10 @@ def _frame(**over):
     ("non_priceable", {"cost": 12_000.0}),
     ("negative_window", {"hours_remaining": [-242.0, -243.0]}),
     ("window_too_long", {"hours_remaining": [500.0, 499.0]}),
-    # hour 2 opens with 20 after hour 1 left 9 behind
-    ("restocked", {"starting_inventory": [12, 20], "ending_inventory": [9, 0]}),
+    # 11 units arrive during hour 1: it opened with 12, sold 3, and the
+    # source reports the FINAL count of 20. Hour 2 then opens with 20, so the
+    # chain stays continuous -- that is what makes it a restock, not a break.
+    ("restocked", {"starting_inventory": [12, 20], "ending_inventory": [20, 0]}),
 ])
 def test_each_condition_flags_and_names_itself(name, over, cfg):
     d, detail = tag_dp_eligibility(_frame(**over), cfg)

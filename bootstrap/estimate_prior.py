@@ -41,6 +41,7 @@ from scipy.special import gammaln
 from scipy.stats import nbinom
 
 from common.config import load_config
+from common import episodes
 from common.provenance import stamp
 from bootstrap.prepare_data import population, split_frames
 from bootstrap.train_baseline import BaselineModel
@@ -107,7 +108,8 @@ def estimate_prior(d, cfg, seed=0):
     # the bracket is the quantity most starved of variation -- so this is
     # the fit that gains most from train_population "integrity"
     train = population(split_frames(d, cfg)["train"], cfg).copy()
-    train["censored"] = train.units_sold >= train.starting_inventory
+    train["censored"] = episodes.censored_hours(
+        train.starting_inventory, train.units_sold, train.ending_inventory)
     train["r"] = [lookup_r(r_lookup, s, c)
                   for s, c in zip(train.subcategory, train.category)]
 

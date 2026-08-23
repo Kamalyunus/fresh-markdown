@@ -64,14 +64,14 @@ def test_filter_chain_waterfall(workspace):
     wf = manifest["data_quality_waterfall"]
     rows = [s["rows"] for s in wf if s["step"] != "contiguous_episodes_built"]
     assert rows == sorted(rows, reverse=True)
-    # every stage is named and counted -- 9 drops, the raw row, the
+    # every stage is named and counted -- 8 drops, the raw row, the
     # re-segmentation row, and the dp_eligible SUMMARY row, which drops
     # nothing. The count is asserted so that adding or removing a filter has
     # to be a deliberate edit here, and so the figure quoted in the
     # walkthrough and design doc has something holding it to the code.
     assert wf[0]["step"] == "raw"
     assert wf[-1]["step"] == "dp_eligible"
-    assert len(wf) == 12, [s["step"] for s in wf]
+    assert len(wf) == 11, [s["step"] for s in wf]
     # Everything that is not an integrity or scope rule is a FLAG. None of
     # these may come back as a drop: each one removes population from every
     # frozen artifact while the thing it protects (the DP's state space, or a
@@ -79,15 +79,21 @@ def test_filter_chain_waterfall(workspace):
     for gone in ("below_cost_dropped", "non_priceable_dropped",
                  "window_too_long_dropped", "cost_missing_dropped",
                  "negative_window_dropped", "restocked_episodes_dropped",
-                 "edge_truncated_episodes_dropped"):
+                 "edge_truncated_episodes_dropped",
+                 "units_gt_inventory_dropped"):
         assert gone not in [x["step"] for x in wf], \
             f"{gone} is back to dropping -- it must flag, or every frozen " \
             "artifact loses that population again"
     d = pd.read_parquet("data/prepared.parquet")
     assert d.category.notna().all()
-    assert (d.units_sold <= d.starting_inventory).all()
     assert d.total_discount.between(0, 1).all()      # percent -> fraction once
     assert (d.original_price > 0).all()
+    # `sold <= starting` holds on dp_eligible ONLY. In the integrity
+    # population an hour selling more than it opened with is a RESTOCK -- the
+    # source reports the final count in `ending_inventory` -- and asserting it
+    # on the whole frame is how a restock got deleted as an impossible value.
+    assert (d[d.dp_eligible].units_sold
+            <= d[d.dp_eligible].starting_inventory).all()
 
 
 def test_waterfall_reports_the_money_each_filter_removes(workspace):
@@ -240,19 +246,20 @@ def test_prepared_data_is_priceable_and_self_consistent(workspace):
     assert (d.hours_remaining <= cfg["data"]["max_window_hours"]).all()
 
     # No episode may sell more than it opened with. This is NOT asserted
-    # directly anywhere -- it is the joint consequence of the per-hour
-    # `units_gt_inventory` drop and a chain that never increases (the
-    # `restocked` flag, which gates dp_eligible). By induction those give
+    # directly anywhere -- it follows from the `restocked` flag gating
+    # dp_eligible. Outside a restock the source's convention is
+    # `ending == starting - sold` with a non-negative ending, so every hour
+    # has `sold <= starting`, and the chain never increases. By induction
     # `start_t <= start_1 - sum(sold before t)`, so the episode total cannot
     # exceed the opening stock. It holds on THIS subset only: a restocked
-    # episode is kept in the population and can of course sell more than it
-    # opened with.
+    # episode is kept in the population and sells more than it opened with as
+    # a matter of course -- that IS the restock signal.
     #
     # An earlier hand-written cleaner checked the episode total directly. It
-    # is redundant here ONLY while both of those hold, and the subsumption
-    # breaks silently if the chain is reordered -- computing the restock flag
-    # before re-segmentation, or dropping the per-hour test -- so the
-    # invariant is asserted on the output rather than argued in a comment.
+    # is redundant here ONLY while the restock flag holds, and the
+    # subsumption breaks silently if the flag is computed before
+    # re-segmentation, so the invariant is asserted on the output rather than
+    # argued in a comment.
     g = d.sort_values(["episode_id", "date", "hour_of_day"]).groupby("episode_id")
     over = g.units_sold.sum() > g.starting_inventory.first()
     assert not over.any(), (
@@ -940,15 +947,32 @@ def test_restocked_episodes_are_flagged_not_dropped():
     clean = _observed_episode()
     assert len(restocked_episodes(clean)) == 0
 
-    # hour 17 opens with 9 units after hour 16 left 5 behind
+    # 4 units arrive during hour 16, which opened with 5 and sold none. The
+    # source reports the FINAL count, so ending goes to 9 and hour 17 opens
+    # with 9 -- the chain stays continuous, which is what makes this a
+    # restock rather than a break.
     restocked = clean.copy()
-    restocked.loc[restocked.hour_of_day >= 17, "starting_inventory"] += 4
+    h16 = restocked.hour_of_day == 16
+    restocked.loc[h16, "ending_inventory"] += 4
+    restocked.loc[restocked.hour_of_day > 16, "starting_inventory"] += 4
+    restocked.loc[restocked.hour_of_day.between(17, 19), "ending_inventory"] += 4
     assert list(restocked_episodes(restocked)) == ["m"]
+
+    # the plainest restock of all: an hour selling MORE than it opened with.
+    # `sold >= starting` is not an impossible quantity, it is stock arriving.
+    oversell = clean.copy()
+    h15 = oversell.hour_of_day == 15
+    oversell.loc[h15, "units_sold"] = 12          # opened with 8
+    oversell.loc[h15, "ending_inventory"] = 5     # so 9 arrived
+    assert list(restocked_episodes(oversell)) == ["m"]
 
     # selling stock down is never a restock, however steep the drop
     steep = clean.copy()
     steep.loc[steep.hour_of_day == 15, "units_sold"] = 8
+    steep.loc[steep.hour_of_day == 15, "ending_inventory"] = 0
     steep.loc[steep.hour_of_day > 15, "starting_inventory"] = 0
+    steep.loc[steep.hour_of_day > 15, "ending_inventory"] = 0
+    steep.loc[steep.hour_of_day > 15, "units_sold"] = 0
     assert len(restocked_episodes(steep)) == 0
 
 
@@ -978,17 +1002,22 @@ def test_a_restock_survives_the_real_chain_and_lands_out_of_dp_eligible(
     tail = set(zip(g.date.astype(str), g.hour_of_day))  # from its 3rd hour on
     tail -= set(zip(g.date.astype(str)[:2], g.hour_of_day[:2]))
 
-    # 50 units appear mid-window. Bump `ending_inventory` in step so every
-    # HOUR still reconciles -- except where the source zeroed it to write the
-    # remainder off, which must stay zero or the chain-break stage takes the
+    # 50 units arrive during the episode's 3rd hour. The source reports the
+    # FINAL count, so that hour's `ending_inventory` carries the arrival and
+    # every LATER hour opens 50 higher -- the chain stays continuous. Only
+    # the arriving hour has ending != starting - sold, and that IS the
+    # restock. A write-off zero must stay zero or chain_break takes the
     # episode before the restock flag ever sees it.
     holed = raw.copy()
-    bump = pd.Series(list(zip(holed.date.astype(str), holed.hour)),
-                     index=holed.index).isin(tail) \
-        & holed.skuseq.eq(g.sku_id.iloc[0]) & holed.fc.eq(g.fc.iloc[0])
-    assert bump.sum() >= 2, int(bump.sum())
-    holed.loc[bump, "inventory"] += 50
-    holed.loc[bump & holed.ending_inventory.ne(0), "ending_inventory"] += 50
+    key = pd.Series(list(zip(holed.date.astype(str), holed.hour)),
+                    index=holed.index)
+    same_sku = holed.skuseq.eq(g.sku_id.iloc[0]) & holed.fc.eq(g.fc.iloc[0])
+    arrives = same_sku & key.isin([sorted(tail)[0]])
+    later = same_sku & key.isin(sorted(tail)[1:])
+    assert arrives.sum() == 1 and later.sum() >= 1
+    holed.loc[arrives | later, "ending_inventory"] += \
+        50 * holed.loc[arrives | later, "ending_inventory"].ne(0)
+    holed.loc[later, "inventory"] += 50
     path = tmp_path / "restocked.parquet"
     holed.to_parquet(path)
 
@@ -1096,17 +1125,49 @@ def test_an_unreconciled_hour_drops_the_episode(workspace, tmp_path):
 
     _, wf = load_and_filter(str(path), cfg)
     got = {t[0]: t[2] for t in wf}
-    assert got["chain_break_dropped"] < got["units_gt_inventory_dropped"], \
+    assert got["chain_break_dropped"] < got["negative_window_recovered"], \
         "the unexplained shortfall did not drop its episode"
     assert got["chain_break_dropped"] == clean["chain_break_dropped"] - 1
 
-    # ...while a write-off at the SAME position is documented and survives
+    # A write-off zero at the SAME position is now ALSO a break, and that is
+    # the corrected convention rather than a regression. `adjustment_reason`
+    # still names the row -- the zero is the source's own sentinel and nothing
+    # about that changed -- but the row is mid-episode, so the NEXT hour opens
+    # from a positive figure this hour says was written off. The two fields
+    # contradict each other about one instant, and no business event explains
+    # that.
+    #
+    # This is what makes the write-off effectively last-hour-only without a
+    # position test anywhere: a genuine close has no next hour to disagree
+    # with, so continuity cannot fire on it. Position used to be rejected as
+    # "our bookkeeping"; the continuity rule derives it from the source's own
+    # arithmetic instead.
     ok = raw.copy()
     ok.at[row, "ending_inventory"] = 0
-    if adjustment_reason(start, sold, 0) is not None:
-        path2 = tmp_path / "writeoff.parquet"
-        ok.to_parquet(path2)
-        _, wf2 = load_and_filter(str(path2), cfg)
-        got2 = {t[0]: t[2] for t in wf2}
-        assert got2["chain_break_dropped"] == clean["chain_break_dropped"], \
-            "a write-off recognised by the zero must not be treated as a break"
+    assert adjustment_reason(start, sold, 0) == "episode_close_write_off"
+    path2 = tmp_path / "writeoff.parquet"
+    ok.to_parquet(path2)
+    _, wf2 = load_and_filter(str(path2), cfg)
+    got2 = {t[0]: t[2] for t in wf2}
+    assert got2["chain_break_dropped"] == clean["chain_break_dropped"] - 1, \
+        "a mid-episode write-off leaves the next hour opening from stock it " \
+        "just wrote off -- the source contradicting itself, not a convention"
+
+    # ...and the same zero on the episode's LAST hour is the real thing: no
+    # next hour, so nothing to contradict, and it survives untouched
+    last_ix = (raw[(raw.skuseq == raw.at[row, "skuseq"])
+                   & (raw.fc == raw.at[row, "fc"])]
+               .sort_values(["date", "hour"]).index[-1])
+    closing = raw.copy()
+    l_start = closing.at[last_ix, "inventory"]
+    l_sold = min(closing.at[last_ix, "units_sold"], max(l_start - 1, 0))
+    closing.at[last_ix, "units_sold"] = l_sold
+    closing.at[last_ix, "ending_inventory"] = 0
+    if l_start - l_sold > 0:
+        path3 = tmp_path / "closing.parquet"
+        closing.to_parquet(path3)
+        _, wf3 = load_and_filter(str(path3), cfg)
+        got3 = {t[0]: t[2] for t in wf3}
+        assert got3["chain_break_dropped"] == clean["chain_break_dropped"], \
+            "a write-off on the FINAL hour is how a listing closes and must " \
+            "never be treated as a break"

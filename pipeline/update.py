@@ -43,6 +43,7 @@ from scipy.special import gammaln
 from scipy.stats import nbinom
 
 from common.config import load_config, deff
+from common import episodes
 from events.store import EventStore
 from pricing import explore
 from pricing.posterior import PosteriorStore, bounded_step
@@ -107,7 +108,12 @@ def grid_update(pairs, cell_record, cfg):
     mu0 = np.array([d["reference_mu"] for d, _, _ in pairs])
     r = np.array([d["dispersion_r"] for d, _, _ in pairs])
     log_ratio = np.log([ratio for _, _, ratio in pairs])
-    censored = k >= inv
+    # `k >= inv` was wrong in one direction and it was the expensive one: it
+    # marked every restock hour censored, and a restock hour is where the
+    # stock was. `ending_inventory` is required on every outcome, so the same
+    # rule the offline fits use applies live -- see episodes.censored_hours.
+    end = np.array([o["ending_inventory"] for _, o, _ in pairs])
+    censored = episodes.censored_hours(inv, k, end)
     lgamma_const = gammaln(k + r) - gammaln(r) - gammaln(k + 1)
 
     loglik = np.empty(len(grid))

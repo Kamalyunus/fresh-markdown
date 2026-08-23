@@ -113,41 +113,57 @@ def test_a_restocked_episode_lands_and_its_il_is_right(cfg, tmp_path):
     assert il["il_pct"] == pytest.approx(0.70)
 
 
-def test_stock_arriving_mid_hour_is_learnt_from_as_a_lower_bound(cfg):
-    """The one case a restock degrades, pinned rather than left latent.
+def test_stock_arriving_mid_hour_is_an_exact_count_not_a_lower_bound(cfg):
+    """The degradation this file used to pin is now fixed, on purpose.
 
-    `grid_update` decides censoring with `units_sold >= starting_inventory`.
-    That is right for an ordinary stockout, and wrong for an hour that sold
-    more than it opened with because stock arrived during it: demand was
-    observed EXACTLY, and the likelihood uses "at least starting_inventory"
-    instead.
+    `grid_update` decided censoring with `units_sold >= starting_inventory`.
+    That is right for an ordinary stockout and wrong for an hour that sold
+    more than it opened with because stock arrived during it: nothing ran out,
+    demand was observed EXACTLY, and the likelihood was using "at least
+    starting_inventory" instead. The old version of this test asserted the two
+    treatments differed and said in as many words that whoever made the
+    over-sell an exact count would see it change and know it was deliberate.
+    This is that change.
 
-    The direction is safe -- it discards information rather than biasing
-    epsilon -- so it is recorded here rather than fixed. What this test
-    guarantees is that the batch still converges, and that the two treatments
-    are genuinely different, so anyone who later makes the over-sell an exact
-    count will see this test change and know it was on purpose.
+    Censoring now reads `starting == sold AND no restock`
+    (`common.episodes.censored_hours`), which is the source's own convention:
+    `ending_inventory` is the final count after any arrival, so an hour that
+    ends holding stock did not run out however much it sold.
     """
     cell = {"mean": -1.0, "std": 0.6}
     dec = _decision(0, 1, 1)
     dec["applied_discount"] = 0.45          # away from the 0.30 reference, so
     ratio = (1 - 0.45) / (1 - 0.30)         # the batch carries real information
 
-    # sold 3 having opened the hour with 1: stock arrived mid-hour
+    # sold 3 having opened the hour with 1, ending with 3 on the shelf: 5
+    # arrived mid-hour and nothing ran out
     oversell = [(dec, _outcome(0, 3, 1, 3), ratio)]
-    # the identical observation on a shelf deep enough to make it an exact count
+    # the identical observation on a shelf deep enough to be exact anyway
     exact = [(dec, _outcome(0, 3, 9, 6), ratio)]
+    # and a genuine stockout: opened with 3, sold 3, ended empty, no restock
+    stockout = [(dec, _outcome(0, 3, 3, 0), ratio)]
 
-    m_over, s_over, info_over, _ = grid_update(oversell * 40, cell, cfg)
+    m_over, s_over, info_over, rep_over = grid_update(oversell * 40, cell, cfg)
     m_exact, s_exact, info_exact, _ = grid_update(exact * 40, cell, cfg)
+    m_stock, _, info_stock, rep_stock = grid_update(stockout * 40, cell, cfg)
 
     for value in (m_over, s_over, info_over):
         assert np.isfinite(value)
     assert s_over > 0
-    # censored on one side, exact on the other -> different posteriors. If this
-    # ever comes out equal, the censoring flag stopped distinguishing them.
-    assert m_over != pytest.approx(m_exact, abs=1e-6), (
-        "the over-sell row is no longer being treated as censored")
+
+    # THE FIX: the over-sell is now treated exactly like the deep shelf,
+    # because in both the hour ended holding stock and demand was observed
+    assert m_over == pytest.approx(m_exact, abs=1e-9), (
+        "an hour that ended holding stock is being treated as censored again "
+        "-- `sold >= starting` is back somewhere")
+    assert rep_over["stockout_share"] == 0.0
+
+    # ...and a real stockout still is censored, so the flag has not simply
+    # stopped distinguishing anything
+    assert rep_stock["stockout_share"] == 1.0
+    assert m_stock != pytest.approx(m_exact, abs=1e-6)
+
     # information does not depend on the censoring flag -- it is computed from
     # mu at the prior mean and the log price ratio -- so it must NOT move
     assert info_over == pytest.approx(info_exact)
+    assert info_stock == pytest.approx(info_exact)

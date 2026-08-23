@@ -30,6 +30,7 @@ from scipy.optimize import minimize_scalar
 from scipy.stats import nbinom
 
 from common.config import load_config, design_effect
+from common import episodes
 from common.provenance import stamp
 from bootstrap.prepare_data import population, split_frames
 from bootstrap.train_baseline import BaselineModel
@@ -65,7 +66,8 @@ def fit_dispersion(d, cfg):
     ratio = (1 - calib.total_discount.to_numpy()) / (1 - calib.d_ref.to_numpy())
     calib["mu_hat"] = np.clip(mu_ref * ratio ** eps0,
                               cfg["pricing"]["demand_floor"], None)
-    calib["censored"] = calib.units_sold >= calib.starting_inventory
+    calib["censored"] = episodes.censored_hours(
+        calib.starting_inventory, calib.units_sold, calib.ending_inventory)
 
     bounds = dc["r_search_bounds"]
     min_rows = dc["min_rows_per_group"]

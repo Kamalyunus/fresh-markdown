@@ -26,7 +26,6 @@ import pandas as pd
 
 from common.config import load_config, reference_discount
 from common import episodes
-from common.episodes import adjustment_reason
 from common.provenance import stamp
 
 SOURCE_TO_PRD = {
@@ -74,25 +73,29 @@ def assign_episode_ids(df):
 
 
 def restocked_episodes(d):
-    """Episode ids where the next hour opens with more stock than this hour
-    left behind.
+    """Episode ids with at least one hour that took a restock.
 
-    Tested on the inventory CHAIN, never on `ending_inventory`: the source
-    zeroes that field at the window close, so an equality test against it
-    would flag every episode's last hour. Callers must run this only on
-    contiguous episodes -- across a data gap the jump reads as a restock.
+    Read WITHIN the hour, from the source's own convention: `ending_inventory`
+    is the final quantity after anything that arrived, so `ending > starting -
+    sold` IS the restock, stated by the source rather than inferred by us.
 
-    The result FLAGS (`dp_ineligible_reason = "restocked"`); it no longer
-    filters. What a restock breaks is the DP's state transition, which assumes
-    one pool draining monotonically. The hours themselves are honest demand
-    observations -- each censored against its own opening stock -- so removing
-    them from the demand fit gave up 2.7% of the extract's COGS to protect a
-    solver that reads the flag anyway.
+    This used to be read ACROSS hours -- next hour's opening against this
+    hour's computed leftover -- which was the same quantity at one remove,
+    since `ending` becomes the next `starting`. Two things were wrong with it.
+    It could not see a restock in an episode's FINAL hour, there being no next
+    hour, so those went undetected and their leftover was booked as scrap. And
+    it inherited a `clip(lower=0)` that erased the plainest restock of all:
+    an hour selling MORE than it opened with has a negative net, and clipping
+    it to zero makes any ending look ordinary.
+
+    FLAGS, never filters (`dp_ineligible_reason = "restocked"`). What a
+    restock breaks is the DP's state transition, which assumes one pool
+    draining monotonically. The hours themselves are honest demand
+    observations -- each censored against its own opening stock.
     """
-    leftover = (d.starting_inventory - d.units_sold).clip(lower=0)
-    nxt = d.groupby("episode_id")["starting_inventory"].shift(-1)
-    restocked = nxt.notna() & (nxt > leftover)
-    return d.loc[restocked, "episode_id"].unique()
+    hit = episodes.hour_status(d.starting_inventory, d.units_sold,
+                               d.ending_inventory) == episodes.RESTOCK
+    return d.loc[hit, "episode_id"].unique()
 
 
 def cogs_at_risk(d):
@@ -299,7 +302,12 @@ def load_and_filter(path, cfg=None, probe=None):
     # those consumers now filter on `dp_eligible`, and `pricing.dp` refuses a
     # non-positive price independently, since that layer owns which prices
     # are legal and must protect a production caller no filter here sees.
-    neg = (d.starting_inventory < 0) | (d.units_sold < 0)
+    # `ending_inventory` is included since it became load-bearing: restock,
+    # censoring and chain continuity are all read off it, and a negative count
+    # of physical stock would be classified rather than rejected -- with a
+    # net more negative still, it reads as a restock.
+    neg = ((d.starting_inventory < 0) | (d.units_sold < 0)
+           | (d.ending_inventory < 0))
     d = d[~d.episode_id.isin(d.loc[neg, "episode_id"].unique())]
     d = step(d, "negative_quantities_dropped")
 
@@ -356,28 +364,48 @@ def load_and_filter(path, cfg=None, probe=None):
     # a one-row episode, which recovery already took), so the contiguity test
     # reads it the same way it reads any other window.
 
-    bad = d.loc[d.units_sold > d.starting_inventory, "episode_id"].unique()
-    d = d[~d.episode_id.isin(bad)]
-    d = step(d, "units_gt_inventory_dropped")
+    # `units_gt_inventory_dropped` USED TO RUN HERE and it was a mistake. An
+    # hour selling more than it opened with is not an impossible quantity, it
+    # is a RESTOCK -- stock arrived during the hour, and `ending_inventory`
+    # carries the final count. The source says so, and
+    # `common.episodes.adjustment_reason` has always agreed: with a negative
+    # net, any ending at all exceeds it, so the production reconciler names
+    # the row `intraday_restock`. The stage ran FIRST and deleted the episode
+    # before the reconciler was ever asked, taking 18.1pp of the extract's
+    # COGS with it. These episodes are now flagged `restocked` like any other.
 
-    # Every hour must either reconcile -- ending == starting - sold -- or name
-    # why it does not. `common.episodes.adjustment_reason` is the same
-    # function `pipeline.shadow` uses to build outcomes and the same rule
-    # `events.store` enforces in production, so the analysis population cannot
-    # contain a break that production would quarantine.
-    #
-    # Recognised BY THE ZERO, never by position. The source writes stock off
-    # at ITS OWN window boundary, and once a window is merged across midnight
-    # that row sits in the MIDDLE of ours -- a "only the last hour may break
-    # the chain" test drops those episodes in bulk. A partial shortfall
-    # (0 < ending < leftover) matches no convention: that is unexplained
-    # inventory loss, and it is what this stage exists to remove.
-    reconciles = (d.starting_inventory - d.units_sold) == d.ending_inventory
-    documented = [adjustment_reason(s_, u, e) is not None for s_, u, e
-                  in zip(d.starting_inventory, d.units_sold, d.ending_inventory)]
-    broken = ~(reconciles | np.array(documented))
+    # WITHIN the hour, exactly three things are legitimate -- see the
+    # convention block at the top of `common.episodes`. Anything else is stock
+    # that left without being sold and without being written off.
+    status = episodes.hour_status(d.starting_inventory, d.units_sold,
+                                  d.ending_inventory)
+    shortfall = status == episodes.SHORTFALL
+
+    # ACROSS hours there are NO legitimate exceptions: `ending` already
+    # carries the restock forward, so it must be the next hour's `starting`.
+    # Nothing tested this before -- restock was inferred from the next hour's
+    # opening, which quietly ASSUMED the continuity it should have checked, so
+    # a feed disagreeing with itself about one instant read as a restock.
+    d = d.sort_values(["sku_id", "fc", "date", "hour_of_day"])
+    discontinuous = episodes.continuity_breaks(d)
+
+    broken = shortfall | discontinuous
+    detail = {
+        "episodes_dropped": int(d.loc[broken, "episode_id"].nunique()),
+        "rows_unexplained_shortfall": int(shortfall.sum()),
+        "rows_chain_discontinuous": int(discontinuous.sum()),
+        "rows_restock": int((status == episodes.RESTOCK).sum()),
+        "rows_write_off": int((status == episodes.WRITE_OFF).sum()),
+        "note": ("Only two things are dropped here: stock that vanished "
+                 "(0 < ending < starting - sold) and a feed that disagrees "
+                 "with itself about one instant (ending != next starting). "
+                 "A restock is NOT a break -- ending is the final quantity "
+                 "after it, so units_sold > starting_inventory is the restock "
+                 "signal, not an impossible value."),
+    }
     d = d[~d.episode_id.isin(d.loc[broken, "episode_id"].unique())]
     d = step(d, "chain_break_dropped")
+    wf[-1] = wf[-1] + (detail,)
 
     # re-segment: the filters above drop rows, which can punch a hole in a
     # window that was contiguous in the raw extract

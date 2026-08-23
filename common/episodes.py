@@ -113,14 +113,190 @@ def leftover_units(starting_inventory, units_sold):
     return pd.Series(out, index=idx)
 
 
+# --------------------------------------------------------------------------
+# THE SOURCE'S INVENTORY CONVENTION, stated once.
+#
+#   `ending_inventory` is the FINAL quantity on hand at the close of the hour,
+#   AFTER any restock that arrived during it. It is not `starting - sold`; it
+#   is what the source counted at the end.
+#
+# Everything about hour-level data quality follows from that one sentence:
+#
+#   ending == starting - sold     the ordinary hour. Nothing arrived.
+#   ending >  starting - sold     STOCK ARRIVED. Note this holds whenever a
+#                                 restock happened, including the case where
+#                                 the hour sold MORE than it opened with --
+#                                 `starting - sold` goes negative and any
+#                                 ending at all exceeds it.
+#   ending == 0 and net > 0       the source wrote the remainder off, which is
+#                                 how a listing closes.
+#   0 < ending < starting - sold  stock left without being sold and without
+#                                 being written off. Nothing explains this.
+#
+# And ACROSS hours, with no exceptions inside an episode:
+#
+#   starting[t+1] == ending[t]    the chain is continuous, because ending
+#                                 already carries the restock forward.
+#
+# `units_sold > starting_inventory` is therefore NOT an impossible quantity.
+# It is the restock signal in its plainest form, and a filter that deletes it
+# is deleting the restocks it is meant to detect.
+# --------------------------------------------------------------------------
+
+RECONCILES = "reconciles"
+RESTOCK = "intraday_restock"
+WRITE_OFF = "episode_close_write_off"
+SHORTFALL = "unexplained_shortfall"
+
+
+def leftover_units(starting_inventory, units_sold):
+    """Stock still on hand at the close of the last hour.
+
+    `max(0, starting_inventory - units_sold)`. NOT `ending_inventory`, which
+    the source zeroes on the last row when it writes the remainder off.
+
+    EXACT except on a last hour that also took a restock, where the arriving
+    quantity is not recoverable from (starting, sold, ending) once the ending
+    has been zeroed -- see `restock_on_final_hour`, which counts them so the
+    ambiguity is measured rather than assumed away.
+    """
+    start = np.asarray(starting_inventory, dtype=float)
+    sold = np.asarray(units_sold, dtype=float)
+    out = np.clip(start - sold, 0, None)
+    idx = getattr(starting_inventory, "index", None)
+    return pd.Series(out, index=idx)
+
+
+def hour_status(starting_inventory, units_sold, ending_inventory):
+    """Classify every hour against the source's convention. Vectorised.
+
+    The single source of truth for hour-level DQ: `adjustment_reason` is the
+    scalar form of the same four rules, and `bootstrap.prepare_data` filters
+    on this. Test ORDER is load-bearing -- restock must be asked before
+    write-off, or an hour that restocked and then sold out to exactly zero
+    reads as an unexplained zero instead of the restock it was.
+    """
+    start = np.asarray(starting_inventory, dtype="int64")
+    sold = np.asarray(units_sold, dtype="int64")
+    end = np.asarray(ending_inventory, dtype="int64")
+    net = start - sold
+    return np.where(end == net, RECONCILES,
+                    np.where(end > net, RESTOCK,
+                             np.where((end == 0) & (net > 0),
+                                      WRITE_OFF, SHORTFALL)))
+
+
+def censored_hours(starting_inventory, units_sold, ending_inventory):
+    """Hours where demand was only observed as a LOWER bound. Vectorised.
+
+    The rule is `starting == sold` AND the hour took no restock. Both halves
+    matter and the second one is why this cannot be `sold >= starting`:
+
+      - `starting == sold`, no restock -- the shelf emptied through sales and
+        stayed empty. Whoever arrived next bought nothing and left no trace,
+        so true demand is `>= sold`. CENSORED.
+      - a RESTOCK hour ending with stock on the shelf -- e.g. opened with 3,
+        sold 2, ended with 5 because 4 arrived. Nothing ran out and demand was
+        observed exactly. NOT censored, even though the hour has a restock.
+      - `sold > starting` -- e.g. opened with 1, sold 3. Under `sold >=
+        starting` this counted as censored, and it is the opposite: the hour
+        sold MORE than it opened with precisely because stock arrived.
+
+    Four call sites carried `units_sold >= starting_inventory` independently
+    -- m5, the dispersion fit, the prior fit and the live posterior update.
+    All four marked every restock hour censored, which inflates demand on
+    exactly the hours that had the most stock to sell.
+
+    ONE CASE IS LEFT OUT DELIBERATELY: a restock hour ending at zero, which
+    did run out and arguably is censored. It is excluded because the arrival
+    time inside the hour is unknown, so the bound is not `>= sold` for a
+    well-defined stock level. `censoring_edge_cases` counts them.
+    """
+    start = np.asarray(starting_inventory, dtype="int64")
+    sold = np.asarray(units_sold, dtype="int64")
+    status = hour_status(start, sold, ending_inventory)
+    return (status == RECONCILES) & (start - sold == 0)
+
+
+def censoring_edge_cases(starting_inventory, units_sold, ending_inventory):
+    """The hours the censoring rule deliberately does not claim."""
+    start = np.asarray(starting_inventory, dtype="int64")
+    sold = np.asarray(units_sold, dtype="int64")
+    end = np.asarray(ending_inventory, dtype="int64")
+    status = hour_status(start, sold, end)
+    restock_to_zero = (status == RESTOCK) & (end == 0)
+    n = max(len(start), 1)
+    return {
+        "restock_hours_ending_at_zero": int(restock_to_zero.sum()),
+        "share_of_hours": round(float(restock_to_zero.sum()) / n, 6),
+        "sold_over_starting_hours": int((sold > start).sum()),
+        "note": ("A restock hour ending at zero DID run out, but the arrival "
+                 "time inside the hour is unknown, so there is no stock level "
+                 "the bound `demand >= sold` is taken against. Treated as "
+                 "uncensored, which understates demand on those hours. If "
+                 "share_of_hours is not small, the rule needs the arrival "
+                 "time from the source rather than a convention."),
+    }
+
+
+def continuity_breaks(d):
+    """Hours whose ending is not the next hour's starting, inside an episode.
+
+    `ending` already carries any restock forward, so the chain has NO
+    legitimate exception here -- unlike the within-hour test, which has three.
+    A violation means the two fields disagree about the same instant, which no
+    business event explains.
+
+    Returns a boolean Series aligned to `d`, False on each episode's last hour
+    (there is no next hour to disagree with). `d` must be in window order.
+    """
+    nxt = d.groupby("episode_id")["starting_inventory"].shift(-1)
+    return (nxt.notna() & (nxt != d.ending_inventory)).to_numpy()
+
+
+def restock_on_final_hour(d):
+    """Episodes whose LAST hour took a restock -- where scrap goes soft.
+
+    Scrap is `max(starting - sold, 0)` on the last row, which is exact until
+    stock arrives during that row. Then the true leftover is `ending`, and if
+    the source also zeroed `ending` to write the remainder off, the arriving
+    quantity is gone and the leftover is genuinely unrecoverable.
+
+    Counted, not corrected: changing what IL means in the same breath as
+    changing what "broken" means would make neither movement attributable.
+    """
+    last = last_rows(d)
+    kind = hour_status(last.starting_inventory, last.units_sold,
+                       last.ending_inventory)
+    hit = kind == RESTOCK
+    zeroed = hit & (last.ending_inventory.to_numpy() == 0)
+    return {
+        "episodes_with_restock_on_final_hour": int(hit.sum()),
+        "of_those_ending_zeroed_so_scrap_unrecoverable": int(zeroed.sum()),
+        "share_of_episodes": round(float(hit.mean()), 6) if len(last) else 0.0,
+        "note": ("On these, leftover_units reads max(starting - sold, 0) and "
+                 "the true leftover is `ending`. Where ending is also zero "
+                 "the restock quantity cannot be recovered at all, so scrap "
+                 "is unknown rather than zero. Read this before quoting a "
+                 "scrap or IL figure to the decimal."),
+    }
+
+
 def adjustment_reason(starting_inventory, units_sold, ending_inventory):
     """Why an outcome's inventory does not reconcile, or None.
 
-    The event store quarantines any non-reconciling outcome that carries no
-    reason, and a quarantined outcome never lands -- so an unnamed but
-    legitimate break sinks event completeness and fails the shadow gate.
+    Scalar form of `hour_status`, and the rule `events.store` enforces on
+    every live outcome. The event store quarantines any non-reconciling
+    outcome that carries no reason, and a quarantined outcome never lands --
+    so an unnamed but legitimate break sinks event completeness and fails the
+    shadow gate.
 
-      restock     ending EXCEEDS what was left: stock was added.
+      restock     ending EXCEEDS what was left over. `starting - sold` is
+                  used UNCLIPPED here: an hour that sold more than it opened
+                  with has a negative net, and clipping it to zero hid the
+                  most obvious restock there is -- one that arrived and then
+                  sold out to exactly zero, which read as an unexplained zero
+                  and quarantined in bulk.
       write-off   ending is exactly ZERO while stock remained. That is the
                   source's own convention -- it writes the remainder off and
                   reports 0 -- and it is recognised BY THE ZERO ITSELF, not
@@ -135,11 +311,11 @@ def adjustment_reason(starting_inventory, units_sold, ending_inventory):
     unexplained inventory loss, matches no convention, and returns None on
     purpose so it quarantines and stays visible.
     """
-    leftover = max(starting_inventory - units_sold, 0)
-    if ending_inventory > leftover:
-        return "intraday_restock"
-    if ending_inventory == 0 and leftover > 0:
-        return "episode_close_write_off"
+    net = starting_inventory - units_sold
+    if ending_inventory > net:
+        return RESTOCK
+    if ending_inventory == 0 and net > 0:
+        return WRITE_OFF
     return None
 
 
