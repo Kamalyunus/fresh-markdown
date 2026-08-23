@@ -88,14 +88,20 @@ def restocked_episodes(d):
     an hour selling MORE than it opened with has a negative net, and clipping
     it to zero makes any ending look ordinary.
 
+    Read on the NET arrival over the episode, not on the hour. The hour-level
+    test fires on bucket skew: a sale recorded an hour after the stock left
+    shows a shortfall at t and a restock of the same size at t+1, and nothing
+    arrived. Gating on that pushed a perfectly reconciled window out of
+    `dp_eligible` while its own `units_restocked` read 0 -- the flag and the
+    quantity contradicting each other. `episode_flow` nets first.
+
     FLAGS, never filters (`dp_ineligible_reason = "restocked"`). What a
     restock breaks is the DP's state transition, which assumes one pool
     draining monotonically. The hours themselves are honest demand
     observations -- each censored against its own opening stock.
     """
-    hit = episodes.hour_status(d.starting_inventory, d.units_sold,
-                               d.ending_inventory) == episodes.RESTOCK
-    return d.loc[hit, "episode_id"].unique()
+    flow = episodes.episode_flow(d)
+    return flow.index[flow.arrived > 0].to_numpy()
 
 
 def cogs_at_risk(d):
@@ -718,6 +724,35 @@ def tag_dp_eligibility(d, cfg):
     edge_detail["still_dp_eligible"] = int(
         d.loc[edge & d.dp_eligible, "episode_id"].nunique())
     detail["edge_truncated"] = edge_detail
+
+    # WHAT THE NETTING ABSORBED. An episode can reconcile at the episode level
+    # while its hours wobble, and the wobble is almost always a sale bucketed
+    # an hour off the inventory snapshot. Almost always is not always: netting
+    # could in principle cancel a real arrival against a real loss hours
+    # apart. Rather than invent an adjacency window, the gross movement is
+    # reported against the net so the case is visible.
+    #
+    # Read `median_gross_per_episode`: ones and twos are bucket skew. If it
+    # climbs, something other than skew is being cancelled out.
+    netted = flow[(flow.gross_in + flow.gross_out > 0)
+                  & (flow.arrived == 0) & (flow.vanished == 0)]
+    detail["hour_wobble_netted_to_zero"] = {
+        "episodes": int(len(netted)),
+        "share_of_episodes": round(float(len(netted)) / max(len(flow), 1), 6),
+        "gross_units_in": int(netted.gross_in.sum()),
+        "gross_units_out": int(netted.gross_out.sum()),
+        "median_gross_per_episode": float(
+            (netted.gross_in + netted.gross_out).median()) if len(netted) else 0.0,
+        "max_gross_per_episode": int(
+            (netted.gross_in + netted.gross_out).max()) if len(netted) else 0,
+        "note": ("Episodes whose hours do not individually reconcile but "
+                 "whose EPISODE does. The sale left inventory in one hour and "
+                 "was recorded in the next, so a shortfall and a restock of "
+                 "the same size cancel. These are fully trusted -- they keep "
+                 "their scrap, clearance and IL, and they are NOT flagged "
+                 "restocked, because nothing arrived. Small ones and twos are "
+                 "skew; a large gross netting to zero is worth a look."),
+    }
 
     # WHERE THE ANOMALIES SIT, so the business can go and find out what moved.
     # A count on its own says "the feed is imperfect" and stops there. Broken

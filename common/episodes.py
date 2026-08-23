@@ -224,6 +224,16 @@ def episode_flow(d):
                       "start": d.starting_inventory.to_numpy()})
     agg = g.groupby("episode_id", sort=False).agg(
         net=("disc", "sum"), sold=("sold", "sum"), opening=("start", "first"))
+    # GROSS movement, before netting. Kept because netting can in principle
+    # cancel a real arrival against a real loss hours apart, and the only
+    # honest answer to that is to report it rather than to invent an
+    # adjacency window. A large gross against a zero net is the thing to look
+    # at; ones and twos on adjacent hours are the bucket skew.
+    agg["gross_in"] = g[g.disc < 0].groupby("episode_id", sort=False).disc.sum(
+        ).reindex(agg.index).fillna(0).abs().astype("int64")
+    agg["gross_out"] = g[g.disc > 0].groupby("episode_id", sort=False).disc.sum(
+        ).reindex(agg.index).fillna(0).astype("int64")
+
     agg["arrived"] = np.clip(-agg.net, 0, None)
     agg["vanished"] = np.clip(agg.net, 0, None)
     agg["supply"] = agg.opening + agg.arrived

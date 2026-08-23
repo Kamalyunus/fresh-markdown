@@ -461,3 +461,62 @@ def test_units_restocked_is_on_the_prepared_frame(cfg):
     assert got["e"] == 0
     assert got["R"] == 11, "12 opened, 3 sold, ended 20 -> 11 arrived"
     assert tagged.groupby("episode_id").episode_supply.first()["R"] == 23
+
+
+def test_bucket_skew_does_not_flag_an_episode_as_restocked(cfg):
+    """The owner's real episode, end to end.
+
+    Hours 11/12 and 17/18 are pairs: a unit leaves inventory in one hour and
+    the sale is recorded in the next. The hour-level test called each pair a
+    shortfall AND a restock, which pushed a perfectly reconciled window out of
+    `dp_eligible` while its own `units_restocked` read 0 -- the flag and the
+    quantity contradicting each other. `restocked_episodes` nets first.
+    """
+    rows = [(0, 24, 12, 0, 12), (1, 23, 12, 0, 12), (2, 22, 12, 0, 12),
+            (3, 21, 12, 0, 12), (4, 20, 12, 0, 12), (5, 19, 12, 0, 12),
+            (6, 18, 12, 0, 12), (7, 17, 12, 0, 12), (8, 16, 12, 1, 11),
+            (9, 15, 11, 0, 11), (10, 14, 11, 0, 11), (11, 13, 11, 0, 10),
+            (12, 12, 10, 1, 10), (13, 11, 10, 0, 10), (14, 10, 10, 0, 10),
+            (15, 9, 10, 1, 9), (16, 8, 9, 1, 8), (17, 7, 8, 0, 7),
+            (18, 6, 7, 1, 7), (19, 5, 7, 0, 7), (20, 4, 7, 4, 3),
+            (21, 3, 3, 2, 0)]
+    d = pd.DataFrame(rows, columns=["hour_of_day", "hours_remaining",
+                                    "starting_inventory", "units_sold",
+                                    "ending_inventory"])
+    d["episode_id"] = "W"
+    d["date"] = "2026-03-01"
+    d["category"] = "MEAT"
+    d["cost"] = 4000.0
+    d["original_price"] = 10_000.0
+    d["total_discount"] = 0.25
+    d["offered_price"] = d.original_price * (1 - d.total_discount)
+    d["d_max"] = 1.0 - d.cost / d.original_price
+
+    from common.episodes import classify, scrap_units
+    tagged, detail = tag_dp_eligibility(d, cfg)
+    t = tagged.iloc[0]
+
+    # the numbers the owner asked for
+    assert int(t.episode_supply) == 12
+    assert int(d.units_sold.sum()) == 11
+    assert float(t.episode_clearance) == pytest.approx(11 / 12)
+    assert classify(d).iloc[0] == "completed"
+    assert scrap_units(d).iloc[0] == 1.0
+
+    # nothing arrived and nothing vanished: the pairs cancel
+    assert int(t.units_restocked) == 0
+    assert int(t.units_unreconciled) == 0
+    assert bool(t.flow_reconciled)
+
+    # so it is fully usable -- artifacts AND backtest/shadow/IL
+    assert bool(t.dp_eligible), \
+        "a reconciled episode was gated out; bucket skew is not a restock"
+    assert pd.isna(t.dp_ineligible_reason)
+    assert "unreconciled_anomalies" not in detail
+
+    # ...and the wobble is still REPORTED, so netting cannot launder a real
+    # arrival against a real loss without anyone seeing it
+    w = detail["hour_wobble_netted_to_zero"]
+    assert w["episodes"] == 1
+    assert w["gross_units_in"] == 2 and w["gross_units_out"] == 2
+    assert w["max_gross_per_episode"] == 4
