@@ -113,6 +113,72 @@ def test_a_restocked_episode_lands_and_its_il_is_right(cfg, tmp_path):
     assert il["il_pct"] == pytest.approx(0.70)
 
 
+def test_a_shrink_hour_is_named_and_lands_rather_than_quarantining(cfg, tmp_path):
+    """Shrink is the THIRD legitimate break, and it used to be the odd one out.
+
+    `adjustment_reason` returned None for a partial shortfall on purpose, so
+    every shrink hour quarantined. That was the last place the live path
+    treated shrink as an anomaly while the offline chain treated it as an
+    ordinary event -- counted gross, booked into scrap, gating nothing.
+
+    The cost was not theoretical. A quarantined outcome never lands, so
+    `event_completeness` fell by the feed's whole shrink rate and the shadow
+    gate (`min_event_completeness`, 0.99) failed for a reason no integration
+    work could fix: it was measuring the source, not the integration. With
+    shrink at ~2.8% of decision hours the harness read 0.9718 and failed.
+
+    Quarantine is for what the system cannot interpret. A shrink is
+    interpreted -- so it is NAMED, and the units stay visible as scrap.
+    """
+    store = EventStore(cfg, root=str(tmp_path / "events"))
+    #        i, hours, q, sold, start, end
+    plan = [(0, 3, 6, 1, 6, 5),     # ordinary: 6 - 1 = 5
+            (1, 2, 5, 1, 5, 3),     # SHRINK: one unit gone, unsold, not written off
+            (2, 1, 3, 1, 3, 0)]     # close, 2 written off
+    for i, hours, q, sold, start, end in plan:
+        assert store.emit_decision(_decision(i, hours, q))
+        assert store.emit_outcome(_outcome(i, sold, start, end)), \
+            f"hour {i} did not land -- a shrink hour is quarantining again"
+
+    assert store.load_quarantine() == []
+    assert store.quarantined_this_run == 0
+    reasons = [o.get("adjustment_reason") for o in store.load_outcomes()]
+    assert reasons == [None, "unexplained_shortfall", "episode_close_write_off"]
+
+    # every decision got an outcome: that is what event_completeness measures,
+    # and shrink must not subtract from it
+    assert len(store.load_outcomes()) == len(store.load_decisions())
+
+
+def test_the_quarantine_count_is_a_property_of_the_run_not_the_file(cfg, tmp_path):
+    """`quarantined_event_count` was read off the whole quarantine FILE.
+
+    Ids are minted per run, so nothing dedups across runs and the file grows
+    every time. Shadow reported that cumulative figure as if it described the
+    run the gate was judging, so two runs over identical input disagreed --
+    26 and 19 -- and it looked like a parallelism defect. It was not: with a
+    clean store the serial and parallel harnesses agree exactly.
+
+    Hidden for as long as it was because the fixture had no shrink. Nothing
+    quarantined, and 0 does not accumulate.
+    """
+    root = str(tmp_path / "events")
+    bad = {"outcome_id": "o1", "decision_id": "d1", "units_sold": -2,
+           "starting_inventory": 5, "ending_inventory": 3,
+           "applied_price": 100.0, "is_stockout": False,
+           "execution_status": "ok", "finalized_at": "2026-08-19T17:00:00+00:00"}
+
+    for run in range(3):
+        store = EventStore(cfg, root=root)
+        assert store.quarantined_this_run == 0, "a fresh store starts at zero"
+        # a NEW id each run, exactly as uuid4 gives the real path
+        assert not store.emit_outcome(dict(bad, outcome_id=f"o{run}",
+                                           decision_id=f"d{run}"))
+        assert store.quarantined_this_run == 1, \
+            "the run count is picking up earlier runs again"
+        assert len(store.load_quarantine()) == run + 1   # the FILE still grows
+
+
 def test_stock_arriving_mid_hour_is_an_exact_count_not_a_lower_bound(cfg):
     """The degradation this file used to pin is now fixed, on purpose.
 

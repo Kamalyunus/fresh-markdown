@@ -969,6 +969,16 @@ finalized_at               UTC with offset
 
 Validation: sales and inventories are non-negative integers; `ending_inventory` reconciles with starting inventory and units sold unless a documented adjustment reason exists; applied price is finite and observable; zero sales are retained.
 
+**Exactly three `adjustment_reason` values are legitimate**, and the producer must name the right one or the outcome quarantines:
+
+| Reason | Condition |
+| --- | --- |
+| `intraday_restock` | `ending_inventory > starting − sold` — stock arrived during the hour |
+| `episode_close_write_off` | `ending_inventory == 0` while stock remained — the source's closure sentinel, ~49.5% of episodes |
+| `unexplained_shortfall` | `0 < ending_inventory < starting − sold` — shrink |
+
+`unexplained_shortfall` was deliberately absent until it was measured: the theory was that unexplained loss should quarantine and stay visible. The effect was that the live path treated shrink as an anomaly while the offline chain treated it as an ordinary event — counted gross, booked into scrap, gating nothing. Because a quarantined outcome never lands, `event_completeness` then fell by the feed's whole shrink rate and the §19 shadow gate (`min_event_completeness`, 0.99) failed for a reason no integration work could fix; at ~2.8% of decision hours the harness read 0.9718. Quarantine is for what the system cannot interpret, and a shrink is interpreted — the units stay visible through `units_shrink` and `episode_scrap`.
+
 The logger must not silently discard malformed events. Invalid events are quarantined and surfaced to monitoring. The event store supports duplicate detection, durable writes, and replay.
 
 ---

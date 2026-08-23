@@ -332,8 +332,8 @@ def _shadow_one(ep, ctx):
             "execution_status": SHADOW_STATUS,
         }
         # The store quarantines any outcome whose inventory does not
-        # reconcile and carries no documented reason, so both legitimate
-        # breaks must be named -- and only those two.
+        # reconcile and carries no documented reason, so all three legitimate
+        # breaks must be named -- restock, write-off, shrink -- and only those.
         reason = adjustment_reason(q, sold, ending)
         if reason:
             outcome["adjustment_reason"] = reason
@@ -687,7 +687,8 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         "state_rejected_count": int(sum(rejected.values())),
         "rejected_reasons": rejected,
         "duplicate_counts": store.duplicate_counts,
-        "quarantined_event_count": len(store.load_quarantine()),
+        # THIS RUN, not the whole quarantine file -- see EventStore.__init__.
+        "quarantined_event_count": store.quarantined_this_run,
         "shadow_gate": gate,
         "exploration_would_be": {
             "forced_rate": round(n_forced / n_dec, 4),

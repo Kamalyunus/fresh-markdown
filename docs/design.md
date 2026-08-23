@@ -1501,43 +1501,58 @@ series, and the window extension all go through it.
 `last_row_ending_inventory_ever_positive` so the convention can be confirmed
 on any new extract rather than assumed.
 
-Two knock-ons for the event store, which quarantines any outcome whose
+Three knock-ons for the event store, which quarantines any outcome whose
 inventory does not reconcile without a documented reason. A **restock** is
 inventory going *up* — the next hour opening with more than this one left
 behind — not inequality in either direction, since the write-off makes many
-hours fail an inequality test. And the **write-off is recognised by the zero
+hours fail an inequality test. The **write-off is recognised by the zero
 itself**, not by position: the source zeroes at its own episode boundary, so
 after a window is merged across midnight that row can sit mid-episode for us.
-A partial shortfall (above zero but below the leftover) matches neither
-convention, stays undocumented, and quarantines — that is unexplained
-inventory loss, and the quarantine file is the only place it shows.
+And a partial shortfall (above zero but below the leftover) is **shrink**, now
+named `unexplained_shortfall` rather than left undocumented.
 
-**Episodes with an intraday restock are dropped whole.** Mid-window
+That third one is a correction. Leaving it unnamed so it would quarantine and
+"stay visible" was the last place the live path treated shrink as an anomaly
+while the offline chain treated it as an ordinary event — counted gross,
+booked into scrap, gating nothing. A quarantined outcome never lands, so
+`event_completeness` fell by the feed's whole shrink rate and the shadow gate
+(`min_event_completeness`, 0.99) failed for something no integration work
+could fix: it was measuring the source. Measured at ~2.8% of decision hours,
+the harness read 0.9718. Quarantine is for what the system cannot interpret;
+shrink is interpreted, and the units remain visible through `units_shrink`,
+`episode_scrap` and the named reason on the event itself.
+
+**Episodes with an intraday restock are no longer dropped, and no longer gate
+anything.** They were dropped whole on the reasoning that mid-window
 replenishment breaks the single-inventory-pool assumption the DP's state
-transition rests on, and the demand those extra units meet is not the demand
-the episode's price path was chosen for. The check runs after re-segmentation,
-because across a data gap the inventory jump would read as a restock.
+transition rests on. It does not: `ending[t] == starting[t+1]`, so the arrival
+is already carried forward and the solver simply meets a larger `q` on the
+next hour — exactly as it does live, where the policy re-solves hourly. The
+drop cost every frozen artifact 2.69pp of the extract's COGS to protect a
+solver that reads `dp_eligible` anyway. Only a restock on the FINAL hour still
+gates (`final_hour_restock`), and only because the close is then ambiguous.
 
 ![episode endings](../reports/charts/02_episode_endings.png)
 
 ### An episode is not as long as its window
 
-**Two endings, and one state that is not an ending.** For any episode that has
-finished, the scrap rule is as simple as the data:
+**Two endings, and one state that is not an ending.** Closure is asked FIRST,
+and it is one condition — `ending_inventory == 0` on the last row. Only then
+does the leftover say which ending it was, read UNCLIPPED so that a close that
+took a restock is not mistaken for a clean sell-out:
 
-    leftover = max(0, starting_inventory − units_sold)   on the last row
+    closed   = ending_inventory == 0                     on the last row
+    leftover = starting_inventory − units_sold           on the last row, UNCLIPPED
 
-| Ending | Test on the last row | Scrap |
+| | Test on the last row | Scrap |
 | --- | --- | --- |
-| `sold_out_early` | leftover 0 | **none** — nothing left, by fact rather than assumption |
-| `completed` | leftover > 0 | **the leftover** — those units were disposed of |
+| `sold_out_early` | closed, leftover 0 | **none** — nothing left, by fact rather than assumption |
+| `completed` | closed, leftover ≠ 0 | **the leftover** — those units were disposed of |
+| `not_closed` | `ending_inventory != 0` | **unknown** — excluded, never counted as zero |
 
-`hours_remaining` is not consulted, and neither is `ending_inventory`'s value.
-The third state, `not_closed`, is an episode that **has not finished**:
-
-| | Test | Scrap |
-| --- | --- | --- |
-| `not_closed` | leftover > 0 **and no closure sentinel** | **unknown** — excluded, never counted as zero |
+`hours_remaining` is not consulted. An earlier version tested the leftover
+first and clipped it at zero, which made both a still-running window and a
+restocked close read as `sold_out_early`.
 
 **The counter is not the end-of-window signal, and keying scrap to it was a
 serious error.** The first version of this classification tested

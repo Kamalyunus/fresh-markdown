@@ -514,21 +514,36 @@ def adjustment_reason(starting_inventory, units_sold, ending_inventory):
                   source's own convention -- it writes the remainder off and
                   reports 0 -- and it is recognised BY THE ZERO ITSELF, not
                   by position in the episode.
+      shrink      ending is ABOVE zero but below the leftover. Stock left
+                  without being sold and without being written off.
 
     Keying the write-off to "our last observed hour" was wrong and quarantined
     real outcomes in bulk: the source zeroes at ITS episode boundary, and once
     a window is merged across midnight that row sits in the MIDDLE of ours.
     Position is our bookkeeping; the zero is the source's fact.
 
-    A PARTIAL shortfall -- ending above zero but below the leftover -- is
-    unexplained inventory loss, matches no convention, and returns None on
-    purpose so it quarantines and stays visible.
+    SHRINK IS NAMED, NOT QUARANTINED. It used to return None here on purpose,
+    so that a partial shortfall would quarantine and stay visible -- and that
+    was the one place left where the live path treated shrink as an anomaly
+    while the offline chain treated it as an ordinary event: counted gross,
+    booked into scrap, gating nothing. The inconsistency was not free. Every
+    shrink hour failed the event store's reconciliation check, so
+    `event_completeness` fell by the feed's shrink rate and the shadow gate
+    (`min_event_completeness`, 0.99) failed for a reason no integration work
+    could fix -- it was measuring the source, not the integration.
+
+    Naming it keeps the visibility that the None was for: the reason is on the
+    event, `units_shrink` and `episode_scrap` carry the quantity, and the rate
+    is monitorable. Quarantine is for what the system CANNOT interpret, and a
+    shrink is interpreted.
     """
     net = starting_inventory - units_sold
     if ending_inventory > net:
         return RESTOCK
     if ending_inventory == 0 and net > 0:
         return WRITE_OFF
+    if 0 < ending_inventory < net:
+        return SHORTFALL
     return None
 
 

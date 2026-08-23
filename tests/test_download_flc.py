@@ -49,6 +49,50 @@ def test_declared_columns_match_the_source_schema():
     assert set(f.name for f in SCHEMA) == set(download_flc.REQUIRED_COLUMNS)
 
 
+def test_the_generator_emits_both_source_inventory_conventions():
+    """A fixture missing one of these does not FAIL. It passes, quietly.
+
+    Two conventions carry the whole of episode-level DQ, and each is read by
+    code that has no other trigger:
+
+      write-off sentinel   `ending == 0` while stock remained. The ONLY test
+                           for closure.
+      shrink               `0 < ending < starting - sold`. The reason scrap is
+                           leftover PLUS shrink rather than just leftover.
+
+    `data/flc_synth.parquet` was once generated before the write-off block
+    existed and carried ZERO sentinel rows. Nothing failed -- `classify_last`
+    had a fallback that read the absence as "every episode closed" -- so the
+    closure path went unexercised for months while the suite stayed green.
+    The fallback is gone, but the fixture could still drift the other way, and
+    shrink has no fallback at all to make its absence visible.
+
+    So the generator is asserted to produce both, on its own output, here.
+    """
+    import numpy as np
+    from tools.make_dummy_flc import generate
+
+    df, _ = generate(n_skus=40, n_days=60, policy="randomized", seed=11,
+                     dirty_frac=0.0)
+    net = df.inventory - df.units_sold
+
+    assert ((df.ending_inventory == 0) & (net > 0)).sum() > 0, \
+        "no write-off sentinel: every episode would read NOT_CLOSED"
+    assert ((df.ending_inventory > 0) & (df.ending_inventory < net)).sum() > 0, \
+        "no shrink: the leftover-PLUS-shrink half of scrap is untested"
+
+    # and shrink must stay INTERIOR -- a zero ending is the close, not a
+    # shrink, and `hour_status` would rightly call it a write-off
+    assert (df.ending_inventory >= 0).all()
+
+    # turning it off is a supported mode, and the only way to isolate the
+    # leftover half of the identity
+    off, _ = generate(n_skus=40, n_days=60, policy="randomized", seed=11,
+                      dirty_frac=0.0, shrink_rate=0.0)
+    net_off = off.inventory - off.units_sold
+    assert ((off.ending_inventory > 0) & (off.ending_inventory < net_off)).sum() == 0
+
+
 def test_exclusion_window_comes_from_config():
     from common.config import load_config
 

@@ -20,6 +20,23 @@ Usage:
     python3 make_dummy_flc.py --skus 400 --days 60 --policy legacy
     python3 make_dummy_flc.py --skus 400 --days 60 --policy randomized \
         --out data/flc_filtered_randomized.parquet
+
+THE SOURCE'S TWO INVENTORY CONVENTIONS ARE MODELLED HERE, and both must stay
+modelled. A fixture missing one does not fail -- it passes, quietly, with the
+code path that reads it never executed:
+
+  write-off sentinel   `ending_inventory` zeroed on the row a listing closes.
+                       This is the ONLY test for closure. A fixture without it
+                       reads every episode as unclosed; with the old
+                       `write_off_convention` fallback in place it read every
+                       episode as CLOSED instead, and a stale fixture carrying
+                       no sentinel at all went unnoticed for months.
+  shrink               `0 < ending < starting - sold` -- stock gone without a
+                       sale and without a write-off. Real, and the chain is
+                       specified to KEEP it: scrap is leftover PLUS shrink.
+
+`main` counts both on every run. If either prints zero, the fixture is not
+exercising what it claims to.
 """
 
 import argparse
@@ -160,7 +177,7 @@ def randomized_discount_path(entry_d, n_hours, d_max, rng, tier=0.025):
     return path
 
 
-def generate(n_skus, n_days, policy, seed, dirty_frac):
+def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02):
     rng = np.random.default_rng(seed)
     master = build_sku_master(n_skus, rng)
     start = dt.date(2026, 3, 1)
@@ -213,7 +230,29 @@ def generate(n_skus, n_days, policy, seed, dirty_frac):
                 p = r_disp / (r_disp + mu)
                 demand = int(rng.negative_binomial(r_disp, p))
                 sold = min(demand, inv)
-                ending = inv - sold
+
+                # SHRINK -- stock that left without being sold and without
+                # being written off, `0 < ending < starting - sold`. A real
+                # business event the source reports, not dirt: the old chain
+                # rule DELETED these episodes and took 33.6pp of the extract's
+                # COGS with them, selecting the largest windows 4.5 to 1.
+                #
+                # Kept strictly interior. `ending == 0` would read as the
+                # write-off sentinel by `hour_status`, which is a CLOSE, not a
+                # shrink -- so the draw leaves at least one unit standing and
+                # the episode carries on. And never on the final hour, where
+                # shrink and leftover are indistinguishable once the source
+                # zeroes the ending: `starting - sold` is the whole remainder
+                # there and it is booked as leftover.
+                #
+                # Chain continuity is preserved BY CONSTRUCTION -- `inv` is
+                # assigned from `ending` below, so `ending[t] == starting[t+1]`
+                # whatever leaves during the hour.
+                shrink = 0
+                if (h_idx < n_hours - 1 and inv - sold >= 2
+                        and rng.random() < shrink_rate):
+                    shrink = int(rng.integers(1, min(inv - sold, 3)))
+                ending = inv - sold - shrink
 
                 if sold == 0:
                     final_price = 0.0
@@ -265,10 +304,18 @@ def main():
     ap.add_argument("--policy", choices=["legacy", "randomized"], default="legacy")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--dirty-frac", type=float, default=0.004)
+    # NOT dirt, and deliberately not folded into --dirty-frac: shrink is a
+    # real event the source reports and the chain is specified to KEEP. It
+    # has its own knob so a run can turn it off to isolate the leftover half
+    # of the identity, which is the only reason to want a fixture without it.
+    ap.add_argument("--shrink-rate", type=float, default=0.02,
+                    help="per-hour probability of an interior inventory "
+                         "shortfall (0 < ending < starting - sold)")
     ap.add_argument("--out", default="data/flc_filtered_synthetic.parquet")
     args = ap.parse_args()
 
-    df, master = generate(args.skus, args.days, args.policy, args.seed, args.dirty_frac)
+    df, master = generate(args.skus, args.days, args.policy, args.seed,
+                          args.dirty_frac, args.shrink_rate)
 
     import os
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
@@ -276,6 +323,14 @@ def main():
     pq.write_table(table, args.out)
 
     excl = df[(df.date >= EXCLUSION_START) & (df.date <= EXCLUSION_END)]
+    # The two convention signals, counted at the source. Both were silently
+    # ABSENT from a committed fixture at some point, and each absence hid a
+    # whole code path while every test passed -- the write-off sentinel for
+    # months. Reported on every run so the next one cannot be silent.
+    net = df.inventory - df.units_sold
+    sentinel = int(((df.ending_inventory == 0) & (net > 0)).sum())
+    shrink_rows = int(((df.ending_inventory > 0)
+                       & (df.ending_inventory < net)).sum())
     print(f"policy            : {args.policy}")
     print(f"rows              : {len(df):,}")
     print(f"skus              : {df.skuseq.nunique():,}")
@@ -286,6 +341,10 @@ def main():
     print(f"final_price==0    : {(df.final_price == 0).mean():.1%} "
           f"(zero-sale rows: {(df.units_sold == 0).mean():.1%})")
     print(f"in exclusion win  : {len(excl):,} rows")
+    print(f"write-off rows    : {sentinel:,} (ending==0 while stock remained "
+          f"— MUST be > 0 or every episode reads unclosed)")
+    print(f"shrink rows       : {shrink_rows:,} "
+          f"(0 < ending < starting-sold, {shrink_rows/max(len(df),1):.2%})")
     print(f"median d_max      : {(1 - df.cogs_wo_vat/df.normal_asp.replace(0,np.nan)).median():.3f}")
     print(f"corr(discount,hour) within episode: {corr_within(df):.3f}")
     print(f"wrote             : {args.out}")

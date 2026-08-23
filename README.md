@@ -144,6 +144,14 @@ python3 -m pytest tests/
 clock) to confirm estimators *detect* it; `--policy randomized` makes
 elasticity identifiable to confirm estimators *recover* it.
 
+**Read the two convention counts the generator prints.** `write-off rows` and
+`shrink rows` must both be non-zero, or the fixture is not exercising the code
+that reads them — and a fixture missing one does not fail, it passes quietly.
+A stale `data/flc_synth.parquet` generated before the write-off block existed
+carried zero sentinel rows and went unnoticed for months, because the closure
+classifier's fallback treated the absence as "everything closed". Regenerate
+the fixture after any change to the inventory conventions.
+
 ## Design invariants worth knowing
 
 - The planner minimises **absolute IL**; the business reads **IL%** with an

@@ -512,7 +512,11 @@ CATALOGUE = [
    "Outcomes without `is_stockout`. **Must be exactly zero.**", "GATE — stop condition"),
   ("quarantined_event_count", "count",
    "Events written to quarantine with their validation failure attached. Nothing is "
-   "ever silently dropped.", ""),
+   "ever silently dropped. **Scope differs by report:** in `pipeline.monitor` it is the "
+   "whole store — the standing production log, which is what a monitor should show — "
+   "while in `pipeline.shadow` it is THIS RUN. Shadow read the whole file until two "
+   "runs over identical input disagreed; ids are minted per run, so the file grows "
+   "every time and the figure was not a property of the run the gate was judging.", ""),
   ("realised_vs_predicted_sold_ratio", "ratio",
    "Realised revenue base ÷ predicted. Production's continuation of the calibration gate.", ""),
  ]),

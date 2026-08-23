@@ -564,10 +564,19 @@ def test_adjustment_reason_names_every_legitimate_break():
     assert why(5, 1, 8) == "intraday_restock"
     # ordinary hour that reconciles
     assert why(5, 1, 4) is None
-    # PARTIAL shortfall -- above zero but below the leftover -- matches no
-    # convention. Unexplained inventory loss must stay unnamed so it
-    # quarantines rather than being absorbed by a catch-all.
-    assert why(5, 1, 2) is None
+    # PARTIAL shortfall -- above zero but below the leftover -- is SHRINK, and
+    # it is NAMED. It returned None on purpose until it was measured, so that
+    # unexplained loss would quarantine and stay visible. That was the last
+    # place the live path called shrink an anomaly while the offline chain
+    # called it an ordinary event: counted gross, booked into scrap, gating
+    # nothing. A quarantined outcome never lands, so event completeness fell by
+    # the feed's whole shrink rate and the shadow gate failed for something no
+    # integration work could fix -- it was measuring the SOURCE. At ~2.8% of
+    # decision hours the harness read 0.9718 against a 0.99 threshold.
+    assert why(5, 1, 2) == "unexplained_shortfall"
+    # ORDER MATTERS at the boundary: a zero ending is the CLOSE, not a shrink.
+    # Asking the shortfall first would swallow every write-off there is.
+    assert why(5, 1, 0) == "episode_close_write_off"
 
 
 def test_noise_floor_and_monitor_use_the_same_smoothing():

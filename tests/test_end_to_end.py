@@ -428,7 +428,14 @@ def test_decision_loop_and_exactly_once_update(workspace):
     from pipeline import assurance
     repro = assurance.reproduction(replayed, cfg)
     assert repro["verdict"] == "PASS", repro
-    assert repro["decisions_checked"] == len(replayed)
+    # `reproduction` re-solves the most recent `reproduction_sample` only, so
+    # the count to expect is the sample cap once the loop above outgrows it --
+    # which it did the moment the fixture gained shrink and this slice of 80
+    # episodes started yielding 511 decisions against a cap of 500. What the
+    # assertion is FOR is that nothing was silently dropped between emitting
+    # and checking; the cap is a deliberate bound, not a drop.
+    assert repro["decisions_checked"] == min(
+        len(replayed), cfg["assurance"]["reproduction_sample"])
     assert repro["decisions_skipped_no_inputs"] == 0
 
     report = update_run(cfg, apply=True)

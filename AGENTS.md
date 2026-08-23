@@ -934,13 +934,24 @@ exact count if you like, but do it deliberately: the test will tell you.
 
 **Any outcome whose inventory does not reconcile MUST name a reason or it is
 quarantined** — and a quarantined outcome never lands, so event completeness
-drops and the shadow gate fails. Exactly two reasons are legitimate:
+drops and the shadow gate fails. Exactly three reasons are legitimate:
 
 - `intraday_restock` — `ending_inventory > max(0, starting - sold)`
 - `episode_close_write_off` — `ending_inventory == 0` while stock remained.
   This is ~49.5% of episodes. An integration that omits it quarantines
   roughly half its outcomes and fails the gate for what looks like a pipeline
   defect.
+- `unexplained_shortfall` — shrink: `0 < ending_inventory < starting - sold`.
+  **This one returned None on purpose until it was measured.** The theory was
+  that an unexplained loss should quarantine and stay visible; the effect was
+  that the live path treated shrink as an anomaly while the offline chain
+  treated it as an ordinary event — counted gross, booked into scrap, gating
+  nothing. Every shrink hour then subtracted from `event_completeness`, so the
+  gate (`min_event_completeness`, **0.99**) failed by the feed's shrink rate,
+  for a reason no integration work could fix: it was measuring the SOURCE. At
+  ~2.8% of decision hours the harness read 0.9718. Quarantine is for what the
+  system cannot interpret; a shrink is interpreted, so it is named, and the
+  units stay visible through `units_shrink` and `episode_scrap`.
 
 **Recognise the write-off by the ZERO, never by position in the episode.**
 Two earlier versions keyed it to `hours_remaining == 0` and then to "our last
@@ -1335,3 +1346,13 @@ so read them off the reports directly. Two rules survive it:
 - Synthetic validation: `tools/make_dummy_flc.py --policy randomized` makes
   elasticity recoverable (estimator should RECOVER it); `--policy legacy`
   reproduces the production confound (estimator should DETECT it).
+- **The generator models both source inventory conventions, and must keep
+  doing so** — the write-off sentinel (`ending == 0` while stock remained) and
+  shrink (`0 < ending < starting − sold`, rate `--shrink-rate`, default 0.02).
+  It prints a count of each on every run and
+  `test_the_generator_emits_both_source_inventory_conventions` asserts both
+  are non-zero. This is not belt-and-braces: a fixture missing one does not
+  fail, it PASSES — a stale `flc_synth.parquet` predating the write-off block
+  carried zero sentinel rows and left the entire closure path unexercised for
+  months while the suite stayed green. **Regenerate the fixture after any
+  change to the conventions**, and read the two counts.
