@@ -211,6 +211,36 @@ def test_every_condition_carries_a_stated_reason():
         assert len(why) > 40, f"{name} has no explanation"
 
 
+def test_every_eligible_episode_is_closed_but_not_the_reverse():
+    """Closure is NECESSARY for eligibility and not SUFFICIENT.
+
+    The one-way implication is the whole point of keeping them as separate
+    columns. `closed` is a fact about the source -- it zeroed
+    `ending_inventory`, so the listing ended. `eligible` additionally asks
+    whether what the episode reports about itself can be believed, and a
+    closed episode can still fail that: the final hour may have taken a
+    restock, or the flow identity may not balance.
+
+    An `eligible` episode that is not `closed` would be a contradiction --
+    a complete accounting of a window that had not finished -- so it is
+    asserted rather than left to the reader.
+    """
+    from common import episodes as E
+
+    d = _closed_and_unclosed()
+    flow = E.episode_flow(d)
+    assert not (flow.eligible & ~flow.closed).any(), \
+        "an episode is eligible without having closed"
+
+    # and the containment is STRICT: closure alone does not confer eligibility
+    dirty = _frame(episode_id="restocked-close").assign(
+        starting_inventory=[9, 3], units_sold=[6, 7], ending_inventory=[3, 0])
+    f2 = E.episode_flow(dirty)
+    assert f2.loc["restocked-close", "closed"]
+    assert not f2.loc["restocked-close", "final_hour_clean"]
+    assert not f2.loc["restocked-close", "eligible"]
+
+
 # ------------------------------------------------------- who reads what
 
 def test_population_resolves_the_config_default(cfg):
