@@ -430,31 +430,49 @@ Three load-bearing properties:
 
 ### 9.2 Filter chain
 
-Deterministic, auditable order — **fifteen named stages**, each counted into the waterfall. **Almost every stage drops the WHOLE EPISODE, not the offending row**: a hole punched mid-window re-segments into a spurious short episode, which is worse than losing the episode.
+Deterministic, auditable order — **twelve named waterfall rows**, each counted, followed by a flagging pass. **Almost every stage drops the WHOLE EPISODE, not the offending row**: a hole punched mid-window re-segments into a spurious short episode, which is worse than losing the episode.
+
+**A stage may only DROP for an integrity or scope reason** — rows that cannot be believed, cannot be used by anything at all, or fall outside the period the study covers. Nothing may be dropped for being hard to *price*. That distinction is load-bearing: `FEATURES` (§9.3) carries neither `cost` nor `hours_remaining` nor anything about the inventory chain, so an unpriceable episode is an ordinary demand observation to every frozen artifact, and removing them took **>70% of the extract's COGS** out of every fit — including the elasticity prior, which is starved of price variation and for which below-cost hours are the widest spread the data contains.
 
 | # | Stage | Scope | Drops |
 | --- | --- | --- | --- |
-| 1 | `duplicate_hour_rows_dropped` | rows, **both** copies | two states for one `sku × fc × hour`; no principled way to choose, and they collide two runs into one episode id |
-| 2 | `exclusion_window_removed` | episode | any episode with ANY hour in the known demand-issue window |
-| 3 | `discount_out_of_range_dropped` | episode | discount outside `[0, 1]` — the percent→fraction conversion applied twice or not at all |
-| 4 | `negative_quantities_dropped` | episode | impossible quantities: negative inventory or sales, and **`cost <= 0`** — a zero cost is a *missing* cost, not a free good |
-| 5 | `null_category_dropped` | rows | missing category/subcategory |
-| 6 | `zero_base_price_dropped` | rows | `original_price` still null or zero after ffill+bfill within the episode |
-| 7 | `negative_window_recovered` | episode | **not a drop.** An episode whose counter enters ALREADY negative and runs no longer than `data.manufacturing_window_hours` is a known source pattern, not a defect; its counter is rewritten as a synthetic countdown. The stage reports what it recovered, since it changes no counts |
-| 8 | `negative_window_dropped` | episode | any `hours_remaining` still `< 0` after recovery |
-| 9 | `window_too_long_dropped` | episode | `hours_remaining` above `data.max_window_hours` |
-| 10 | `below_cost_dropped` | episode | any hour whose **offered** price is under cost — tested on `original_price × (1 − discount)`, never `applied_price`, which the source zeroes on zero-sale rows |
-| 11 | `non_priceable_dropped` | episode | `cost >= original_price`, i.e. `d_max <= 0`: no feasible tier exists |
-| 12 | `units_gt_inventory_dropped` | episode | sales exceed the inventory on hand |
-| 13 | `chain_break_dropped` | episode | an hour where `ending != starting − sold` and `common.episodes.adjustment_reason` names no reason — unexplained inventory loss. The SAME rule `events.store` enforces in production, so the analysis population cannot hold a break production would quarantine |
-| 14 | `contiguous_episodes_built` | — | re-segmentation, not a filter: episode count can RISE here because earlier drops split windows |
-| 15 | `restocked_episodes_dropped` | episode | an hour opens with more stock than the previous hour left |
+| 1 | `raw` | — | the starting count |
+| 2 | `duplicate_hour_rows_dropped` | rows, **both** copies | two states for one `sku × fc × hour`; no principled way to choose, and they collide two runs into one episode id |
+| 3 | `exclusion_window_removed` | episode | any episode with ANY hour in the known demand-issue window. SCOPE, not integrity |
+| 4 | `discount_out_of_range_dropped` | episode | discount outside `[0, 1]` — the percent→fraction conversion applied twice or not at all |
+| 5 | `negative_quantities_dropped` | episode | impossible quantities: negative inventory or sales. **Not `cost <= 0`** — see the flags below |
+| 6 | `null_category_dropped` | rows | missing category/subcategory |
+| 7 | `zero_base_price_dropped` | rows | `original_price` still null or zero after ffill+bfill within the episode |
+| 8 | `negative_window_recovered` | episode | **not a drop.** An episode whose counter enters ALREADY negative and runs no longer than `data.manufacturing_window_hours` is a known source pattern, not a defect; its counter is rewritten as a synthetic countdown. The stage reports what it recovered, since it changes no counts |
+| 9 | `units_gt_inventory_dropped` | episode | sales exceed the inventory on hand |
+| 10 | `chain_break_dropped` | episode | an hour where `ending != starting − sold` and `common.episodes.adjustment_reason` names no reason — unexplained inventory loss. The SAME rule `events.store` enforces in production, so the analysis population cannot hold a break production would quarantine |
+| 11 | `contiguous_episodes_built` | — | re-segmentation, not a filter: episode count and COGS both move here because earlier drops split windows |
+| 12 | `dp_eligible` | — | **not a drop.** The terminal summary row: how much of the surviving population the DP can act on, with the per-flag breakdown in its detail block |
+
+`tag_dp_eligibility` then labels the surviving frame. Five conditions set `dp_eligible = False` and `dp_ineligible_reason` to the **first** they trip; the rows stay in the frame.
+
+| Flag | Test | Why the DP cannot price it |
+| --- | --- | --- |
+| `cost_missing` | `cost <= 0` | a *missing* cost, not a free good: `d_max` reads 1.0, so the DP would discount to the tier cap believing scrap is free, and IL reads zero |
+| `non_priceable` | `cost >= original_price` | `d_max <= 0`: no feasible tier exists |
+| `negative_window` | any `hours_remaining < 0` after recovery | the DP takes its horizon from the counter and `extend_to_window` builds the synthetic tail from it |
+| `window_too_long` | `hours_remaining` above `data.max_window_hours` | `extend_to_window` RAISES above the cap — a crash, not a refusal |
+| `restocked` | an hour opens with more stock than the previous hour left | the state transition assumes one pool draining monotonically |
+
+Two more are flagged and gate **nothing**:
+
+| Flag | Test | Why it does not gate |
+| --- | --- | --- |
+| `below_cost_hours` | any hour whose **offered** price is under cost — tested on `original_price × (1 − discount)`, never `applied_price`, which the source zeroes on zero-sale rows | a price the LEGACY policy set, which the agent is constrained never to set. The backtest's DP arm is self-anchored and never sees it; shadow anchors on it and refuses from the crossing hour onward, which is the cost floor working (§11) |
+| `edge_truncated` | the last row's timestamp plus `hours_remaining` runs past the extract's last hour | only the *outcome* is missing, and every consumer of an outcome already excludes it: `scrap_units` returns NaN, replay zeroes scrap under `outcome_known`, shadow charges scrap only on `COMPLETED` |
+
+Which population a consumer reads is one decision, `baseline_model.train_population` (default `integrity`), resolved through `prepare_data.population`. The three artifact fits read the config; the DP, the calibration gate, the backtest and shadow always pass `"dp_eligible"` — for them it is a precondition, not a choice.
 
 Two of these deserve their reasoning stated, because both were written after the omission caused a defect.
 
-**Why stage 4 tests `cost <= 0` and not `cost < 0`.** A zero cost reads as *maximally* priceable — `d_max = 1 − cost/original_price = 1.0` — so stage 10 waves it through, and a `< 0` test misses it. It therefore used to survive the whole chain. That put a 100% discount in the action set, where `mu(d) = mu_ref · ((1−d)/(1−d_ref))^ε` is `0 ** negative`; and because scrap is `cost × leftover`, those episodes contributed discount cost and **no scrap**, deflating every IL figure measured over them. `pricing.dp.feasible_tiers` independently refuses any tier whose price is not strictly positive — the two layers are not redundant, since the filter cannot protect a production caller and the tier rule cannot un-deflate a measured baseline.
+**Why `cost_missing` tests `cost <= 0` and not `cost < 0`.** A zero cost reads as *maximally* priceable — `d_max = 1 − cost/original_price = 1.0` — so `non_priceable` waves it through, and a `< 0` test misses it. It therefore used to survive the whole chain. That put a 100% discount in the action set, where `mu(d) = mu_ref · ((1−d)/(1−d_ref))^ε` is `0 ** negative`; and because scrap is `cost × leftover`, those episodes contributed discount cost and **no scrap**, deflating every IL figure measured over them. `pricing.dp.feasible_tiers` independently refuses any tier whose price is not strictly positive — the two layers are not redundant, since a flag cannot protect a production caller and the tier rule cannot un-deflate a measured baseline.
 
-**`restocked_episodes_dropped` — this reverses an earlier requirement.** Prior drafts of this section said *preserve* intraday restocks within one episode. That is not implementable alongside §11: the DP's state transition is `V(p, q − min(k,q), h−1)` over a single inventory pool draining monotonically, so a mid-window replenishment leaves the episode's scrap, IL and horizon all undefined, and the demand the extra units met is not the demand the episode's price path was chosen for. They are dropped from the **analysis population** only. **Production absorbs a restock without difficulty** — inventory is DP state, the policy re-solves hourly, and an outcome records the break with `adjustment_reason = "intraday_restock"` (§16.2).
+**`restocked` — this reverses an earlier requirement, twice.** Prior drafts of this section said *preserve* intraday restocks within one episode. That is not implementable alongside §11: the DP's state transition is `V(p, q − min(k,q), h−1)` over a single inventory pool draining monotonically, so a mid-window replenishment leaves the episode's scrap, IL and horizon all undefined. They were then dropped outright, which went too far the other way: the hours are honest demand observations, each censored against its own opening stock, and the demand model cannot see the break at all — so the drop cost every frozen artifact 2.69pp of the extract's COGS to protect a solver that reads `dp_eligible` anyway. They are now **excluded from the DP-side population only**. **Production absorbs a restock without difficulty** — inventory is DP state, the policy re-solves hourly, and an outcome records the break with `adjustment_reason = "intraday_restock"` (§16.2).
 
 Emit a data-quality waterfall with row and episode counts before and after every stage.
 
@@ -1087,6 +1105,8 @@ None of these should start before the learning loop is demonstrably working.
 ## Appendix A — `bootstrap/measure.py` (phase-0 measurement suite)
 
 This is the working implementation of §8. It ran successfully against production data; the three defects found on review of that run are fixed here. Measurements 9 and 10 require the fitted baseline and are skipped until step 4 of §1a is complete.
+
+> **The `load_and_filter` listing below is a historical snapshot and is superseded by `bootstrap/prepare_data.py`.** It is kept because the measurement code around it is still the reference for §8. Two things in it are now wrong: episode ids are keyed on `sku|fc|date`, which splits a window that runs past midnight (§9.1 gives the contiguous-run rule that replaced it), and `negative_window_dropped` / `below_cost_dropped` are drops, which §9.2 above has since reclassified as flags. Read §9.2, not this code, for the filter chain.
 
 ```python
 """

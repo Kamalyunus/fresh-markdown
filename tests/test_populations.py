@@ -1,15 +1,27 @@
 """Two populations, and which consumer is entitled to which.
 
 The distinction this file defends: an INTEGRITY defect is a row that cannot
-be believed; an ECONOMIC condition is a row that is perfectly believable and
-merely unpriceable. Conflating them cost most of the COGS in the extract --
-every frozen artifact was fit on the priceable subset, including the
-elasticity prior, for which below-cost hours are the widest price variation
-the data contains.
+be believed; everything else is a row that is perfectly believable and merely
+hard to PRICE. Conflating them cost most of the COGS in the extract -- every
+frozen artifact was fit on the priceable subset, including the elasticity
+prior, for which below-cost hours are the widest price variation the data
+contains.
 
 And it made gate 1 undecidable. `share_non_explorable` counts episodes whose
 cost floor leaves too few tiers to explore against, and the chain deleted
 exactly those before `m1` looked, so the gate read 0.0 and could not fail.
+
+Five conditions gate `dp_eligible`, and each one names something the SOLVER
+cannot do -- no feasible tier (`cost_missing`, `non_priceable`), no trustable
+horizon (`negative_window`, `window_too_long`), no single draining pool
+(`restocked`). None of them names anything the demand model can see: FEATURES
+carries neither `cost` nor `hours_remaining` nor anything about the inventory
+chain.
+
+Two more conditions are flagged and gate NOTHING. `below_cost_hours` is a
+price the legacy policy set and the agent is constrained never to repeat.
+`edge_truncated` is a missing OUTCOME rather than a limit on the DP, and every
+consumer of an outcome already excludes it by the closure sentinel.
 """
 
 import inspect
@@ -31,25 +43,39 @@ def cfg():
 
 
 def _frame(**over):
-    """One clean two-hour episode; keyword overrides break it one way."""
+    """One clean two-hour episode; keyword overrides break it one way.
+
+    Per-hour lists (`hours_remaining`, `starting_inventory`, `units_sold`,
+    `ending_inventory`) are laid down as given; scalars are broadcast. The
+    inventory chain is closed by the write-off sentinel on the final row --
+    `ending_inventory == 0` while stock remained -- so `classify_last` reads
+    the episode as COMPLETED and it is not swept up by `edge_truncated`.
+    """
+    per_hour = ("hours_remaining", "starting_inventory", "units_sold",
+                "ending_inventory")
     base = dict(episode_id="e", cost=4000.0, original_price=10_000.0,
-                total_discount=0.25, starting_inventory=12,
-                hours_remaining=[10.0, 9.0])
+                total_discount=0.25, date="2026-01-01", hour_of_day=[10, 11],
+                starting_inventory=[12, 9], units_sold=[3, 2],
+                ending_inventory=[9, 0], hours_remaining=[10.0, 9.0])
     base.update(over)
-    hr = base.pop("hours_remaining")
+    cols = {k: base.pop(k) for k in per_hour + ("hour_of_day",) if k in base}
     d = pd.DataFrame({k: [v, v] for k, v in base.items()})
-    d["hours_remaining"] = hr
+    for k, v in cols.items():
+        d[k] = v
     d["offered_price"] = d.original_price * (1 - d.total_discount)
     d["d_max"] = 1.0 - d.cost / d.original_price
     return d
 
 
-# ------------------------------------------------------ the four conditions
+# ------------------------------------------------------ the five conditions
 
 @pytest.mark.parametrize("name,over", [
     ("cost_missing", {"cost": 0.0}),
     ("non_priceable", {"cost": 12_000.0}),
+    ("negative_window", {"hours_remaining": [-242.0, -243.0]}),
     ("window_too_long", {"hours_remaining": [500.0, 499.0]}),
+    # hour 2 opens with 20 after hour 1 left 9 behind
+    ("restocked", {"starting_inventory": [12, 20], "ending_inventory": [9, 0]}),
 ])
 def test_each_condition_flags_and_names_itself(name, over, cfg):
     d, detail = tag_dp_eligibility(_frame(**over), cfg)
@@ -98,9 +124,57 @@ def test_below_cost_is_reported_but_does_not_gate(cfg):
     assert "below_cost" not in [n for n, _ in DP_INELIGIBLE]
 
 
+def test_an_unclosed_ending_is_reported_but_does_not_gate(cfg):
+    """`edge_truncated` marks a missing OUTCOME, not a limit on the DP.
+
+    The extract stopping mid-window says nothing about the hours it did
+    capture: they are ordinary, fully-priced demand observations, and these
+    are the LARGEST episodes in the data (~25 units of opening stock against
+    ~3 for the population). What is missing is the ending, and every consumer
+    of an ending already handles that on its own -- `scrap_units` returns NaN,
+    `backtest.replay` zeroes scrap under `outcome_known`, `pipeline.shadow`
+    charges scrap only on COMPLETED. Gating on it would buy nothing and cost
+    the demand fit its best-observed windows.
+    """
+    # TWO episodes, because closure is read from the source's own sentinel and
+    # a frame with no sentinel anywhere proves nothing -- `classify_last`
+    # rightly falls back to treating every episode as closed rather than
+    # sweeping all the scrap into UNKNOWN. `e` carries the sentinel; `u` ends
+    # holding honest stock with hours still on its counter, so it is unclosed
+    # AND at the extract's edge.
+    unclosed = _frame(episode_id="u", ending_inventory=[9, 7])
+    d = pd.concat([_frame(), unclosed], ignore_index=True)
+    tagged, detail = tag_dp_eligibility(d, cfg)
+
+    assert (tagged.edge_truncated == (tagged.episode_id == "u")).all()
+    assert tagged.dp_eligible.all(), "an unclosed ending must not gate the DP"
+    assert tagged.dp_ineligible_reason.isna().all()
+    assert "edge_truncated" not in [n for n, _ in DP_INELIGIBLE]
+
+    edge = detail["edge_truncated"]
+    assert edge["episodes_unclosed"] == 1
+    assert edge["episodes_edge_truncated"] == 1
+    assert edge["episodes_unclosed_not_edge"] == 0
+    assert edge["share_of_unclosed_explained_by_edge"] == 1.0
+    assert edge["still_dp_eligible"] == 1
+
+
+def test_a_closed_episode_is_never_flagged_edge_truncated(cfg):
+    """The flag has to mean 'the extract stopped', or the residue it is meant
+    to isolate -- unclosed for a reason a longer extract will NOT fix -- has
+    nothing left to be measured against."""
+    tagged, detail = tag_dp_eligibility(_frame(), cfg)
+    assert not tagged.edge_truncated.any()
+    assert detail["edge_truncated"]["episodes_unclosed"] == 0
+    assert detail["edge_truncated"]["share_of_unclosed_explained_by_edge"] == 0.0
+
+
 def test_nothing_is_dropped(cfg):
     for over in ({"cost": 0.0}, {"cost": 12_000.0}, {"total_discount": 0.9},
-                 {"hours_remaining": [500.0, 499.0]}):
+                 {"hours_remaining": [500.0, 499.0]},
+                 {"hours_remaining": [-242.0, -243.0]},
+                 {"starting_inventory": [12, 20], "ending_inventory": [9, 0]},
+                 {"ending_inventory": [9, 7]}):
         before = _frame(**over)
         after, _ = tag_dp_eligibility(before, cfg)
         assert len(after) == len(before)
@@ -175,3 +249,41 @@ def test_the_cost_floor_is_not_a_population_choice():
     tiers, d_max = dp.feasible_tiers(1000.0, 400.0, 0.025)
     assert all(1000.0 * (1 - t) >= 400.0 - 1e-9 for t in tiers)
     assert "dp_eligible" not in inspect.getsource(dp.feasible_tiers)
+
+
+def test_an_unknown_outcome_reaches_the_harnesses_and_is_not_charged_scrap(cfg):
+    """`edge_truncated` staying in `dp_eligible` sends unclosed episodes into
+    the backtest and shadow for the first time. Both already had the branch;
+    nothing had exercised it, because the filter chain deleted the subject.
+
+    What must hold is that the observed-world baseline does NOT book scrap it
+    never saw. Charging an unfinished episode's leftover to scrap inflates the
+    number the policy is compared against, which flatters the policy.
+    """
+    from backtest.replay import _episode_frame, _replay_one
+
+    g = pd.DataFrame({
+        "episode_id": ["e"] * 3,
+        "date": ["2026-05-01"] * 3, "hour_of_day": [9, 10, 11],
+        "total_discount": [0.25, 0.25, 0.30],
+        "original_price": [10_000.0] * 3, "cost": [4000.0] * 3,
+        "d_ref": [0.25] * 3, "starting_inventory": [10, 8, 6],
+        "units_sold": [2, 2, 2], "mu_ref_hat": [2.0] * 3,
+        "r": [3.0] * 3, "eps": [-2.0] * 3,
+    })
+    known = _episode_frame(g)
+    unknown = _episode_frame(g, unfinished=frozenset({"e"}))
+    assert known["outcome_known"] and not unknown["outcome_known"]
+    assert known["end_inv"] == unknown["end_inv"] == 4
+
+    row_k, _ = _replay_one(known, cfg)
+    row_u, _ = _replay_one(unknown, cfg)
+    assert row_k["actual_scrap_cost"] == pytest.approx(4 * 4000.0)
+    assert row_u["actual_scrap_cost"] == 0.0
+    # the DISCOUNT half is real either way -- those hours happened
+    assert row_u["actual_discount_cost"] == pytest.approx(
+        row_k["actual_discount_cost"])
+    # and the model arms are untouched: they simulate the full window, so an
+    # unknown ENDING says nothing about what the policy would have done
+    for col in ("legacy_model_il", "dp_il"):
+        assert row_u[col] == pytest.approx(row_k[col])

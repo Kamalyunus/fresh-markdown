@@ -45,29 +45,18 @@ data:
     #
     # Episodes are assigned by the date their WINDOW OPENED
     # (common.episodes.window_slice), so no episode straddles the seam.
-  drop_edge_truncated_episodes: true   # SET  drop ONLY the episodes the
-    # extract cut off mid-window: the nominal window still had hours to run
-    # at the extract's last hour, so the outcome is unknown and unknowable
-    # from this data. Unavoidable, not a defect, and a longer extract is the
-    # only thing that closes them.
-    #
-    # DELIBERATELY NOT every episode with an unknown outcome. The rest are
-    # unclosed for reasons the extract boundary does not explain -- a gap in
-    # the hourly feed splitting one window into fragments, or a subset whose
-    # feed never writes off -- and those are a DATA-QUALITY problem that must
-    # stay visible. They are kept, stay classified `not_closed`, and so
-    # m11.scrap_units_unknown_not_closed measures exactly that residue.
-    # Dropping them too would drive it to zero by construction and hide a
-    # systemic feed problem behind a clean population.
-    #
-    # Read `share_of_unclosed_explained_by_edge` in the waterfall beside
-    # m11.not_closed_by_month: near 1.0 and the unknown scrap was purely the
-    # extract boundary; well below, with months evenly loaded, and the feed
-    # has a standing problem no re-download will fix.
-    #
-    # The cost of true is real and reported as `rows_dropped`: those observed
-    # hours are good training data and they are the LARGEST episodes, so
-    # mu_ref and r are fit without the slow, heavily-stocked windows.
+  # Extract-edge truncation is NOT a config switch any more. An episode the
+  # extract cut off mid-window is FLAGGED `edge_truncated` and kept: only its
+  # ENDING is unknown, its observed hours are ordinary demand data, and it is
+  # among the LARGEST episodes in the extract. Every scrap and IL consumer
+  # already excludes an unclosed ending on its own -- scrap_units returns NaN,
+  # backtest.replay zeroes scrap under outcome_known, shadow charges scrap
+  # only on COMPLETED -- so the drop was protecting a figure that was already
+  # protected while starving mu_ref and r of the slow, heavily-stocked
+  # windows. Read `share_of_unclosed_explained_by_edge` in the dp_eligible
+  # waterfall row beside m11.not_closed_by_month: near 1.0 and the unknown
+  # scrap was purely the extract boundary; well below, with months evenly
+  # loaded, and the feed has a standing problem no re-download will fix.
   max_window_hours: 120                # SET  upper bound on a plausible FLC
     # window. flc_window carries occasional very large values from upstream
     # data issues; an episode claiming a window longer than this is FLAGGED

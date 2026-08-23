@@ -256,14 +256,16 @@ def ending_summary(d):
                    for k in (SOLD_OUT_EARLY, COMPLETED, NOT_CLOSED)},
         "scrap_units_completed": int(left[kind == COMPLETED].sum()),
         "scrap_units_unknown_not_closed": int(left[kind == NOT_CLOSED].sum()),
-        # WHERE the unknowns sit in time and in the catalogue. With
-        # data.drop_edge_truncated_episodes on, the extract boundary has
-        # already been removed, so anything left here is unclosed for a
-        # reason a longer extract will NOT fix -- a gap in the hourly feed,
-        # or a subset whose feed never writes off. Concentrated in one month
-        # reads as an incident; spread evenly across every month reads as a
-        # standing property of the feed; concentrated in a few categories
-        # names the subset.
+        # WHERE the unknowns sit in time and in the catalogue. The extract
+        # boundary explains some of them and nothing can be done about those;
+        # the rest are unclosed for a reason a longer extract will NOT fix --
+        # a gap in the hourly feed, or a subset whose feed never writes off.
+        # The split is `share_of_unclosed_explained_by_edge` in the
+        # dp_eligible waterfall row. Here: concentrated in the LAST month
+        # reads as the boundary; concentrated in one earlier month reads as
+        # an incident; spread evenly across every month reads as a standing
+        # property of the feed; concentrated in a few categories names the
+        # subset.
         "not_closed_by_month": _unknown_by(last, kind, left, "month"),
         "not_closed_by_category": _unknown_by(last, kind, left, "category"),
         "share_episodes_ending_by_write_off": round(float(
@@ -284,15 +286,16 @@ def ending_summary(d):
                  "large. Closure is read from the source's own sentinel -- "
                  "ending_inventory zeroed on the final row -- so an episode "
                  "whose final row still reports honest inventory is the only "
-                 "kind with an unknown outcome. With "
-                 "data.drop_edge_truncated_episodes on, the extract boundary "
-                 "has ALREADY been removed upstream, so everything still "
-                 "counted not_closed here is unclosed for a reason a longer "
-                 "extract will not fix -- a gap in the hourly feed, or a "
-                 "subset whose feed never writes off. not_closed_by_month and "
-                 "not_closed_by_category say which. How many the boundary did "
-                 "explain is in the edge_truncated_episodes_dropped row of "
-                 "the waterfall."),
+                 "kind with an unknown outcome. Unclosed episodes are KEPT in "
+                 "the population -- their observed hours are good demand data "
+                 "and only the ending is missing -- so not_closed here counts "
+                 "both kinds: the ones the extract boundary cut off, and the "
+                 "ones unclosed for a reason a longer extract will not fix "
+                 "(a gap in the hourly feed, or a subset whose feed never "
+                 "writes off). The split is edge_truncated."
+                 "share_of_unclosed_explained_by_edge in the dp_eligible "
+                 "waterfall row; not_closed_by_month and "
+                 "not_closed_by_category say where the residue sits."),
     }
 
 

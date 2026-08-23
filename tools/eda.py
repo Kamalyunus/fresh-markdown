@@ -597,9 +597,29 @@ def p_drift(d, cfg):
 # ------------------------------------------------------------------- assembly
 
 def build(d, cfg):
-    out = {"population": {"rows": int(len(d)),
-                          "episodes": int(d.episode_id.nunique())},
-           "panels": {}}
+    """Describe the INTEGRITY population -- everything that survived the filter
+    chain, DP-ineligible episodes included.
+
+    That is the right frame for a description of the business, and it is not
+    the frame the DP acts on, so the header states the split. It matters for
+    two panels in particular: the window counter carries negatives
+    (`negative_window`) and values above the cap (`window_too_long`), so their
+    tails are real data about what was flagged rather than noise to clip.
+    """
+    pop = {"rows": int(len(d)), "episodes": int(d.episode_id.nunique())}
+    if "dp_eligible" in d:
+        pop["episodes_dp_eligible"] = int(
+            d.loc[d.dp_eligible, "episode_id"].nunique())
+        pop["episodes_by_dp_ineligible_reason"] = {
+            str(k): int(v) for k, v in
+            d[~d.dp_eligible].groupby("dp_ineligible_reason")
+            .episode_id.nunique().items()}
+        pop["note"] = (
+            "The INTEGRITY population: every episode that survived the filter "
+            "chain, including those the DP cannot price. Panels below describe "
+            "all of it. The DP, the calibration gate and the A/B read "
+            "dp_eligible only.")
+    out = {"population": pop, "panels": {}}
     for p in PANELS:
         body = p["fn"](d, cfg)
         out["panels"][p["key"]] = dict(

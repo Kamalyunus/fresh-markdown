@@ -81,6 +81,13 @@ def restocked_episodes(d):
     zeroes that field at the window close, so an equality test against it
     would flag every episode's last hour. Callers must run this only on
     contiguous episodes -- across a data gap the jump reads as a restock.
+
+    The result FLAGS (`dp_ineligible_reason = "restocked"`); it no longer
+    filters. What a restock breaks is the DP's state transition, which assumes
+    one pool draining monotonically. The hours themselves are honest demand
+    observations -- each censored against its own opening stock -- so removing
+    them from the demand fit gave up 2.7% of the extract's COGS to protect a
+    solver that reads the flag anyway.
     """
     leftover = (d.starting_inventory - d.units_sold).clip(lower=0)
     nxt = d.groupby("episode_id")["starting_inventory"].shift(-1)
@@ -117,30 +124,35 @@ def cogs_at_risk(d):
                   * d.starting_inventory.to_numpy()[opening.to_numpy()]).sum())
 
 
-def _drop_edge_truncated(d):
-    """Drop ONLY the episodes the extract cut off mid-window. Keep the rest.
+def edge_truncated_episodes(d):
+    """Split the unclosed episodes into the two reasons they are unclosed.
 
     An episode with no closure sentinel on its final row -- `ending_inventory`
     still positive while stock remained -- has an unknown outcome. There are
-    two very different reasons for that, and dropping both would delete the
-    evidence for telling them apart:
+    two very different reasons for that, and only one of them is a defect:
 
       EDGE      the nominal window still had hours to run when the extract was
-                cut. Unavoidable, not a defect, and nothing to learn from
-                keeping it: a longer extract is the only thing that closes it.
-                DROPPED here.
+                cut. Unavoidable, not a defect, and a longer extract is the
+                only thing that closes it.
       NOT EDGE  the window ended INSIDE the data and no sentinel appeared
                 anyway -- a gap in the hourly feed splitting one window into
-                fragments, or a subset whose feed never writes off. That is a
-                data-quality problem, it is not fixed by a longer extract, and
-                it must stay VISIBLE. KEPT, still classified `not_closed`, so
-                m11's not_closed share and scrap_units_unknown_not_closed
-                measure exactly this residue and nothing else.
+                fragments, or a subset whose feed never writes off. A
+                data-quality problem, not fixed by a longer extract.
 
-    So after this stage `not_closed` means "unclosed for a reason the extract
-    boundary does not explain", which is the number worth watching month to
-    month. Dropping all of them instead would have driven it to zero by
-    construction and hidden a systemic feed problem behind a clean population.
+    NEITHER is removed. Both stay `not_closed`, so m11's not_closed share and
+    `scrap_units_unknown_not_closed` keep measuring the whole unknown, and the
+    two reasons are told apart by `share_of_unclosed_explained_by_edge` rather
+    than by deleting one of them. Removing the edge cases used to be the
+    default and it cost more than it bought: they are the LARGEST episodes in
+    the extract (~25 units of opening stock against ~3 for the population),
+    so the demand fit was giving up its best-observed windows to protect a
+    scrap figure that was already protected -- `common.episodes.scrap_units`
+    returns NaN for an unclosed episode, `backtest.replay` zeroes its scrap
+    under `outcome_known`, and `pipeline.shadow` charges scrap only on
+    COMPLETED. Their observed hours are ordinary, fully-priced demand
+    observations; only their ENDING is missing.
+
+    Returns (edge_episode_ids, detail). The caller flags, never filters.
 
     Edge is tested exactly rather than by a tolerance: the final row's
     timestamp plus its remaining window against the extract's last hour. An
@@ -164,43 +176,53 @@ def _drop_edge_truncated(d):
     edge = ((ts + pd.to_timedelta(hr, unit="h") > extract_end)
             | (ts >= extract_end))
 
-    dropped = unknown[edge.loc[unknown].to_numpy()]
-    kept = unknown[~edge.loc[unknown].to_numpy()]
+    at_edge = unknown[edge.loc[unknown].to_numpy()]
+    not_edge = unknown[~edge.loc[unknown].to_numpy()]
     n_unknown = len(unknown)
     detail = {
-        "episodes_dropped": int(len(dropped)),
-        # the LARGEST episodes, so this runs well above their episode share --
-        # it is the training signal the demand fit gives up
-        "rows_dropped": int(d.episode_id.isin(dropped).sum()),
-        "leftover_units_dropped": int(left.loc[dropped].sum()) if len(dropped) else 0,
-        # what remains unknown for a reason the extract boundary does NOT
-        # explain. This is the number to watch: it is a feed problem, and a
-        # longer extract will not move it.
-        "unclosed_kept_not_edge": int(len(kept)),
-        "leftover_units_kept_unknown": int(left.loc[kept].sum()) if len(kept) else 0,
+        "episodes_unclosed": int(n_unknown),
+        "episodes_edge_truncated": int(len(at_edge)),
+        "leftover_units_edge_truncated":
+            int(left.loc[at_edge].sum()) if len(at_edge) else 0,
+        # unknown for a reason the extract boundary does NOT explain. This is
+        # the number to watch: it is a feed problem, and a longer extract will
+        # not move it.
+        "episodes_unclosed_not_edge": int(len(not_edge)),
+        "leftover_units_unclosed_not_edge":
+            int(left.loc[not_edge].sum()) if len(not_edge) else 0,
         "share_of_unclosed_explained_by_edge":
-            round(float(len(dropped) / n_unknown), 4) if n_unknown else 0.0,
+            round(float(len(at_edge) / n_unknown), 4) if n_unknown else 0.0,
         "extract_last_hour": str(extract_end),
-        "note": ("Only extract-edge truncation is dropped. Episodes unclosed "
-                 "for any OTHER reason are kept and stay `not_closed`, so "
-                 "m11 measures the residue a longer extract cannot fix. Read "
-                 "share_of_unclosed_explained_by_edge: near 1.0 and the "
+        "note": ("FLAGGED, NOT DROPPED -- `edge_truncated` is a column, and "
+                 "these episodes stay dp_eligible. Their observed hours are "
+                 "good demand data and they are the largest episodes in the "
+                 "extract; only their ENDING is unknown, and every scrap and "
+                 "IL consumer already excludes an unclosed ending on its own "
+                 "(scrap_units returns NaN, replay zeroes scrap under "
+                 "outcome_known, shadow charges scrap only on COMPLETED). "
+                 "Read share_of_unclosed_explained_by_edge: near 1.0 and the "
                  "unknown-scrap problem is purely the extract boundary; well "
                  "below and there is a feed gap or a subset that never writes "
                  "off, spread across the whole period. "
                  "m11.not_closed_by_month shows which."),
     }
-    return d[~d.episode_id.isin(dropped)], detail
+    return at_edge, detail
 
 
 def load_and_filter(path, cfg=None):
     """Section 9.1 mapping + section 9.2 filter chain. Returns (df, waterfall).
 
-    Filter order is deterministic and auditable; the waterfall records row and
-    episode counts after every step. Episodes with an intraday restock are
-    dropped whole: mid-window replenishment breaks the one-inventory-pool
-    assumption the DP's state transition rests on, and the demand the extra
-    units meet is not the demand the episode's price path was chosen for.
+    Every stage that DROPS is an integrity or scope rule: the row is
+    impossible (negative stock), unusable by anything (null category, zero
+    base price), unreconcilable (chain break), ambiguous (duplicate hour), or
+    outside the period the study covers (exclusion window). Nothing is dropped
+    for being hard to PRICE. Those conditions -- missing cost, an untrusted
+    window counter, a mid-window restock, an unclosed ending -- are flagged by
+    `tag_dp_eligibility` and stay in the frame, because the demand model can
+    see none of them and the frozen artifacts want the data.
+
+    Filter order is deterministic and auditable; the waterfall records row,
+    episode and COGS-at-risk counts after every step.
     """
     cfg = cfg or load_config()
     excl = cfg["data"]["exclusion_window"]
@@ -307,9 +329,13 @@ def load_and_filter(path, cfg=None):
     d = step(d, "negative_window_recovered")
     wf[-1] = wf[-1] + (recovery,)
 
-    bad = d.groupby("episode_id")["hours_remaining"].min().lt(0)
-    d = d[~d.episode_id.isin(bad[bad].index)]
-    d = step(d, "negative_window_dropped")
+    # An episode whose counter is STILL negative after recovery used to be
+    # dropped here. It is now flagged `negative_window` and gates dp_eligible
+    # instead -- same argument as `window_too_long`, which it sits beside in
+    # DP_INELIGIBLE. Safe to carry through re-segmentation: what survives
+    # recovery decrements by exactly one per hour (a flat negative constant is
+    # a one-row episode, which recovery already took), so the contiguity test
+    # reads it the same way it reads any other window.
 
     bad = d.loc[d.units_sold > d.starting_inventory, "episode_id"].unique()
     d = d[~d.episode_id.isin(bad)]
@@ -341,34 +367,13 @@ def load_and_filter(path, cfg=None):
     wf.append(("contiguous_episodes_built", len(d), d.episode_id.nunique(),
                cogs_at_risk(d)))
 
-    # Intraday restock: the next hour opens with more stock than this hour
-    # left behind. Detected on the inventory CHAIN, never on
-    # ending_inventory, which is written off to zero at the window close.
-    # Run only after re-segmentation -- across a data gap the chain test
-    # would read the jump as a restock.
-    d = d[~d.episode_id.isin(restocked_episodes(d))]
-    d = step(d, "restocked_episodes_dropped")
-
-    # Episodes the extract cut off mid-window. Their outcome is unknown and
-    # unknowable from this data -- nothing to learn from keeping them, and a
-    # longer extract is the only thing that closes them.
-    #
-    # Deliberately NOT every episode with an unknown outcome. The others are
-    # unclosed for reasons the extract boundary does not explain -- a gap in
-    # the hourly feed, or a subset whose feed never writes off -- and those
-    # are a data-quality problem that must stay visible. Dropping them too
-    # would drive m11's not_closed share to zero by construction and hide a
-    # systemic issue behind a clean population.
-    #
-    # THE COST, since it is real: the dropped episodes' observed hours are
-    # good training data, and they are the LARGEST episodes. `rows_dropped`
-    # is how much mu_ref and r give up. Set
-    # `data.drop_edge_truncated_episodes: false` to keep them and go back to
-    # excluding all unclosed episodes from IL only.
-    if cfg["data"].get("drop_edge_truncated_episodes", True):
-        d, unclosed = _drop_edge_truncated(d)
-        d = step(d, "edge_truncated_episodes_dropped")
-        wf[-1] = wf[-1] + (unclosed,)
+    # Intraday restocks and extract-edge truncation used to be two more drops
+    # here. Both are now flags set in `tag_dp_eligibility` below -- the
+    # restock gates dp_eligible (it breaks the DP's state transition and
+    # nothing else), the truncation does not gate anything (only the episode's
+    # ENDING is missing, and every scrap consumer already handles that).
+    # Both tests must run AFTER re-segmentation, which is why they live at the
+    # end of the chain rather than beside the drops.
 
     d["d_ref"] = d.category.map(lambda c: reference_discount(cfg, c))
     d["d_max"] = 1.0 - d.cost / d.original_price
@@ -498,11 +503,12 @@ def pre_launch(d, cfg):
 
 
 
-# The four conditions that make an episode unpriceable. Each is ECONOMIC, not
-# an integrity defect: the demand model's FEATURES carry neither `cost` nor
-# `hours_remaining`, so it cannot see any of them, and an episode failing one
-# is an ordinary demand observation to every frozen artifact. They are fatal
-# to exactly two things -- the action set, and any figure with scrap in it.
+# The five conditions that make an episode unpriceable. Each is a MODELLING
+# limit, not an integrity defect: the demand model's FEATURES carry neither
+# `cost` nor `hours_remaining` nor anything about the inventory chain, so it
+# cannot see any of them, and an episode failing one is an ordinary demand
+# observation to every frozen artifact. They are fatal to exactly two things
+# -- the DP's state space, and any figure with scrap in it.
 #
 # Reasons are ordered by how fundamental they are, and an episode is labelled
 # with the FIRST it trips, so the reason column reads as a cause rather than
@@ -515,10 +521,27 @@ DP_INELIGIBLE = (
     ("non_priceable",
      "cost >= original_price, so d_max <= 0 and feasible_tiers is EMPTY -- "
      "there is no price for the DP to choose"),
+    ("negative_window",
+     "hours_remaining still < 0 after negative_window_recovered -- an episode "
+     "entering negative that runs LONGER than data.manufacturing_window_hours, "
+     "so it is not the recoverable source pattern and its true window length "
+     "is unknown. The DP takes its horizon from the counter and "
+     "extend_to_window generates the synthetic tail from it; neither can read "
+     "a negative one. Same class as window_too_long"),
     ("window_too_long",
      "hours_remaining above data.max_window_hours. extend_to_window RAISES "
      "above the cap, so this is a crash rather than a refusal. Only backtest "
      "and shadow extend; the artifact fits never read the counter"),
+    ("restocked",
+     "an hour opens with more stock than the previous hour left behind. The "
+     "DP's state transition is V(p, q - min(k,q), h-1) over ONE inventory "
+     "pool draining monotonically, so a mid-window replenishment leaves the "
+     "episode's horizon, scrap and IL undefined. The demand observations "
+     "themselves are fine -- censoring is per hour against that hour's own "
+     "opening stock -- which is why this flags rather than drops. Detected on "
+     "the inventory CHAIN, never on ending_inventory, which the source zeroes "
+     "at the window close; run after re-segmentation, since across a data gap "
+     "the jump would read as a restock"),
 )
 
 # Reported, NOT gating. A below-cost hour is a price the LEGACY policy set,
@@ -552,15 +575,25 @@ def tag_dp_eligibility(d, cfg):
     against", and `share_non_explorable` measured 0.0 because those episodes
     were already gone.
 
-    Episode-scoped: one below-cost hour makes the whole window unpriceable,
-    because the monotonicity anchor carries that price into every later hour.
-    Runs after re-segmentation, so the ids it groups on are final.
+    Two further stages that used to be drops are computed here for the same
+    reason: `negative_window` and `restocked` break the DP's horizon and its
+    state transition respectively, and break nothing at all in the demand fit.
+    A third, `edge_truncated`, is flagged and gates NOTHING -- see
+    `edge_truncated_episodes`.
+
+    Episode-scoped throughout: one bad hour makes the whole window
+    unpriceable, because the monotonicity anchor carries that price into every
+    later hour and the DP plans the window as a unit. Runs after
+    re-segmentation, so the ids it groups on are final and the chain tests
+    cannot mistake a data gap for a restock.
     """
     cap = cfg["data"]["max_window_hours"]
     tests = {
         "cost_missing": d.cost <= 0,
         "non_priceable": d.cost >= d.original_price,
+        "negative_window": d.hours_remaining < 0,
         "window_too_long": d.hours_remaining > cap,
+        "restocked": d.episode_id.isin(restocked_episodes(d)),
     }
     reason = pd.Series(pd.NA, index=d.index, dtype="object")
     detail = {}
@@ -588,16 +621,30 @@ def tag_dp_eligibility(d, cfg):
             d.loc[below & d.dp_eligible, "episode_id"].nunique()),
         "why": BELOW_COST_HOURS,
     }
+    # also reported-only, and for a different reason: an unclosed ending is
+    # not a limit on the DP, it is a missing OUTCOME, and every consumer of an
+    # outcome already handles it (scrap_units -> NaN, replay's outcome_known,
+    # shadow's COMPLETED-only scrap).
+    at_edge, edge_detail = edge_truncated_episodes(d)
+    edge = d.episode_id.isin(at_edge)
+    d["edge_truncated"] = edge
+    edge_detail["rows"] = int(edge.sum())
+    edge_detail["cogs_at_risk"] = round(cogs_at_risk(d[edge]), 1)
+    edge_detail["still_dp_eligible"] = int(
+        d.loc[edge & d.dp_eligible, "episode_id"].nunique())
+    detail["edge_truncated"] = edge_detail
     detail["episodes_dp_eligible"] = int(
         d.loc[d.dp_eligible, "episode_id"].nunique())
     detail["episodes_dp_ineligible"] = int(
         d.loc[~d.dp_eligible, "episode_id"].nunique())
     detail["note"] = (
         "FLAGGED, NOT DROPPED. Every row above is still in the population. "
-        "below_cost_hours is REPORTED ONLY and stays dp_eligible: the "
-        "backtest's DP arm is self-anchored so it never sees the legacy "
-        "price, and in shadow the refusal from the crossing hour onward is "
-        "the cost floor working, counted in rejected_reasons. "
+        "below_cost_hours and edge_truncated are REPORTED ONLY and stay "
+        "dp_eligible: the backtest's DP arm is self-anchored so it never sees "
+        "a below-cost legacy price, in shadow the refusal from the crossing "
+        "hour onward is the cost floor working (counted in rejected_reasons), "
+        "and an unclosed ending is already excluded from every scrap and IL "
+        "figure by the closure sentinel rather than by a filter. "
         "The three artifact fits read baseline_model.train_population "
         "('integrity' = all of it, 'dp_eligible' = this subset); the DP, the "
         "calibration gate and the A/B always read dp_eligible. Reasons are "

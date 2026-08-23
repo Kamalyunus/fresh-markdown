@@ -305,24 +305,51 @@ waterfall after every step. **Almost every filter drops the whole episode
 rather than the offending row** — a hole punched mid-window re-segments into
 a spurious short episode, which loses more than the episode does.
 
+**Only integrity and scope rules drop.** A stage removes an episode when its
+rows cannot be believed, cannot be used by anything at all, or fall outside
+the period the study covers. Nothing is dropped for being hard to *price* —
+those conditions are flags, because `FEATURES` carries neither `cost` nor
+`hours_remaining` nor anything about the inventory chain, so the demand model
+cannot see them and such an episode is an ordinary observation to every frozen
+artifact. Dropping them removed **>70% of the extract's COGS** from every fit.
+
 | Step | Drops |
 | --- | --- |
 | `duplicate_hour_rows_dropped` | both copies of any repeated (SKU, FC, hour) — no principled way to choose, and they collide two runs into one episode id |
-| `exclusion_window_removed` | any episode with *any* hour in the known bad-data window |
+| `exclusion_window_removed` | any episode with *any* hour in the known bad-data window. Scope, not integrity: the rows are fine, the period is not |
 | `discount_out_of_range_dropped` | discount outside [0,1] — the percent→fraction conversion applied twice or not at all |
-| `negative_quantities_dropped` | impossible quantities: negative inventory or sales, and **`cost <= 0`** — a zero cost is a *missing* cost, not a free good. It reads as maximally priceable (`d_max = 1.0`), so nothing downstream catches it; and since scrap is `cost × leftover`, these episodes contributed discount cost and no scrap, deflating every IL figure measured over them |
+| `negative_quantities_dropped` | impossible quantities: negative inventory or sales. **Not `cost <= 0`** — that is the `cost_missing` flag |
 | `null_category_dropped` | no category/subcategory — no reference discount, no dispersion cell |
 | `zero_base_price_dropped` | `original_price` still absent after fill-within-episode |
-| `negative_window_recovered` | *(not a filter)* "manufacturing" SKUs enter with a counter that is **already negative** — a large negative constant, not a countdown from the window length. Dropping them is not neutral: they are concentrated in a few categories, so it selects on category and biases every per-category figure. Measured on production, 381,805 of 384,055 such episodes (**99.4%**) resolve inside `data.manufacturing_window_hours` (**24**), so those get a synthetic countdown `(cap−1) − position`. A countdown, never a clamp: the counter drives episode identification, the DP horizon, and `extend_to_window`, and a flat counter re-segments every hour. The 2,250 that run longer are **not** recovered and fall through to the drop below, with their count reported |
-| `negative_window_dropped` | any `hours_remaining < 0`. With the recovery in force this takes 2,268 episodes rather than 384,073 — a recovery stage changes no counts of its own, so its whole effect shows up here as a drop that did not happen |
-| `window_too_long_dropped` | window above `data.max_window_hours` (**120**, raised from 48 — the shorter bound was cutting legitimate multi-day windows) — the counter carries very large values from upstream data issues |
-| `below_cost_dropped` | any hour whose **offered** price is under cost — tested on `original_price × (1 − discount)`, never `applied_price`, which the source zeroes on zero-sale rows |
-| `non_priceable_dropped` | `cost >= original_price`, so `d_max <= 0` and no tier is feasible |
+| `negative_window_recovered` | *(not a filter)* "manufacturing" SKUs enter with a counter that is **already negative** — a large negative constant, not a countdown from the window length. Dropping them is not neutral: they are concentrated in a few categories, so it selects on category and biases every per-category figure. Measured on production, 381,805 of 384,055 such episodes (**99.4%**) resolve inside `data.manufacturing_window_hours` (**24**), so those get a synthetic countdown `(cap−1) − position`. A countdown, never a clamp: the counter drives episode identification, the DP horizon, and `extend_to_window`, and a flat counter re-segments every hour. The 2,250 that run longer are **not** recovered and carry the `negative_window` flag instead, with their count reported |
 | `units_gt_inventory_dropped` | sales exceeding inventory on hand |
-| `chain_break_dropped` | any hour that neither reconciles (`ending == starting − sold`) nor names why not, via the same `common.episodes.adjustment_reason` that `pipeline.shadow` builds outcomes with and `events.store` enforces in production — so the analysis population cannot hold a break production would quarantine. Recognised **by the zero, never by position**: the source writes stock off at *its* window boundary, which sits mid-window once a window is merged across midnight |
-| `contiguous_episodes_built` | *(not a filter)* re-segmentation — earlier drops can split a window, so episode count may RISE here |
-| `restocked_episodes_dropped` | an hour opening with more stock than the previous hour left behind |
-| `edge_truncated_episodes_dropped` | **only** the episodes the extract cut off mid-window — the nominal window still had hours to run at the extract's last hour, so the outcome is unknowable from this data and a longer extract is the only thing that closes them. Episodes unclosed for any OTHER reason are **kept** and stay `not_closed`, because those are a feed problem a longer extract will not fix and deleting them would hide it. Off with `data.drop_edge_truncated_episodes: false`. Reports `rows_dropped` (the training signal given up — these are the largest episodes), `unclosed_kept_not_edge`, and `share_of_unclosed_explained_by_edge` |
+| `chain_break_dropped` | any hour that neither reconciles (`ending == starting − sold`) nor names why not, via the same `common.episodes.adjustment_reason` that `pipeline.shadow` builds outcomes with and `events.store` enforces in production — so the analysis population cannot hold a break production would quarantine. Recognised **by the zero, never by position**: the source writes stock off at *its* window boundary, which sits mid-window once a window is merged across midnight. The biggest cut in the tail: 94,940 episodes, **11.05pp of COGS** |
+| `contiguous_episodes_built` | *(not a filter)* re-segmentation — earlier drops can split a window, so episode count and COGS both move here |
+| `dp_eligible` | *(not a filter)* the terminal summary row: how much of the surviving population the DP can act on, with the per-flag breakdown in its detail block |
+
+`tag_dp_eligibility` then flags, on the surviving frame. Five conditions gate
+`dp_eligible`, each naming something the *solver* cannot do; an episode is
+labelled with the first it trips.
+
+| Flag | Why the DP cannot price it |
+| --- | --- |
+| `cost_missing` | `cost <= 0` — a *missing* cost, not a free good. It reads as maximally priceable (`d_max = 1.0`), so nothing downstream catches it; and since scrap is `cost × leftover`, these episodes contribute discount cost and no scrap, deflating every IL figure measured over them |
+| `non_priceable` | `cost >= original_price`, so `d_max <= 0` and no tier is feasible |
+| `negative_window` | any `hours_remaining < 0` after recovery. With the recovery in force this is 2,268 episodes rather than 384,073 — a recovery stage changes no counts of its own, so its whole effect shows up here as a flag that was not set |
+| `window_too_long` | window above `data.max_window_hours` (**120**, raised from 48 — the shorter bound was cutting legitimate multi-day windows). `extend_to_window` raises above the cap, so this is a crash rather than a refusal |
+| `restocked` | an hour opening with more stock than the previous hour left behind. The DP's transition assumes one pool draining monotonically; the demand observations themselves are fine, each censored against its own opening stock. 70,883 episodes, **2.69pp of COGS** on production |
+
+Two conditions are flagged and gate nothing:
+
+| Flag | Why it does not gate |
+| --- | --- |
+| `below_cost_hours` | any hour whose **offered** price is under cost — tested on `original_price × (1 − discount)`, never `applied_price`, which the source zeroes on zero-sale rows. A price the legacy policy set, which the agent is constrained never to set. The backtest's DP arm is self-anchored and never sees it; shadow anchors on it and refuses from the crossing hour, which is the cost floor working |
+| `edge_truncated` | the extract cut the window off mid-flight, so only the *ending* is unknown. The observed hours are ordinary priced demand and these are the largest episodes in the extract (24.9 units of opening stock against 3.05). Episodes unclosed for any other reason are flagged `False` and stay `not_closed`, because those are a feed problem a longer extract will not fix. Reports `episodes_unclosed`, `episodes_unclosed_not_edge` and `share_of_unclosed_explained_by_edge` |
+
+Which population a consumer reads is one decision, in
+`baseline_model.train_population` (default `integrity`), resolved through
+`prepare_data.population`. The three artifact fits read the config; the DP,
+the calibration gate, the backtest and shadow always pass `"dp_eligible"`.
 
 Every stage also reports **`cogs_at_risk`** — unit cost × opening stock,
 counted once per episode — with `cogs_dropped` and `cogs_dropped_pct_of_raw`
@@ -1541,23 +1568,30 @@ extract is cut. And they were half-in: excluded from scrap and IL, but
 contributing hours to the demand and dispersion fits, so no two figures were
 measured on the same rows.
 
-`data.drop_edge_truncated_episodes` (default **true**) removes them in
-`prepare_data` — but **only the extract-boundary ones**, and the narrowness is
-the point. Two causes need opposite responses:
+Neither is removed. `prepare_data` flags them instead — `edge_truncated` on
+the frame, split from the residue by an exact test — because the half-in
+problem is fixed by *including* them consistently, not by deleting them. Their
+observed hours are ordinary priced demand; only the ending is missing, and
+every consumer of an ending already excludes it on its own (`scrap_units`
+returns NaN, `backtest.replay` zeroes scrap under `outcome_known`,
+`pipeline.shadow` charges scrap only on `COMPLETED`). Dropping them gave up
+the largest, slowest, most heavily stocked windows in the extract to protect a
+figure that was already protected.
 
-| | What it is | Response |
+The split still matters, because the two causes mean different things:
+
+| | What it is | What to do about it |
 | --- | --- | --- |
-| **edge** | the window still had hours to run at the extract's last hour | **dropped** — unknowable from this data, and only a longer extract closes it |
-| **not edge** | the window ended *inside* the data and no sentinel appeared | **kept**, still `not_closed` — a feed gap or a subset that never writes off, which no re-download fixes |
+| **edge** | the window still had hours to run at the extract's last hour | nothing — unknowable from this data, and only a longer extract closes it |
+| **not edge** | the window ended *inside* the data and no sentinel appeared | investigate — a feed gap or a subset that never writes off, which no re-download fixes |
 
-Dropping both would drive `m11.not_closed` to zero *by construction* and hide
-a systemic feed problem behind a clean population. So after this stage
-`not_closed` means "unclosed for a reason the extract boundary does not
-explain", and `m11.not_closed_by_month` / `not_closed_by_category` say whether
-that residue is one incident, a standing property of the feed, or one corner
-of the catalogue. The waterfall's
-`share_of_unclosed_explained_by_edge` is the headline: near 1.0 and the whole
-unknown-scrap problem was the extract cut.
+`m11.not_closed` counts both, so read it beside
+`share_of_unclosed_explained_by_edge` in the `dp_eligible` waterfall detail:
+near 1.0 and the whole unknown-scrap problem was the extract cut.
+`m11.not_closed_by_month` / `not_closed_by_category` then say whether the
+residue is one incident, a standing property of the feed, or one corner of the
+catalogue. Deleting the residue would have driven that number to zero *by
+construction* and hidden a systemic feed problem behind a clean population.
 
 **Worth checking against the flc_window recovery**: the sentinel-free rows
 appeared in the same run family that began recovering the "manufacturing"

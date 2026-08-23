@@ -64,17 +64,22 @@ def test_filter_chain_waterfall(workspace):
     wf = manifest["data_quality_waterfall"]
     rows = [s["rows"] for s in wf if s["step"] != "contiguous_episodes_built"]
     assert rows == sorted(rows, reverse=True)
-    # every stage is named and counted -- 13 drops, the raw row, and the
-    # dp_eligible SUMMARY row, which drops nothing. The count is asserted so
-    # that adding or removing a filter has to be a deliberate edit here, and
-    # so the figure quoted in the walkthrough and design doc has something
-    # holding it to the code.
+    # every stage is named and counted -- 9 drops, the raw row, the
+    # re-segmentation row, and the dp_eligible SUMMARY row, which drops
+    # nothing. The count is asserted so that adding or removing a filter has
+    # to be a deliberate edit here, and so the figure quoted in the
+    # walkthrough and design doc has something holding it to the code.
     assert wf[0]["step"] == "raw"
     assert wf[-1]["step"] == "dp_eligible"
-    assert len(wf) == 15, [s["step"] for s in wf]
-    # the economic conditions are FLAGS now: none of them may appear as a drop
+    assert len(wf) == 12, [s["step"] for s in wf]
+    # Everything that is not an integrity or scope rule is a FLAG. None of
+    # these may come back as a drop: each one removes population from every
+    # frozen artifact while the thing it protects (the DP's state space, or a
+    # scrap figure) reads the flag anyway.
     for gone in ("below_cost_dropped", "non_priceable_dropped",
-                 "window_too_long_dropped"):
+                 "window_too_long_dropped", "cost_missing_dropped",
+                 "negative_window_dropped", "restocked_episodes_dropped",
+                 "edge_truncated_episodes_dropped"):
         assert gone not in [x["step"] for x in wf], \
             f"{gone} is back to dropping -- it must flag, or every frozen " \
             "artifact loses that population again"
@@ -124,46 +129,51 @@ def test_waterfall_reports_the_money_each_filter_removes(workspace):
     assert wf[-1]["cogs_at_risk"] < per_row
 
 
-def test_only_edge_truncation_is_dropped_not_every_unknown(workspace):
-    """The drop is narrow ON PURPOSE, and this is what keeps it narrow.
+def test_edge_truncation_is_flagged_and_split_from_the_feed_residue(workspace):
+    """Unclosed episodes stay, and the two reasons stay told apart.
 
-    Two things make an episode's outcome unknown, and they need opposite
-    responses. The extract cutting a window mid-flight is unavoidable and
-    unknowable -- drop it. Everything else is a feed problem a longer extract
-    will NOT fix, and dropping it too would drive m11's not_closed to zero by
-    construction and hide the problem behind a clean population.
-
-    So: the surviving frame MUST still contain not_closed episodes whenever
-    non-edge ones exist, and every dropped episode must genuinely be at the
-    edge.
+    Two things make an episode's outcome unknown. The extract cutting a window
+    mid-flight is unavoidable and a longer extract is the only fix. Everything
+    else is a feed problem a longer extract will NOT fix. Neither is dropped
+    -- the observed hours are good demand data either way, and every scrap
+    figure already excludes an unclosed ending on its own -- so what this test
+    protects is the SPLIT: `edge_truncated` must mark exactly the
+    boundary-explained ones, leaving m11's not_closed residue readable.
     """
     _chdir(workspace)
     from common import episodes as E
     with open("artifacts/split_manifest.json") as f:
         wf = json.load(f)["data_quality_waterfall"]
     steps = [s["step"] for s in wf]
-    stage = wf[steps.index("edge_truncated_episodes_dropped")]
-    prev = wf[steps.index("edge_truncated_episodes_dropped") - 1]
-
-    assert stage["episodes_dropped"] == prev["episodes"] - stage["episodes"]
-    assert stage["rows_dropped"] == prev["rows"] - stage["rows"]
+    stage = wf[steps.index("dp_eligible")]["edge_truncated"]
     assert 0.0 <= stage["share_of_unclosed_explained_by_edge"] <= 1.0
 
     d = pd.read_parquet("data/prepared.parquet")
-    kept = int((E.classify(d) == E.NOT_CLOSED).sum())
-    assert kept == stage["unclosed_kept_not_edge"], \
-        "non-edge unclosed episodes were dropped -- the residue that proves " \
-        "whether the feed problem is systemic has been deleted"
+    kind = E.classify(d)
+    unknown_ids = set(kind.index[kind == E.NOT_CLOSED])
+    flagged = set(d.loc[d.edge_truncated, "episode_id"].unique())
 
-    # nothing that survived was cut by the extract boundary: its window ended
-    # before the extract's last hour
+    assert stage["episodes_unclosed"] == len(unknown_ids)
+    assert stage["episodes_edge_truncated"] == len(flagged)
+    assert stage["episodes_unclosed_not_edge"] == len(unknown_ids - flagged)
+    assert flagged <= unknown_ids, \
+        "a CLOSED episode was flagged edge_truncated -- the flag has stopped " \
+        "meaning 'outcome missing because the extract stopped'"
+    # nothing was removed for being unclosed: the frame still carries both
+    # kinds, and the flag does not gate the DP
+    assert stage["still_dp_eligible"] > 0 or not flagged, \
+        "edge-truncated episodes are being kept out of dp_eligible -- only " \
+        "their ENDING is unknown, and replay zeroes that scrap already"
+
+    # the flag is exactly the boundary test: an episode NOT flagged has a
+    # window that ended before the extract's last hour
     last = E.last_rows(d)
     ts = pd.to_datetime(last.date) + pd.to_timedelta(last.hour_of_day, unit="h")
     ends = ts + pd.to_timedelta(last.hours_remaining.clip(lower=0), unit="h")
-    unknown = (E.classify_last(last) == E.NOT_CLOSED).to_numpy()
-    if unknown.any():
-        assert (ends[unknown] <= ts.max()).all()
-        assert (ts[unknown] < ts.max()).all()
+    residue = last.episode_id.isin(unknown_ids - flagged).to_numpy()
+    if residue.any():
+        assert (ends[residue] <= ts.max()).all()
+        assert (ts[residue] < ts.max()).all()
 
 
 def test_m11_still_reports_where_the_unknown_scrap_sits(workspace):
@@ -229,16 +239,18 @@ def test_prepared_data_is_priceable_and_self_consistent(workspace):
     assert (d.hours_remaining >= 0).all()
     assert (d.hours_remaining <= cfg["data"]["max_window_hours"]).all()
 
-    # No episode may sell more than it opened with. This is NOT a filter --
-    # it is the joint consequence of two that are: per-hour
-    # `sold <= starting_inventory`, and a chain that never increases
-    # (restocked_episodes_dropped). By induction those give
+    # No episode may sell more than it opened with. This is NOT asserted
+    # directly anywhere -- it is the joint consequence of the per-hour
+    # `units_gt_inventory` drop and a chain that never increases (the
+    # `restocked` flag, which gates dp_eligible). By induction those give
     # `start_t <= start_1 - sum(sold before t)`, so the episode total cannot
-    # exceed the opening stock.
+    # exceed the opening stock. It holds on THIS subset only: a restocked
+    # episode is kept in the population and can of course sell more than it
+    # opened with.
     #
     # An earlier hand-written cleaner checked the episode total directly. It
     # is redundant here ONLY while both of those hold, and the subsumption
-    # breaks silently if the chain is reordered -- moving the restock stage
+    # breaks silently if the chain is reordered -- computing the restock flag
     # before re-segmentation, or dropping the per-hour test -- so the
     # invariant is asserted on the output rather than argued in a comment.
     g = d.sort_values(["episode_id", "date", "hour_of_day"]).groupby("episode_id")
@@ -258,14 +270,22 @@ def test_every_episode_has_a_monotone_window_counter(workspace):
     """The episode rule's own postcondition: inside an episode, flc_window
     (hours_remaining) steps down exactly one per row, and the window is at
     least as long as the rows we hold. A violation means two runs collided
-    into one id -- which is what duplicate (sku, fc, date, hour) rows did."""
+    into one id -- which is what duplicate (sku, fc, date, hour) rows did.
+
+    The STEP is asserted on everything, because episode identification rests
+    on it. The window LENGTH is asserted on `dp_eligible` only: an episode
+    entering with an already-negative counter that recovery could not repair
+    is kept and flagged `negative_window`, and its counter is exactly the
+    thing that cannot be trusted."""
     _chdir(workspace)
     d = pd.read_parquet("data/prepared.parquet")
     g = d.sort_values(["date", "hour_of_day"]).groupby("episode_id")
     for eid, s in g.hours_remaining:
         steps = set(np.diff(s.to_numpy()))
         assert steps <= {-1.0}, f"{eid} has window-counter steps {steps}"
-    first, n = g.hours_remaining.first(), g.size()
+    ge = (d[d.dp_eligible].sort_values(["date", "hour_of_day"])
+          .groupby("episode_id"))
+    first, n = ge.hours_remaining.first(), ge.size()
     assert (first >= n - 1).all()
     assert not d.duplicated(
         subset=["sku_id", "fc", "date", "hour_of_day"]).any()
@@ -906,7 +926,15 @@ def test_zero_cost_episodes_are_flagged_whole_not_dropped(workspace, tmp_path):
         int(clean[clean.dp_eligible].episode_id.nunique()) - 1
 
 
-def test_restocked_episodes_are_dropped():
+def test_restocked_episodes_are_flagged_not_dropped():
+    """The detector, and the fact that its output only ever sets a flag.
+
+    A restock breaks the DP's state transition -- one pool draining
+    monotonically -- and nothing else. The hours themselves are honest demand
+    observations, each censored against its own opening stock, so dropping
+    them cost the demand fit 2.7% of the extract's COGS to protect a solver
+    that reads `dp_eligible` anyway.
+    """
     from bootstrap.prepare_data import restocked_episodes
 
     clean = _observed_episode()
@@ -924,6 +952,63 @@ def test_restocked_episodes_are_dropped():
     assert len(restocked_episodes(steep)) == 0
 
 
+def test_a_restock_survives_the_real_chain_and_lands_out_of_dp_eligible(
+        workspace, tmp_path):
+    """The flag through the whole pipeline, not just the detector.
+
+    Two things have to hold together and only an end-to-end run shows both:
+    the episode is STILL THERE for the demand fit, and it is OUT of the subset
+    the DP acts on. A restock is also the one break `adjustment_reason` names
+    (`intraday_restock`), so the chain-break stage must let it through -- if
+    that stage took it first, the flag would be measuring an empty set.
+    """
+    _chdir(workspace)
+    from bootstrap.prepare_data import load_and_filter
+
+    cfg = yaml.safe_load(open("config.yaml"))
+    raw = pd.read_parquet("data/flc.parquet")
+    clean, _ = load_and_filter("data/flc.parquet", cfg)
+
+    # pick a window that survives a CLEAN run, so the only thing this test can
+    # be measuring is the restock
+    sizes = clean.groupby("episode_id").size()
+    eid = sizes[sizes >= 4].index[0]
+    g = (clean[clean.episode_id == eid]
+         .sort_values(["date", "hour_of_day"]))
+    tail = set(zip(g.date.astype(str), g.hour_of_day))  # from its 3rd hour on
+    tail -= set(zip(g.date.astype(str)[:2], g.hour_of_day[:2]))
+
+    # 50 units appear mid-window. Bump `ending_inventory` in step so every
+    # HOUR still reconciles -- except where the source zeroed it to write the
+    # remainder off, which must stay zero or the chain-break stage takes the
+    # episode before the restock flag ever sees it.
+    holed = raw.copy()
+    bump = pd.Series(list(zip(holed.date.astype(str), holed.hour)),
+                     index=holed.index).isin(tail) \
+        & holed.skuseq.eq(g.sku_id.iloc[0]) & holed.fc.eq(g.fc.iloc[0])
+    assert bump.sum() >= 2, int(bump.sum())
+    holed.loc[bump, "inventory"] += 50
+    holed.loc[bump & holed.ending_inventory.ne(0), "ending_inventory"] += 50
+    path = tmp_path / "restocked.parquet"
+    holed.to_parquet(path)
+
+    d, wf = load_and_filter(str(path), cfg)
+    hit = d[(d.sku_id == g.sku_id.iloc[0]) & (d.fc == g.fc.iloc[0])
+            & d.date.astype(str).isin(g.date.astype(str))]
+    assert len(hit), "the restocked episode was dropped from the population"
+    assert not hit.dp_eligible.any()
+    assert (hit.dp_ineligible_reason == "restocked").all()
+
+    # and it cost the frozen artifacts nothing: same population, one fewer
+    # DP-eligible episode
+    assert d.episode_id.nunique() == clean.episode_id.nunique()
+    assert int(d[d.dp_eligible].episode_id.nunique()) < \
+        int(clean[clean.dp_eligible].episode_id.nunique())
+    detail = next(t[4] for t in wf if t[0] == "dp_eligible")
+    assert detail["restocked"]["episodes"] >= 1
+    assert detail["restocked"]["cogs_at_risk"] > 0
+
+
 def test_negative_entry_window_is_recovered_not_dropped(workspace, tmp_path):
     """A window counter that enters ALREADY negative is a known source
     pattern, not a defect, and dropping it is not neutral.
@@ -935,7 +1020,9 @@ def test_negative_entry_window_is_recovered_not_dropped(workspace, tmp_path):
 
     The claim is CHECKED, not trusted: an episode entering negative that runs
     LONGER than the assumed window is not the pattern, is not recovered, and
-    is dropped with its count reported.
+    is flagged `negative_window` -- kept in the population, out of
+    `dp_eligible`, since the counter it cannot supply is a DP input and not a
+    demand feature.
     """
     _chdir(workspace)
     from bootstrap.prepare_data import load_and_filter
@@ -963,8 +1050,13 @@ def test_negative_entry_window_is_recovered_not_dropped(workspace, tmp_path):
 
     # recovered rows survive, and carry a real countdown rather than a clamp:
     # episode identification, the DP horizon and extend_to_window all
-    # difference this column, so a flat value would re-segment every hour
-    assert (d.hours_remaining >= 0).all()
+    # difference this column, so a flat value would re-segment every hour.
+    # Asserted on dp_eligible: an UNrecovered negative is kept in the
+    # population now, flagged rather than dropped.
+    assert (d.loc[d.dp_eligible, "hours_remaining"] >= 0).all()
+    # (the reason column is first-match, so a negative window that also has a
+    #  missing cost reads `cost_missing` -- what must hold is the gating)
+    assert not d.loc[d.hours_remaining < 0, "dp_eligible"].any()
     surv = d[(d.sku_id == victim.skuseq) & (d.fc == victim.fc)]
     if len(surv):
         for _, g in surv.groupby("episode_id"):

@@ -1,10 +1,14 @@
 """A mid-episode restock in PRODUCTION, which is a different path from the one
 `bootstrap.prepare_data` guards.
 
-Offline, `restocked_episodes_dropped` removes these episodes: the DP rests on a
-single inventory pool draining monotonically, so a window that gains stock
-half-way through is not evidence about a system that cannot model it. That rule
-is tested in `test_end_to_end.test_restocked_episodes_are_dropped`.
+Offline, a restocked episode is FLAGGED `restocked` and excluded from
+`dp_eligible`: the DP rests on a single inventory pool draining monotonically,
+so a window that gains stock half-way through leaves its horizon, scrap and IL
+undefined. It stays in the population, because the hours themselves are honest
+demand observations -- each censored against its own opening stock -- and the
+demand model has no way to see the break. That rule is tested in
+`test_end_to_end.test_restocked_episodes_are_flagged_not_dropped` and
+`test_populations`.
 
 Live, a restock simply happens, and dropping it is not an option. The claim
 this file exists to hold up is that production ABSORBS it -- the agent is a

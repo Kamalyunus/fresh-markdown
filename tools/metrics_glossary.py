@@ -39,7 +39,7 @@ CATALOGUE = [
 ("Population", "bootstrap.prepare_data → artifacts/split_manifest.json",
  "The rows every other number is measured on. Frozen at launch.", [
   ("data_quality_waterfall", "count",
-   "Rows and episodes remaining after each of the 16 filter stages, in order. "
+   "Rows, episodes and COGS at risk after each of the 12 waterfall rows, in order. "
    "The first entry is `raw`.", "every figure traces back through it"),
   ("cogs_at_risk", "won",
    "Unit cost × opening stock, ONCE per episode, reported at every waterfall stage "
@@ -50,13 +50,16 @@ CATALOGUE = [
    "`cogs_dropped` appears at exactly one stage, `contiguous_episodes_built`, where "
    "re-segmentation turns one opening row into two.",
    "whether the surviving population still looks like the business"),
-  ("edge_truncated_episodes_dropped", "count",
-   "ONLY the episodes the extract cut off mid-window. Episodes unclosed for any other "
-   "reason are KEPT and stay `not_closed`, because those are a feed problem no "
-   "re-download fixes and dropping them would zero out the evidence. "
+  ("dp_eligible · edge_truncated", "count",
+   "Episodes the extract cut off mid-window, FLAGGED not dropped: only the ENDING is "
+   "unknown, the observed hours are ordinary priced demand, and these are the LARGEST "
+   "episodes in the extract (~24.9 units of opening stock against ~3.05). They stay "
+   "dp_eligible, because every consumer of an outcome already excludes an unclosed "
+   "one -- scrap_units returns NaN, replay zeroes scrap under outcome_known, shadow "
+   "charges scrap only on COMPLETED. "
    "`share_of_unclosed_explained_by_edge` near 1.0 means the whole unknown-scrap "
-   "problem was the extract boundary; `rows_dropped` is the training signal given up, "
-   "and these are the LARGEST episodes.", "every scrap and IL figure"),
+   "problem was the extract boundary; `episodes_unclosed_not_edge` is the residue a "
+   "longer extract will NOT fix.", "every scrap and IL figure"),
   ("episode_rule", "text",
    "The persisted definition of an episode: a maximal run of consecutive hourly "
    "rows for one SKU × FC over which the source hours-remaining counter "
@@ -114,10 +117,12 @@ CATALOGUE = [
    "entry rows ONLY, so this is the population that estimate is drawn from.", ""),
   ("m11 · episode_endings", "count",
    "Splits episodes three ways — `completed` (leftover IS scrap), `sold_out_early` "
-   "(no scrap by construction), `not_closed` (scrap UNKNOWN). With "
-   "`data.drop_edge_truncated_episodes` on, the extract boundary has already been "
-   "removed upstream, so `not_closed` here counts ONLY episodes unclosed for a reason "
-   "a longer extract will not fix.", "every scrap and IL figure"),
+   "(no scrap by construction), `not_closed` (scrap UNKNOWN). Unclosed episodes are "
+   "KEPT in the population, so `not_closed` counts BOTH kinds: the ones the extract "
+   "boundary cut off and the ones unclosed for a reason a longer extract will not "
+   "fix. Read it beside `dp_eligible.edge_truncated."
+   "share_of_unclosed_explained_by_edge`, which is the split.",
+   "every scrap and IL figure"),
   ("m11 · not_closed_by_month / by_category", "count",
    "Where the residual unknown scrap sits. Concentrated in one month reads as an "
    "incident; spread evenly across every month reads as a standing property of the "
