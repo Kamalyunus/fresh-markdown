@@ -332,19 +332,76 @@ def test_prior_artifact_within_bounds(workspace):
     _chdir(workspace)
     with open("artifacts/prior.json") as f:
         prior = json.load(f)
-    assert prior["source"] in ("bracket", "fallback", "mixed")
+    assert prior["source"] in ("bracket", "fallback", "mixed",
+                              "profile_density")
     lo, hi = prior["search_bounds"]
     for cat, v in prior["per_category"].items():
         assert lo <= v["epsilon_naive"] <= hi
         assert lo <= v["epsilon_controlled"] <= hi
         assert v["std"] > 0 and v["mean"] < 0
-        # what the DATA said, kept whether or not the fallback overwrote it --
-        # without this the cost of a rejection is invisible in the artifact
-        assert v["bracket_mean"] < 0 and v["bracket_std"] > 0
-        assert v["using"] in ("bracket", "fallback")
-        if v["using"] == "bracket":
-            assert v["mean"] == v["bracket_mean"], \
-                "a category using its bracket must carry the bracket's numbers"
+
+        # WHAT THE DATA SAID BEFORE ANYTHING OVERWROTE IT. Both methods must
+        # carry it, or the cost of the overwrite is invisible in the artifact.
+        # The two methods overwrite differently, so the field differs: the
+        # bracket REPLACES a rejected category with a constant, while
+        # profile_density SHRINKS toward a pooled density and never replaces.
+        if prior["source"] == "profile_density":
+            assert v["own_mean"] < 0 and v["own_std"] > 0
+            assert 0.0 <= v["own_information_weight"] <= 1.0
+            if v["own_information_weight"] >= 0.999:
+                assert abs(v["mean"] - v["own_mean"]) < 1e-9, \
+                    "a category standing on its own data must carry its own " \
+                    "density's moments unchanged"
+            # the whole point of the method: no constant anywhere in it
+            assert "using" not in v and "rejected_for" not in v
+        else:
+            assert v["bracket_mean"] < 0 and v["bracket_std"] > 0
+            assert v["using"] in ("bracket", "fallback")
+            if v["using"] == "bracket":
+                assert v["mean"] == v["bracket_mean"], \
+                    "a category using its bracket must carry the bracket's numbers"
+
+
+def test_the_density_prior_has_no_constant_in_it(workspace):
+    """The objection that motivated the method: -1.00 +- 0.60 is a config
+    constant nothing measured produced, and it was overwriting measured
+    brackets. Under `profile_density` it must not appear at all.
+
+    A category the data says nothing about must land on the UNIFORM over the
+    support -- mean (lo+hi)/2, std (hi-lo)/sqrt(12) -- which is reached by
+    construction from a flat likelihood, not configured. That is the property
+    that makes "no fallback" true rather than merely renamed.
+    """
+    _chdir(workspace)
+    with open("artifacts/prior.json") as f:
+        prior = json.load(f)
+    if prior["source"] != "profile_density":
+        pytest.skip("bracket method configured")
+
+    from common.config import load_config
+
+    cfg = load_config()
+    pc = cfg["posterior"]["prior"]
+    lo, hi = prior["search_bounds"]
+    u = prior["uniform_limit"]
+    assert abs(u["mean"] - (lo + hi) / 2) < 1e-6
+    assert abs(u["std"] - (hi - lo) / np.sqrt(12)) < 1e-3
+
+    for cat, v in prior["per_category"].items():
+        assert v["mean"] != pc["fallback_mean"] or v["std"] != pc["fallback_std"], \
+            f"{cat} landed exactly on the fallback constant, which this " \
+            "method does not use -- check it is not being reintroduced"
+        # a category with NO price variation has a flat likelihood, so its OWN
+        # density must be the uniform, to the grid's resolution
+        if v["log_ratio_sd"] < 1e-9:
+            assert abs(v["own_mean"] - u["mean"]) < 0.05, (
+                f"{cat} has no price variation, so its own density must be "
+                f"the uniform ({u['mean']}), got {v['own_mean']}")
+            assert v["own_information_weight"] == 0.0
+
+    # and the artifact must carry the evidence for its own method
+    c = prior["holdout_comparison"]
+    assert c["window"] != "train"
 
 
 def test_backtest_blocks_reported_separately(workspace):

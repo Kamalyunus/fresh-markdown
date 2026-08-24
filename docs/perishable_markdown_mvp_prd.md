@@ -615,6 +615,66 @@ Note the acceptance checks are **pre-registered in config**, not chosen after se
 
 **Censored entry rows are dropped, and this is what lets the step run before §9.4.** Censoring is decided at an episode's *last* row, so a censored entry row is a one-hour episode — the window sold out inside its opening hour. Removing them takes the `nbinom.logsf` term out of the likelihood, which is the channel through which `r` really matters, leaving only the weighting term `r/(r+μ)`. The bracket therefore fits at `posterior.prior.reference_r` and §9.4 runs afterwards on the real per-category elasticities.
 
+### 9.5a Why the entry-row restriction was starving the fit
+
+`tools.profile_epsilon` plots the profile and reports its shape. On the fixture, scoring **entry rows only**:
+
+| category | n | distinct discounts | log_ratio sd | span naive / ctrl |
+|---|---|---|---|---|
+| SEAFOOD | 275 | 9 | 0.0352 | 6.86 / 3.46 |
+| FRUIT | 361 | 5 | 0.0161 | 0.76 / 0.27 |
+| MEAT | 467 | 2 | 0.0027 | 0.18 / 0.01 |
+| SIDE DISH | 358 | 1 | 0.0000 | 0.00 / 0.00 |
+| VEGETABLE | 237 | 1 | 0.0000 | 0.00 / 0.00 |
+
+`span` is how far the log-likelihood moves across the *entire* support. Two categories are exactly **zero**: ε enters the likelihood only as `exp(ε·log_ratio)`, so where every scored row sits at the same discount ε is not weakly identified, it is **absent**. Every grid value scores identically and `argmax` of a constant array returns index 0 — which is how those categories came back as a confident `−4.000 ± 0.400 [BOUNDARY]` with nothing measured at all.
+
+The mechanism is structural: the bracket scored *entry* rows, the entry hour is before the legacy ramp starts discounting, so entry rows sit at the opening discount — which **is** `d_ref`. The restriction meant to buy same-hour cross-episode variation was selecting the rows with the least price variation in the data.
+
+Scoring **every stocked hour** instead, with the design-effect deflation applied:
+
+| category | log_ratio sd | span naive / ctrl | within-hour share |
+|---|---|---|---|
+| FRUIT | 0.0160 | 2.40 / 0.66 | 0.998 |
+| MEAT | 0.0235 | 10.31 / 0.95 | 0.239 |
+| SEAFOOD | 0.0353 | 5.65 / 2.75 | 0.998 |
+| SIDE DISH | 0.0245 | 8.97 / 1.07 | 0.227 |
+| VEGETABLE | 0.0000 | 0.00 / 0.00 | 0.000 |
+
+Three different situations the old reporting could not tell apart. MEAT and SIDE DISH gain enormously — SIDE DISH goes from a *constant* likelihood to a bounded interval — but only in the naive arm, and only 23–24% of their price variation survives hour de-meaning, so three quarters of the gain is the ramp confound. FRUIT and SEAFOOD barely move: their variation is 99.8% within-hour, simply small. VEGETABLE has **one** discount, 0.30, across all 1,355 stocked hours, equal to `d_ref` — no estimator and no row selection can produce a VEGETABLE elasticity from that extract, and `profile_density` says so by handing it the pooled density and a `no_price_variation` note rather than a number.
+
+`[BOUNDARY]` in the bracket method fires identically for SEAFOOD, whose curve genuinely rules out the elastic end over 6.9 log-likelihood units, and for VEGETABLE, whose curve rules out nothing because it is a horizontal line. Those are opposite situations reported with the same flag, which is the reporting gap `likelihood_span` and `own_information_weight` close.
+
+### 9.5b Method `profile_density` — the prior *is* the profile likelihood
+
+**Default since 2026-08-24 (owner).** The bracket is retained as `method: bracket` so an older run reproduces exactly, and every run writes a `holdout_comparison` scoring both on data neither saw.
+
+Two changes, and they answer separate questions.
+
+**How the curve is computed** — a censored **Poisson** profile, not a censored NB. The Poisson quasi-MLE is consistent for the *mean* parameters even when the truth is negative binomial; dispersion moves the standard errors, not the point estimate (Gourieroux, Monfort & Trognon 1984). ε lives entirely in the mean, so `r` leaves this step **by theorem** rather than by measuring a sensitivity and calling it small. That is what cuts ε ↔ r: §9.4 still needs an elasticity, but §9.5 no longer needs a dispersion.
+
+**What the curve becomes** — the whole curve, read as a density, instead of its argmax:
+
+1. Per arm, normalise the deff-deflated profile: `w(ε) ∝ exp(ll(ε)/deff)`.
+2. Per category, take the **50/50 mixture** of the naive and controlled densities.
+3. Pool across categories by summing log-likelihoods; that pooled density is what a category with no information of its own borrows.
+4. Final prior = mixture of own and pooled, weighted `own_information_weight = min(1, span / own_information_saturation)`, saturation defaulting to 2.0 — the χ² 95% cutoff.
+5. `prior_mean`, `prior_std` are the mean and std of that density.
+
+**This is a strict generalisation of the bracket, not a different idea.** A 50/50 mixture of two *point masses* at `a` and `b` has mean `(a+b)/2` and std `|a−b|/2` — exactly the bracket's `prior_mean` and `prior_std`. Where both arms are sharp the two methods agree; where they are not, this widens instead of reporting false precision, and it needs no `std_floor` because the density's own width is the floor.
+
+**The fallback constant is gone.** There is no `fallback_mean`, `fallback_std` or `std_floor` in this path. A category the data says nothing about gets its own density — which for a flat likelihood *is* the uniform on the support, mean −2.025 and std 1.140 on [−4, −0.05], reached by construction rather than configured — and then shrinks to the measured pooled density. The only external input left is `search_bounds`, and that is a policy statement about the range the DP supports, not a guess about demand.
+
+**Rows: every stocked hour**, not entry rows. See §9.5a for why the entry-row restriction was starving the fit. The extra rows repeat the same episode, so the curve is deflated by `deff = 1 + (m̄−1)·ρ` before any interval is read from it — and that ρ is computed on **ε-free** `units_sold − μ_ref` residuals, which is what keeps the step acyclic. §9.4 still re-fits ρ at the estimated elasticity, and that value is the one the posterior update uses.
+
+**The held-out comparison is the acceptance evidence.** Neither prior can be judged from the inside — "is −1.61 ± 1.09 better than −1.00 ± 0.60" has no answer by inspection. Fit on train, then score the log marginal predictive likelihood on the held-out window:
+
+    score = log ∫ p(y_hold | ε) π(ε) dε
+
+Both priors are rendered as densities on the same grid — the bracket's `(mean, std)` as a normal — so the difference measured is the method, not the accounting. Two reference points bracket the result: **`oracle`**, the best single ε chosen with hindsight, and **`uniform`**, a flat prior. **Read `information_available_per_row` (oracle − uniform) first**: a method gap that is a large share of a tiny number is still a tiny number.
+
+Fixture run, calib window, 1,230 rows: oracle −0.591567, bracket −0.591826, profile_density −0.592091, uniform −0.592705. The whole information available is **0.001137 nats/row** and the method gap is 23% of it. On that extract the window cannot settle the method question — which is itself the finding, and the reason the choice rests on which method is more honest about what it does not know.
+
 `reference_r` is **derived from the data, not pinned, and fitted per category** (owner, 2026-08-24). Left null (the default) the step fits `r` on each category's own entry rows — the rows this likelihood sums over — at the fallback elasticity, using the same `fit_dispersion.fit_r` and the same boundary clamp the frozen artifact uses. Reported as `reference_r_by_category`, with `reference_r` the pooled value used only where a category has fewer than `reference_r_min_rows` entry rows, plus `reference_r_basis` and a per-category `reference_r_scope` of `category` or `pooled`.
 
 It is computed rather than borrowed, so nothing has to exist first and the cold start works on a fresh clone. It also cannot go stale: a pinned constant describes whatever extract produced it, needs re-pasting after a retrain, and says nothing about the data in front of you. Setting an explicit number still wins, for reproducing an older run, and then applies to every category.

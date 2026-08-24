@@ -383,7 +383,29 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
    rows, so the dispersion-sensitive `logsf` term never fires; see PRD
    §9.4/§9.5.
 
-   **`reference_r` is DERIVED, not pinned, and fitted PER CATEGORY** — `r` on
+   **THE DEFAULT PRIOR METHOD IS `profile_density`** (owner, 2026-08-24), and
+   it removes the epsilon <-> r cycle rather than managing it. The curve is a
+   censored POISSON profile -- the Poisson QMLE is consistent for the MEAN
+   whatever the true dispersion is, and epsilon lives entirely in the mean, so
+   `r` leaves this step by theorem. The whole curve then becomes the prior as a
+   density instead of its argmax. **There is no `fallback_mean`,
+   `fallback_std` or `std_floor` in this path**: a flat likelihood gives the
+   uniform on the support by construction (-2.025 +- 1.140 on [-4, -0.05]) and
+   then shrinks to the MEASURED pooled density. A 50/50 mixture of two point
+   masses at a and b has mean (a+b)/2 and std |a-b|/2, so this reproduces the
+   bracket exactly wherever both arms were sharp -- it is a generalisation, not
+   a replacement. Rows are every stocked hour, deflated by an eps-free deff.
+   `method: bracket` still reproduces an older run. See PRD 9.5a/9.5b.
+
+   **EVERY RUN SCORES BOTH METHODS ON HELD-OUT DATA**, in
+   `prior.json.holdout_comparison`: the log marginal predictive per row, with
+   `oracle` (best epsilon with hindsight) and `uniform` (flat prior) as the
+   ceiling and floor. **Read `information_available_per_row` = oracle - uniform
+   FIRST.** On the fixture it is 0.001137 nats/row, so neither method is
+   meaningfully better there and the method gap of 23% is 23% of nearly
+   nothing. A method gap that is a large share of a tiny number is still tiny.
+
+   **`reference_r` (bracket method only) is DERIVED, not pinned, and fitted PER CATEGORY** — `r` on
    each category's own entry rows at the fallback elasticity, so it cannot go
    stale and there is no constant to re-paste. Computed, not read from
    `r_lookup.json`, so a fresh clone runs. **Do not borrow the artifact's

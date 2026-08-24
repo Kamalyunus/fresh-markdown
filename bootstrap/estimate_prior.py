@@ -89,6 +89,7 @@ from common import episodes
 from common.provenance import stamp
 from bootstrap.prepare_data import population, split_frames
 from bootstrap.train_baseline import BaselineModel
+from bootstrap import prior_density
 
 
 def _censored_loglik(eps, mu_ref, log_ratio, k, r, censored, lgamma_const,
@@ -229,7 +230,111 @@ def _reference_r(rows, cfg, model, pc):
     return by_cat, float(pooled), basis
 
 
+def _episodes_per_week(d, cfg):
+    """Volume per category on the train window, which decides cell structure in
+    `pricing.posterior.initialise`. Shared by both methods -- it is a property
+    of the population, not of how epsilon was estimated."""
+    train = population(split_frames(d, cfg)["train"], cfg)
+    weeks = max(train.date.astype(str).map(
+        lambda x: pd.Timestamp(x).to_period("W")).nunique(), 1)
+    per = train.groupby("category")["episode_id"].nunique() / weeks
+    return {str(k): round(float(v), 1) for k, v in per.items()}
+
+
+def estimate_prior_density(d, cfg):
+    """PRD 9.5 method `profile_density` -- the prior IS the profile likelihood.
+
+    See `bootstrap.prior_density` for why. Two changes from the bracket, and
+    they are separable: the curve is a censored POISSON profile, so `r` leaves
+    the epsilon step by theorem rather than by a measured sensitivity; and the
+    whole curve becomes the prior instead of its argmax, so there is no
+    fallback constant, no std floor, and a category the data says nothing about
+    degrades to the uniform on the support rather than to someone's guess.
+
+    The held-out comparison runs in the same pass and scores BOTH methods, so
+    the artifact carries the evidence for its own method rather than asserting
+    it. Nothing here decides the prior-acceptance gate; that is still a human
+    reading this file.
+    """
+    pc = cfg["posterior"]["prior"]
+    model = BaselineModel(cfg)
+    grid, per_category, densities, pooled = prior_density.estimate(d, cfg, model)
+
+    # THE COMPARISON IS AGAINST THE METHOD BEING REPLACED, not against nothing.
+    # Both priors are rendered as densities on the same grid and scored by the
+    # same arithmetic -- the bracket's (mean, std) as a normal, this method's
+    # as itself -- so the difference is the method and not the accounting.
+    candidates = {"profile_density": densities}
+    bracket_note = None
+    try:
+        bracket = estimate_prior_bracket(d, cfg)
+        candidates["bracket"] = {
+            c: prior_density.normal_on_grid(grid, v["mean"], v["std"])
+            for c, v in bracket["per_category"].items()}
+    except Exception as exc:                       # noqa: BLE001
+        # a comparison that cannot run must not take the fit down with it
+        bracket_note = f"bracket comparison unavailable: {exc}"
+
+    comparison = prior_density.holdout_comparison(
+        d, cfg, model, grid, candidates)
+    if bracket_note:
+        # its own key: `note` may already carry why the window was unscorable,
+        # and one message must not silently replace the other
+        comparison["bracket_note"] = bracket_note
+
+    return {
+        "source": "profile_density",
+        "method": "profile_density",
+        "requested_source": pc["source"],
+        "identifying_rows": pc.get("rows", "all_stocked_hours"),
+        "search_bounds": list(pc["search_bounds"]),
+        "grid_step": float(grid[1] - grid[0]),
+        "uniform_limit": {
+            "mean": round(float(np.mean(pc["search_bounds"])), 4),
+            "std": round(float((pc["search_bounds"][1] - pc["search_bounds"][0])
+                               / np.sqrt(12)), 4),
+            "note": ("what a category with a FLAT likelihood gets, by "
+                     "construction rather than by configuration. Any "
+                     "per-category mean and std at these values means the data "
+                     "said nothing and the support bounds are the whole "
+                     "answer."),
+        },
+        "pooled": pooled,
+        "no_fallback_note": (
+            "There is no fallback_mean, fallback_std or std_floor in this "
+            "method. A category with no information of its own takes the "
+            "POOLED density, which is fitted across every category on this "
+            "extract -- measured, not chosen. `own_information_weight` says "
+            "how much of each category's prior is its own data."),
+        "per_category": per_category,
+        # `pricing.posterior.initialise` reads this to decide which categories
+        # get their own cell, so it is required of any method, not a bracket
+        # detail. Measured on the same train window the prior is fitted on.
+        "episodes_per_week": _episodes_per_week(d, cfg),
+        "no_price_variation_categories": sorted(
+            c for c, v in per_category.items() if "no_price_variation" in v),
+        "holdout_comparison": comparison,
+        "acceptance": {
+            "passed": True,
+            "failures": [],
+            "note": ("this method has no reject path: a category that fails to "
+                     "identify epsilon widens instead of being replaced, which "
+                     "is what removes the constant. Read "
+                     "`holdout_comparison` and `own_information_weight` "
+                     "instead of an accept/reject flag."),
+        },
+    }
+
+
 def estimate_prior(d, cfg, seed=0):
+    """Dispatch on `posterior.prior.method`. `bracket` is kept so an older run
+    reproduces exactly; `profile_density` is the default."""
+    if cfg["posterior"]["prior"].get("method", "bracket") == "profile_density":
+        return estimate_prior_density(d, cfg)
+    return estimate_prior_bracket(d, cfg, seed=seed)
+
+
+def estimate_prior_bracket(d, cfg, seed=0):
     pc = cfg["posterior"]["prior"]
     lo, hi = pc["search_bounds"]
     grid = np.linspace(lo, hi, pc["search_grid_size"])
@@ -533,6 +638,36 @@ def estimate_prior(d, cfg, seed=0):
     }
 
 
+def _print_density(prior):
+    u = prior["uniform_limit"]
+    print(f"prior method: profile_density   rows: {prior['identifying_rows']}")
+    print(f"  flat-likelihood limit: {u['mean']:+.3f} +- {u['std']:.3f}  "
+          f"(a category AT these values learned nothing)")
+    print(f"  pooled across categories: {prior['pooled']['pooled_mean']:+.3f} "
+          f"+- {prior['pooled']['pooled_std']:.3f}\n")
+    print(f"  {'category':12s} {'mean':>7s} {'std':>6s} {'own':>6s} "
+          f"{'span':>7s} {'sd(lr)':>8s} {'deff':>5s}  note")
+    for cat, v in prior["per_category"].items():
+        note = ("NO PRICE VARIATION -- pooled" if "no_price_variation" in v
+                else "own data" if v["own_information_weight"] >= 0.999
+                else f"{v['own_information_weight']:.0%} own, rest pooled")
+        print(f"  {cat:12s} {v['mean']:>+7.3f} {v['std']:>6.3f} "
+              f"{v['own_information_weight']:>6.2f} {v['likelihood_span']:>7.2f} "
+              f"{v['log_ratio_sd']:>8.5f} {v['deff']:>5.2f}  {note}")
+    c = prior.get("holdout_comparison", {})
+    if c.get("total_per_row"):
+        print(f"\n  held out on '{c['window']}' ({c['rows_scored']:,} rows), "
+              f"log marginal predictive per row -- higher is better:")
+        for k, v in sorted(c["total_per_row"].items(), key=lambda kv: -kv[1]):
+            print(f"    {k:18s} {v:>10.6f}")
+        print(f"  information available on this window (oracle - uniform): "
+              f"{c.get('information_available_per_row')} nats/row")
+        if c.get("verdict"):
+            print(f"  -> {c['verdict']}")
+        if c.get("warning"):
+            print(f"  !! {c['warning']}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
@@ -549,6 +684,11 @@ def main():
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
         json.dump(prior, f, indent=2)
+
+    if prior.get("method") == "profile_density":
+        _print_density(prior)
+        print(f"wrote {path}")
+        return
 
     print(f"prior source: {prior['source']}"
           + ("" if prior["acceptance"]["passed"]

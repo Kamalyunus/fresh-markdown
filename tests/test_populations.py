@@ -359,8 +359,10 @@ def test_the_artifact_fits_read_the_config_and_the_dp_side_does_not():
     from backtest import __main__ as bt
     from pipeline import shadow
 
+    from bootstrap import prior_density
     for fn in (train_baseline.train, fit_dispersion.fit_dispersion,
-               estimate_prior.estimate_prior):
+               estimate_prior.estimate_prior_bracket,
+               prior_density.build_curves):
         assert "population(" in inspect.getsource(fn), fn.__name__
 
     for fn in (bt.main, shadow.run_shadow):

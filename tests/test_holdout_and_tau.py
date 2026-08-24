@@ -320,8 +320,23 @@ def test_the_three_artifact_fits_stay_inside_their_own_splits():
     assert 'splits["train"]' in inspect.getsource(train_baseline.train)
     assert 'split_frames(d, cfg)["calib"]' in inspect.getsource(
         fit_dispersion.fit_dispersion)
+    # BOTH prior methods, not just whichever is configured. `estimate_prior`
+    # is a dispatcher now, so asserting on it would pass while a method read
+    # the wrong window.
+    from bootstrap import prior_density
     assert 'split_frames(d, cfg)["train"]' in inspect.getsource(
-        estimate_prior.estimate_prior)
+        estimate_prior.estimate_prior_bracket)
+    assert 'split_frames(d, cfg)[window]' in inspect.getsource(
+        prior_density.build_curves), (
+        "profile_density must take its rows from a named split, so the fit "
+        "window and the held-out window cannot silently be the same one")
+    assert '"train"' in inspect.getsource(prior_density.estimate), \
+        "the profile_density fit must be built on the TRAIN window"
+    hold = inspect.getsource(prior_density.holdout_comparison)
+    assert 'cfg["posterior"]["prior"]["holdout_window"]' in hold, \
+        "the held-out comparison must score the CONFIGURED held-out window"
+    assert 'build_curves(d, cfg, model, grid, "train")' not in hold, \
+        "the held-out comparison must not score the window the prior was fitted on"
 
 
 # -------------------------------------------------------- tau provenance

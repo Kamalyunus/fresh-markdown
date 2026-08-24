@@ -252,10 +252,59 @@ posterior:
   min_std: 0.05                        # SET  floor on posterior std
   path: "artifacts/posterior.json"
   prior:
+    method: "profile_density"          # SET BY OWNER 2026-08-24.
+      # "profile_density"  the prior IS the deff-deflated profile likelihood,
+      #                    read as a density. A censored POISSON profile, so
+      #                    `r` leaves the epsilon step by theorem (the Poisson
+      #                    QMLE is consistent for the MEAN whatever the true
+      #                    dispersion is) rather than by a measured
+      #                    sensitivity -- that is what cuts epsilon <-> r.
+      #                    NO fallback_mean, NO fallback_std, NO std_floor:
+      #                    a category the data says nothing about degrades to
+      #                    the uniform on the support and then borrows the
+      #                    POOLED density, which is measured across categories.
+      # "bracket"          PRD 9.5 as originally written: argmax of two arms,
+      #                    midpoint and half-gap, with a constant fallback when
+      #                    a category is rejected. Kept so an older run
+      #                    reproduces exactly.
+      #
+      # The two are not as different as they look. A 50/50 mixture of two POINT
+      # masses at a and b has mean (a+b)/2 and std |a-b|/2 -- exactly the
+      # bracket's formula -- so profile_density reproduces it wherever both
+      # arms are sharp, and widens instead of asserting false precision where
+      # they are not. Measured on the fixture, four of five categories had a
+      # likelihood span under 2.4 across the WHOLE support and two were exactly
+      # constant, yet the bracket reported -4.000 +- 0.400 for them, because
+      # argmax of a constant array returns index 0.
+      #
+      # Every run writes `holdout_comparison` scoring BOTH methods on data
+      # neither saw. Read it before changing this key.
+    rows: "all_stocked_hours"          # SET  "all_stocked_hours" | "entry"
+      # WHERE THE PRICE VARIATION IS. The entry hour is BEFORE the legacy ramp
+      # starts discounting, so entry rows sit at the opening discount -- which
+      # IS d_ref -- and carry almost none. Measured on the fixture, scoring
+      # every stocked hour moved log_ratio sd from 0.00267 to 0.02352 for MEAT
+      # and from 0.0 to 0.02448 for SIDE DISH, whose entry-row likelihood was
+      # CONSTANT. The extra rows repeat the same episode, so the curve is
+      # deflated by the design effect before any interval is read from it.
+    own_information_saturation: 2.0    # SET  log-likelihood units, across the
+      # whole support, at which a category stops borrowing from the pool and
+      # stands on its own data. 2.0 is the chi-square 95% cutoff: a category
+      # that discriminates at least as much as its own significance threshold
+      # is entitled to its own answer. Lower = more categories stand alone;
+      # 0 = never pool. Reported per category as `own_information_weight`.
+    holdout_window: "calib"            # SET  which split the comparison scores
+      # on. Must be a window the prior did NOT see -- the whole point is that
+      # neither method can be judged from the inside.
     source: "bracket"                  # SET  "bracket" | "fallback"
-    fallback_mean: -1.00               # SET  used if bracket rejected
-    fallback_std: 0.60                 # SET
-    std_floor: 0.40                    # SET  floor on bracket-derived std
+      # BRACKET METHOD ONLY, ignored under profile_density.
+    fallback_mean: -1.00               # SET  BRACKET METHOD ONLY. Used if the
+      # bracket is rejected -- and nothing measured produced it, which is the
+      # objection that motivated profile_density. Unused under that method.
+    fallback_std: 0.60                 # SET  BRACKET METHOD ONLY, ditto
+    std_floor: 0.40                    # SET  BRACKET METHOD ONLY. Floor on the
+      # bracket-derived std. profile_density needs no floor: the density's own
+      # width is the floor.
     reference_r: null                  # SET  dispersion the BRACKET fits at.
       # null = MEASURE IT from the train window, PER CATEGORY, which is the
       # default and the right answer. `fit_r` at the fallback elasticity on
