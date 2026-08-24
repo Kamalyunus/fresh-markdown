@@ -315,12 +315,19 @@ def test_prior_artifact_within_bounds(workspace):
     _chdir(workspace)
     with open("artifacts/prior.json") as f:
         prior = json.load(f)
-    assert prior["source"] in ("bracket", "fallback")
+    assert prior["source"] in ("bracket", "fallback", "mixed")
     lo, hi = prior["search_bounds"]
     for cat, v in prior["per_category"].items():
         assert lo <= v["epsilon_naive"] <= hi
         assert lo <= v["epsilon_controlled"] <= hi
         assert v["std"] > 0 and v["mean"] < 0
+        # what the DATA said, kept whether or not the fallback overwrote it --
+        # without this the cost of a rejection is invisible in the artifact
+        assert v["bracket_mean"] < 0 and v["bracket_std"] > 0
+        assert v["using"] in ("bracket", "fallback")
+        if v["using"] == "bracket":
+            assert v["mean"] == v["bracket_mean"], \
+                "a category using its bracket must carry the bracket's numbers"
 
 
 def test_backtest_blocks_reported_separately(workspace):

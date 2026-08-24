@@ -14,7 +14,37 @@ it. Two estimates per category, both via the censored likelihood of section
 
 Both estimates search the FULL posterior support [epsilon_min, epsilon_max];
 a bound tighter than epsilon_min is a defect (the phase-0 run pinned five
-categories at a -1.5 bound). Boundary solutions are rejected outright.
+categories at a -1.5 bound).
+
+ACCEPTANCE IS PER CATEGORY, AND ONLY THE SIGN REJECTS UNCONDITIONALLY.
+PRD 9.5 was amended for this (owner, 2026-08-24); the previous rule was
+all-or-nothing with boundary and orientation both fatal, and it was throwing
+away measured information in favour of a constant. On the production extract
+BAKERY & PASTRY passed every check on 21,484 rows and was still overwritten
+with the fallback because two OTHER categories failed.
+
+The principle: a measured bracket beats an assumption. `fallback_std: 0.60`
+is a config constant -- nothing measured produced it -- so "the bracket is
+wider, therefore worse" compares a measurement against a number someone
+chose. Judged by the PRD's own criterion, "not confidently wrong", the
+fallback was the worse of the two for every category on that extract: it puts
+the measured deepening bar (median 2.429) at 2.38 sigma, against 0.08-0.75
+sigma under the brackets.
+
+    wrong sign   ALWAYS rejects. A non-negative endpoint says demand rises
+                 with price -- nonsensical rather than weak, and no midpoint
+                 of it means anything.
+    boundary     reported, does not reject by default. A bound-pinned endpoint
+                 is not point-identified but still carries the sign and a
+                 magnitude floor.
+    inverted     reported, does not reject by default. `naive > controlled`
+                 means the hour control STRENGTHENED the estimate when it
+                 should weaken it, so the bracket's story is wrong -- but both
+                 endpoints are measured and the interval is still the interval
+                 the data supports.
+
+Both remain configurable (`reject_boundary_solutions`,
+`reject_orientation_violations`) so the stricter rule can be restored.
 
 Both estimates use ENTRY-HOUR rows only. Identifying variation is same-hour
 cross-episode, never adjacent-hour within-episode (section 9.5): under the
@@ -134,33 +164,93 @@ def estimate_prior(d, cfg, seed=0):
 
         boundary = any(abs(e - b) <= step + 1e-12
                        for e in (e_naive, e_ctrl) for b in (lo, hi))
-        oriented = e_naive <= e_ctrl < 0
+        # THE THREE CHECKS ARE SEPARATE, and only the first is unconditional.
+        #
+        #   wrong sign    a non-negative endpoint says demand rises with price.
+        #                 Not a weak estimate -- a nonsensical one, and no
+        #                 midpoint of it means anything. Always rejects.
+        #   boundary      an endpoint pinned to a search bound. The estimate is
+        #                 "at least this elastic", which is still information
+        #                 about the SIGN and magnitude even though the point is
+        #                 not identified.
+        #   inverted      `naive > controlled`. Controlling for the hour
+        #                 confound is expected to weaken the estimate; when it
+        #                 strengthens it, our story about which estimator
+        #                 bounds which is wrong -- but both endpoints are still
+        #                 measured, and the interval between them is still the
+        #                 interval the data supports.
+        wrong_sign = not (e_naive < 0 and e_ctrl < 0)
+        inverted = e_naive > e_ctrl
 
         mean = (e_naive + e_ctrl) / 2
         std = max(abs(e_naive - e_ctrl) / 2, pc["std_floor"])
-        accepted = oriented and not (boundary and pc["reject_boundary_solutions"])
+
+        why = []
+        if wrong_sign:
+            why.append("wrong sign")
+        if boundary and pc["reject_boundary_solutions"]:
+            why.append("boundary solution")
+        if inverted and pc["reject_orientation_violations"]:
+            why.append("orientation violated")
+        accepted = not why
         if not accepted:
-            failures.append(f"{cat}: " + ("boundary solution" if boundary
-                                          else "orientation violated"))
+            failures.append(f"{cat}: " + " + ".join(why))
+
         per_category[str(cat)] = {
             "epsilon_naive": e_naive, "epsilon_controlled": e_ctrl,
             "mean": round(mean, 4), "std": round(std, 4),
-            "boundary": boundary, "accepted": accepted, "rows": int(len(g)),
+            # WHAT THE DATA SAID, kept even when the fallback overwrites
+            # mean/std below. Without these the cost of a rejection is
+            # invisible: the numbers the bracket produced are gone and the
+            # owner cannot see what was given up without recomputing by hand.
+            "bracket_mean": round(mean, 4), "bracket_std": round(std, 4),
+            "boundary": boundary, "inverted": inverted,
+            "wrong_sign": wrong_sign,
+            "accepted": accepted, "rows": int(len(g)),
         }
+        if not accepted:
+            per_category[str(cat)]["rejected_for"] = why
 
     stds = {v["std"] for v in per_category.values() if v["accepted"]}
     constant_std = len(per_category) > 1 and len(stds) == 1 \
         and next(iter(stds)) != pc["std_floor"]
+
+    per_cat_scope = pc["acceptance_scope"] == "per_category"
     if constant_std:
+        # A std identical across every category asserts uniform confidence the
+        # data does not support. Frame-wide by nature, so it fails the whole
+        # prior under either scope.
         failures.append("prior_std constant across categories -- asserts "
                         "uniform confidence the data does not support")
 
+    # WHICH CATEGORIES FALL BACK. Under `per_category` a category that passed
+    # its own checks keeps its own bracket, because the checks are
+    # pre-registered and applied per cell -- using the cells that pass is not
+    # selecting on the outcome. Under `all_or_nothing` one failure replaces
+    # every category, which is what PRD 9.5 originally specified.
+    #
+    # The all-or-nothing rule was costing real information. On the production
+    # extract BAKERY & PASTRY passed every check on 21,484 rows and was still
+    # overwritten with -1.0 +- 0.6 because two OTHER categories failed. Its own
+    # bracket was -1.6125 +- 1.0875. Judged by the PRD's own criterion -- "not
+    # confidently wrong" -- the fallback was the worse of the two: it puts the
+    # measured deepening bar (median 2.429) 2.38 sigma away, against 0.75 sigma
+    # under the bracket. 0.6 is a config constant; 1.0875 was measured.
+    if constant_std or (failures and not per_cat_scope):
+        fell_back = list(per_category)          # frame-wide failure
+    else:
+        fell_back = [c for c, v in per_category.items() if not v["accepted"]]
+    for cat in fell_back:
+        per_category[cat]["mean"] = pc["fallback_mean"]
+        per_category[cat]["std"] = pc["fallback_std"]
+        per_category[cat]["using"] = "fallback"
+    for cat in per_category:
+        per_category[cat].setdefault("using", "bracket")
+
     all_accepted = not failures
-    source = "bracket" if all_accepted else "fallback"
-    if not all_accepted:
-        for cat in per_category:
-            per_category[cat]["mean"] = pc["fallback_mean"]
-            per_category[cat]["std"] = pc["fallback_std"]
+    n_bracket = sum(1 for v in per_category.values() if v["using"] == "bracket")
+    source = ("bracket" if n_bracket == len(per_category) and per_category
+              else "fallback" if n_bracket == 0 else "mixed")
 
     return {
         "source": source,

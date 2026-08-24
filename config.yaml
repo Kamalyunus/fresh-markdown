@@ -259,7 +259,40 @@ posterior:
     search_bounds: [-4.00, -0.05]      # SET  must equal [epsilon_min, epsilon_max]
     search_grid_size: 159              # SET  bracket search resolution
     max_rows_per_category: 150000      # SET  row cap per category in the bracket fit
-    reject_boundary_solutions: true    # SET  a bound-pinned estimate is not an estimate
+    acceptance_scope: "per_category"   # SET BY OWNER 2026-08-24.
+      # "per_category"    a category that passes its own checks keeps its own
+      #                   bracket; only the failures take the fallback.
+      # "all_or_nothing"  one failure replaces EVERY category. What PRD 9.5
+      #                   originally specified, and it was costing real
+      #                   information: BAKERY & PASTRY passed every check on
+      #                   21,484 rows and was still overwritten with the
+      #                   fallback because two other categories failed. Its own
+      #                   bracket was -1.6125 +- 1.0875.
+      #
+      # The checks are pre-registered here, not chosen after seeing the
+      # answers, so applying them per cell and using the cells that pass is not
+      # selecting on the outcome.
+    #
+    # THE THREE CHECKS. Only the sign is unconditional -- see PRD 9.5, which
+    # was amended for this. The owner's rule: a measured bracket beats an
+    # assumption, and the SIGN is the thing worth rejecting on.
+    reject_wrong_sign: true            # SET  NOT configurable in practice: a
+      # non-negative endpoint says demand rises with price. Nonsensical, not
+      # weak, and no midpoint of it means anything.
+    reject_boundary_solutions: false   # SET BY OWNER 2026-08-24 (was true).
+      # A bound-pinned endpoint is not point-identified, but it still carries
+      # the sign and a magnitude floor -- "at least this elastic" is real
+      # information, and -1.0 +- 0.6 is not. DAIRY PRODUCT pinned at -4.0 on
+      # the production extract; under the old rule that discarded the whole
+      # prior for all 16 categories.
+    reject_orientation_violations: false  # SET BY OWNER 2026-08-24.
+      # `naive > controlled`. Controlling for the hour confound should WEAKEN
+      # the estimate; when it strengthens it, our story about which estimator
+      # bounds which is wrong. Worth knowing -- it is reported as `inverted`
+      # per category -- but both endpoints are still measured and the interval
+      # between them is still the interval the data supports. BABY FOOD is the
+      # live case: naive -1.55, controlled -2.7, both firmly negative.
+      # Set true to go back to rejecting these.
     path: "artifacts/prior.json"
     per_category: null                 # MEASURED  re-run section 9.5 after bound fix
 

@@ -757,6 +757,20 @@ reasons, in order of force.
    for nothing. And history cannot identify ε per category, so it certainly
    cannot per subcategory — the same confound with less data behind it.
 
+> **⚠ §9.5 acceptance was amended by the owner on 2026-08-24, and every prior
+> figure in this document predates it.** Acceptance is now PER CATEGORY and
+> only the SIGN rejects unconditionally; boundary and inverted brackets are
+> reported rather than discarded. On the four categories inspected from the
+> 174-day extract, all four keep their measured bracket where previously all
+> 16 took the fallback — means around −1.6 to −2.3 rather than a uniform −1.0.
+>
+> That moves the measured deepening bar (median **2.429**) from 2.38σ away to
+> **0.08–0.75σ**, so the "enter-and-hold at the launch prior" conclusion in
+> risk 6 below, and the 0%-deepened backtest result behind it, **no longer
+> follow**. Both must be re-measured on the next full run before anything in
+> this section is quoted. Point 3 above still holds for a different reason:
+> per-subcategory brackets would divide the same identifying variation further.
+
 Categories above 250 episodes/week earn their own cell, everything below
 reads and feeds the global cell, assignment fixed at launch. The honest
 counter-argument is that if elasticity genuinely varies *within* a category,

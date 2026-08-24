@@ -752,3 +752,77 @@ def test_the_floor_and_the_trigger_compute_the_same_quantity():
         assert guardrail.deviation(t, c, True, basis).iloc[0] > 0
         # margin: higher is BETTER -> negative
         assert guardrail.deviation(t, c, False, basis).iloc[0] < 0
+
+
+def _bracket_verdict(naive, ctrl, cfg, lo=-4.0, hi=-0.05, step=0.025):
+    """The acceptance decision from bootstrap.estimate_prior, in isolation.
+
+    Mirrors the three checks so a rule change has to be a deliberate edit in
+    two places rather than a silent drift in one.
+    """
+    pc = cfg["posterior"]["prior"]
+    boundary = any(abs(e - b) <= step + 1e-12 for e in (naive, ctrl)
+                   for b in (lo, hi))
+    why = []
+    if not (naive < 0 and ctrl < 0):
+        why.append("wrong sign")
+    if boundary and pc["reject_boundary_solutions"]:
+        why.append("boundary solution")
+    if naive > ctrl and pc["reject_orientation_violations"]:
+        why.append("orientation violated")
+    return why
+
+
+def test_only_the_sign_rejects_a_bracket_by_default():
+    """PRD 9.5 as amended by the owner, 2026-08-24.
+
+    The rule used to be all-or-nothing with boundary AND orientation both
+    fatal, and it was discarding measured information for a constant. On the
+    production extract BAKERY & PASTRY passed every check on 21,484 rows and
+    was still overwritten with -1.0 +- 0.6 because two OTHER categories failed.
+
+    `fallback_std: 0.60` is a config constant -- nothing measured produced it.
+    So "the bracket is wider, therefore worse" compares a measurement against a
+    number someone chose, and by the PRD's own test -- "not confidently wrong"
+    -- the fallback was the worse of the two: it puts the measured deepening
+    bar (2.429) at 2.38 sigma against 0.08-0.75 sigma under the brackets.
+    """
+    import copy
+    cfg = copy.deepcopy(CFG)
+
+    # the four production categories, verbatim from artifacts/prior.json
+    live = {
+        "BABY FOOD":       (-1.55, -2.7),     # inverted, both negative
+        "BAKERY & PASTRY": (-2.7, -0.525),    # clean
+        "BEVERAGE":        (-2.325, -2.15),   # clean, near-identical endpoints
+        "DAIRY PRODUCT":   (-4.0, -0.575),    # naive pinned to the search bound
+    }
+    for cat, (n, c) in live.items():
+        assert _bracket_verdict(n, c, cfg) == [], \
+            f"{cat} should keep its measured bracket, not take the fallback"
+
+    # the sign is the one thing that always rejects
+    assert _bracket_verdict(0.4, -1.2, cfg) == ["wrong sign"]
+    assert _bracket_verdict(-1.2, 0.05, cfg) == ["wrong sign"]
+
+    # ...and the stricter rule is still reachable, so the change is a choice
+    strict = copy.deepcopy(CFG)
+    strict["posterior"]["prior"]["reject_boundary_solutions"] = True
+    strict["posterior"]["prior"]["reject_orientation_violations"] = True
+    assert _bracket_verdict(-4.0, -0.575, strict) == ["boundary solution"]
+    assert _bracket_verdict(-1.55, -2.7, strict) == ["orientation violated"]
+
+
+def test_a_passing_category_is_not_punished_for_another_ones_failure():
+    """The all-or-nothing rule, and why it is no longer the default.
+
+    Acceptance checks are pre-registered in config, not chosen after seeing the
+    answers, so applying them per cell and using the cells that pass is not
+    selecting on the outcome -- it is the checks doing their job.
+    """
+    assert CFG["posterior"]["prior"]["acceptance_scope"] == "per_category"
+    # a wrong-sign category must still fall back, and must not drag the others
+    import copy
+    cfg = copy.deepcopy(CFG)
+    assert _bracket_verdict(0.4, -1.2, cfg) != []
+    assert _bracket_verdict(-2.7, -0.525, cfg) == []

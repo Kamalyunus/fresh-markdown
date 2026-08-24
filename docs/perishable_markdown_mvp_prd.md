@@ -31,8 +31,8 @@ The system is built in the order below. Each step's output is the next step's in
 | 4b | `backtest` (§17) | 2, 4 | Replay harness. Needed by the calibration gate, and re-run after every correction — build it as a module, not a script. |
 | 5 | **GATE — calibration** (§9.3) | 3, 4b | **BLOCKING.** Run measurement 10. Establish the level/slope split. Do not proceed until `fidelity_episode_sold_ratio` is inside `calibration_gate_band`. |
 | 6 | `bootstrap.fit_dispersion` (§9.4) | 2, 4 | `r_lookup`, `rho`. Re-fit `rho` against fitted residuals — the phase-0 value is a proxy. |
-| 7 | `bootstrap.estimate_prior` (§9.5) | 2, 4 | **Widen the search bound to `epsilon_min` before running.** Reject boundary solutions. |
-| 8 | **GATE — prior acceptance** (§9.5) | 7 | **BLOCKING.** Orientation, no boundary solutions, non-constant std. On failure set `prior.source: fallback` and record it. |
+| 7 | `bootstrap.estimate_prior` (§9.5) | 2, 4 | **Widen the search bound to `epsilon_min` before running.** Boundary endpoints are reported, not rejected (owner, 2026-08-24). |
+| 8 | **GATE — prior acceptance** (§9.5) | 7 | **BLOCKING, PER CATEGORY.** Sign rejects the category; constant std rejects the whole prior. Boundary and orientation are reported, not fatal. `source` is `bracket`, `mixed`, or `fallback`. |
 | 9 | `pricing.demand`, `pricing.posterior`, `pricing.dp` (§9.3, §10, §11) | 1, 4, 6, 7 | Decision core. |
 | 10 | `pricing.explore` (§12) | 9, 4b | Derive `tau_initial` as a **currency** quantile from replay, per §12.3. |
 | 11 | `inference` (§11.4, §16.1) | 9, 10 | Validation, decision, event emission. |
@@ -567,7 +567,35 @@ Identifying variation is **same-hour cross-episode**, never adjacent-hour within
 - same-hour variation clears the thresholds agreed in measurement 2, fixed before the estimate is run;
 - bracket width is stable under reasonable perturbation of the filter chain and hour specification.
 
-If any check fails, set `prior.source: fallback` and record the rejection. **Rejection is an acceptable outcome** — the learning loop does not depend on the prior being good, only on it not being confidently wrong.
+**Acceptance is PER CATEGORY, and only the sign rejects unconditionally.** *(Amended by the owner, 2026-08-24. The rule was previously all-or-nothing — "if any check fails, set `prior.source: fallback`" — with boundary and orientation both fatal.)*
+
+| Check | Effect | Rationale |
+| --- | --- | --- |
+| **wrong sign** — an endpoint not strictly negative | **rejects; category takes the fallback** | Demand rising with price is nonsensical, not weak. No midpoint of it means anything. |
+| **boundary** — an endpoint at a search bound | reported as `boundary`, does not reject | Not point-identified, but still carries the sign and a magnitude floor. "At least this elastic" is information; `-1.0 ± 0.6` is not. |
+| **inverted** — `epsilon_naive > epsilon_controlled` | reported as `inverted`, does not reject | The hour control strengthened the estimate when it should weaken it, so the bracket's *story* is wrong — but both endpoints are measured and the interval between them is still the interval the data supports. |
+| **constant `prior_std`** across categories | rejects the WHOLE prior | Frame-wide by nature: it asserts uniform confidence the data does not support. |
+
+Both non-sign checks stay configurable (`reject_boundary_solutions`, `reject_orientation_violations`) so the stricter rule can be restored, and `acceptance_scope` can be set back to `all_or_nothing`.
+
+**Why this changed.** The all-or-nothing rule was discarding measured information in favour of a constant. On the 174-day production extract, BAKERY & PASTRY passed every check on 21,484 rows and was still overwritten with the fallback because two *other* categories failed. Its own bracket was **−1.6125 ± 1.0875**.
+
+The objection to adopting it — "the bracket is wider, so the fallback is safer" — does not survive inspection: `fallback_std: 0.60` is a config constant, so that comparison sets a measurement against a number someone chose. Judged by this section's own criterion, *not confidently wrong*, the fallback was the worse of the two for every category on that extract:
+
+| Category | bracket | bar at 2.429 under bracket | under fallback |
+| --- | --- | --- | --- |
+| BABY FOOD | −2.1250 ± 0.5750 | 0.53σ | 2.38σ |
+| BAKERY & PASTRY | −1.6125 ± 1.0875 | 0.75σ | 2.38σ |
+| BEVERAGE | −2.2375 ± 0.4000 | 0.48σ | 2.38σ |
+| DAIRY PRODUCT | −2.2875 ± 1.7125 | 0.08σ | 2.38σ |
+
+The fallback asserts the measured deepening bar is 2.4 standard deviations out of reach in every category at once. That is the "confidently wrong" this section warns against, and nothing measured produced it.
+
+Note the acceptance checks are **pre-registered in config**, not chosen after seeing the estimates, so applying them per cell and using the cells that pass is the checks doing their job rather than selection on the outcome.
+
+`prior.source` is now `bracket`, `mixed`, or `fallback`, and every category records `bracket_mean` / `bracket_std` alongside the values in force — so the cost of a rejection stays visible in the artifact instead of having to be recomputed by hand.
+
+**Rejection remains an acceptable outcome** — the learning loop does not depend on the prior being good, only on it not being confidently wrong.
 
 Bounded updates (§13.4) mean a prior wrong by 1.0 needs at least seven cycles to correct, and under a small cell count that error is present nearly everywhere at once. An over-confident prior is materially more expensive than a weak one; that is what `std_floor` is for.
 
