@@ -49,6 +49,21 @@ echo "== step 10: tools.make_charts ==================================="
 # the numbers. Non-fatal: a missing report is skipped, not an error.
 python3 -m tools.make_charts || echo "  (charts skipped)"
 
+echo "== step 10b: tools.refresh_figures =============================="
+# THE AGENT HOLDING THE DATA IS THE ONE WITH THE NUMBERS, so refreshing the
+# documents belongs in the run rather than in someone's memory. Every anchored
+# figure in the docs is rewritten from the artifacts just produced, and the
+# run is stamped into each document that changed.
+#
+# It REFUSES to write from a dataset whose name says it is synthetic, because
+# fixture numbers are plausible and silent -- they read as measurements. Run it
+# by hand with --allow-fixture only to exercise the tool itself.
+#
+# Non-fatal: a stale document must not fail a bootstrap that succeeded.
+python3 -m tools.refresh_figures --write --dataset "$INPUT" \
+    || echo "  (figures not refreshed -- see above; run"\
+            "'python3 -m tools.refresh_figures' to see what is stale)"
+
 echo "== step 11: bootstrap.seal ======================================"
 # Everything above wrote a fresh artifact against a fresh model, so this set
 # is the bundle. Non-fatal on purpose: a refusal means the artifacts on disk

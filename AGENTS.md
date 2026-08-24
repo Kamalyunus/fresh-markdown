@@ -420,6 +420,32 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
       answer costing more than an honest wide one, in nats.
    3. `ranking` and `verdict` last, and only once 1 and 2 are read.
 
+   **THE DOCUMENTS REFRESH THEMSELVES FROM THE ARTIFACTS.** Numbers in the
+   docs are anchored — `<!--f:rho.implied_deff|dec3-->3.347<!--/f-->` renders
+   as `3.347` and nothing else — and `scripts/run_bootstrap.sh` calls
+   `tools.refresh_figures --write --dataset "$INPUT"` as step 10b, so a
+   completed run leaves the docs saying what its own artifacts say. Check
+   without writing at any time:
+
+       python3 -m tools.refresh_figures        # non-zero if anything is stale
+
+   Two rules when adding a figure to a document.
+
+   * **Anchor CURRENT-STATE measurements only.** A figure describing what a
+     PAST decision cost — "deleting restocked episodes took 18.1pp of the
+     extract's COGS" — is historical. Refreshing it against today's artifacts
+     replaces a fact about a decision with an unrelated number and destroys
+     the argument it supports. Leave those as prose with their own date.
+   * **Never anchor a config value.** `dispersion.rho` and
+     `mean_forced_hours_per_episode` are pasted by hand on purpose, and
+     `pipeline.status` refuses to start when they drift from the artifacts.
+     Auto-writing them would silence a gate that is meant to stop a human.
+
+   `--write` REFUSES a dataset whose name says it is synthetic. Fixture
+   numbers are plausible and silent — they read as measurements — and
+   production figures in `design.md` were once overwritten with them, with
+   nothing about the result looking wrong.
+
    **TUNE `own_information_saturation` AGAINST PRODUCTION, ONCE.** It is the
    log-likelihood span at which a category stops borrowing from the pooled
    density and stands on its own data; the shipped 2.0 is the chi-square 95%

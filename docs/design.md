@@ -983,14 +983,17 @@ All three quantities the replay produces, on the calibrated run over 2,000
 episodes, with IL split into its two components because the split *is* the
 result:
 
+<!--figures-from:baseline-20260811043259 on the 2026-08 production extract-->
+*Anchored figures in this section are rewritten from the artifacts by `tools.refresh_figures`; the HTML comment above records which run they are from. Historical figures — what a past decision cost — are deliberately NOT anchored and keep their own date.*
+
 | | Observed | Legacy under model | DP under model |
 | --- | --- | --- | --- |
-| Inventory Loss | ₩17.11M | ₩19.51M | **₩12.09M** |
-| — discount given away | ₩13.96M | ₩13.27M | ₩5.26M |
-| — scrap | ₩3.15M | ₩6.24M | ₩6.84M |
-| IL% | 38.68% | 45.14% | 28.77% |
-| Clearance | 93.28% | 77.58% | 76.61% |
-| Mean discount | 0.3094 | 0.2935 | 0.1285 |
+| Inventory Loss | <!--f:backtest.policy_deltas.actual_il|won_m-->₩17.11M<!--/f--> | <!--f:backtest.policy_deltas.legacy_model_il|won_m-->₩19.51M<!--/f--> | **<!--f:backtest.policy_deltas.dp_il|won_m-->₩12.09M<!--/f-->** |
+| — discount given away | <!--f:backtest.policy_deltas.actual_discount_cost|won_m-->₩13.96M<!--/f--> | <!--f:backtest.policy_deltas.legacy_model_discount_cost|won_m-->₩13.27M<!--/f--> | <!--f:backtest.policy_deltas.dp_discount_cost|won_m-->₩5.26M<!--/f--> |
+| — scrap | <!--f:backtest.policy_deltas.actual_scrap_cost|won_m-->₩3.15M<!--/f--> | <!--f:backtest.policy_deltas.legacy_model_scrap_cost|won_m-->₩6.24M<!--/f--> | <!--f:backtest.policy_deltas.dp_scrap_cost|won_m-->₩6.84M<!--/f--> |
+| IL% | <!--f:backtest.policy_deltas.actual_il_pct|pct-->38.68%<!--/f--> | <!--f:backtest.policy_deltas.legacy_model_il_pct|pct-->45.14%<!--/f--> | <!--f:backtest.policy_deltas.dp_il_pct|pct-->28.77%<!--/f--> |
+| Clearance | <!--f:backtest.policy_deltas.actual_clearance|pct-->93.28%<!--/f--> | <!--f:backtest.policy_deltas.legacy_model_clearance|pct-->77.58%<!--/f--> | <!--f:backtest.policy_deltas.dp_clearance|pct-->76.61%<!--/f--> |
+| Mean discount | <!--f:backtest.policy_deltas.actual_mean_discount|dec4-->0.3094<!--/f--> | <!--f:backtest.policy_deltas.legacy_model_mean_discount|dec4-->0.2935<!--/f--> | <!--f:backtest.policy_deltas.dp_mean_discount|dec4-->0.1285<!--/f--> |
 
 Like-for-like: **−₩7.42M, −38.02% of the legacy arm**, clearance −0.97pp.
 Scrap rises ₩0.59M, so the entire gain comes out of a discount line that falls
@@ -1176,7 +1179,7 @@ direction those corrections predicted.
 | DP vs legacy (like-for-like, same demand model) | **−38.0% IL** at **−0.97pp clearance** (77.58% → 76.61% … see section 5.7) |
 | DP vs legacy mean discount | 0.1285 vs 0.2935 — the DP opens far shallower and holds |
 | Intra-episode deepening | 0% of episodes; median \|ε\| needed 2.429 against 1.0 in use |
-| Correlation `rho` / forced hours / implied deff | 0.3103 / 8.563 / **3.347** (fitted-residual basis, `artifacts/rho.json`) |
+| Correlation `rho` / forced hours / implied deff | <!--f:rho.rho|dec4-->0.3103<!--/f--> / <!--f:rho.mean_forced_hours_per_episode|dec3-->8.563<!--/f--> / **<!--f:rho.implied_deff|dec3-->3.347<!--/f-->** (fitted-residual basis, `artifacts/rho.json`) |
 | IL% clustered SE | **0.002915** (SKU × FC, 71,559 units) |
 | A/B minimum detectable effect | **6.75% at 2 weeks** (9 blocks); the duration curve is flat — 6 weeks reaches only 5.74% |
 | Elasticity prior | **fallback −1.0 ± 0.6 for all 16 categories — 0 brackets accepted** |
@@ -1785,7 +1788,7 @@ previously accepted MEAT, now fails for all 16 categories.
 
 | # | Risk | Evidence | Mitigation | Owner |
 | --- | --- | --- | --- | --- |
-| 1 | **Learning throughput** — and the deepening bar in risk 6 sets how far the posterior must travel, not just how fast | Per-outcome information is small (demand ~0.5–1/hr × squared log-price-ratio ~0.01–0.04, ÷ deff 3.347); prior is wide fallback for **all 16** categories; monotonicity concentrates identification at entry | Shadow now emits `learning_yield_would_be` — effective information per episode, episodes per bounded update — so weeks-to-convergence is read off before the pilot, not guessed. Two floors bind separately: evidence (episodes needed) and calendar (the 0.15 step cap with one human-gated update per day means ≥6 days to move the mean 1.0 → 1.9 however much evidence arrives). Levers: raise the budget share, coarser cells. A 21-day flat-posterior alert catches a dead loop | Eng + owner |
+| 1 | **Learning throughput** — and the deepening bar in risk 6 sets how far the posterior must travel, not just how fast | Per-outcome information is small (demand ~0.5–1/hr × squared log-price-ratio ~0.01–0.04, ÷ deff <!--f:rho.implied_deff|dec3-->3.347<!--/f-->); prior is wide fallback for **all 16** categories; monotonicity concentrates identification at entry | Shadow now emits `learning_yield_would_be` — effective information per episode, episodes per bounded update — so weeks-to-convergence is read off before the pilot, not guessed. Two floors bind separately: evidence (episodes needed) and calendar (the 0.15 step cap with one human-gated update per day means ≥6 days to move the mean 1.0 → 1.9 however much evidence arrives). Levers: raise the budget share, coarser cells. A 21-day flat-posterior alert catches a dead loop | Eng + owner |
 | 2 | **Frozen-model drift over Sep–Dec** (seasonality incl. Chuseok; no trend features) | Drift already measured: 1.144 → 0.990 → 1.095 across windows; every economic quantity is denominated in the demand prediction | Final retrain immediately before the launch freeze (gate re-checked); daily drift ratio in shadow and production; pre-register a mid-window recalibration rule now so a drift response is not improvised | Eng |
 | 3 | **A/B power** — adequate, and duration is not the lever | SE 0.002915 once scrap is counted in full; 6.75% detectable at 2 weeks against a measured 38% effect (5.6×). The duration curve is nearly flat — 6 weeks reaches only 5.74% where √T promised 3.90%, because variance is between-unit and the same units recur weekly | Empirical duration table from the derivation tool; owner commits to a feasible (effect, duration) pair before launch. If more power is ever needed the lever is more SKU × FC units, not more weeks | Owner |
 | 4 | **Metric divergence at readout** — planner optimises IL, business reads IL% | Worked example in 2.3; likeliest A/B outcome is the escalation row | Both metrics + denominators in every cut; divergence flag monitored; decision table pre-committed | Owner |
@@ -1861,7 +1864,7 @@ is reproducible from its event alone. Run outputs (`data/`, `reports/`,
 | ε (elasticity) | Exponent mapping price ratio to demand; the only quantity learned in production |
 | `r` | Frozen negative-binomial dispersion (`Var = mu + mu²/r`) |
 | `rho` | Frozen intra-episode demand correlation |
-| deff | Design effect deflating correlated within-episode evidence (3.347) |
+| deff | Design effect deflating correlated within-episode evidence (<!--f:rho.implied_deff|dec3-->3.347<!--/f-->) |
 | `tau` | Currency threshold defining the affordable exploration set |
 | Cell | A learning unit: one high-volume category, or the pooled global cell |
 | Anchor | The price currently in force; hourly actions may only deepen from it |
