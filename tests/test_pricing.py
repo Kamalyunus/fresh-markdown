@@ -946,3 +946,66 @@ def test_a_censored_entry_row_is_a_one_hour_episode():
     # episode b is one hour, so entry IS last -- the only censored entry row
     assert cen[2]
     assert list(pd.Series(cen)[entry_idx]) == [False, True]
+
+
+def test_the_documented_run_order_works_from_a_cold_start():
+    """`reference_r` must be a NUMBER, not null.
+
+    `estimate_prior` runs first now, so on a fresh clone there is no
+    `r_lookup.json` to borrow a dispersion from. With `reference_r: null` the
+    step refused -- correctly, rather than inventing a value -- but that made
+    `run_bootstrap.sh` fail on its own documented order, which is what
+    happened the first time anyone ran it. Refusing to invent a number is
+    right; shipping a default that cannot run is not.
+
+    0.42 is the fitted global from the production extract, a documented
+    constant in the same way `fallback_mean: -1.00` is. Pinning it also makes
+    the bracket reproducible: it no longer depends on whether a previous run
+    left an artifact behind.
+    """
+    ref = CFG["posterior"]["prior"]["reference_r"]
+    assert ref is not None, (
+        "reference_r is null, so a fresh clone cannot run step 4 -- the "
+        "documented order would fail before it started")
+    assert isinstance(ref, (int, float)) and ref > 0
+
+    # null must still be ACCEPTED, as the escape hatch for the old order --
+    # it just cannot be the shipped default
+    import inspect
+    from bootstrap import estimate_prior as ep
+    src = inspect.getsource(ep.estimate_prior)
+    assert 'pc.get("reference_r")' in src and "if ref_r is None" in src, \
+        "the null path must remain, for a re-run in the old order"
+
+
+def test_the_bounded_step_holds_in_the_REPORT_not_just_in_the_store(): # noqa: N802
+    """`max_mean_step` is a safety bound, and something checks it on the
+    REPORT rather than on the posterior file.
+
+    `proposed_mean` was rounded to 4dp while `mean_before` was not, so the step
+    between the two fields could read up to 5e-5 over the cap even though the
+    stored value was correct. It stayed invisible while every cell's prior was
+    exactly -1.0 -- round numbers minus 0.15 are still round -- and appeared
+    the moment per-category brackets landed: -0.76098 - 0.15 = -0.91098, which
+    rounds to -0.911, and |-0.911 - -0.76098| = 0.15002.
+
+    A bound that holds in the store but not in the artifact people read is not
+    a bound anyone can verify, so both fields are now unrounded.
+    """
+    import inspect
+    from pipeline import update as up
+
+    src = inspect.getsource(up)
+    for field in ("proposed_mean", "proposed_std", "raw_mean", "raw_std"):
+        assert f'"{field}": round(' not in src, (
+            f"{field} is rounded again -- it is compared against the unrounded "
+            "mean_before, so the step can read over max_mean_step")
+
+    # and the clamp itself is exact, at the boundary and past it
+    cap = CFG["learning"]["max_mean_step"]
+    for raw in (-1.0 - cap, -1.0 - cap * 3, -1.0 + cap * 3):
+        m, _, _ = bounded_step(-1.0, 0.6, raw, 0.5, CFG)
+        assert abs(m - (-1.0)) <= cap + 1e-12, (raw, m)
+    # an awkward starting mean, the shape that exposed the reporting bug
+    m, _, _ = bounded_step(-0.76098, 0.6, -3.0, 0.5, CFG)
+    assert abs(m - (-0.76098)) <= cap + 1e-12

@@ -260,9 +260,18 @@ def run(cfg, apply=False, events_root=None, posterior_path=None):
             # a batch that keeps growing without triggering is the learning
             # loop stalling; this surfaces it before the 21-day flat alert
             "batch_oldest_outcome_age_days": age_days,
+            # UNROUNDED, all four. `proposed_mean` used to be rounded to 4dp
+            # while `mean_before` was not, so the step between them could read
+            # up to 5e-5 over `max_mean_step` -- and that bound is a SAFETY
+            # property something downstream checks, not a display. It fired the
+            # moment the prior stopped being a round -1.0 for every cell:
+            # -0.76098 - 0.15 = -0.91098, rounded to -0.911, giving 0.15002.
+            # The stored posterior was always correct; the report was not
+            # comparable with itself. Rounding for humans belongs in the
+            # printed line below, which already formats to 3dp.
             "mean_before": rec["mean"], "std_before": rec["std"],
-            "raw_mean": round(raw_mean, 4), "raw_std": round(raw_std, 4),
-            "proposed_mean": round(new_mean, 4), "proposed_std": round(new_std, 4),
+            "raw_mean": raw_mean, "raw_std": raw_std,
+            "proposed_mean": new_mean, "proposed_std": new_std,
             "bound_clipped": clipped,
             **diag,
         }
