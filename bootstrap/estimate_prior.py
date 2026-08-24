@@ -137,7 +137,11 @@ def _estimate(g, mu_ref, grid, controlled):
 
 
 def _reference_r(rows, cfg, model, pc):
-    """One global dispersion for the bracket's likelihood. (value, basis).
+    """Dispersion for the bracket's likelihood, PER CATEGORY.
+
+    Returns `(by_category, pooled, basis)`. Each category's bracket is scored
+    at its OWN r; the pooled fit is the fallback for a category with too few
+    entry rows to fit one.
 
     Fitted on THE ROWS THE BRACKET SCORES -- entry rows, censored ones already
     dropped -- at the fallback elasticity, using the same `fit_dispersion.fit_r`
@@ -145,37 +149,84 @@ def _reference_r(rows, cfg, model, pc):
     after this module and fits per subcategory at each category's real prior
     mean.
 
-    THE WINDOW MATTERS MORE THAN THE ROW TYPE, which is why this is fitted here
-    rather than borrowed. Measured on the fixture: entry rows give 2.34 and all
-    train rows 2.31 -- the same answer -- while `fit_dispersion`'s calibration
-    window gives 0.48, five times lower. They are different windows serving
-    different purposes, so borrowing the artifact's global would describe the
-    calibration period rather than the rows this likelihood sums over.
+    WHY PER CATEGORY AND NOT ONE POOLED SCALAR (owner, 2026-08-24). Dispersion
+    is not a property of the extract, it is a property of the category, and the
+    spread is far wider than the pooled fit's own imprecision. Measured on the
+    fixture's entry rows, at the pooled value 8.04:
+
+        SEAFOOD      1.60    (Pearson 1.685 -- genuinely overdispersed)
+        VEGETABLE    5.39
+        FRUIT       14.12
+        MEAT        28.71
+        SIDE DISH   49.9998  (pinned at the search bound)
+
+    That is 5x below to 6x above pooled, where the sensitivity band this
+    approximation was justified over was +-2x. Scoring SEAFOOD's bracket at 8.04
+    is not a small error in a nuisance parameter, it is the wrong likelihood.
+
+    THE WINDOW MATTERS MORE THAN THE ROW TYPE, which is why these are fitted
+    here rather than borrowed from `r_lookup.json`: that artifact describes the
+    CALIBRATION window and this likelihood sums over TRAIN entry rows. It also
+    does not exist yet in the current step order.
+
+    A FIT AT THE SEARCH BOUND IS NOT AN ESTIMATE -- SIDE DISH above is
+    under-dispersed relative to Poisson, so the MLE runs to the ceiling. Those
+    are clamped at `dispersion.clamp_percentile` of the converged set, the same
+    treatment and the same config key `fit_dispersion` uses, so the two modules
+    cannot drift in how they handle a boundary.
 
     Explicit config wins if set -- for reproducing an old run, or pinning the
-    bootstrap against a known value. Otherwise it is derived, so a new extract
-    gets its own reference and there is no constant to re-paste.
+    bootstrap against a known value -- and then applies to every category.
     """
     if pc.get("reference_r") is not None:
-        return float(pc["reference_r"]), "config reference_r (pinned)"
+        return {}, float(pc["reference_r"]), "config reference_r (pinned)"
 
     from bootstrap.fit_dispersion import fit_r
 
     eps0 = float(pc["fallback_mean"])
-    mu_ref = model.predict_mu_ref(rows)
-    ratio = (1 - rows.total_discount.to_numpy()) / (1 - rows.d_ref.to_numpy())
-    mu = np.clip(mu_ref * ratio ** eps0, cfg["pricing"]["demand_floor"], None)
-    r, ok = fit_r(rows.units_sold.to_numpy(), mu,
-                  rows.censored.to_numpy(), cfg["dispersion"]["r_search_bounds"])
+    bounds = cfg["dispersion"]["r_search_bounds"]
+    min_rows = int(pc["reference_r_min_rows"])
+
+    def fit(g):
+        mu_ref = model.predict_mu_ref(g)
+        ratio = (1 - g.total_discount.to_numpy()) / (1 - g.d_ref.to_numpy())
+        mu = np.clip(mu_ref * ratio ** eps0, cfg["pricing"]["demand_floor"], None)
+        return fit_r(g.units_sold.to_numpy(), mu,
+                     g.censored.to_numpy(), bounds)
+
+    pooled, ok = fit(rows)
     if not ok:
-        # the scalar fit failing at all means something is wrong with the
+        # the pooled fit failing at all means something is wrong with the
         # window, and a silent midpoint would hide it
         raise SystemExit(
             "could not fit a reference dispersion on the bracket's own rows. "
             "Set posterior.prior.reference_r explicitly, or check the train "
             "window has usable entry rows.")
-    return (float(r),
-            f"fitted on {len(rows)} entry rows at fallback elasticity {eps0}")
+
+    by_cat, thin = {}, {}
+    for cat, g in rows.groupby("category"):
+        if len(g) < min_rows:
+            thin[str(cat)] = int(len(g))
+            continue
+        r, cat_ok = fit(g)
+        if cat_ok:
+            by_cat[str(cat)] = r
+        else:
+            thin[str(cat)] = int(len(g))
+
+    # same clamp as fit_dispersion: hold down boundary solutions, preserve low
+    # values (a low r is real overdispersion and the conservative direction)
+    cap = float(np.percentile(list(by_cat.values()) + [pooled],
+                             cfg["dispersion"]["clamp_percentile"] * 100))
+    by_cat = {k: min(v, cap) for k, v in by_cat.items()}
+    pooled = min(pooled, cap)
+
+    basis = (f"fitted per category on {len(rows)} entry rows at fallback "
+             f"elasticity {eps0}, clamped at {cap:.4f}; pooled "
+             f"{pooled:.4f} where a category has fewer than {min_rows} rows")
+    if thin:
+        basis += f" (pooled for {', '.join(sorted(thin))})"
+    return by_cat, float(pooled), basis
 
 
 def estimate_prior(d, cfg, seed=0):
@@ -199,10 +250,10 @@ def estimate_prior(d, cfg, seed=0):
     #
     # The dependency is broken on THIS side instead, because it is much weaker
     # here. With censored entry rows dropped above, `r` only reaches the
-    # bracket through the weighting term `r/(r+mu)`; a +-2x change moved the
-    # endpoints ~0.099 against stds of 0.4-1.7. So the bracket takes a
-    # reference constant and `fit_dispersion` runs AFTER, on the real
-    # per-category elasticities.
+    # bracket through the weighting term `r/(r+mu)` -- and the reference is
+    # fitted PER CATEGORY, so that term is not being fed a pooled average that
+    # fits no category. `fit_dispersion` runs AFTER, on the real per-category
+    # elasticities.
     #
     # the widest price spread in the extract is the below-cost hours, and
     # the bracket is the quantity most starved of variation -- so this is
@@ -210,24 +261,24 @@ def estimate_prior(d, cfg, seed=0):
     train = population(split_frames(d, cfg)["train"], cfg).copy()
     train["censored"] = episodes.censored_hours(train)
 
-    # THE REFERENCE IS MEASURED FROM THIS DATA, not pinned to a constant.
+    # THE REFERENCE IS MEASURED FROM THIS DATA, per category, not pinned to a
+    # constant and not pooled.
     #
     # A pinned number was the first attempt and it was worse in every way that
     # matters: it goes stale against a retrain, it has to be re-pasted by hand,
-    # and it says nothing about the extract in front of it. One scalar fit on
-    # the train window costs a bounded scalar minimisation.
+    # and it says nothing about the extract in front of it. A pooled fit was the
+    # second, and it averaged over a 5x-below to 6x-above spread -- see
+    # `_reference_r` for the measurement. Both cost the same bounded scalar
+    # minimisation as doing it properly.
     #
-    # This does NOT reintroduce the cycle, because the seed is COMPUTED here
-    # rather than read from `r_lookup.json`. It uses the fallback elasticity,
-    # which is exactly the approximation the old ordering made -- except it now
-    # lands on the quantity that barely cares. `r` reaches the bracket only
-    # through the weighting term `r/(r+mu)` once censored entry rows are gone,
-    # and a +-2x change moved the endpoints ~0.099 against stds of 0.4-1.7. So
-    # the seed's own imprecision is immaterial, while fitting DISPERSION at the
-    # wrong elasticity cost 26% of the learning rate.
+    # This does NOT reintroduce the cycle, because the reference is COMPUTED
+    # here rather than read from `r_lookup.json`. It uses the fallback
+    # elasticity, which is exactly the approximation the old ordering made --
+    # except it now lands on the quantity that cares far less, and fitting
+    # DISPERSION at the wrong elasticity cost 26% of the learning rate.
     #
     # Same estimator `fit_dispersion` uses -- imported, not reimplemented, so
-    # the two cannot drift.
+    # the two cannot drift, and the same boundary clamp for the same reason.
     # `r` is assigned after `entry` is built -- the reference is fitted on
     # those rows, so it cannot be known yet.
 
@@ -245,16 +296,15 @@ def estimate_prior(d, cfg, seed=0):
     #
     # Censoring is decided at an episode's LAST row, so an entry row can only
     # be censored when entry IS the last row -- the window sold out within its
-    # opening hour. Measured: 3 of 452 entry rows (0.66%).
+    # opening hour. Fixture: 33 of 1,731 entry rows (1.91%).
     #
     # Dropping them is what lets the bracket run BEFORE `fit_dispersion`. The
     # censored branch of the likelihood is `nbinom.logsf(k-1, r, p)`, and how
     # much probability mass sits above k is entirely a dispersion question --
     # it is the channel through which `r` really bites. With no censored rows
-    # left, `r` acts only through the weighting term `r/(r+mu)`, which moved
-    # the brackets ~0.099 (four grid steps) under a +-2x change, well inside
-    # their own std of 0.4-1.7. A reference `r` is then good enough and the
-    # circular dependency is gone.
+    # left, `r` acts only through the weighting term `r/(r+mu)`, and a
+    # per-category reference is then good enough: the circular dependency is
+    # gone. Pooled was NOT good enough -- see `_reference_r`.
     #
     # THE COST IS A SELECTION BIAS, and it is small only because the count is:
     # these are the fastest-selling episodes, so removing them truncates the
@@ -271,9 +321,14 @@ def estimate_prior(d, cfg, seed=0):
     dropped_share = float(censored_entry.mean()) if len(censored_entry) else 0.0
     entry = entry[~censored_entry].copy()
 
-    # NOW the reference can be fitted, on exactly these rows
-    ref_r, r_basis = _reference_r(entry, cfg, model, pc)
-    entry["r"] = float(ref_r)
+    # NOW the reference can be fitted, on exactly these rows, per category --
+    # dispersion is a property of the category, not of the extract, and the
+    # spread across them (1.6 to the search bound on the fixture) dwarfs the
+    # +-2x band this approximation was ever justified over. A category too thin
+    # to fit its own takes the pooled value.
+    r_by_cat, ref_r, r_basis = _reference_r(entry, cfg, model, pc)
+    entry["r"] = (entry.category.astype(str).map(r_by_cat)
+                  .fillna(float(ref_r)).astype(float))
 
     per_category, failures = {}, []
     for cat, g in entry.groupby("category"):
@@ -352,6 +407,14 @@ def estimate_prior(d, cfg, seed=0):
             # Small here; if it climbs the selection bias stops being cheap.
             "entry_rows_censored_dropped": int(
                 entry_censored_by_cat.get(cat, 0)),
+            # THE DISPERSION THIS BRACKET WAS SCORED AT, and whether it is the
+            # category's own or the pooled stand-in. Per row rather than once
+            # at the top because that is the level it now varies at, and a
+            # reader checking a suspicious bracket should not have to
+            # cross-reference which r produced it.
+            "reference_r": round(float(g.r.iloc[0]), 6),
+            "reference_r_scope": ("category" if str(cat) in r_by_cat
+                                  else "pooled"),
             "accepted": accepted, "rows": int(len(g)),
         }
         if not accepted:
@@ -425,7 +488,16 @@ def estimate_prior(d, cfg, seed=0):
         # THE DISPERSION THE BRACKET USED, and where it came from. Recorded
         # because it is the assumption that lets this step run BEFORE
         # fit_dispersion -- the reader should be able to see it, not infer it.
+        #
+        # `reference_r` is the POOLED value, used only for categories too thin
+        # to fit their own. What actually scored each bracket is
+        # `reference_r_by_category` (and `per_category[c].reference_r`). The
+        # two differ by a lot -- 1.6 to the search bound against pooled 8.04 on
+        # the fixture -- so reading the pooled number as "the r the bracket
+        # used" would be wrong for every category that fitted its own.
         "reference_r": round(float(ref_r), 6),
+        "reference_r_by_category": {k: round(float(v), 6)
+                                    for k, v in sorted(r_by_cat.items())},
         "reference_r_basis": r_basis,
         # THE COST OF THAT ORDERING. A censored entry row is a one-hour
         # episode -- the fastest sellers -- so dropping them pulls |epsilon|

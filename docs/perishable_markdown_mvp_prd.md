@@ -30,7 +30,7 @@ The system is built in the order below. Each step's output is the next step's in
 | 4 | `bootstrap.train_baseline` (§9.3) | 2 | Fit and freeze `mu_ref`. |
 | 4b | `backtest` (§17) | 2, 4 | Replay harness. Needed by the calibration gate, and re-run after every correction — build it as a module, not a script. |
 | 5 | **GATE — calibration** (§9.3) | 3, 4b | **BLOCKING.** Run measurement 10. Establish the level/slope split. Do not proceed until `fidelity_episode_sold_ratio` is inside `calibration_gate_band`. |
-| 6 | `bootstrap.estimate_prior` (§9.5) | 2, 4 | **Runs BEFORE dispersion (owner, 2026-08-24)** — see §9.4. **Widen the search bound to `epsilon_min` before running.** Boundary and inverted brackets are flagged and used, not rejected. Fits at `posterior.prior.reference_r` and drops censored entry rows. |
+| 6 | `bootstrap.estimate_prior` (§9.5) | 2, 4 | **Runs BEFORE dispersion (owner, 2026-08-24)** — see §9.4. **Widen the search bound to `epsilon_min` before running.** Boundary and inverted brackets are flagged and used, not rejected. Fits at a per-category `reference_r` derived from its own entry rows, and drops censored entry rows. |
 | 7 | `bootstrap.fit_dispersion` (§9.4) | 2, 4, **6** | `r_lookup`, `rho`, fitted at each category's OWN prior mean. Re-fit `rho` against fitted residuals — the phase-0 value is a proxy. |
 | 8 | **GATE — prior acceptance** (§9.5) | 6 | **BLOCKING, PER CATEGORY.** Only a wrong sign rejects a category; constant std rejects the whole prior. Boundary and inversion are flagged, not fatal — read `inverted_categories`. `source` is `bracket`, `mixed`, or `fallback`. |
 | 9 | `pricing.demand`, `pricing.posterior`, `pricing.dp` (§9.3, §10, §11) | 1, 4, 6, 7 | Decision core. |
@@ -540,9 +540,9 @@ The two steps are genuinely circular: the bracket's censored NB likelihood needs
 | direction | strength |
 | --- | --- |
 | ε → `r`, `rho` | **strong** — 26% of the learning rate for a 0.5 shift |
-| `r` → ε | **weak** — ±2× moved the bracket endpoints ~0.099, against stds of 0.4–1.7 |
+| `r` → ε | **weak, once `r` is per category** — the pooled-vs-per-category error was worth up to 0.212 on a bracket midpoint (§9.5), so the loop is cut by fitting the reference per category rather than by calling the pooled error small |
 
-The asymmetry exists because the channel through which `r` really bites — the censored term `nbinom.logsf(k−1, r, p)`, where the mass above `k` is entirely a dispersion question — **stops firing**. Censoring is decided at an episode's *last* row while the bracket uses *entry* rows, so a censored entry row can only be a one-hour episode; §9.5 drops those (measured: 3 of 452, **0.66%**). What remains is the weighting term `r/(r+μ)`.
+The asymmetry exists because the channel through which `r` really bites — the censored term `nbinom.logsf(k−1, r, p)`, where the mass above `k` is entirely a dispersion question — **stops firing**. Censoring is decided at an episode's *last* row while the bracket uses *entry* rows, so a censored entry row can only be a one-hour episode; §9.5 drops those (fixture: 33 of 1,731, **1.91%**). What remains is the weighting term `r/(r+μ)`, and that term is now fitted per category rather than pooled.
 
 `r_lookup.json` records `working_elasticity_basis` and `working_elasticity_by_category`, so a reader can confirm which curve `r` and `rho` were actually fitted against. Run standalone with no prior artifact, the step still falls back to the constant and says so.
 
@@ -608,15 +608,27 @@ The fallback asserts the measured deepening bar is 2.4 standard deviations out o
 
 Note the acceptance checks are **pre-registered in config**, not chosen after seeing the estimates, so applying them per cell and using the cells that pass is the checks doing their job rather than selection on the outcome.
 
-**Censored entry rows are dropped, and this is what lets the step run before §9.4.** Censoring is decided at an episode's *last* row, so a censored entry row is a one-hour episode — the window sold out inside its opening hour. Measured: 3 of 452 entry rows (**0.66%**). Removing them takes the `nbinom.logsf` term out of the likelihood, which is the channel through which `r` really matters, leaving only the weighting term `r/(r+μ)`; a ±2× change in `r` then moves the endpoints ~0.099 against stds of 0.4–1.7. The bracket therefore fits at `posterior.prior.reference_r` and §9.4 runs afterwards on the real per-category elasticities.
+**Censored entry rows are dropped, and this is what lets the step run before §9.4.** Censoring is decided at an episode's *last* row, so a censored entry row is a one-hour episode — the window sold out inside its opening hour. Removing them takes the `nbinom.logsf` term out of the likelihood, which is the channel through which `r` really matters, leaving only the weighting term `r/(r+μ)`. The bracket therefore fits at `posterior.prior.reference_r` and §9.4 runs afterwards on the real per-category elasticities.
 
-`reference_r` is **derived from the data, not pinned.** Left null (the default) the step fits one global `r` on its own entry rows — the rows this likelihood sums over — at the fallback elasticity, using the same `fit_dispersion.fit_r` the frozen artifact uses. Reported as `reference_r` and `reference_r_basis`.
+`reference_r` is **derived from the data, not pinned, and fitted per category** (owner, 2026-08-24). Left null (the default) the step fits `r` on each category's own entry rows — the rows this likelihood sums over — at the fallback elasticity, using the same `fit_dispersion.fit_r` and the same boundary clamp the frozen artifact uses. Reported as `reference_r_by_category`, with `reference_r` the pooled value used only where a category has fewer than `reference_r_min_rows` entry rows, plus `reference_r_basis` and a per-category `reference_r_scope` of `category` or `pooled`.
 
-It is computed rather than borrowed, so nothing has to exist first and the cold start works on a fresh clone. It also cannot go stale: a pinned constant describes whatever extract produced it, needs re-pasting after a retrain, and says nothing about the data in front of you. Setting an explicit number still wins, for reproducing an older run.
+It is computed rather than borrowed, so nothing has to exist first and the cold start works on a fresh clone. It also cannot go stale: a pinned constant describes whatever extract produced it, needs re-pasting after a retrain, and says nothing about the data in front of you. Setting an explicit number still wins, for reproducing an older run, and then applies to every category.
 
-**The window matters more than the row type**, which is why this is fitted here rather than read from `r_lookup.json`. Measured on the fixture: entry rows give **2.34** and all train rows **2.31** — the same answer — while `fit_dispersion`'s *calibration* window gives **0.48**, five times lower. Those are different windows serving different purposes; borrowing the artifact's global would describe the calibration period rather than the rows the bracket scores.
+**Why per category and not one pooled scalar.** Dispersion is a property of the category, not of the extract, and the spread across categories swamps the pooled fit's own imprecision. Fixture entry rows, against a pooled 8.04:
 
-**The `r → ε` sensitivity is category-dependent, and the earlier "~0.099" figure was measured around the wrong anchor.** Re-measured at ±2× around 2.34: four of five categories move **0.049** (two grid steps), and VEGETABLE moves **0.592** — and it is the least-identified cell in the fixture. So the reference being right matters most exactly where `identifying_variation_share` is already low. Read the two together.
+| category | entry rows | reference `r` | Pearson |
+|---|---|---|---|
+| SEAFOOD | 275 | 1.60 | 1.685 |
+| VEGETABLE | 237 | 5.39 | 0.865 |
+| FRUIT | 361 | 14.12 | 0.663 |
+| MEAT | 467 | 28.71 | 0.581 |
+| SIDE DISH | 358 | 39.35 (clamped from the 50.0 bound) | 0.597 |
+
+That is 5× below to 6× above pooled, where the sensitivity band this approximation was ever justified over was ±2×. Scoring SEAFOOD's bracket at 8.04 is not a small error in a nuisance parameter, it is the wrong likelihood. Switching from pooled to per-category moved FRUIT's controlled endpoint 0.425 and its midpoint **0.212** — half the `std_floor` — while the other four fixture brackets are pinned at a search bound and cannot move at all. The fixture builds `corr(discount, hour) ≈ 0.97` by design, so it is a weak testbed for this: expect production, where the brackets are not all pinned, to show the effect on more than one category.
+
+**A fit at a search bound is not an estimate.** SIDE DISH above is *under*-dispersed relative to Poisson (Pearson 0.597), so the MLE runs to the ceiling. Those are clamped at `dispersion.clamp_percentile` of the converged set — the same key and the same treatment §9.4 applies, so the two steps cannot drift on how a boundary is handled. Low values are preserved: a low `r` is real overdispersion and the conservative direction.
+
+**The window matters more than the row type**, which is a second reason these are fitted here rather than read from `r_lookup.json`: that artifact describes the *calibration* window while this likelihood sums over *train* entry rows. It also does not exist yet in this step order.
 
 The cost is a **selection bias**, and it is small only because the count is: these are the fastest-selling episodes, so removing them truncates the top of the demand distribution and pulls |ε| **toward zero** — the same direction the controlled arm is already biased. `entry_rows_censored_share` is reported, per category and overall. Above a couple of percent the trade stops being cheap and the ordering must be revisited rather than the number ignored.
 

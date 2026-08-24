@@ -383,20 +383,31 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
    rows, so the dispersion-sensitive `logsf` term never fires; see PRD
    §9.4/§9.5.
 
-   **`reference_r` is DERIVED, not pinned** — one global `r` fitted on the
-   bracket's own entry rows at the fallback elasticity, so it cannot go stale
-   and there is no constant to re-paste. Computed, not read from
+   **`reference_r` is DERIVED, not pinned, and fitted PER CATEGORY** — `r` on
+   each category's own entry rows at the fallback elasticity, so it cannot go
+   stale and there is no constant to re-paste. Computed, not read from
    `r_lookup.json`, so a fresh clone runs. **Do not borrow the artifact's
-   global:** it is fitted on the CALIBRATION window and measured 0.48 against
-   2.34 on the bracket's own rows — five times off, because the window differs,
-   not the row type.
+   global:** it is fitted on the CALIBRATION window, and this likelihood sums
+   over TRAIN entry rows.
 
-   **The `r → ε` sensitivity is category-dependent.** At ±2× around the right
-   anchor, four of five fixture categories move 0.049 (two grid steps) and one
-   moves 0.592 — the least-identified cell. So the reference matters most
-   exactly where `identifying_variation_share` is already low; read them
-   together. An earlier "~0.099 for ±2×" figure in this repo was measured
-   around the wrong anchor and understated the tail.
+   **Pooled was the wrong unit.** Dispersion belongs to the category, and the
+   spread swamps the ±2× band the approximation was justified over — fixture
+   entry rows against a pooled 8.04: SEAFOOD 1.60, VEGETABLE 5.39, FRUIT 14.12,
+   MEAT 28.71, SIDE DISH at the 50.0 search bound. Going per-category moved
+   FRUIT's midpoint 0.212, half the `std_floor`; the other four fixture
+   brackets are pinned at a search bound and cannot move, because the fixture
+   builds `corr(discount, hour) ≈ 0.97` by design and is a weak testbed here.
+   Boundary fits are clamped at `dispersion.clamp_percentile` — the same key
+   §9.4 uses, so the two cannot drift. Read `reference_r_by_category` and the
+   per-category `reference_r_scope` (`category` vs `pooled`), not the pooled
+   `reference_r` alone.
+
+   **Where it matters most.** The reference being right matters most exactly
+   where `identifying_variation_share` is already low, so read the two
+   together. Two figures previously in this repo were measured on bases that no
+   longer apply: "~0.099 for ±2×" was anchored at the wrong `r`, and the 0.049
+   / 0.592 pair that replaced it was measured against a pooled reference the
+   step no longer uses.
    `pipeline.assurance` shares `_working_elasticity` so its live `rho` check
    cannot drift onto a different basis.
 

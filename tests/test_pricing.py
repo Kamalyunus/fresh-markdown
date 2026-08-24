@@ -883,13 +883,16 @@ def test_the_prior_runs_before_dispersion_and_each_says_what_it_used():
 
       eps -> r    STRONG. -1.0 -> -1.5 moved rho 0.3103 -> 0.4236 and deff
                   3.347 -> 4.204: 26% of the learning rate.
-      r -> eps    WEAK, once censored entry rows are dropped. The censored
-                  term `nbinom.logsf(k-1, r, p)` is where dispersion really
-                  bites, and it stops firing -- censoring is decided at an
-                  episode's LAST row while the bracket uses ENTRY rows, so a
-                  censored entry row is a one-hour episode. Measured 3 of 452.
-                  What is left is the weighting term `r/(r+mu)`: +-2x moved
-                  the endpoints ~0.099 against stds of 0.4-1.7.
+      r -> eps    WEAK, once censored entry rows are dropped AND the reference
+                  is fitted per category. The censored term
+                  `nbinom.logsf(k-1, r, p)` is where dispersion really bites,
+                  and it stops firing -- censoring is decided at an episode's
+                  LAST row while the bracket uses ENTRY rows, so a censored
+                  entry row is a one-hour episode (fixture: 33 of 1,731).
+                  What is left is the weighting term `r/(r+mu)`, and a POOLED
+                  reference was still worth 0.212 on a bracket midpoint, so
+                  the loop is cut by fitting per category rather than by
+                  calling the pooled error small.
     """
     import inspect
     from bootstrap import estimate_prior as ep
@@ -958,10 +961,10 @@ def test_the_documented_run_order_works_from_a_cold_start():
     happened the first time anyone ran it. Refusing to invent a number is
     right; shipping a default that cannot run is not.
 
-    0.42 is the fitted global from the production extract, a documented
-    constant in the same way `fallback_mean: -1.00` is. Pinning it also makes
-    the bracket reproducible: it no longer depends on whether a previous run
-    left an artifact behind.
+    A pinned 0.42 was the first fix and it was the wrong one: it goes stale
+    against a retrain, has to be re-pasted by hand, and describes whatever
+    extract produced it rather than the one in front of you. Deriving it costs
+    a bounded scalar minimisation per category and cannot go stale.
     """
     import inspect
     from bootstrap import estimate_prior as ep
@@ -977,9 +980,83 @@ def test_the_documented_run_order_works_from_a_cold_start():
     assert "fit_r(" in src, "the reference must be FITTED, not assumed"
     assert 'pc.get("reference_r") is not None' in src, \
         "an explicit value must still win, for reproducing an older run"
-    # nothing may be read from disk to get it, or the cold start breaks again
-    assert "r_lookup" not in src and "open(" not in src, \
+    # nothing may be read from disk to get it, or the cold start breaks again.
+    # The docstring is stripped first: it names `r_lookup.json` on purpose, to
+    # say why the reference is NOT borrowed from it.
+    code = src.replace(ep._reference_r.__doc__ or "", "")
+    assert "r_lookup" not in code and "open(" not in code, \
         "the reference must be computed, not borrowed from an artifact"
+
+
+def test_the_reference_dispersion_is_fitted_per_category():
+    """One pooled r fits no category, and the spread is not small.
+
+    Dispersion is a property of the category, not of the extract. Measured on
+    the fixture's entry rows against a pooled 8.04: SEAFOOD 1.60, VEGETABLE
+    5.39, FRUIT 14.12, MEAT 28.71, SIDE DISH at the 50.0 search bound -- 5x
+    below to 6x above. That is far outside the +-2x band the pooled
+    approximation was ever justified over, and switching to per-category moved
+    FRUIT's bracket midpoint 0.212, half the std_floor.
+
+    Two properties are asserted behaviourally, by fitting real counts rather
+    than by reading the source: an overdispersed category must come back with a
+    LOWER r than a near-Poisson one, and a category too thin to fit its own
+    must fall back to the pooled value rather than to a noisy fit of its own.
+    """
+    import copy
+    from bootstrap import estimate_prior as ep
+
+    rng = np.random.default_rng(0)
+    n = 600
+    mu = 4.0
+
+    class _FlatModel:
+        """mu_ref is a constant here, so all the signal is in the counts."""
+
+        def predict_mu_ref(self, rows):
+            return np.full(len(rows), mu)
+
+    def block(cat, counts):
+        return pd.DataFrame({
+            "category": cat,
+            "units_sold": counts,
+            # d_ref == total_discount, so the ratio is 1 and the elasticity
+            # cannot move mu: this isolates dispersion
+            "total_discount": 0.20, "d_ref": 0.20,
+            "censored": False,
+        })
+
+    # r = 0.5 is heavily overdispersed; r = 40 is nearly Poisson
+    over = rng.negative_binomial(0.5, 0.5 / (0.5 + mu), n)
+    tight = rng.negative_binomial(40.0, 40.0 / (40.0 + mu), n)
+    thin = rng.negative_binomial(0.5, 0.5 / (0.5 + mu), 10)
+    rows = pd.concat([block("OVER", over), block("TIGHT", tight),
+                      block("THIN", thin)], ignore_index=True)
+
+    cfg = copy.deepcopy(CFG)
+    cfg["posterior"]["prior"]["reference_r"] = None
+    cfg["posterior"]["prior"]["reference_r_min_rows"] = 100
+
+    by_cat, pooled, basis = ep._reference_r(
+        rows, cfg, _FlatModel(), cfg["posterior"]["prior"])
+
+    assert set(by_cat) == {"OVER", "TIGHT"}, \
+        f"THIN has 10 rows and must take the pooled value, got {sorted(by_cat)}"
+    assert by_cat["OVER"] < by_cat["TIGHT"], (
+        "the overdispersed category must fit a LOWER r -- got "
+        f"OVER={by_cat['OVER']:.3f} TIGHT={by_cat['TIGHT']:.3f}")
+    # a single pooled number would have sat between them, fitting neither
+    assert by_cat["OVER"] < pooled < by_cat["TIGHT"], (
+        "the pooled fit should land between the two, which is exactly why it "
+        f"is the wrong unit -- pooled {pooled:.3f}")
+    assert "per category" in basis and "THIN" in basis, \
+        f"the basis must name the pooled fallbacks: {basis}"
+
+    # and an explicit value still wins, applying to every category
+    cfg["posterior"]["prior"]["reference_r"] = 0.42
+    by_cat, pooled, basis = ep._reference_r(
+        rows, cfg, _FlatModel(), cfg["posterior"]["prior"])
+    assert by_cat == {} and pooled == 0.42 and "pinned" in basis
 
 
 def test_the_bounded_step_holds_in_the_REPORT_not_just_in_the_store(): # noqa: N802

@@ -22,10 +22,11 @@ nothing uses, and this direction is strong: -1.0 -> -1.5 moved rho
 
 The two steps are genuinely circular -- the bracket's likelihood needs r. The
 loop is broken on the OTHER side now, because it is far weaker there:
-`estimate_prior` drops its censored entry rows (one-hour episodes, 0.66% of
-them) so the dispersion-sensitive `logsf` term never fires, leaving r to act
-only through the weighting term `r/(r+mu)`. A +-2x change in r moved the
-brackets ~0.099 against their own stds of 0.4-1.7.
+`estimate_prior` drops its censored entry rows (one-hour episodes) so the
+dispersion-sensitive `logsf` term never fires, leaving r to act only through
+the weighting term `r/(r+mu)` -- and it fits its own reference PER CATEGORY on
+its own train entry rows, so that term is not fed a pooled average. It does not
+read this module's `r_lookup.json`, which describes the CALIBRATION window.
 
 Run standalone with no prior artifact, this still falls back to the constant
 and says so in `working_elasticity_basis`.
@@ -106,8 +107,9 @@ def fit_dispersion(d, cfg):
     #
     # The old ordering existed because the two steps are circular -- the prior
     # fit needs r. That is broken on the OTHER side now: `estimate_prior` drops
-    # its censored entry rows and takes a reference r, which costs it ~0.099
-    # against stds of 0.4-1.7. So the prior runs FIRST and this reads it.
+    # its censored entry rows, so the dispersion-sensitive term never fires, and
+    # fits its own per-category reference r on its own train entry rows. So the
+    # prior runs FIRST and this reads it.
     eps_by_cat, eps0 = _working_elasticity(cfg)
     mu_ref = model.predict_mu_ref(calib)
     ratio = (1 - calib.total_discount.to_numpy()) / (1 - calib.d_ref.to_numpy())

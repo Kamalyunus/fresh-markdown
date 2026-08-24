@@ -257,48 +257,63 @@ posterior:
     fallback_std: 0.60                 # SET
     std_floor: 0.40                    # SET  floor on bracket-derived std
     reference_r: null                  # SET  dispersion the BRACKET fits at.
-      # null = MEASURE IT from the train window, which is the default and the
-      # right answer. One global `fit_r` at the fallback elasticity, using the
-      # same estimator fit_dispersion uses. Reported as `reference_r` and
-      # `reference_r_basis` in prior.json.
+      # null = MEASURE IT from the train window, PER CATEGORY, which is the
+      # default and the right answer. `fit_r` at the fallback elasticity on
+      # each category's entry rows, using the same estimator and the same
+      # boundary clamp fit_dispersion uses. Reported as
+      # `reference_r_by_category`, with `reference_r` the pooled fallback for a
+      # category thinner than reference_r_min_rows, and `reference_r_basis`.
       #
       # Why derived rather than pinned: a pinned constant goes stale against a
       # retrain, has to be re-pasted by hand, and says nothing about the
       # extract in front of it. Deriving it costs one bounded scalar
-      # minimisation.
+      # minimisation per category.
       #
-      # Why this does not reintroduce the cold-start cycle: the seed is
-      # COMPUTED here, not read from r_lookup.json, so nothing has to exist
-      # first. It uses the fallback elasticity -- the same approximation the
-      # old ordering made -- except now it lands on the quantity that barely
-      # cares. With censored entry rows dropped, `r` reaches the bracket only
-      # through `r/(r+mu)`: a +-2x change moved the endpoints ~0.099 against
-      # stds of 0.4-1.7. Fitting DISPERSION at the wrong elasticity, by
-      # contrast, cost 26% of the learning rate.
+      # Why PER CATEGORY (owner, 2026-08-24): dispersion is a property of the
+      # category, not of the extract, and the spread swamps the +-2x band the
+      # approximation was justified over. Fixture entry rows, pooled 8.04:
+      # SEAFOOD 1.60, VEGETABLE 5.39, FRUIT 14.12, MEAT 28.71, SIDE DISH at the
+      # 50.0 search bound. Scoring SEAFOOD at the pooled value is not a small
+      # error in a nuisance parameter, it is the wrong likelihood.
       #
-      # Set a number to PIN it -- reproducing an older run, or holding the
-      # bootstrap against a known value. Then it is used verbatim and nothing
-      # is fitted.
-      # estimate_prior now runs BEFORE fit_dispersion, so the fitted r_lookup
-      # does not exist yet and the bracket needs a stand-in. The two steps are
-      # circular; the loop is cut here because this side is far weaker.
+      # A FIT AT A SEARCH BOUND IS NOT AN ESTIMATE. SIDE DISH above is
+      # under-dispersed relative to Poisson, so the MLE runs to the ceiling.
+      # Those are clamped at dispersion.clamp_percentile of the converged set --
+      # the same key and the same treatment fit_dispersion applies, so the two
+      # modules cannot drift on how a boundary is handled.
+      #
+      # WHY THIS IS FITTED HERE AND NOT READ FROM r_lookup.json: estimate_prior
+      # runs BEFORE fit_dispersion, so that artifact does not exist yet on a
+      # cold start. The two steps are genuinely circular -- the bracket's
+      # likelihood needs r, and dispersion needs an elasticity -- and the loop
+      # is cut on THIS side because it is far weaker here. Even were the
+      # artifact present it would be the wrong number: it describes the
+      # CALIBRATION window, and this likelihood sums over TRAIN entry rows.
       #
       # `r` reaches the bracket two ways. The strong one is the censored term
       # `nbinom.logsf(k-1, r, p)` -- how much mass sits above k is entirely a
-      # dispersion question -- and it now never fires, because censoring is
-      # decided at an episode's LAST row while the bracket uses ENTRY rows, so
-      # a censored entry row is a one-hour episode and those are dropped
-      # (measured: 3 of 452, 0.66%). What remains is the weighting term
-      # `r/(r+mu)`: a +-2x change moved the endpoints ~0.099, four grid steps,
-      # against bracket stds of 0.4-1.7.
+      # dispersion question -- and it never fires, because censoring is decided
+      # at an episode's LAST row while the bracket uses ENTRY rows, so a
+      # censored entry row is a one-hour episode and those are dropped. What
+      # remains is the weighting term `r/(r+mu)`, and fitting per category is
+      # what keeps even that term honest.
       #
-      # Against that, fitting dispersion at the WRONG elasticity cost 26% of
-      # the learning rate (-1.0 -> -1.5 moved rho 0.3103 -> 0.4236, deff
+      # Against this, fitting DISPERSION at the wrong elasticity cost 26% of the
+      # learning rate (-1.0 -> -1.5 moved rho 0.3103 -> 0.4236, deff
       # 3.347 -> 4.204). So the approximation belongs on this side.
       #
-      # null = use the fitted global from an existing r_lookup.json, which is
-      # what a re-run in the old order does. Set a number to pin it and make
-      # the bootstrap independent of any previous run's artifact.
+      # Set a number to PIN it -- reproducing an older run, or holding the
+      # bootstrap against a known value. It then applies to EVERY category and
+      # nothing is fitted.
+    reference_r_min_rows: 150          # SET  entry rows a category needs to
+      # fit its own reference r; below this it takes the pooled fit.
+      #
+      # SEPARATE FROM dispersion.min_rows_per_group (200) ON PURPOSE, because
+      # the rows are not the same unit. That threshold counts calibration HOURS;
+      # this one counts ENTRY rows, one per episode, so the same number would be
+      # a far stricter bar and would silently push production categories onto
+      # the pooled value. Reported per category as `reference_r_scope`, so
+      # "category" vs "pooled" is visible rather than inferred.
     search_bounds: [-4.00, -0.05]      # SET  must equal [epsilon_min, epsilon_max]
     search_grid_size: 159              # SET  bracket search resolution
     max_rows_per_category: 150000      # SET  row cap per category in the bracket fit
