@@ -31,9 +31,9 @@ step                                          writes                            
 2. bootstrap.measure --input <raw>            reports/phase0.json                     raw FLC parquet
 3. bootstrap.train_baseline --input prepared  artifacts/baseline_model.txt,           prepared
                                               artifacts/feature_schema.json
-4. bootstrap.fit_dispersion --input prepared  artifacts/r_lookup.json,                prepared + baseline
+4. bootstrap.estimate_prior --input prepared  artifacts/prior.json                    prepared + baseline
+5. bootstrap.fit_dispersion --input prepared  artifacts/r_lookup.json,                prepared + baseline + PRIOR
                                               artifacts/rho.json
-5. bootstrap.estimate_prior --input prepared  artifacts/prior.json                    prepared + baseline + r_lookup
 6. backtest --input prepared --out <json>     reports/backtest*.json                  prepared + baseline + prior + r_lookup
 7. bootstrap.train_baseline --fit-calibration artifacts/calibration.json              prepared + baseline
    (only when the calibration gate fails on a level error)
@@ -339,8 +339,13 @@ checks, each aimed at something that would otherwise be silent:
 - `dispersion` compares realised zero-sale and stockout rates against
   `NB(mu, r)`. Both are exact under censoring; a variance comparison is not.
 - `correlation` re-measures `rho` on live residuals **at the working elasticity**
-  (`posterior.prior.fallback_mean`), the same basis `bootstrap.fit_dispersion`
-  used. Measuring at the posterior mean would show drift that is not there.
+  -- each category's PRIOR MEAN, via the shared
+  `fit_dispersion._working_elasticity`, which is the same basis
+  `bootstrap.fit_dispersion` used. Measuring at the posterior mean would show
+  drift that is not there; so would measuring at the fallback constant now
+  that dispersion is fitted after the prior, and `rho_drift_alert` (0.10) is
+  tight enough to fire on a pure basis mismatch. One helper, so they cannot
+  diverge.
 - `exploration` reconstructs the affordable set and tests that the applied tier
   is a uniform draw from it, plus the invariant that a non-empty affordable set
   always produced an exploration.
@@ -358,15 +363,28 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
    both reports. `--fit-calibration` does NOT retrain; plain
    `train_baseline` and `run_bootstrap.sh` DO.
 
-1a. **Changing `posterior.prior.fallback_mean` invalidates `rho`, and the
-   calibration factor with it.** `fit_dispersion` measures residual
-   correlation using the fallback as its *working* elasticity when scaling
-   `mu_ref` to actual prices, so a different prior gives a different `rho`
-   and `deff`. Measured: −1.0 → −1.5 moved `rho` 0.3103 → 0.4236 and `deff`
+1a. **Changing the ELASTICITY PRIOR invalidates `rho`, and the calibration
+   factor with it.** `fit_dispersion` scales `mu_ref` to actual prices at a
+   *working* elasticity, so a different prior gives a different `rho` and
+   `deff`. Measured: −1.0 → −1.5 moved `rho` 0.3103 → 0.4236 and `deff`
    3.347 → 4.204, and the level-calibration factor from 1.4779 to 1.6222.
-   Re-run steps 4 onward and re-paste the mirrors, or strict start-up will
-   refuse on `ARTIFACT_MIRRORS` drift — which is the check working, not a
-   nuisance.
+   Re-run the dispersion step onward and re-paste the mirrors, or strict
+   start-up will refuse on `ARTIFACT_MIRRORS` drift — which is the check
+   working, not a nuisance.
+
+   **The working elasticity is now each category's PRIOR MEAN, not
+   `fallback_mean`** (owner, 2026-08-24), which is why `estimate_prior` runs
+   BEFORE `fit_dispersion`. Fitting at the constant was harmless only while
+   the bracket was rejected for all 16 categories and the fallback *was* the
+   prior; with brackets accepted per category it measured correlation against
+   a demand curve nothing uses. The two steps are circular — the bracket's
+   censored NB likelihood needs `r` — and the loop is cut on the prior's
+   side because `r → ε` is weak (±2× moved endpoints ~0.099, against stds of
+   0.4–1.7) while `ε → rho` is strong (26% of the learning rate). What makes
+   `r → ε` weak is that the bracket drops its censored entry rows, so the
+   dispersion-sensitive `logsf` term never fires; see PRD §9.4/§9.5.
+   `pipeline.assurance` shares `_working_elasticity` so its live `rho` check
+   cannot drift onto a different basis.
 
    Also worth knowing before anyone proposes a "better" prior: **the policy
    is insensitive to the prior mean anywhere below the deepening bar

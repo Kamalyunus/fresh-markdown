@@ -27,11 +27,19 @@ python3 -m bootstrap.measure --input "$INPUT" --out reports/phase0.json
 echo "== step 3: bootstrap.train_baseline ============================="
 python3 -m bootstrap.train_baseline --input data/prepared.parquet
 
-echo "== step 4: bootstrap.fit_dispersion ============================="
-python3 -m bootstrap.fit_dispersion --input data/prepared.parquet
-
-echo "== step 5: bootstrap.estimate_prior ============================="
+# ORDER: the prior comes FIRST, and it is not arbitrary. `fit_dispersion`
+# forms residuals at a working elasticity, so running it first meant fitting r
+# and rho at the fallback constant -- fine while the bracket was rejected for
+# every category, wrong once brackets are accepted per category. The two steps
+# are circular (the bracket's likelihood needs r), and the loop is cut on the
+# prior's side because it is far weaker there: the bracket uses a reference r
+# and drops its censored entry rows, costing ~0.099 against stds of 0.4-1.7,
+# where dispersion at the wrong elasticity costs 26% of the learning rate.
+echo "== step 4: bootstrap.estimate_prior ============================="
 python3 -m bootstrap.estimate_prior --input data/prepared.parquet
+
+echo "== step 5: bootstrap.fit_dispersion ============================="
+python3 -m bootstrap.fit_dispersion --input data/prepared.parquet
 
 echo "== step 6: backtest -- calibration gate + tau_initial ==========="
 python3 -m backtest --input data/prepared.parquet --out reports/backtest.json

@@ -89,7 +89,6 @@ from common import episodes
 from common.provenance import stamp
 from bootstrap.prepare_data import population, split_frames
 from bootstrap.train_baseline import BaselineModel
-from bootstrap.fit_dispersion import lookup_r
 
 
 def _censored_loglik(eps, mu_ref, log_ratio, k, r, censored, lgamma_const,
@@ -145,16 +144,47 @@ def estimate_prior(d, cfg, seed=0):
     rng = np.random.default_rng(seed)
 
     model = BaselineModel(cfg)
-    with open(cfg["dispersion"]["r_lookup_path"]) as f:
-        r_lookup = json.load(f)
+    # DISPERSION FOR THE BRACKET, and why it does not come from r_lookup.
+    #
+    # `fit_dispersion` forms its residuals at a working elasticity, and this
+    # module produces that elasticity -- a genuine circular dependency. It used
+    # to be broken by running dispersion FIRST at the fallback constant, which
+    # was harmless only while the fallback WAS the prior. Once the bracket is
+    # accepted per category (-1.6 to -2.3 measured), fitting r and rho at -1.0
+    # measures residual correlation against a demand curve nothing uses -- and
+    # that direction is strong: -1.0 -> -1.5 moved rho 0.3103 -> 0.4236 and
+    # deff 3.347 -> 4.204, 26% of the learning rate.
+    #
+    # The dependency is broken on THIS side instead, because it is much weaker
+    # here. With censored entry rows dropped above, `r` only reaches the
+    # bracket through the weighting term `r/(r+mu)`; a +-2x change moved the
+    # endpoints ~0.099 against stds of 0.4-1.7. So the bracket takes a
+    # reference constant and `fit_dispersion` runs AFTER, on the real
+    # per-category elasticities.
+    #
+    # `reference_r` may be left null, in which case the fitted global is used
+    # if an r_lookup already exists -- for a re-run in the old order, or when
+    # someone wants the fitted value. It is never the per-cell r: that is the
+    # artifact this step now precedes.
+    ref_r = pc.get("reference_r")
+    r_basis = "config reference_r"
+    if ref_r is None:
+        path = cfg["dispersion"]["r_lookup_path"]
+        if not os.path.exists(path):
+            raise SystemExit(
+                "posterior.prior.reference_r is null and no r_lookup exists. "
+                "The bracket needs a dispersion; set reference_r, or run "
+                "bootstrap.fit_dispersion first (the old order).")
+        with open(path) as f:
+            ref_r = float(json.load(f)["global"])
+        r_basis = "fitted global from r_lookup"
 
     # the widest price spread in the extract is the below-cost hours, and
     # the bracket is the quantity most starved of variation -- so this is
     # the fit that gains most from train_population "integrity"
     train = population(split_frames(d, cfg)["train"], cfg).copy()
     train["censored"] = episodes.censored_hours(train)
-    train["r"] = [lookup_r(r_lookup, s, c)
-                  for s, c in zip(train.subcategory, train.category)]
+    train["r"] = float(ref_r)
 
     weeks = max(train.date.astype(str).map(
         lambda x: pd.Timestamp(x).to_period("W")).nunique(), 1)
@@ -165,6 +195,36 @@ def estimate_prior(d, cfg, seed=0):
     entry = (train.sort_values(["episode_id", "hour_of_day"])
              .groupby("episode_id").head(1))
     entry = entry[entry.starting_inventory >= 1]
+
+    # A CENSORED ENTRY ROW IS A ONE-HOUR EPISODE, and it is dropped.
+    #
+    # Censoring is decided at an episode's LAST row, so an entry row can only
+    # be censored when entry IS the last row -- the window sold out within its
+    # opening hour. Measured: 3 of 452 entry rows (0.66%).
+    #
+    # Dropping them is what lets the bracket run BEFORE `fit_dispersion`. The
+    # censored branch of the likelihood is `nbinom.logsf(k-1, r, p)`, and how
+    # much probability mass sits above k is entirely a dispersion question --
+    # it is the channel through which `r` really bites. With no censored rows
+    # left, `r` acts only through the weighting term `r/(r+mu)`, which moved
+    # the brackets ~0.099 (four grid steps) under a +-2x change, well inside
+    # their own std of 0.4-1.7. A reference `r` is then good enough and the
+    # circular dependency is gone.
+    #
+    # THE COST IS A SELECTION BIAS, and it is small only because the count is:
+    # these are the fastest-selling episodes, so removing them truncates the
+    # top of the demand distribution and pulls |epsilon| TOWARD ZERO -- the
+    # same direction the controlled arm is already biased. `entry_rows_censored`
+    # is reported per category so the trade stays visible; if it climbs above a
+    # couple of percent, this is no longer cheap and the ordering has to be
+    # reconsidered rather than the number ignored.
+    censored_entry = entry.censored.to_numpy()
+    entry_censored_by_cat = (entry[censored_entry].groupby("category").size()
+                             .to_dict())
+    entry_total_by_cat = entry.groupby("category").size().to_dict()
+    dropped_censored = int(censored_entry.sum())
+    dropped_share = float(censored_entry.mean()) if len(censored_entry) else 0.0
+    entry = entry[~censored_entry]
 
     per_category, failures = {}, []
     for cat, g in entry.groupby("category"):
@@ -239,6 +299,10 @@ def estimate_prior(d, cfg, seed=0):
             # the CONTROLLED estimate is identified by. Near zero means that
             # estimate is not identified, whatever number it returned.
             "identifying_variation_share": round(identifying, 4),
+            # one-hour episodes, dropped so the bracket needs no fitted r.
+            # Small here; if it climbs the selection bias stops being cheap.
+            "entry_rows_censored_dropped": int(
+                entry_censored_by_cat.get(cat, 0)),
             "accepted": accepted, "rows": int(len(g)),
         }
         if not accepted:
@@ -307,7 +371,20 @@ def estimate_prior(d, cfg, seed=0):
     return {
         "source": source,
         "requested_source": pc["source"],
-        "identifying_rows": "entry-hour only (same-hour cross-episode, PRD 9.5)",
+        "identifying_rows": ("entry-hour only (same-hour cross-episode, PRD "
+                             "9.5), censored entry rows excluded"),
+        # THE DISPERSION THE BRACKET USED, and where it came from. Recorded
+        # because it is the assumption that lets this step run BEFORE
+        # fit_dispersion -- the reader should be able to see it, not infer it.
+        "reference_r": round(float(ref_r), 6),
+        "reference_r_basis": r_basis,
+        # THE COST OF THAT ORDERING. A censored entry row is a one-hour
+        # episode -- the fastest sellers -- so dropping them pulls |epsilon|
+        # toward zero. Cheap only while the count is small: above a couple of
+        # percent the trade is no longer worth it and the ordering should be
+        # revisited rather than this number ignored.
+        "entry_rows_censored_dropped": dropped_censored,
+        "entry_rows_censored_share": round(dropped_share, 4),
         "search_bounds": [lo, hi],
         "grid_step": float(step),
         "per_category": per_category,

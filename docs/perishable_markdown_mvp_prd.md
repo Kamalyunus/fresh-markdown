@@ -30,9 +30,9 @@ The system is built in the order below. Each step's output is the next step's in
 | 4 | `bootstrap.train_baseline` (§9.3) | 2 | Fit and freeze `mu_ref`. |
 | 4b | `backtest` (§17) | 2, 4 | Replay harness. Needed by the calibration gate, and re-run after every correction — build it as a module, not a script. |
 | 5 | **GATE — calibration** (§9.3) | 3, 4b | **BLOCKING.** Run measurement 10. Establish the level/slope split. Do not proceed until `fidelity_episode_sold_ratio` is inside `calibration_gate_band`. |
-| 6 | `bootstrap.fit_dispersion` (§9.4) | 2, 4 | `r_lookup`, `rho`. Re-fit `rho` against fitted residuals — the phase-0 value is a proxy. |
-| 7 | `bootstrap.estimate_prior` (§9.5) | 2, 4 | **Widen the search bound to `epsilon_min` before running.** Boundary and inverted brackets are flagged and used, not rejected (owner, 2026-08-24). |
-| 8 | **GATE — prior acceptance** (§9.5) | 7 | **BLOCKING, PER CATEGORY.** Only a wrong sign rejects a category; constant std rejects the whole prior. Boundary and inversion are flagged, not fatal — read `inverted_categories`. `source` is `bracket`, `mixed`, or `fallback`. |
+| 6 | `bootstrap.estimate_prior` (§9.5) | 2, 4 | **Runs BEFORE dispersion (owner, 2026-08-24)** — see §9.4. **Widen the search bound to `epsilon_min` before running.** Boundary and inverted brackets are flagged and used, not rejected. Fits at `posterior.prior.reference_r` and drops censored entry rows. |
+| 7 | `bootstrap.fit_dispersion` (§9.4) | 2, 4, **6** | `r_lookup`, `rho`, fitted at each category's OWN prior mean. Re-fit `rho` against fitted residuals — the phase-0 value is a proxy. |
+| 8 | **GATE — prior acceptance** (§9.5) | 6 | **BLOCKING, PER CATEGORY.** Only a wrong sign rejects a category; constant std rejects the whole prior. Boundary and inversion are flagged, not fatal — read `inverted_categories`. `source` is `bracket`, `mixed`, or `fallback`. |
 | 9 | `pricing.demand`, `pricing.posterior`, `pricing.dp` (§9.3, §10, §11) | 1, 4, 6, 7 | Decision core. |
 | 10 | `pricing.explore` (§12) | 9, 4b | Derive `tau_initial` as a **currency** quantile from replay, per §12.3. |
 | 11 | `inference` (§11.4, §16.1) | 9, 10 | Validation, decision, event emission. |
@@ -531,6 +531,21 @@ D ~ NegBin(r, mu),   Var[D] = mu + mu²/r
 
 `rho` is a single global scalar from measurement 3. This is a legitimate use of legacy history: it measures correlation structure, not price response, so the policy confound does not affect it.
 
+**This step runs AFTER §9.5, at each category's own prior mean.** *(Owner, 2026-08-24. It previously ran first, at `posterior.prior.fallback_mean` — the constant −1.0 whatever the prior said.)*
+
+Residuals are formed at a **working elasticity**, so fitting at −1.0 while the priors are −1.6 to −2.3 measures correlation against a demand curve nothing uses. That direction is strong: −1.0 → −1.5 moved `rho` 0.3103 → 0.4236 and `deff` 3.347 → 4.204 — **26% of the learning rate**, and `deff` divides all accumulated evidence.
+
+The two steps are genuinely circular: the bracket's censored NB likelihood needs `r`. The loop is cut on §9.5's side because the dependence is far weaker there:
+
+| direction | strength |
+| --- | --- |
+| ε → `r`, `rho` | **strong** — 26% of the learning rate for a 0.5 shift |
+| `r` → ε | **weak** — ±2× moved the bracket endpoints ~0.099, against stds of 0.4–1.7 |
+
+The asymmetry exists because the channel through which `r` really bites — the censored term `nbinom.logsf(k−1, r, p)`, where the mass above `k` is entirely a dispersion question — **stops firing**. Censoring is decided at an episode's *last* row while the bracket uses *entry* rows, so a censored entry row can only be a one-hour episode; §9.5 drops those (measured: 3 of 452, **0.66%**). What remains is the weighting term `r/(r+μ)`.
+
+`r_lookup.json` records `working_elasticity_basis` and `working_elasticity_by_category`, so a reader can confirm which curve `r` and `rho` were actually fitted against. Run standalone with no prior artifact, the step still falls back to the constant and says so.
+
 ### 9.5 Elasticity prior — bracket procedure
 
 History cannot point-identify elasticity. It can **set-identify** it, and thousands of episodes beat a guessed constant.
@@ -592,6 +607,10 @@ The objection to adopting it — "the bracket is wider, so the fallback is safer
 The fallback asserts the measured deepening bar is 2.4 standard deviations out of reach in every category at once. That is the "confidently wrong" this section warns against, and nothing measured produced it.
 
 Note the acceptance checks are **pre-registered in config**, not chosen after seeing the estimates, so applying them per cell and using the cells that pass is the checks doing their job rather than selection on the outcome.
+
+**Censored entry rows are dropped, and this is what lets the step run before §9.4.** Censoring is decided at an episode's *last* row, so a censored entry row is a one-hour episode — the window sold out inside its opening hour. Measured: 3 of 452 entry rows (**0.66%**). Removing them takes the `nbinom.logsf` term out of the likelihood, which is the channel through which `r` really matters, leaving only the weighting term `r/(r+μ)`; a ±2× change in `r` then moves the endpoints ~0.099 against stds of 0.4–1.7. The bracket therefore fits at `posterior.prior.reference_r` — a constant, or the fitted global from a previous run — and §9.4 runs afterwards on the real per-category elasticities.
+
+The cost is a **selection bias**, and it is small only because the count is: these are the fastest-selling episodes, so removing them truncates the top of the demand distribution and pulls |ε| **toward zero** — the same direction the controlled arm is already biased. `entry_rows_censored_share` is reported, per category and overall. Above a couple of percent the trade stops being cheap and the ordering must be revisited rather than the number ignored.
 
 **Read `identifying_variation_share` before acting on an inversion.** The controlled fit profiles out hour effects, so it is identified by **within-hour price variation and nothing else** — the share of price variation surviving hour de-meaning, reported per category. Two very different situations produce the same inverted bracket:
 

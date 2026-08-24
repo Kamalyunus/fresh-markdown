@@ -256,6 +256,27 @@ posterior:
     fallback_mean: -1.00               # SET  used if bracket rejected
     fallback_std: 0.60                 # SET
     std_floor: 0.40                    # SET  floor on bracket-derived std
+    reference_r: null                  # SET  dispersion the BRACKET fits at.
+      # estimate_prior now runs BEFORE fit_dispersion, so the fitted r_lookup
+      # does not exist yet and the bracket needs a stand-in. The two steps are
+      # circular; the loop is cut here because this side is far weaker.
+      #
+      # `r` reaches the bracket two ways. The strong one is the censored term
+      # `nbinom.logsf(k-1, r, p)` -- how much mass sits above k is entirely a
+      # dispersion question -- and it now never fires, because censoring is
+      # decided at an episode's LAST row while the bracket uses ENTRY rows, so
+      # a censored entry row is a one-hour episode and those are dropped
+      # (measured: 3 of 452, 0.66%). What remains is the weighting term
+      # `r/(r+mu)`: a +-2x change moved the endpoints ~0.099, four grid steps,
+      # against bracket stds of 0.4-1.7.
+      #
+      # Against that, fitting dispersion at the WRONG elasticity cost 26% of
+      # the learning rate (-1.0 -> -1.5 moved rho 0.3103 -> 0.4236, deff
+      # 3.347 -> 4.204). So the approximation belongs on this side.
+      #
+      # null = use the fitted global from an existing r_lookup.json, which is
+      # what a re-run in the old order does. Set a number to pin it and make
+      # the bootstrap independent of any previous run's artifact.
     search_bounds: [-4.00, -0.05]      # SET  must equal [epsilon_min, epsilon_max]
     search_grid_size: 159              # SET  bracket search resolution
     max_rows_per_category: 150000      # SET  row cap per category in the bracket fit

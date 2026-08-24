@@ -868,3 +868,81 @@ def test_a_passing_category_is_not_punished_for_another_ones_failure():
     cfg = copy.deepcopy(CFG)
     assert _bracket_verdict(0.4, -1.2, cfg) != []
     assert _bracket_verdict(-2.7, -0.525, cfg) == []
+
+
+def test_the_prior_runs_before_dispersion_and_each_says_what_it_used():
+    """The two steps are circular and the loop is cut on the PRIOR's side.
+
+    `fit_dispersion` forms residuals at a working elasticity; `estimate_prior`
+    produces that elasticity but its likelihood needs `r`. Dispersion used to
+    run first at `prior.fallback_mean` -- the constant -1.0 whatever the prior
+    said -- which was harmless only while the bracket was rejected for all 16
+    categories and the fallback WAS the prior.
+
+    The asymmetry decides which side gives way:
+
+      eps -> r    STRONG. -1.0 -> -1.5 moved rho 0.3103 -> 0.4236 and deff
+                  3.347 -> 4.204: 26% of the learning rate.
+      r -> eps    WEAK, once censored entry rows are dropped. The censored
+                  term `nbinom.logsf(k-1, r, p)` is where dispersion really
+                  bites, and it stops firing -- censoring is decided at an
+                  episode's LAST row while the bracket uses ENTRY rows, so a
+                  censored entry row is a one-hour episode. Measured 3 of 452.
+                  What is left is the weighting term `r/(r+mu)`: +-2x moved
+                  the endpoints ~0.099 against stds of 0.4-1.7.
+    """
+    import inspect
+    from bootstrap import estimate_prior as ep
+    from bootstrap import fit_dispersion as fd
+
+    # the prior no longer reads the fitted per-cell lookup...
+    assert "lookup_r" not in inspect.getsource(ep), \
+        "the bracket is using the fitted r again, which reinstates the cycle"
+    assert "reference_r" in inspect.getsource(ep)
+    # ...and dispersion no longer hardcodes the fallback constant
+    fdsrc = inspect.getsource(fd)
+    assert "_working_elasticity" in fdsrc
+    assert 'eps0 = cfg["posterior"]["prior"]["fallback_mean"]' not in fdsrc, \
+        "dispersion is fitting at the fallback constant again"
+
+    # the run order is the script's, not a comment. Absolute path: the
+    # end-to-end tests chdir into a workspace and a relative one would resolve
+    # against whichever ran last.
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent
+    order = (root / "scripts" / "run_bootstrap.sh").read_text()
+    assert order.index("bootstrap.estimate_prior") < \
+        order.index("bootstrap.fit_dispersion"), \
+        "the prior must be fitted before dispersion reads its elasticities"
+
+
+def test_a_censored_entry_row_is_a_one_hour_episode():
+    """Which is why dropping them is cheap -- and why the cost is a selection
+    bias, not a coverage one.
+
+    Censoring is decided at the LAST row (`episodes.censored_hours`), so an
+    entry row can only be censored when entry IS the last row. Those are the
+    fastest sellers, so removing them truncates the top of the demand
+    distribution and pulls |epsilon| TOWARD ZERO -- the direction this estimate
+    is already fighting. `entry_rows_censored_share` is reported so the trade
+    stays visible rather than assumed small forever.
+    """
+    from common import episodes
+
+    d = pd.DataFrame({
+        "episode_id": ["a", "a", "b"],
+        "date": ["2026-03-01"] * 3,
+        "hour_of_day": [10, 11, 10],
+        "starting_inventory": [5, 3, 4],
+        "units_sold": [2, 3, 4],       # a closes by sell-out; b is one hour
+        "ending_inventory": [3, 0, 0],
+    })
+    cen = episodes.censored_hours(d)
+    entry_idx = d.sort_values(["episode_id", "hour_of_day"]).groupby(
+        "episode_id").head(1).index
+
+    # episode a: censored on its LAST row (index 1), not its entry row (0)
+    assert cen[1] and not cen[0]
+    # episode b is one hour, so entry IS last -- the only censored entry row
+    assert cen[2]
+    assert list(pd.Series(cen)[entry_idx]) == [False, True]

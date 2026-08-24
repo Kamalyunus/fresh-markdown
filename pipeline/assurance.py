@@ -235,18 +235,29 @@ def correlation_drift(decisions, outcomes, cfg):
     """Re-measure rho on live residuals, against the frozen artifact.
 
     Measured on the SAME basis bootstrap.fit_dispersion used -- residuals
-    against raw mu at the WORKING elasticity (the prior fallback), not against
-    the posterior mean. Using the moved posterior would make rho drift for a
-    reason that has nothing to do with the world, and the number would no
-    longer be comparable to the one deff was frozen from.
+    against raw mu at the WORKING elasticity, not against the posterior mean.
+    Using the moved posterior would make rho drift for a reason that has
+    nothing to do with the world, and the number would no longer be comparable
+    to the one deff was frozen from.
+
+    "The working elasticity" is now each category's PRIOR MEAN, not the
+    fallback constant -- `fit_dispersion` runs after `estimate_prior` and fits
+    against the prior in force. This function has to move with it: measuring
+    live residuals at -1.0 while the frozen rho was fitted at -1.6 to -2.3
+    would report drift that is purely a basis mismatch, and `rho_drift_alert`
+    (0.10 absolute) is tight enough that it would fire on it. Same helper, so
+    the two cannot diverge again.
     """
+    from bootstrap.fit_dispersion import _working_elasticity
+
     ac = cfg["assurance"]
     pcfg = cfg["pricing"]
-    eps0 = cfg["posterior"]["prior"]["fallback_mean"]
+    eps_by_cat, eps_fallback = _working_elasticity(cfg)
     pairs = _pairs(decisions, outcomes)
 
     rows = {}
     for d, o in pairs:
+        eps0 = eps_by_cat.get(str(d.get("category")), eps_fallback)
         mu = mu_at(d["reference_mu"], d["applied_discount"],
                    d["reference_discount"], eps0, pcfg["demand_floor"])
         rows.setdefault(d["episode_id"], []).append(
