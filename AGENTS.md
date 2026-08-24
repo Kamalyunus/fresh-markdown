@@ -735,6 +735,13 @@ extract's COGS** from every fit, including the elasticity prior — which is
 starved of price variation and for which below-cost hours are the widest
 spread in the data.
 
+**`python3 -m tools.export_waterfall --input <raw>.parquet`** writes the whole
+thing as a workbook: the stages with `kind` and `used_by`, then three WHOLE
+episodes per removal reason drawn from the raw feed, then every rule in prose.
+The example episode ids come from `load_and_filter` itself as it drops them --
+an exporter re-deriving which episodes a filter removed would be a second copy
+of the chain, disagreeing silently in the document meant to establish trust.
+
 ### The chain (13 waterfall rows)
 
 Every row carries `kind` and `used_by`. **`kind: hard_drop`** — the rows leave

@@ -1432,3 +1432,91 @@ def test_a_new_window_is_not_mistaken_for_a_gap(workspace):
     ids, detail = gap_split_windows(
         frame([(10, 3), (11, 2), (12, 1), (13, 9), (14, 8)]))
     assert len(ids) == 0
+
+
+def test_backtest_episode_units_reconcile_with_the_hourly_sheet(workspace):
+    """The episode sheet and the hourly sheet must be the same numbers.
+
+    An owner reading a per-episode scrap figure will check it against the
+    hours, and if the two sheets disagree the workbook is worse than useless --
+    it looks authoritative and is not. Two identities per arm:
+
+        hourly sum of units == the episode's *_sold_units
+        supply             == sold + leftover + shrink
+
+    The second holds by construction for the simulated arms (the replay loop
+    moves every unit it starts with) and by `accounting_closes` for the
+    observed one, so a non-zero residual is a real defect rather than rounding.
+    """
+    from common.config import load_config
+    from tools import export_backtest as ex
+
+    _chdir(workspace)
+    cfg = load_config()
+    ep, hourly = ex.build("data/prepared.parquet", cfg, 40)
+    rec = ex._reconciliation(ep, hourly)
+    assert len(rec) == len(ep)
+    bad = rec[~rec.reconciles]
+    assert bad.empty, bad[["episode_id", "note"]].to_string()
+
+    # and the units must actually be exported, not merely computed
+    view = ex._episode_view(ep)
+    for arm in ("actual", "legacy_model", "dp"):
+        for field in ("sold_units", "leftover_units", "scrap_units"):
+            assert f"{arm}_{field}" in view, f"{arm}_{field} missing"
+        # scrap is leftover PLUS shrink, the same definition common.episodes
+        # uses -- not the leftover alone
+        assert np.allclose(view[f"{arm}_scrap_units"],
+                           view[f"{arm}_leftover_units"]
+                           + np.where(view.outcome_known if arm == "actual"
+                                      else True, view.shrink, 0))
+    # shrink is EXOGENOUS: no policy prices away stock that went missing, so
+    # the arms may differ in leftover but never in shrink
+    assert np.allclose(view.dp_scrap_units - view.dp_leftover_units,
+                       view.legacy_model_scrap_units
+                       - view.legacy_model_leftover_units)
+
+
+def test_the_waterfall_export_shows_real_removed_episodes(workspace):
+    """The examples must come from the filter chain itself, not be re-derived.
+
+    An exporter with its own copy of the chain would disagree with the real one
+    the first time either changed -- silently, in the document whose whole
+    purpose is to establish that the removals were justified.
+    """
+    import inspect
+    from common.config import load_config
+    from bootstrap import prepare_data as pdm
+    from tools import export_waterfall as ew
+
+    # the ids are recorded where the drop happens
+    assert "examples" in inspect.signature(pdm.load_and_filter).parameters
+    src = inspect.getsource(ew)
+    assert "load_and_filter(" in src
+    for banned in ("hours_remaining < 0", "cost <= 0", "starting_inventory"):
+        assert f"{banned} " not in src.replace("RAW_COLS", ""), \
+            f"the exporter is re-deriving a filter predicate ({banned})"
+
+    _chdir(workspace)
+    cfg = load_config()
+    sheets = ew.build("data/flc.parquet", cfg, 3)
+    wf, ex, defs = sheets["waterfall"], sheets["examples"], sheets["definitions"]
+
+    assert wf.step.iloc[0] == "raw" and wf.step.iloc[-1] == "dp_eligible"
+    assert set(wf[wf.kind == "population_gate"].step) == {"eligible",
+                                                          "dp_eligible"}
+    assert not len(ex) or ex.groupby("removed_at_step").episode_id.nunique().max() <= 3
+
+    # WHOLE episodes, not sampled rows -- a fragment cannot show a defect in
+    # context, which is the entire reason this sheet exists
+    for (_, eid), g in ex.groupby(["removed_at_step", "episode_id"]):
+        assert len(g) == g.hours_present.iloc[0]
+    # ...and no episode is shown twice under two headings: the gates overlap by
+    # construction, and printing the same rows again teaches nothing
+    assert ex.episode_id.nunique() == len(
+        ex.groupby(["removed_at_step", "episode_id"]))
+
+    # every reason shown must be defined, and every definition must be prose a
+    # reader who has not seen the code can act on
+    assert set(ex.removed_at_step) <= set(defs.name)
+    assert (defs.definition.str.len() > 40).all()

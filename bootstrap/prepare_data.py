@@ -257,8 +257,20 @@ def edge_truncated_episodes(d):
     return at_edge, detail
 
 
-def load_and_filter(path, cfg=None):
+def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     """Section 9.1 mapping + section 9.2 filter chain. Returns (df, waterfall).
+
+    Pass a dict as `examples` and it is filled in place with
+    `{step_label: [episode_id, ...]}` -- up to `examples_per_step` episodes
+    REMOVED at that step. `tools.export_waterfall` uses it to show whole
+    episodes beside the counts, because a reader asked to accept that 24,002
+    episodes were dropped for `window_too_long` is entitled to see one.
+
+    Collected HERE rather than reconstructed by the exporter: an exporter that
+    re-derived which episodes a filter removed would be a second copy of the
+    filter chain, and it would disagree with this one the first time either
+    changed. Costs one set difference per step and nothing when the dict is
+    not passed.
 
     Every stage that DROPS is an integrity or scope rule: the row is
     impossible (negative stock), unusable by anything (null category, zero
@@ -299,8 +311,16 @@ def load_and_filter(path, cfg=None):
           ("duplicate_hour_rows_dropped", len(df), df.episode_id.nunique(),
            cogs_at_risk(df))]
 
+    prev_ids = {"ids": set(df.episode_id.unique())}
+
     def step(d, label):
         wf.append((label, len(d), d.episode_id.nunique(), cogs_at_risk(d)))
+        if examples is not None:
+            now = set(d.episode_id.unique())
+            gone = prev_ids["ids"] - now
+            if gone:
+                examples[label] = sorted(gone)[:examples_per_step]
+            prev_ids["ids"] = now
         return d
 
     # A hole in the hourly feed splits one source window into fragments, and a
@@ -706,6 +726,77 @@ def pre_launch(d, cfg):
 # Reasons are ordered by how fundamental they are, and an episode is labelled
 # with the FIRST it trips, so the reason column reads as a cause rather than
 # as whichever test happened to run last.
+# WHAT EVERY WATERFALL STEP DOES, in one place, because three documents and a
+# workbook were each carrying their own wording of it. (label, scope, what it
+# removes and why). `DP_INELIGIBLE` below is the same idea for the gates; these
+# are the HARD DROPS, where the rows leave the frame for every consumer.
+#
+# A reader of the exported workbook sees these verbatim, so they are written
+# for someone who has never read the code.
+WATERFALL_STEPS = (
+    ("raw", "--",
+     "the starting count, before anything is removed. Every percentage in the "
+     "report is a share of this row's COGS at risk"),
+    ("duplicate_hour_rows_dropped", "rows, BOTH copies",
+     "two different states recorded for one sku x fc x hour. There is no "
+     "principled way to choose between them, and keeping both collides two "
+     "runs into a single episode id"),
+    ("gap_split_windows_dropped", "episode, EVERY fragment",
+     "a hole in the hourly feed splits one source window into two, and neither "
+     "half is an episode: the first ends with no write-off sentinel so its "
+     "scrap is unknown, and the second opens MID-window with the wrong "
+     "starting stock and a first row that reads as an entry row. Detected from "
+     "the window counter, which across a gap keeps falling in step with the "
+     "clock instead of resetting upward"),
+    ("exclusion_window_removed", "episode",
+     "any episode with ANY hour inside the known demand-issue period. This is "
+     "a SCOPE rule, not an integrity one -- the rows are fine, the period is "
+     "not representative of normal trading"),
+    ("discount_out_of_range_dropped", "episode",
+     "a discount outside [0, 1], which means the percent-to-fraction "
+     "conversion was applied twice or not at all"),
+    ("negative_quantities_dropped", "episode",
+     "impossible quantities: negative inventory or negative sales. NOT "
+     "`cost <= 0`, which is a flag rather than a drop -- see cost_missing"),
+    ("episode_universe", "episode",
+     "the three conditions that make an episode's inventory readable, checked "
+     "once and before any filter with an opinion about price, category or "
+     "cost. Only CONTINUITY drops (ending[t] must equal starting[t+1]); the "
+     "accounting identity and a clean final hour are flagged instead. Note "
+     "`units_sold > starting_inventory` is a RESTOCK, not an impossible "
+     "quantity"),
+    ("null_category_dropped", "episode",
+     "no category or subcategory, so there is no reference discount and no "
+     "dispersion cell to put the episode in. Episode-scoped on purpose: "
+     "dropping single ROWS punched holes mid-window and manufactured chain "
+     "breaks the feed never had"),
+    ("zero_base_price_dropped", "episode",
+     "`original_price` still null or zero after filling forward and backward "
+     "within the episode, so there is no price to discount from"),
+    ("contiguous_episodes_built", "--",
+     "not a filter. Re-segmentation, and now a no-op that RAISES if it ever "
+     "stops being one, since every drop after the ids are assigned is "
+     "episode-scoped and so nothing can punch a hole in a window"),
+    ("negative_window_recovered", "episode",
+     "not a drop. A counter that enters ALREADY negative is a known source "
+     "pattern for manufactured goods, not a defect; where the episode runs no "
+     "longer than the manufacturing window its counter is rewritten as a "
+     "synthetic countdown. Changes no counts, so the row reports what it "
+     "recovered. This is the last hard-drop row, so its counts ARE the "
+     "`integrity` population"),
+    ("eligible", "GATE -- flags, drops nothing",
+     "the accounting identity holds, the final hour is clean, and the episode "
+     "CLOSED. What a frozen artifact needs: a censored likelihood is only "
+     "correct if we know which hours ran out. Read by the demand model and the "
+     "artifact fits, and by every scrap / IL / clearance figure -- "
+     "`scrap_units` returns NaN outside this set"),
+    ("dp_eligible", "GATE -- flags, drops nothing",
+     "everything `eligible` requires PLUS what the solver needs: a feasible "
+     "price tier, a horizon it can read, and one inventory pool. Read by the "
+     "DP, the backtest, shadow mode, the calibration gate and the A/B. The six "
+     "reasons are listed separately below"),
+)
+
 DP_INELIGIBLE = (
     ("cost_missing",
      "cost <= 0 -- a MISSING cost, not a free good. d_max reads 1.0, so the "

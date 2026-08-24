@@ -61,13 +61,27 @@ EP_COLS = [
     "q0", "supply", "shrink", "end_inv", "hours", "n_observed",
     "outcome_known", "original_price", "cost", "d_ref", "eps", "r",
     "deepening_threshold",
+    # UNITS BEFORE MONEY in each arm's block. A category owner checks the
+    # physical story first -- how much sold, how much was left, how much was
+    # scrapped -- and the currency figures are those quantities priced.
+    "actual_sold_units", "actual_leftover_units", "actual_scrap_units",
     "actual_il", "actual_discount_cost", "actual_scrap_cost",
     "actual_denom", "actual_cleared", "actual_mean_discount",
+    "legacy_model_sold_units", "legacy_model_leftover_units",
+    "legacy_model_scrap_units",
     "legacy_model_il", "legacy_model_discount_cost", "legacy_model_scrap_cost",
     "legacy_model_denom", "legacy_model_cleared", "legacy_model_mean_discount",
+    "dp_sold_units", "dp_leftover_units", "dp_scrap_units",
     "dp_il", "dp_discount_cost", "dp_scrap_cost",
     "dp_denom", "dp_cleared", "dp_mean_discount",
 ]
+
+# Per arm: the episode total, the column on the hourly sheet that must sum to
+# it, and the identity residual. One list so the episode sheet, the summary and
+# the reconciliation sheet cannot disagree about what reconciles with what.
+ARMS = (("actual", "actual_units"),
+        ("legacy_model", "legacy_units"),
+        ("dp", "dp_units"))
 
 
 def build(input_path, cfg, episodes_n, seed=0, workers=None):
@@ -108,6 +122,58 @@ def _episode_view(ep):
     return e[cols].sort_values("dp_minus_legacy_il")
 
 
+def _reconciliation(ep, hourly, tol=1e-6):
+    """Does the episode sheet agree with the hourly sheet, row by row?
+
+    THE POINT OF PUTTING IT IN THE WORKBOOK rather than in a test: a reader
+    who spots a number they do not believe needs to be able to check it
+    themselves, on the episode in front of them, without running anything. Two
+    identities per arm, per episode:
+
+      hourly sum of units  ==  the episode's *_sold_units
+      supply               ==  sold + leftover + shrink
+
+    The second is `accounting_closes` for the observed arm and holds by
+    construction for the two simulated ones, since the replay loop moves every
+    unit it starts with. So a non-zero residual is a real defect, never
+    rounding -- which is why the tolerance is 1e-6 and not something forgiving.
+
+    An UNCLOSED episode reconciles on the hourly identity but not the supply
+    one, and that is correct rather than a failure: nothing is scrapped
+    because the outcome was never observed, so the units are still on the
+    shelf when the extract ends. Those rows are marked rather than flagged.
+    """
+    sums = hourly.groupby("episode_id").agg(
+        **{f"hourly_{col}": (col, "sum") for _, col in ARMS},
+        hourly_rows=("t", "size"))
+    e = ep.set_index("episode_id").join(sums, how="left")
+    out = pd.DataFrame({
+        "episode_id": e.index, "category": e.category.to_numpy(),
+        "outcome_known": e.outcome_known.to_numpy(),
+        "hours": e.hours.to_numpy(), "hourly_rows": e.hourly_rows.to_numpy(),
+        "supply": e.supply.to_numpy(), "shrink": e.shrink.to_numpy(),
+    })
+    ok = np.ones(len(e), bool)
+    for arm, col in ARMS:
+        ep_units = e[f"{arm}_sold_units"].to_numpy()
+        hr_units = e[f"hourly_{col}"].fillna(0.0).to_numpy()
+        out[f"{arm}_episode_sold"] = ep_units
+        out[f"{arm}_hourly_sold"] = hr_units
+        out[f"{arm}_hourly_gap"] = ep_units - hr_units
+        out[f"{arm}_supply_residual"] = e[f"{arm}_supply_residual"].to_numpy()
+        ok &= np.abs(ep_units - hr_units) <= tol
+        # the supply identity is only claimed where the outcome is known
+        ok &= (np.abs(e[f"{arm}_supply_residual"].to_numpy()) <= tol) | \
+              (~e.outcome_known.to_numpy())
+    out["reconciles"] = ok
+    out["note"] = np.where(
+        ok, "",
+        np.where(~e.outcome_known.to_numpy(),
+                 "unclosed episode -- supply identity not claimed",
+                 "MISMATCH -- episode and hourly sheets disagree"))
+    return out.sort_values(["reconciles", "episode_id"])
+
+
 def _summary(ep):
     """Ratio-of-sums, never a mean of per-episode ratios, and always over
     outcome_known -- the same rule policy_replay applies. An unfinished
@@ -142,6 +208,23 @@ def _summary(ep):
     add("share_episodes_clearing_deepening_bar",
         round(float((k.eps.abs() > k.deepening_threshold).mean()), 4),
         "|eps| > (1-d)/(gamma-d). At 0 the DP enters and holds by design")
+
+    # UNITS, beside the money. Scrap is what the whole system exists to
+    # reduce, and an owner reading an IL delta in won wants to know how many
+    # physical units moved to produce it.
+    for arm in ("actual", "legacy_model", "dp"):
+        add(f"{arm}_sold_units", round(float(k[f"{arm}_sold_units"].sum()), 1))
+        add(f"{arm}_scrap_units", round(float(k[f"{arm}_scrap_units"].sum()), 1),
+            "leftover at the close PLUS shrink -- units paid for that "
+            "returned no revenue")
+    add("dp_minus_legacy_scrap_units",
+        round(float(k.dp_scrap_units.sum()
+                    - k.legacy_model_scrap_units.sum()), 1),
+        "THE physical policy comparison, the units counterpart of "
+        "dp_minus_legacy_il")
+    add("shrink_units", round(float(k.shrink.sum()), 1),
+        "EXOGENOUS and identical across arms -- no policy can price away "
+        "stock that went missing, so only the leftover differs")
     return pd.DataFrame(rows)
 
 
@@ -160,6 +243,9 @@ def write_workbook(path, ep, hourly):
         "summary": _summary(ep),
         "episodes": _episode_view(ep),
         "hourly": hourly[[c for c in HOUR_COLS if c in hourly]],
+        # so a reader who doubts a number can check it on the episode in
+        # front of them, without running anything
+        "reconciliation": _reconciliation(ep, hourly),
     }
     with pd.ExcelWriter(path, engine="xlsxwriter") as w:
         for name, frame in sheets.items():

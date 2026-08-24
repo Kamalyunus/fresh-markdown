@@ -491,6 +491,8 @@ def _replay_one(e, cfg):
         q = max(q + adj[t], 0.0)
         if q <= 0 and not adj[t + 1:].any():
             break
+    # captured before the DP loop reuses `q`
+    lg_q_final = q
     lg_scrap = cost * (max(q, 0.0) + e["shrink"])
 
     # ---- DP path, deterministic expected transitions
@@ -540,8 +542,44 @@ def _replay_one(e, cfg):
             dp_feasible_tiers=len(res.tiers))
         q = max(q - sold + adj[t], 0.0)
     dp_scrap = cost * (max(q, 0.0) + e["shrink"])
+
+    # UNITS, NOT ONLY MONEY. Every IL figure above is currency, and a category
+    # owner reading a workbook needs the physical quantities to check it: how
+    # much each arm SOLD, how much it had left at the close, and how much was
+    # scrapped. Emitted as their own fields rather than derived from
+    # `*_scrap_cost / cost` downstream, which divides by a number that can be
+    # zero and rounds differently in every consumer.
+    #
+    # SCRAP IS LEFTOVER PLUS SHRINK, the same definition `common.episodes` uses
+    # -- both are units paid for that returned no revenue. Shrink is identical
+    # across the arms because it is EXOGENOUS: no policy can price away stock
+    # that went missing, so only the leftover differs.
+    a_left = max(e["end_inv"], 0) if e["outcome_known"] else 0
+    lg_left, dp_left = max(lg_q_final, 0.0), max(q, 0.0)
     row = {
         "outcome_known": e["outcome_known"],
+        "actual_sold_units": float(a_sold.sum()),
+        "actual_leftover_units": float(a_left),
+        "actual_scrap_units": float(a_left + (e["shrink"]
+                                              if e["outcome_known"] else 0)),
+        "legacy_model_sold_units": float(lg_sold_total),
+        "legacy_model_leftover_units": float(lg_left),
+        "legacy_model_scrap_units": float(lg_left + e["shrink"]),
+        "dp_sold_units": float(dp_sold_total),
+        "dp_leftover_units": float(dp_left),
+        "dp_scrap_units": float(dp_left + e["shrink"]),
+        # THE IDENTITY, PER ARM, so a reader can check the row rather than
+        # trust it: supply = sold + leftover + shrink. It holds by construction
+        # for the two simulated arms (the loop moves every unit) and by
+        # `accounting_closes` for the observed one, which is exactly why a
+        # violation here means a real defect and not a rounding artifact.
+        "actual_supply_residual": float(
+            e["supply"] - a_sold.sum() - a_left
+            - (e["shrink"] if e["outcome_known"] else 0)),
+        "legacy_model_supply_residual": float(
+            e["supply"] - lg_sold_total - lg_left - e["shrink"]),
+        "dp_supply_residual": float(
+            e["supply"] - dp_sold_total - dp_left - e["shrink"]),
         "actual_il": a_disc_cost + a_scrap,
         "actual_discount_cost": a_disc_cost, "actual_scrap_cost": a_scrap,
         "actual_denom": a_denom,
