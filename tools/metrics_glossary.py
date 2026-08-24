@@ -47,7 +47,8 @@ CATALOGUE = [
    "backtest and A/B. The three populations are NESTED, so their exclusions must "
    "never be added together.", "every figure traces back through it"),
   ("cogs_at_risk", "won",
-   "Unit cost × opening stock, ONCE per episode, reported at every waterfall stage "
+   "Unit cost × SUPPLY -- opening stock plus gross arrivals -- ONCE per episode, "
+   "reported at every waterfall stage "
    "with `cogs_dropped` and `cogs_dropped_pct_of_raw`. Never summed over hours — "
    "inventory persists, so a per-row sum multiplies the same stock by the window "
    "length. Rows and money diverge, and that is the point: a filter taking 1% of rows "

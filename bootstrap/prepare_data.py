@@ -130,7 +130,20 @@ def gap_split_windows(df):
 
 
 def cogs_at_risk(d):
-    """Money on the shelf: unit cost x opening stock, ONCE per episode.
+    """Money on the shelf: unit cost x SUPPLY, ONCE per episode.
+
+    SUPPLY, NOT OPENING STOCK (owner, 2026-08-24). Opening stock stopped being
+    an episode's supply the moment restocked episodes were kept in the
+    population: a window that opens with 3 and takes 10 mid-flight has 13
+    units of cost at risk, and calling it 3 understates the exposure of every
+    restocked episode in every waterfall row. `tools.eda`'s clearance panel
+    already made this correction for its own denominator, so until now the two
+    disagreed by design and a reader comparing them would have been misled.
+
+    Arrivals are counted GROSS, from the positive part of the hour adjustment,
+    the same way `backtest.replay` builds its `supply`. Shrink is NOT
+    subtracted: units that went missing were still paid for and were still at
+    risk, which is exactly why `scrap` counts them.
 
     A row count says how much data a filter removed. This says how much
     exposure -- which is the quantity the system exists to protect, since IL
@@ -144,18 +157,35 @@ def cogs_at_risk(d):
     stock by the length of the window. Relies on the frame being in window
     order, which `load_and_filter` guarantees -- it sorts once up front and
     again at re-segmentation, and every drop between them preserves order.
+    `date` and `hour_of_day` must be present, since the arrival term reads
+    them to establish that order; every caller has them, because
+    `assign_episode_ids` needs them first.
 
     Before `negative_quantities_dropped` this includes impossible values
     (negative stock, non-positive cost), so the first few stages carry
     figures that are not real exposure. That is deliberate: clipping them
     would hide the size of the bad data, and the drop that removes them is
     exactly where the waterfall should show it.
+
+    THE ARRIVAL TERM IS ONLY MEANINGFUL ON A CONTINUOUS CHAIN, and before
+    `episode_universe` the chain is not guaranteed -- a break makes
+    `ending[t] != starting[t+1]` and the difference reads as an arrival that
+    never happened. Those stages are already flagged above as carrying figures
+    that are not real exposure; this is one more reason, and it points the same
+    way, so the early rows still show the size of the bad data rather than
+    hiding it behind a clip.
     """
     if not len(d):
         return 0.0
-    opening = ~d.episode_id.duplicated()
-    return float((d.cost.to_numpy()[opening.to_numpy()]
-                  * d.starting_inventory.to_numpy()[opening.to_numpy()]).sum())
+    opening = (~d.episode_id.duplicated()).to_numpy()
+    # gross arrivals per episode: `ending[t]` IS `starting[t+1]`, so a positive
+    # step between them is stock that arrived
+    arrivals = (episodes.hour_adjustment(d).clip(lower=0)
+                .groupby(d.episode_id.to_numpy()).sum())
+    opening_ids = pd.Series(d.episode_id.to_numpy()[opening])
+    supply = (d.starting_inventory.to_numpy()[opening]
+              + opening_ids.map(arrivals).fillna(0.0).to_numpy())
+    return float((d.cost.to_numpy()[opening] * supply).sum())
 
 
 def edge_truncated_episodes(d):

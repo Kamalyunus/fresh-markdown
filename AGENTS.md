@@ -400,10 +400,35 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
    **EVERY RUN SCORES BOTH METHODS ON HELD-OUT DATA**, in
    `prior.json.holdout_comparison`: the log marginal predictive per row, with
    `oracle` (best epsilon with hindsight) and `uniform` (flat prior) as the
-   ceiling and floor. **Read `information_available_per_row` = oracle - uniform
-   FIRST.** On the fixture it is 0.001137 nats/row, so neither method is
-   meaningfully better there and the method gap of 23% is 23% of nearly
-   nothing. A method gap that is a large share of a tiny number is still tiny.
+   ceiling and floor.
+
+   **READ IT IN THIS ORDER, EVERY RUN.** These two fields decide whether any of
+   the prior machinery earned its place on your extract, and neither can be
+   guessed from the fixture.
+
+   1. **`information_available_per_row`** (= oracle - uniform). The entire
+      value of knowing this extract's elasticity on that window. **Under
+      ~0.01 nats/row the window cannot settle the method question at all** --
+      a method gap that is a large share of a tiny number is still tiny, so
+      decide on which prior is more honest about what it does not know and
+      compare their WIDTHS instead of their scores. The fixture measures
+      0.0013, which is why nothing there is evidence for either method.
+   2. **`worse_than_a_flat_prior`.** A prior listed here scored BELOW the
+      uniform: on that window it is worse than knowing nothing, which is a
+      stronger finding than any pairwise gap. On the full-span fixture
+      `bracket` lands here and `profile_density` does not -- a confident wrong
+      answer costing more than an honest wide one, in nats.
+   3. `ranking` and `verdict` last, and only once 1 and 2 are read.
+
+   **TUNE `own_information_saturation` AGAINST PRODUCTION, ONCE.** It is the
+   log-likelihood span at which a category stops borrowing from the pooled
+   density and stands on its own data; the shipped 2.0 is the chi-square 95%
+   cutoff and is a principled default, not a measured one. Read
+   `likelihood_span` across categories in `prior.json`: if nearly every
+   category clears it, the pooling never fires and thin cells are trusting
+   their own noise -- raise it. If nearly none does, every category is being
+   dragged to the pool -- lower it. `own_information_weight` per category says
+   which way it went.
 
    **`reference_r` (bracket method only) is DERIVED, not pinned, and fitted PER CATEGORY** — `r` on
    each category's own entry rows at the fallback elasticity, so it cannot go
@@ -430,6 +455,19 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
    longer apply: "~0.099 for ±2×" was anchored at the wrong `r`, and the 0.049
    / 0.592 pair that replaced it was measured against a pooled reference the
    step no longer uses.
+   **AN `r` AT THE SEARCH CEILING HAS TWO CAUSES AND THEY WANT OPPOSITE
+   TREATMENT.** A thin group whose MLE wandered there wants clamping at
+   `dispersion.clamp_percentile`. A group that is genuinely steadier than
+   Poisson also lands there — because no NB can represent it, `Var = mu +
+   mu^2/r` being at least `mu` for every finite `r` — and clamping THAT one
+   inflates the variance the model claims for the cell that has least, which
+   the DP's censored demand expectation, the posterior likelihood and the
+   exploration cost of a tier all inherit. Pearson dispersion
+   `mean((k-mu)^2/mu)` tells them apart: below 1.0 the group is exempt from the
+   clamp and listed in `r_lookup.under_dispersed_groups`. **If that list is
+   long, the NB is the wrong family for the extract and not just for those
+   cells** — read `pearson_global` beside it.
+
    `pipeline.assurance` shares `_working_elasticity` so its live `rho` check
    cannot drift onto a different basis.
 
@@ -717,7 +755,7 @@ Two verdicts are blocking, not advisory:
 
 `bootstrap.prepare_data` runs a deterministic, auditable filter chain; the
 waterfall in `artifacts/split_manifest.json` records rows, episodes and
-**COGS at risk** (unit cost × opening stock, counted once per episode) after
+**COGS at risk** (unit cost × **supply** — opening stock plus gross arrivals — counted once per episode) after
 every step. **Almost every filter drops the WHOLE EPISODE, not the offending
 row** — a hole punched mid-window re-segments into a spurious short episode,
 which is worse than losing the episode.
@@ -1436,7 +1474,7 @@ so read them off the reports directly. Two rules survive it:
   execution is what needed it. Note this **changed the numbers** from any run
   before it — same seed, different draws.
 - **Every waterfall stage reports money, not just counts.** `cogs_at_risk` is
-  unit cost × opening stock, once per episode (never summed over hours —
+  unit cost × supply (opening stock plus gross arrivals), once per episode (never summed over hours —
   inventory persists, so a per-row sum multiplies the same stock by the window
   length). Each row carries `cogs_dropped` and `cogs_dropped_pct_of_raw`.
   Rows and money diverge and the divergence is the point: a stage taking a

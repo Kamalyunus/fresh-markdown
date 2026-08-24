@@ -114,6 +114,34 @@ HOUR_FACTOR = {
 EXCLUSION_START = dt.date(2026, 4, 25)
 EXCLUSION_END = dt.date(2026, 6, 3)
 
+# THE FIXTURE MUST COVER THE CONFIGURED SPLITS, or the pipeline it exists to
+# exercise cannot run on it. The generator used to start at a hardcoded
+# 2026-03-01 for 90 days, of which the exclusion window removed the tail --
+# so the data ended 2026-04-24 while config.yaml's calib window began in July.
+# `fit_dispersion` then died with "calibration window contains no rows" and
+# the prior's held-out comparison came back empty, on the documented run order,
+# from a clean checkout. Both were silent about the cause.
+#
+# `--start` now defaults to whatever reaches split.train_start, and `--days` to
+# whatever reaches split.test_end, so `scripts/run_bootstrap.sh <fixture>` runs
+# end to end. Pass either explicitly to override.
+DEFAULT_START = dt.date(2026, 3, 1)
+
+
+def span_covering_splits(cfg):
+    """(start, days) that cover every configured split, exclusion window
+    included. Returns the generator's own defaults when no config is readable,
+    so the tool still runs standalone."""
+    try:
+        split = cfg["data"]["split"]
+        lo = dt.date.fromisoformat(str(split["train_start"]))
+        hi = dt.date.fromisoformat(str(split["test_end"]))
+    except Exception:                                   # noqa: BLE001
+        return DEFAULT_START, 90
+    # the exclusion window sits inside the span and removes its rows, so the
+    # days it covers have to be generated for the splits after it to be reached
+    return lo, (hi - lo).days + 1
+
 SCHEMA = pa.schema([
     ("date", pa.date32()),
     ("hour", pa.int64()),
@@ -184,10 +212,11 @@ def randomized_discount_path(entry_d, n_hours, d_max, rng, tier=0.025):
     return path
 
 
-def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02):
+def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
+             start=None):
     rng = np.random.default_rng(seed)
     master = build_sku_master(n_skus, rng)
-    start = dt.date(2026, 3, 1)
+    start = start or DEFAULT_START
 
     records = []
     windows = []          # (start, end) row range of each emitted window
@@ -344,7 +373,11 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--skus", type=int, default=400)
-    ap.add_argument("--days", type=int, default=90)
+    ap.add_argument("--days", type=int, default=None,
+                    help="default: enough to reach data.split.test_end")
+    ap.add_argument("--start", default=None,
+                    help="YYYY-MM-DD; default: data.split.train_start")
+    ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--policy", choices=["legacy", "randomized"], default="legacy")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--dirty-frac", type=float, default=0.004)
@@ -358,8 +391,17 @@ def main():
     ap.add_argument("--out", default="data/flc_filtered_synthetic.parquet")
     args = ap.parse_args()
 
-    df, master = generate(args.skus, args.days, args.policy, args.seed,
-                          args.dirty_frac, args.shrink_rate)
+    try:
+        from common.config import load_config
+        cfg = load_config(args.config)
+    except Exception:                                   # noqa: BLE001
+        cfg = {}
+    auto_start, auto_days = span_covering_splits(cfg)
+    start = (dt.date.fromisoformat(args.start) if args.start else auto_start)
+    days = args.days if args.days is not None else auto_days
+
+    df, master = generate(args.skus, days, args.policy, args.seed,
+                          args.dirty_frac, args.shrink_rate, start=start)
 
     import os
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)

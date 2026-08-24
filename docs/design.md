@@ -363,7 +363,7 @@ Which population a consumer reads is one decision, in
 `prepare_data.population`. The three artifact fits read the config; the DP,
 the calibration gate, the backtest and shadow always pass `"dp_eligible"`.
 
-Every stage also reports **`cogs_at_risk`** — unit cost × opening stock,
+Every stage also reports **`cogs_at_risk`** — unit cost × **supply** (opening stock plus gross arrivals; owner, 2026-08-24 — opening stock alone understated every restocked episode, and `tools.eda`'s clearance panel had already made the same correction for its own denominator),
 counted once per episode — with `cogs_dropped` and `cogs_dropped_pct_of_raw`
 beside it. Rows are not the unit the business cares about: IL is discount
 given away plus scrap at cost, so what a filter costs is exposure, and the two

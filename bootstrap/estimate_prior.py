@@ -662,6 +662,8 @@ def _print_density(prior):
             print(f"    {k:18s} {v:>10.6f}")
         print(f"  information available on this window (oracle - uniform): "
               f"{c.get('information_available_per_row')} nats/row")
+        if c.get("worse_than_a_flat_prior"):
+            print(f"  !! {c['worse_than_a_flat_prior_note']}")
         if c.get("verdict"):
             print(f"  -> {c['verdict']}")
         if c.get("warning"):

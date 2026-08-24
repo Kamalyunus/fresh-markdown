@@ -1090,3 +1090,99 @@ def test_the_bounded_step_holds_in_the_REPORT_not_just_in_the_store(): # noqa: N
     # an awkward starting mean, the shape that exposed the reporting bug
     m, _, _ = bounded_step(-0.76098, 0.6, -3.0, 0.5, CFG)
     assert abs(m - (-0.76098)) <= cap + 1e-12
+
+
+def test_an_under_dispersed_group_is_exempt_from_the_clamp():
+    """The clamp must not make the steadiest cells claim variance they lack.
+
+    An r at the search ceiling has two entirely different causes. A THIN group
+    whose MLE wandered there wants clamping. A group that is genuinely steadier
+    than Poisson also lands there -- because no negative binomial can represent
+    it at all, Var = mu + mu^2/r being at least mu for every finite r -- and
+    clamping THAT one down inflates the variance the model claims for the cell
+    that has least. Everything reading `r` inherits it: the censored demand
+    expectation the DP maximises, the posterior likelihood, the exploration
+    cost of a tier.
+
+    Pearson dispersion tells the two apart, and this asserts it does.
+    """
+    from bootstrap.fit_dispersion import pearson_dispersion
+
+    rng = np.random.default_rng(4)
+    mu = 6.0
+    # binomial with the same mean is UNDER-dispersed: var = mu(1-p) < mu
+    tight = rng.binomial(12, mu / 12, 4000)
+    assert pearson_dispersion(tight, np.full(len(tight), mu)) < 1.0
+    # negative binomial at the same mean is over-dispersed
+    loose = rng.negative_binomial(1.5, 1.5 / (1.5 + mu), 4000)
+    assert pearson_dispersion(loose, np.full(len(loose), mu)) > 1.0
+    # Poisson sits at 1 either side of noise
+    poi = rng.poisson(mu, 20000)
+    assert 0.9 < pearson_dispersion(poi, np.full(len(poi), mu)) < 1.1
+
+    import inspect
+    from bootstrap import fit_dispersion as fd
+
+    src = inspect.getsource(fd.fit_dispersion)
+    assert "under" in src and "pearson_dispersion(" in src, \
+        "the clamp must consult Pearson dispersion, not just the fitted r"
+    assert "under_dispersed_groups" in src, \
+        "an NB misfit must be REPORTED, not absorbed into a percentile"
+
+
+def test_cogs_at_risk_counts_supply_not_opening_stock():
+    """A window that opens with 3 and takes 10 mid-flight has 13 units of cost
+    at risk. Counting 3 understates the exposure of every restocked episode in
+    every waterfall row -- and `tools.eda`'s clearance panel already used
+    supply for its own denominator, so the two disagreed by design.
+
+    Shrink is NOT subtracted: units that went missing were still paid for and
+    were still at risk, which is why `scrap` counts them.
+    """
+    from bootstrap.prepare_data import cogs_at_risk
+
+    # one episode: opens with 3, 10 arrive in hour 2, sells 9, loses 1
+    d = pd.DataFrame({
+        "episode_id": ["e"] * 3,
+        # `hour_adjustment` establishes window order from these, so the
+        # arrival term needs them -- every real caller has them, since
+        # `assign_episode_ids` needs them first
+        "date": ["2026-03-01"] * 3, "hour_of_day": [10, 11, 12],
+        "cost": [100.0] * 3,
+        "starting_inventory": [3, 13, 4],
+        "units_sold": [0, 9, 3],
+        "ending_inventory": [13, 4, 0],
+    })
+    # 3 opening + 10 arrived = 13 units x 100
+    assert cogs_at_risk(d) == pytest.approx(1300.0)
+
+    # no arrivals -> unchanged from the old opening-stock reading
+    flat = pd.DataFrame({
+        "episode_id": ["f"] * 2, "cost": [50.0] * 2,
+        "date": ["2026-03-01"] * 2, "hour_of_day": [10, 11],
+        "starting_inventory": [8, 5], "units_sold": [3, 5],
+        "ending_inventory": [5, 0],
+    })
+    assert cogs_at_risk(flat) == pytest.approx(400.0)
+
+
+def test_the_fixture_generator_covers_the_configured_splits():
+    """`scripts/run_bootstrap.sh <fixture>` must run end to end from a clean
+    checkout. It could not: the generator started at a hardcoded date for 90
+    days, the exclusion window removed the tail, and the data ended in April
+    while config's calib window began in July -- so `fit_dispersion` died with
+    "calibration window contains no rows" and the prior's held-out comparison
+    came back empty, both silently about the cause."""
+    import datetime as dt
+    from tools.make_dummy_flc import span_covering_splits
+
+    split = CFG["data"]["split"]
+    start, days = span_covering_splits(CFG)
+    assert start == dt.date.fromisoformat(str(split["train_start"]))
+    assert start + dt.timedelta(days=days - 1) >= \
+        dt.date.fromisoformat(str(split["test_end"])), \
+        "the generated span must reach test_end, or the gate window is empty"
+
+    # and it must still run standalone, with no config to read
+    fallback_start, fallback_days = span_covering_splits({})
+    assert fallback_days > 0 and fallback_start.year == 2026

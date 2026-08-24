@@ -123,7 +123,8 @@ def test_waterfall_reports_the_money_each_filter_removes(workspace):
     """Rows are not the unit the business cares about.
 
     IL is discount given away plus scrap at cost, so what a filter costs is
-    measured in exposure -- unit cost x opening stock -- not in rows. The two
+    measured in exposure -- unit cost x SUPPLY, opening stock plus gross
+    arrivals -- not in rows. The two
     diverge: a stage can take a small share of rows and a large share of the
     money, and only the second says whether the surviving population still
     represents the business.

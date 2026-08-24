@@ -412,26 +412,47 @@ def holdout_comparison(d, cfg, model, grid, candidates):
         "window, in nats per row. Every method's score lies between those two. "
         "Read this FIRST -- a method gap that is a large share of a tiny "
         "number is still a tiny number.")
+    # WHICH CANDIDATES CLEAR THE FLOOR AT ALL. A prior that scores BELOW the
+    # uniform is not merely weaker than its rival -- it is worse than knowing
+    # nothing, which is a stronger statement than any pairwise gap and has to
+    # be said in those words. It also breaks the share arithmetic: measured
+    # against a range that runs from uniform to oracle, a gap involving a
+    # sub-uniform candidate can exceed 100% and read as decisive when what it
+    # actually shows is one candidate falling off the bottom.
+    below_floor = sorted(k for k in names if totals[k] < totals["uniform"])
+    out["worse_than_a_flat_prior"] = below_floor
+    if below_floor:
+        out["worse_than_a_flat_prior_note"] = (
+            f"{', '.join(below_floor)} scored BELOW a flat prior over the "
+            "support: on this held-out window that prior is worse than knowing "
+            "nothing about epsilon. A confident wrong answer costs more than "
+            "an honest wide one, and this is what that looks like in nats.")
+
     if len(ranked) >= 2:
         a, b = ranked[0], ranked[1]
         gain = (totals[a] - totals[b]) / max(rows_total, 1)
-        share = gain / available if available > 0 else float("nan")
+        # measured against the floor, not against the loser, so a sub-uniform
+        # rival cannot manufacture a share above 100%
+        headroom = (totals["oracle"] - max(totals[b], totals["uniform"])) \
+            / max(rows_total, 1)
+        share = gain / headroom if headroom > 0 else float("nan")
         out["method_gap_per_row"] = round(gain, 6)
         out["method_gap_share_of_available"] = (
-            None if available <= 0 else round(share, 3))
+            None if headroom <= 0 else round(share, 3))
         out["verdict"] = (
             f"{a} beats {b} by {gain:.6f} nats per held-out row "
-            f"({totals[a] - totals[b]:.1f} total over {rows_total:,} rows), "
-            f"which is {share:.0%} of the {available:.6f} available. "
-            + ("The available information is under 0.01 nats/row, so this "
-               "window cannot settle the method question -- neither prior is "
-               "meaningfully better here, and the choice should be made on "
-               "which is more honest about what it does not know rather than "
-               "on this score. Compare the two priors' WIDTHS instead."
-               if available < 0.01 else
-               "Large enough to act on." if abs(gain) > 0.1 * available else
-               "A small share of a real difference: prefer the wider prior, "
-               "since it costs little here and fails more gracefully."))
+            f"({totals[a] - totals[b]:.1f} total over {rows_total:,} rows). "
+            + (f"{b} is itself below a flat prior, so this is not a close "
+               f"contest between two reasonable answers -- it is one answer "
+               f"and one that costs more than knowing nothing. "
+               if b in below_floor else
+               f"That is {share:.0%} of the {headroom:.6f} still on the table "
+               f"above the loser. ")
+            + ("The information available on this window (oracle minus "
+               "uniform) is under 0.01 nats/row, so read any ranking here as "
+               "weak evidence and decide on which prior is more honest about "
+               "what it does not know. Compare their WIDTHS."
+               if available < 0.01 else "Large enough to act on."))
     if ranked and totals[ranked[0]] < totals["uniform"]:
         out["warning"] = (
             "NO CANDIDATE BEATS A FLAT PRIOR. On this held-out window the data "

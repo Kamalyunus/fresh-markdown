@@ -59,6 +59,19 @@ def _censored_nll(r, k, mu, censored):
     return -float(np.sum(ll))
 
 
+def pearson_dispersion(k, mu, floor=1e-9):
+    """mean((k - mu)^2 / mu). One under Poisson, above one when overdispersed,
+    BELOW ONE when the data is steadier than Poisson -- which no negative
+    binomial can represent, since Var = mu + mu^2/r >= mu for every finite r.
+
+    Used to tell a genuinely tight group apart from a thin one whose MLE
+    wandered to the search ceiling. The two produce the same r and want
+    opposite treatment from the clamp.
+    """
+    mu = np.maximum(np.asarray(mu, dtype=float), floor)
+    return float(np.mean((np.asarray(k, dtype=float) - mu) ** 2 / mu))
+
+
 def fit_r(k, mu, censored, bounds):
     res = minimize_scalar(
         lambda lr: _censored_nll(np.exp(lr), k, mu, censored),
@@ -126,28 +139,76 @@ def fit_dispersion(d, cfg):
         return fit_r(g.units_sold.to_numpy(), g.mu_hat.to_numpy(),
                      g.censored.to_numpy(), bounds)
 
-    by_sub, by_cat = {}, {}
-    for sub, g in calib.groupby("subcategory"):
-        if len(g) >= min_rows:
+    by_sub, by_cat, under = {}, {}, {}
+    for level, store in (("subcategory", by_sub), ("category", by_cat)):
+        for key, g in calib.groupby(level):
+            if len(g) < min_rows:
+                continue
             r, ok = fit_group(g)
-            if ok:
-                by_sub[str(sub)] = r
-    for cat, g in calib.groupby("category"):
-        if len(g) >= min_rows:
-            r, ok = fit_group(g)
-            if ok:
-                by_cat[str(cat)] = r
+            if not ok:
+                continue
+            store[str(key)] = r
+            p = pearson_dispersion(g.units_sold.to_numpy(), g.mu_hat.to_numpy())
+            if p < 1.0:
+                under[f"{level}:{key}"] = round(p, 4)
     r_global, _ = fit_group(calib)
+    pearson_global = pearson_dispersion(calib.units_sold.to_numpy(),
+                                        calib.mu_hat.to_numpy())
 
-    # clamp high converged values; preserve low ones
+    # CLAMP HIGH CONVERGED VALUES, PRESERVE LOW ONES -- AND EXEMPT THE GROUPS
+    # THAT ARE GENUINELY UNDER-DISPERSED (owner, 2026-08-24).
+    #
+    # The clamp exists to hold down a SPURIOUSLY high r: a thin group whose MLE
+    # wanders to the search ceiling because it has too few rows to pin down.
+    # But an r at the ceiling has a second, entirely different cause -- the data
+    # really is Poisson or tighter, and an NB cannot represent that at all,
+    # since Var = mu + mu^2/r >= mu for every finite r. The MLE runs to the
+    # ceiling because the ceiling is the closest the family can get.
+    #
+    # Clamping THOSE groups is wrong in a specific and harmful direction: it
+    # makes the model claim MORE variance than the data has, for the groups
+    # that have least. Everything reading `r` inherits it -- the censored
+    # demand expectation the DP maximises, the posterior's likelihood, the
+    # exploration cost of a tier -- all of them then over-weight tail outcomes
+    # for the steadiest sellers in the extract. Measured on the fixture's entry
+    # rows, SIDE DISH came back at Pearson 0.597 with its r at the 50.0 bound
+    # and was being clamped to the 90th percentile of OTHER groups' values.
+    #
+    # Pearson dispersion is what tells the two cases apart, and it is cheap:
+    # mean((k - mu)^2 / mu), which is 1 under Poisson. Below 1 the group is
+    # under-dispersed and its high r is a fact rather than an artifact, so it
+    # is exempt and REPORTED, because "this category is steadier than Poisson"
+    # is a finding about the business worth someone's attention.
     converged = list(by_sub.values()) + list(by_cat.values()) + [r_global]
     cap = float(np.percentile(converged, dc["clamp_percentile"] * 100))
-    by_sub = {k: min(v, cap) for k, v in by_sub.items()}
-    by_cat = {k: min(v, cap) for k, v in by_cat.items()}
-    r_global = min(r_global, cap)
+
+    def clamped(level, store):
+        return {k: (v if f"{level}:{k}" in under else min(v, cap))
+                for k, v in store.items()}
+
+    by_sub = clamped("subcategory", by_sub)
+    by_cat = clamped("category", by_cat)
+    if pearson_global >= 1.0:
+        r_global = min(r_global, cap)
 
     r_lookup = {"subcategory": by_sub, "category": by_cat,
                 "global": r_global, "clamp_at": cap,
+                # WHERE THE NB FAMILY DOES NOT FIT. Var = mu + mu^2/r is never
+                # below mu, so a group under Pearson 1.0 cannot be represented
+                # at any r and its fit sits at the search ceiling by necessity.
+                # Exempt from the clamp for that reason, and listed so the
+                # misfit is visible rather than absorbed into a percentile.
+                "under_dispersed_groups": dict(sorted(under.items())),
+                "pearson_global": round(float(pearson_global), 4),
+                "under_dispersion_note": (
+                    "Pearson dispersion mean((k-mu)^2/mu) below 1.0. These "
+                    "groups are steadier than Poisson, which the negative "
+                    "binomial cannot express at any r, so their fit sits at "
+                    "the search ceiling and is EXEMPT from clamp_percentile -- "
+                    "clamping it down would make the model claim more variance "
+                    "than the data has, for the steadiest cells in the "
+                    "extract. If this list is long, the NB is the wrong family "
+                    "for this extract and not just for these cells."),
                 "fallback_order": dc["fallback_order"],
                 # what the residuals were ACTUALLY formed at. Per category
                 # now, from the prior in force -- `working_elasticity` alone

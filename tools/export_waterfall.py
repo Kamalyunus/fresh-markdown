@@ -168,7 +168,8 @@ def definitions_frame(cfg):
                  "last hard-drop row, negative_window_recovered"})
     rows.append({"kind": "how to read it", "name": "cogs_at_risk",
                  "scope": "won",
-                 "definition": "unit cost x OPENING stock, counted ONCE per "
+                 "definition": "unit cost x SUPPLY -- opening stock PLUS gross "
+                 "arrivals -- counted ONCE per "
                  "episode, never summed over hours -- inventory persists, so a "
                  "per-row sum would multiply the same stock by the window "
                  "length. Reported beside row and episode counts because the "
