@@ -669,9 +669,9 @@ spread in the data.
 | `negative_quantities_dropped` | episode | impossible quantities: negative inventory or sales. **Not `cost <= 0`** — that is a flag now; see the note below |
 | `null_category_dropped` | episode | missing category/subcategory (no reference discount, no dispersion cell). EPISODE-scoped: row scoping punched a hole mid-window, which re-segmentation then had to clean up — and it manufactured chain breaks, 20 of them on the fixture, that the feed never had |
 | `zero_base_price_dropped` | episode | `original_price` still null/zero after ffill+bfill within the episode. EPISODE-scoped, same reason |
-| `negative_window_recovered` | episode | **not a drop.** A counter entering ALREADY negative is a known source pattern, not a defect — see the note below the table |
 | `episode_universe` | episode | the three conditions that make an episode's inventory readable, evaluated once and BEFORE any filter with an opinion about price, category or cost. Only continuity DROPS; see below |
 | `contiguous_episodes_built` | — | re-segmentation, and now a NO-OP that RAISES if it ever stops being one. It used to split windows that row-scoped drops had holed; every drop after the ids are assigned is episode-scoped, so nothing punches a hole. The invariant is load-bearing and invisible — `episode_universe` runs BEFORE this, so a future row-scoped filter would leave its continuity check and every id-keyed flag stale, silently. Hence an assertion rather than a bare recompute |
+| `negative_window_recovered` | episode | **not a drop.** A counter entering ALREADY negative is a known source pattern, not a defect — see the note below the table. **Runs AFTER the re-segmentation check, deliberately** — it is the one step that MUTATES `hours_remaining`, the field the ids are derived from |
 | `dp_eligible` | — | **not a drop.** The terminal SUMMARY row: how much of the surviving population the DP can act on, with a per-reason breakdown in its detail block |
 
 ### The source's inventory convention
@@ -861,6 +861,19 @@ not widen the recovery.** Recovery writes a countdown, never a clamp: the
 counter is load-bearing three ways (episode identification differences it, the
 DP takes its horizon from it, `extend_to_window` generates the tail from it),
 and a flat value would make re-segmentation split every hour.
+
+**Recovery runs AFTER `contiguous_episodes_built`, and the order is not
+cosmetic.** It is the only step in the chain that MUTATES `hours_remaining`,
+and that is the field `assign_episode_ids` differences to find window
+boundaries. Run it first and the invariant is graded against a counter the
+pipeline just invented — and the synthetic countdown can line up with a real
+neighbour: an episode entering negative, rewritten to 23, 22, 21, sitting one
+hour before a genuine window that opens at 20 reads as one continuous run, and
+the two MERGE into an episode with a fabricated boundary. That fired on the
+production extract (**165 rows**) and the assertion reported it as "a filter is
+dropping rows", which was the one explanation that was not true — every drop is
+`isin(episode_id)`-scoped. With the check first, recovery only rewrites values
+inside boundaries that are already settled. **Do not move it back above.**
 
 **Only CONTINUITY drops, and it uses a rule production also enforces.**
 `ending[t]` must be `starting[t+1]`, and separately every live outcome must

@@ -413,50 +413,6 @@ def load_and_filter(path, cfg=None):
     d = d[~d.episode_id.isin(bad)]
     d = step(d, "zero_base_price_dropped")
 
-    # "Manufacturing" SKUs enter with a window counter that is ALREADY
-    # negative -- a large negative constant rather than a countdown from the
-    # window length. Dropping them outright is not neutral: they are
-    # concentrated in a handful of categories, so it selects on category and
-    # biases every per-category figure downstream.
-    #
-    # They are recoverable because they behave like a standard short window:
-    # an episode entering negative resolves -- sells out or is written off --
-    # inside `data.manufacturing_window_hours`. That claim is CHECKED here
-    # rather than trusted: any episode entering negative with MORE observed
-    # hours than the cap is not this pattern, is not recovered, and falls
-    # through to the drop below with its count reported.
-    #
-    # Recovery rewrites `hours_remaining` as a synthetic countdown from the
-    # cap (23, 22, ... at 24). It has to be a countdown rather than a clamp
-    # because the counter is load-bearing three ways: episode identification
-    # differences it, the DP takes its horizon from it, and
-    # `extend_to_window` generates the synthetic tail from it. A clamp would
-    # leave a flat counter that re-segmentation would then split every hour.
-    cap = int(cfg["data"]["manufacturing_window_hours"])
-    entry = d.groupby("episode_id")["hours_remaining"].transform("first")
-    length = d.groupby("episode_id")["hours_remaining"].transform("size")
-    recoverable = (entry < 0) & (length <= cap)
-    n_recovered_ep = int(d.loc[recoverable, "episode_id"].nunique())
-    if n_recovered_ep:
-        d = d.copy()
-        position = d.groupby("episode_id").cumcount()
-        d.loc[recoverable, "hours_remaining"] = (cap - 1) - position[recoverable]
-    recovery = {"episodes_recovered": n_recovered_ep,
-                "rows_recovered": int(recoverable.sum()),
-                "window_hours_assumed": cap,
-                "episodes_entering_negative_but_longer_than_cap":
-                    int(d.loc[(entry < 0) & (length > cap), "episode_id"].nunique())}
-    d = step(d, "negative_window_recovered")
-    wf[-1] = wf[-1] + (recovery,)
-
-    # An episode whose counter is STILL negative after recovery used to be
-    # dropped here. It is now flagged `negative_window` and gates dp_eligible
-    # instead -- same argument as `window_too_long`, which it sits beside in
-    # DP_INELIGIBLE. Safe to carry through re-segmentation: what survives
-    # recovery decrements by exactly one per hour (a flat negative constant is
-    # a one-row episode, which recovery already took), so the contiguity test
-    # reads it the same way it reads any other window.
-
     # `units_gt_inventory_dropped` USED TO RUN HERE and it was a mistake. An
     # hour selling more than it opened with is not an impossible quantity, it
     # is a RESTOCK -- stock arrived during the hour, and `ending_inventory`
@@ -483,19 +439,84 @@ def load_and_filter(path, cfg=None):
     # re-split anything, the continuity check would have been made against ids
     # that no longer exist -- stale, and silent. Hence the assertion rather
     # than the bare recompute.
+    #
+    # THIS RUNS BEFORE `negative_window_recovered`, and the order is not
+    # cosmetic. The check re-derives ids from `hours_remaining`; recovery
+    # REWRITES `hours_remaining`. Running recovery first therefore graded the
+    # invariant against a counter the pipeline had just invented, and the
+    # synthetic countdown can line up with a real neighbour: an episode
+    # entering negative and rewritten to 23, 22, 21 sits one hour before a
+    # genuine window opening at 20, so the two merge into one episode with a
+    # fabricated boundary. That fired on the production extract -- 165 rows --
+    # and read as "a filter is row-scoped" when no filter was. Nothing here
+    # drops rows, so the invariant belongs against the SOURCE counter.
     d = d.sort_values(["sku_id", "fc", "date", "hour_of_day"]).copy()
     resegmented = assign_episode_ids(d)
     moved = int((resegmented != d.episode_id).sum())
     if moved:
         raise AssertionError(
-            f"re-segmentation moved {moved} rows to a different episode. A "
-            "filter after the ids are assigned is dropping ROWS rather than "
-            "whole episodes, which punches a hole in a window -- and "
-            "episode_universe already ran, so its continuity check and every "
-            "flag keyed to those ids are now stale. Make that filter "
-            "episode-scoped.")
+            f"re-segmentation moved {moved} rows to a different episode, so "
+            "the ids every flag above is keyed to are stale -- episode_universe "
+            "already ran its continuity check against them. TWO causes, and "
+            "the second is the one that actually happened:\n"
+            "  (a) a filter after the ids are assigned is dropping ROWS rather "
+            "than whole episodes, punching a hole in a window. Check that every "
+            "drop is `isin(episode_id)`-scoped.\n"
+            "  (b) something between id assignment and here MUTATED "
+            "`hours_remaining`, which is the field the ids are derived from. "
+            "`negative_window_recovered` does exactly that, and its synthetic "
+            "countdown can line up with a genuine neighbouring window and MERGE "
+            "them -- no filter is misbehaving at all. That is why recovery runs "
+            "after this check; do not move it back above.")
     wf.append(("contiguous_episodes_built", len(d), d.episode_id.nunique(),
                cogs_at_risk(d)))
+
+    # "Manufacturing" SKUs enter with a window counter that is ALREADY
+    # negative -- a large negative constant rather than a countdown from the
+    # window length. Dropping them outright is not neutral: they are
+    # concentrated in a handful of categories, so it selects on category and
+    # biases every per-category figure downstream.
+    #
+    # They are recoverable because they behave like a standard short window:
+    # an episode entering negative resolves -- sells out or is written off --
+    # inside `data.manufacturing_window_hours`. That claim is CHECKED here
+    # rather than trusted: any episode entering negative with MORE observed
+    # hours than the cap is not this pattern, is not recovered, and is flagged
+    # `negative_window` with its count reported.
+    #
+    # Recovery rewrites `hours_remaining` as a synthetic countdown from the
+    # cap (23, 22, ... at 24). It has to be a countdown rather than a clamp
+    # because the counter is load-bearing three ways: episode identification
+    # differences it, the DP takes its horizon from it, and
+    # `extend_to_window` generates the synthetic tail from it. A clamp would
+    # leave a flat counter that re-segmentation would then split every hour.
+    #
+    # RUNS AFTER re-segmentation, deliberately. This is the one step that
+    # MUTATES the field the ids are derived from, so with the ids already
+    # fixed and verified above, the rewrite can no longer move a row into a
+    # different episode -- it only changes values inside a settled boundary.
+    # The other way round it merged an episode entering negative with the
+    # genuine window that happened to follow it.
+    cap = int(cfg["data"]["manufacturing_window_hours"])
+    entry = d.groupby("episode_id")["hours_remaining"].transform("first")
+    length = d.groupby("episode_id")["hours_remaining"].transform("size")
+    recoverable = (entry < 0) & (length <= cap)
+    n_recovered_ep = int(d.loc[recoverable, "episode_id"].nunique())
+    if n_recovered_ep:
+        d = d.copy()
+        position = d.groupby("episode_id").cumcount()
+        d.loc[recoverable, "hours_remaining"] = (cap - 1) - position[recoverable]
+    recovery = {"episodes_recovered": n_recovered_ep,
+                "rows_recovered": int(recoverable.sum()),
+                "window_hours_assumed": cap,
+                "episodes_entering_negative_but_longer_than_cap":
+                    int(d.loc[(entry < 0) & (length > cap), "episode_id"].nunique())}
+    d = step(d, "negative_window_recovered")
+    wf[-1] = wf[-1] + (recovery,)
+
+    # An episode whose counter is STILL negative after recovery is flagged
+    # `negative_window` and gates dp_eligible -- same argument as
+    # `window_too_long`, which it sits beside in DP_INELIGIBLE.
 
     # Intraday restocks and extract-edge truncation used to be two more drops
     # here. Both are now flags set in `tag_dp_eligibility` below -- the

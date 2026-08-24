@@ -34,9 +34,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from bootstrap.prepare_data import (DP_INELIGIBLE, population,
+import pathlib
+
+from bootstrap.prepare_data import (DP_INELIGIBLE, load_and_filter, population,
                                     tag_dp_eligibility)
 from common.config import load_config
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture(scope="module")
@@ -209,6 +213,65 @@ def test_reasons_are_first_match_so_the_column_reads_as_a_cause(cfg):
 def test_every_condition_carries_a_stated_reason():
     for name, why in DP_INELIGIBLE:
         assert len(why) > 40, f"{name} has no explanation"
+
+
+def test_recovery_cannot_merge_a_negative_episode_into_its_neighbour():
+    """`negative_window_recovered` rewrites the field the ids are derived from.
+
+    Episode identification differences `hours_remaining` hour to hour, and
+    recovery replaces it with a synthetic countdown from
+    `manufacturing_window_hours`. Those two facts collide: an episode entering
+    negative and rewritten to 23, 22, 21 sitting one hour before a genuine
+    window that opens at 20 now looks like one continuous run, and the two
+    merge into a single episode with a fabricated boundary.
+
+    It is not hypothetical -- it moved 165 rows on the production extract, and
+    the `contiguous_episodes_built` assertion caught it and reported it as "a
+    filter is dropping rows", which was the one explanation that was NOT true.
+    No filter drops rows; the pipeline was grading the invariant against a
+    counter it had just invented.
+
+    The fix is ordering: re-segmentation is verified against the SOURCE
+    counter, and recovery runs afterwards, mutating values inside boundaries
+    that are already settled. This test pins the shape that broke it.
+    """
+    from bootstrap.prepare_data import assign_episode_ids
+
+    rows = ([dict(sku_id=1, fc="X", date="2026-03-01", hour_of_day=h,
+                  hours_remaining=hr) for h, hr in
+             [(10, -5.0), (11, -6.0), (12, -7.0)]]                  # enters negative
+            + [dict(sku_id=1, fc="X", date="2026-03-01", hour_of_day=h,
+                    hours_remaining=hr) for h, hr in
+               [(13, 20.0), (14, 19.0)]])                           # a REAL next window
+    raw = pd.DataFrame(rows)
+    raw["episode_id"] = assign_episode_ids(raw)
+    assert raw.episode_id.nunique() == 2, "the two windows are distinct at source"
+
+    # apply recovery exactly as the chain does
+    cap, d = 24, raw.copy()
+    entry = d.groupby("episode_id")["hours_remaining"].transform("first")
+    length = d.groupby("episode_id")["hours_remaining"].transform("size")
+    rec = (entry < 0) & (length <= cap)
+    d.loc[rec, "hours_remaining"] = (cap - 1) - d.groupby("episode_id").cumcount()[rec]
+
+    # re-deriving ids from the REWRITTEN counter is what used to happen, and
+    # it silently fuses the two windows
+    assert assign_episode_ids(d).nunique() == 1, (
+        "the collision this ordering exists to avoid no longer reproduces -- "
+        "if recovery changed, re-check whether the ordering is still needed")
+    # ...but the ids the pipeline carries are untouched, which is the fix
+    assert d.episode_id.nunique() == 2
+
+
+def test_recovery_runs_after_the_resegmentation_check(cfg):
+    """Order, asserted on the waterfall itself rather than on a comment."""
+    _, wf = load_and_filter(str(ROOT / "data" / "flc_synth.parquet"), cfg)
+    steps = [t[0] for t in wf]
+    assert steps.index("contiguous_episodes_built") < \
+        steps.index("negative_window_recovered"), (
+        "negative_window_recovered mutates hours_remaining, so it must run "
+        "AFTER the re-segmentation invariant is checked against the source "
+        "counter -- otherwise the check grades an invented counter")
 
 
 def test_every_eligible_episode_is_closed_but_not_the_reverse():
