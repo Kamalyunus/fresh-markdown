@@ -452,7 +452,7 @@ def main():
     cfg = load_config(args.config)
     d, waterfall = load_and_filter(args.input, cfg)
 
-    res = {"data_quality_waterfall": waterfall_rows(waterfall)}
+    res = {"data_quality_waterfall": waterfall_rows(waterfall, cfg)}
     res.update(run_all(d, cfg))
 
     import os

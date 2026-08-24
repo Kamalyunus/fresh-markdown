@@ -715,6 +715,12 @@ spread in the data.
 
 ### The chain (13 waterfall rows)
 
+Every row carries `kind` and `used_by`. **`kind: hard_drop`** — the rows leave
+the frame, so every consumer downstream sees the same population and "who uses
+this" is not a question. **`kind: population_gate`** — the last two rows, which
+drop nothing at all; they are flags, and they are the only place the consumers
+diverge. Read `used_by` before quoting any row as "the data we trained on".
+
 | Step | Scope | Drops |
 | --- | --- | --- |
 | `raw` | — | the starting count, before any drop |
@@ -727,8 +733,9 @@ spread in the data.
 | `zero_base_price_dropped` | episode | `original_price` still null/zero after ffill+bfill within the episode. EPISODE-scoped, same reason |
 | `episode_universe` | episode | the three conditions that make an episode's inventory readable, evaluated once and BEFORE any filter with an opinion about price, category or cost. Only continuity DROPS; see below |
 | `contiguous_episodes_built` | — | re-segmentation, and now a NO-OP that RAISES if it ever stops being one. It used to split windows that row-scoped drops had holed; every drop after the ids are assigned is episode-scoped, so nothing punches a hole. The invariant is load-bearing and invisible — `episode_universe` runs BEFORE this, so a future row-scoped filter would leave its continuity check and every id-keyed flag stale, silently. Hence an assertion rather than a bare recompute |
-| `negative_window_recovered` | episode | **not a drop.** A counter entering ALREADY negative is a known source pattern, not a defect — see the note below the table. **Runs AFTER the re-segmentation check, deliberately** — it is the one step that MUTATES `hours_remaining`, the field the ids are derived from |
-| `dp_eligible` | — | **not a drop.** The terminal SUMMARY row: how much of the surviving population the DP can act on, with a per-reason breakdown in its detail block |
+| `negative_window_recovered` | episode | **not a drop.** A counter entering ALREADY negative is a known source pattern, not a defect — see the note below the table. **Runs AFTER the re-segmentation check, deliberately** — it is the one step that MUTATES `hours_remaining`, the field the ids are derived from. The last `hard_drop` row, so its counts ARE the `integrity` population |
+| `eligible` | — | **not a drop — a GATE.** `accounting_closes & final_hour_clean & closed`. The population the DEMAND MODEL and the frozen artifacts read (when `baseline_model.train_population` is `eligible`, which it is), and the population every scrap / IL / clearance figure reads unconditionally — `scrap_units` returns NaN outside it. It used to be missing from the waterfall entirely, so its cost was folded into `dp_eligible` as though the solver had caused it |
+| `dp_eligible` | — | **not a drop — a GATE.** How much of the surviving population the DP can act on, with a per-reason breakdown in its detail block. Read by the DP solver, backtest, shadow, the calibration gate and the A/B, which pass it explicitly because for them it is not a setting |
 
 ### The source's inventory convention
 

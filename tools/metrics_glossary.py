@@ -39,8 +39,13 @@ CATALOGUE = [
 ("Population", "bootstrap.prepare_data → artifacts/split_manifest.json",
  "The rows every other number is measured on. Frozen at launch.", [
   ("data_quality_waterfall", "count",
-   "Rows, episodes and COGS at risk after each of the 12 waterfall rows, in order. "
-   "The first entry is `raw`.", "every figure traces back through it"),
+   "Rows, episodes and COGS at risk after each of the 13 waterfall rows, in order. "
+   "The first entry is `raw`. Every row carries `kind` and `used_by`: `hard_drop` "
+   "rows leave the frame and are gone for every consumer, while the last two are "
+   "`population_gate` rows that drop nothing and say WHO reads them -- `eligible` "
+   "for the demand model and every scrap/IL figure, `dp_eligible` for the solver, "
+   "backtest and A/B. The three populations are NESTED, so their exclusions must "
+   "never be added together.", "every figure traces back through it"),
   ("cogs_at_risk", "won",
    "Unit cost × opening stock, ONCE per episode, reported at every waterfall stage "
    "with `cogs_dropped` and `cogs_dropped_pct_of_raw`. Never summed over hours — "

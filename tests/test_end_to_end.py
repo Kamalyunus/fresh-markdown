@@ -65,14 +65,31 @@ def test_filter_chain_waterfall(workspace):
     rows = [s["rows"] for s in wf if s["step"] != "contiguous_episodes_built"]
     assert rows == sorted(rows, reverse=True)
     # every stage is named and counted -- 7 drops, the raw row, the
-    # negative-window recovery, the re-segmentation guard, and the
-    # dp_eligible SUMMARY row. The count is asserted so that adding or
+    # negative-window recovery, the re-segmentation guard, and the TWO
+    # population-gate rows. The count is asserted so that adding or
     # removing a filter has to be a deliberate edit here, and so the figure
     # quoted in the walkthrough and design doc has something holding it to
     # the code.
     assert wf[0]["step"] == "raw"
     assert wf[-1]["step"] == "dp_eligible"
-    assert len(wf) == 12, [s["step"] for s in wf]
+    assert len(wf) == 13, [s["step"] for s in wf]
+
+    # EVERY ROW SAYS WHAT IT IS AND WHO READS IT. Counts alone never answered
+    # the question a reader brings to this report -- "is this the population my
+    # number came from?" -- and the two gate rows are the only place the
+    # consumers differ, everything above being gone for everyone.
+    assert all("kind" in s and "used_by" in s for s in wf)
+    gates = [s["step"] for s in wf if s["kind"] == "population_gate"]
+    assert gates == ["eligible", "dp_eligible"], gates
+    # ...and the demand-model side must be visible on its own row, not folded
+    # into the solver's. Reporting only dp_eligible attributed the cost of the
+    # eligibility gate to the DP, which did not cause it.
+    elig = next(s for s in wf if s["step"] == "eligible")
+    dp = next(s for s in wf if s["step"] == "dp_eligible")
+    assert "DEMAND MODEL" in elig["used_by"] and "IL" in elig["used_by"]
+    assert "DP SOLVER" in dp["used_by"] and "backtest" in dp["used_by"]
+    # nested, so the exclusions must never be added together
+    assert dp["episodes"] <= elig["episodes"]
     # a fragment of a gap-split window is not an episode, and both halves go
     assert "gap_split_windows_dropped" in [x["step"] for x in wf]
     # Everything that is not an integrity or scope rule is a FLAG. None of

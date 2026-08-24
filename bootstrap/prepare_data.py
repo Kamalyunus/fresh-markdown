@@ -544,6 +544,34 @@ def load_and_filter(path, cfg=None):
     d["d_max"] = 1.0 - d.cost / d.original_price
     d["offered_price"] = d.original_price * (1 - d.total_discount)
     d, economic = tag_dp_eligibility(d, cfg)
+
+    # THE TWO POPULATION GATES GET A ROW EACH, and the second one used to be
+    # the only one reported. Every row ABOVE this point is a hard drop: those
+    # rows leave the frame and every consumer downstream sees the same
+    # population, so "who uses this" is not a question. These last two drop
+    # NOTHING -- they are flags -- and they are exactly where the consumers
+    # diverge. Reporting only `dp_eligible` meant the population the DEMAND
+    # MODEL and every scrap/IL figure read appeared nowhere in the waterfall,
+    # and its cost was folded into the solver's row as though the solver had
+    # caused it.
+    elig = d.episode_eligible
+    wf.append(("eligible", int(elig.sum()),
+               int(d.loc[elig, "episode_id"].nunique()),
+               cogs_at_risk(d[elig]), eligible_detail(d)))
+    # THE NESTING THE WHOLE REPORT IS READ AS. `dp_eligible` tests closure and
+    # a clean final hour but NOT `accounting_closes`, so containment follows
+    # from continuity -- which `episode_universe` enforces -- rather than from
+    # the gate list itself. Assert it rather than assume it: if it ever breaks,
+    # a waterfall row goes UP, and a reader would sooner disbelieve the report
+    # than suspect the invariant.
+    leaked = int(d.loc[d.dp_eligible & ~elig, "episode_id"].nunique())
+    assert not leaked, (
+        f"{leaked} episodes are dp_eligible but not eligible. The waterfall "
+        "is read as strictly nested (integrity > eligible > dp_eligible) and "
+        "this breaks that. `accounting_closes` is the only `eligible` "
+        "condition with no DP gate of its own, so suspect it first: it is an "
+        "identity given continuity, so a failure means episode_universe let "
+        "a discontinuous episode through.")
     wf.append(("dp_eligible", int(d.dp_eligible.sum()),
                int(d.loc[d.dp_eligible, "episode_id"].nunique()),
                cogs_at_risk(d[d.dp_eligible]), economic))
@@ -739,6 +767,61 @@ BELOW_COST_HOURS = (
     "some hour's OFFERED price is under cost. Tested on "
     "original_price x (1 - d), never applied_price, which the source zeroes "
     "on the ~78% of rows that sold nothing")
+
+
+# WHO READS THE POPULATION EACH WATERFALL ROW DESCRIBES.
+#
+# The question this answers is the one the report kept failing: a reader sees
+# 34% of the COGS survive and cannot tell whether the demand model was trained
+# on 34% or on something wider, nor which of the drops the solver caused.
+#
+# Every row up to and including `negative_window_recovered` is a HARD DROP --
+# the rows leave the frame, so every consumer sees the same population and the
+# question does not arise. The last two rows drop nothing; they are flags, and
+# they are where the consumers actually split.
+HARD_DROP_USED_BY = (
+    "everything downstream -- the rows are gone, no consumer can see them")
+
+GATE_USED_BY = {
+    "eligible": (
+        "the DEMAND MODEL and the frozen artifacts (baseline mu_ref, the "
+        "elasticity prior, r and rho) when baseline_model.train_population is "
+        "'eligible', plus every scrap / IL / clearance figure -- `scrap_units` "
+        "returns NaN outside this set, so an ineligible episode cannot enter "
+        "an IL number even by accident"),
+    "dp_eligible": (
+        "the DP SOLVER, the backtest, shadow mode, the calibration gate and "
+        "the A/B. These callers pass 'dp_eligible' explicitly because for them "
+        "it is not a configurable choice -- an episode here is one the solver "
+        "can actually price"),
+}
+
+
+def eligible_detail(d):
+    """What the `eligible` gate costs, and what it does NOT mean.
+
+    Deliberately thin: the per-reason blocks belong to `dp_eligible`, which
+    reports all six gates including the two shared with this one. Repeating
+    them here would invite adding the two rows' exclusions together, and they
+    are nested, not disjoint.
+    """
+    not_elig = ~d.episode_eligible
+    return {
+        "gated_by": ["accounting_closes", "final_hour_clean", "closed"],
+        "episodes_excluded": int(d.loc[not_elig, "episode_id"].nunique()),
+        "rows_excluded": int(not_elig.sum()),
+        "note": (
+            "FLAGGED, NOT DROPPED -- every row is still in the frame and the "
+            "integrity population still holds them. Three conditions, all in "
+            "common.episodes.episode_flow: the accounting identity holds, the "
+            "final hour is clean, and the episode CLOSED. That is what a "
+            "FROZEN ARTIFACT needs -- a censored likelihood is only correct if "
+            "we know which hours ran out. Two of the three are also DP gates "
+            "(`outcome_unknown` = not closed, `final_hour_restock` = unclean "
+            "final hour), so this row and the next OVERLAP by construction: "
+            "the populations are nested, integrity > eligible > dp_eligible, "
+            "and their exclusions must never be added together."),
+    }
 
 
 def tag_dp_eligibility(d, cfg):
@@ -992,8 +1075,10 @@ def tag_dp_eligibility(d, cfg):
         "hour onward is the cost floor working (counted in rejected_reasons), "
         "and an unclosed ending is already excluded from every scrap and IL "
         "figure by the closure sentinel rather than by a filter. "
-        "The three artifact fits read baseline_model.train_population "
-        "('integrity' = all of it, 'dp_eligible' = this subset); the DP, the "
+        "The three artifact fits read baseline_model.train_population, which "
+        "selects one of the THREE NESTED populations -- 'integrity' (every row "
+        "that survived the hard drops), 'eligible' (the previous waterfall "
+        "row), or 'dp_eligible' (this row); the DP, the backtest, shadow, the "
         "calibration gate and the A/B always read dp_eligible. Reasons are "
         "first-match in the order " + ", ".join(n for n, _ in DP_INELIGIBLE)
         + ". Counts overlap, so they do not sum to episodes_dp_ineligible.")
@@ -1055,10 +1140,19 @@ def split_frames(d, cfg):
     }
 
 
-def waterfall_rows(waterfall):
+def waterfall_rows(waterfall, cfg=None):
     """The waterfall as JSON rows. One definition, because two consumers write
     it -- the split manifest and phase 0 -- and a stage that reports a detail
     block would otherwise appear in one and crash the other.
+
+    EVERY ROW SAYS WHAT KIND OF STAGE IT IS AND WHO READS IT (`kind`,
+    `used_by`), because counts alone never answered the question anyone
+    actually brings to this report: is this population the one my number came
+    from? `kind` is `hard_drop` for a stage that removes rows -- gone for
+    everyone -- and `population_gate` for the last two, which remove nothing
+    and are read by different consumers. Pass `cfg` and the `eligible` row also
+    names whether the demand model is in fact reading it, since
+    `baseline_model.train_population` is a setting and not a fact.
 
     Stages are (label, rows, episodes, cogs_at_risk). A stage may carry a
     fifth element, a dict merged into its row: the flc_window recovery reports
@@ -1074,13 +1168,24 @@ def waterfall_rows(waterfall):
     row becomes two and the same stock is counted twice. It is the only stage
     that adds rather than removes, in episodes and in money alike.
     """
+    train_pop = (cfg or {}).get("baseline_model", {}).get("train_population")
     raw = waterfall[0][3] if waterfall else 0.0
     out, prev = [], None
     for t in waterfall:
         label, rows, eps, cogs = t[:4]
+        gate = label in GATE_USED_BY
+        used_by = GATE_USED_BY[label] if gate else HARD_DROP_USED_BY
+        if label == "eligible" and train_pop is not None:
+            used_by += (
+                f". baseline_model.train_population is {train_pop!r}, so the "
+                + ("artifact fits DO read this population"
+                   if train_pop == "eligible" else
+                   f"artifact fits read {train_pop!r} instead"))
         row = {"step": label, "rows": rows, "episodes": eps,
                "cogs_at_risk": round(cogs, 1),
-               "cogs_pct_of_raw": round(cogs / raw, 6) if raw else None}
+               "cogs_pct_of_raw": round(cogs / raw, 6) if raw else None,
+               "kind": "population_gate" if gate else "hard_drop",
+               "used_by": used_by}
         if prev is not None:
             row["cogs_dropped"] = round(prev - cogs, 1)
             row["cogs_dropped_pct_of_raw"] = (
@@ -1100,7 +1205,7 @@ def write_manifest(path, cfg, waterfall):
             "holdout": cfg["data"].get("holdout"),
             "exclusion_window": cfg["data"]["exclusion_window"],
             "config_version": cfg["meta"]["config_version"],
-            "data_quality_waterfall": waterfall_rows(waterfall),
+            "data_quality_waterfall": waterfall_rows(waterfall, cfg),
         }, cfg, None, "bootstrap.prepare_data"), f, indent=2)
 
 
@@ -1123,14 +1228,21 @@ def main():
     # disagreement is the point: a stage taking 1% of rows and 15% of the
     # exposure has changed what the surviving population represents.
     fixed = ("step", "rows", "episodes", "cogs_at_risk", "cogs_pct_of_raw",
-             "cogs_dropped", "cogs_dropped_pct_of_raw")
-    rows = waterfall_rows(wf)
+             "cogs_dropped", "cogs_dropped_pct_of_raw", "kind", "used_by")
+    rows = waterfall_rows(wf, cfg)
+    # The two GATE rows are marked in the margin. Without it the last rows read
+    # as more drops, and the reader cannot see that the population splits there
+    # rather than shrinking.
     for row in rows:
         pct = row.get("cogs_dropped_pct_of_raw")
-        print(f"{row['step']:34s} rows {row['rows']:>10,}  "
+        gate = row["kind"] == "population_gate"
+        print(f"{'GATE ' if gate else '     '}{row['step']:29s} "
+              f"rows {row['rows']:>10,}  "
               f"episodes {row['episodes']:>9,}  "
               f"cogs {row['cogs_at_risk']:>16,.0f}"
               + (f"  dropped {pct:>7.2%}" if pct is not None else ""))
+        if gate:
+            print(f"{'':34s}   read by: {row['used_by']}")
         for k, v in row.items():
             if k not in fixed:
                 print(f"{'':34s}   {k}: {v}")
@@ -1139,6 +1251,25 @@ def main():
         print(f"\nCOGS at risk surviving: {rows[-1]['cogs_at_risk']:,.0f} of "
               f"{rows[0]['cogs_at_risk']:,.0f} raw"
               + (f" ({kept:.2%})" if kept is not None else ""))
+        # WHICH NUMBER TO QUOTE FOR WHICH CLAIM. The unmarked rows shrink one
+        # population; the two GATE rows split it three ways, and the three are
+        # NESTED -- their exclusions must never be added together.
+        by_step = {r["step"]: r for r in rows}
+        hard = [r for r in rows if r["kind"] == "hard_drop"]
+        integrity = hard[-1] if hard else None
+        print("\nThree populations come out of this, NESTED -- never add their "
+              "exclusions together:")
+        for name, r, what in (
+                ("integrity", integrity,
+                 "everything that survived the hard drops above"),
+                ("eligible", by_step.get("eligible"),
+                 "demand model, prior, dispersion; every scrap / IL / "
+                 "clearance figure"),
+                ("dp_eligible", by_step.get("dp_eligible"),
+                 "DP solver, backtest, shadow, calibration gate, A/B")):
+            if r:
+                print(f"  {name:14s} episodes {r['episodes']:>9,}  "
+                      f"cogs {r['cogs_pct_of_raw']:>7.2%} of raw   {what}")
     print(f"wrote {args.out} and {args.manifest}")
 
 
