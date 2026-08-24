@@ -34,17 +34,27 @@ sigma under the brackets.
     wrong sign   ALWAYS rejects. A non-negative endpoint says demand rises
                  with price -- nonsensical rather than weak, and no midpoint
                  of it means anything.
-    boundary     reported, does not reject by default. A bound-pinned endpoint
-                 is not point-identified but still carries the sign and a
-                 magnitude floor.
-    inverted     reported, does not reject by default. `naive > controlled`
-                 means the hour control STRENGTHENED the estimate when it
-                 should weaken it, so the bracket's story is wrong -- but both
-                 endpoints are measured and the interval is still the interval
-                 the data supports.
+    boundary     reported, does NOT reject. The ordering survives; only the
+                 lower end is truncated at the search bound. Still a bracket,
+                 just a conservative one -- the midpoint understates |eps| and
+                 the std understates the width.
+    inverted     REJECTS that category. This breaks something boundary does
+                 not: the bracket's argument is DIRECTIONAL, and the midpoint
+                 means something only because naive <= eps_true <= controlled.
+                 When the ordering reverses, neither endpoint bounds the truth
+                 in the assumed direction and averaging two figures whose bias
+                 directions we no longer know is not a measurement.
 
-Both remain configurable (`reject_boundary_solutions`,
-`reject_orientation_violations`) so the stricter rule can be restored.
+READ `identifying_variation_share` BEFORE ACTING ON AN INVERSION. The
+controlled fit profiles out hour effects, so it is identified by WITHIN-HOUR
+price variation and nothing else. Near zero, it is noise that can land
+anywhere -- including past the naive estimate -- and the inversion says
+nothing about the category; pool hours or coarsen the control. Ample, and the
+control IS identified, so the inversion is a real result: the evening-lift
+confound story does not hold for that category.
+
+All three are configurable (`reject_wrong_sign`, `reject_boundary_solutions`,
+`reject_orientation_violations`).
 
 Both estimates use ENTRY-HOUR rows only. Identifying variation is same-hour
 cross-episode, never adjacent-hour within-episode (section 9.5): under the
@@ -182,6 +192,21 @@ def estimate_prior(d, cfg, seed=0):
         wrong_sign = not (e_naive < 0 and e_ctrl < 0)
         inverted = e_naive > e_ctrl
 
+        # WHAT THE CONTROLLED ESTIMATE HAD TO WORK WITH. It profiles out hour
+        # effects, so it is identified by WITHIN-HOUR price variation and
+        # nothing else. Where a category has almost none, that estimate is
+        # noise and can land anywhere -- including past the naive one, which
+        # is what an inverted bracket usually is. Reported so the two cases
+        # can be told apart: an unidentified control (fixable -- pool hours,
+        # coarsen the control) versus a confound story that is genuinely wrong
+        # for this category (a real finding).
+        lr = np.log((1 - g.total_discount.to_numpy())
+                    / (1 - g.d_ref.to_numpy()))
+        v_tot = float(np.var(lr))
+        within = lr - pd.Series(lr).groupby(
+            g.hour_of_day.to_numpy()).transform("mean").to_numpy()
+        identifying = float(np.var(within) / v_tot) if v_tot > 0 else 0.0
+
         mean = (e_naive + e_ctrl) / 2
         std = max(abs(e_naive - e_ctrl) / 2, pc["std_floor"])
 
@@ -206,10 +231,29 @@ def estimate_prior(d, cfg, seed=0):
             "bracket_mean": round(mean, 4), "bracket_std": round(std, 4),
             "boundary": boundary, "inverted": inverted,
             "wrong_sign": wrong_sign,
+            # share of price variation surviving hour de-meaning: everything
+            # the CONTROLLED estimate is identified by. Near zero means that
+            # estimate is not identified, whatever number it returned.
+            "identifying_variation_share": round(identifying, 4),
             "accepted": accepted, "rows": int(len(g)),
         }
         if not accepted:
             per_category[str(cat)]["rejected_for"] = why
+        if inverted:
+            per_category[str(cat)]["inversion_note"] = (
+                "epsilon_naive > epsilon_controlled: the hour control "
+                "STRENGTHENED the estimate when the bracket argument requires "
+                "it to weaken it, so neither endpoint bounds the truth in the "
+                "assumed direction and the midpoint is not an estimate. "
+                f"Within-hour price variation is {identifying:.1%} of total -- "
+                + ("below 10%, so the controlled fit is barely identified and "
+                   "this is most likely noise rather than a finding: pool "
+                   "hours or coarsen the control and re-run."
+                   if identifying < 0.10 else
+                   "ample, so the control IS identified and the inversion is "
+                   "a real result about this category -- the evening-lift "
+                   "confound story does not hold here. Worth investigating "
+                   "before dismissing."))
 
     stds = {v["std"] for v in per_category.values() if v["accepted"]}
     constant_std = len(per_category) > 1 and len(stds) == 1 \

@@ -285,14 +285,31 @@ posterior:
       # information, and -1.0 +- 0.6 is not. DAIRY PRODUCT pinned at -4.0 on
       # the production extract; under the old rule that discarded the whole
       # prior for all 16 categories.
-    reject_orientation_violations: false  # SET BY OWNER 2026-08-24.
-      # `naive > controlled`. Controlling for the hour confound should WEAKEN
-      # the estimate; when it strengthens it, our story about which estimator
-      # bounds which is wrong. Worth knowing -- it is reported as `inverted`
-      # per category -- but both endpoints are still measured and the interval
-      # between them is still the interval the data supports. BABY FOOD is the
-      # live case: naive -1.55, controlled -2.7, both firmly negative.
-      # Set true to go back to rejecting these.
+    reject_orientation_violations: true   # SET BY OWNER 2026-08-24.
+      # `naive > controlled`, and this one DOES reject -- unlike boundary,
+      # because it breaks a different thing.
+      #
+      # The bracket identifies a SET, and the whole argument is directional:
+      # naive absorbs the evening lift into price so it is biased too elastic;
+      # controlled strips the confounded variation so it is biased toward
+      # zero. Hence naive <= eps_true <= controlled, and the MIDPOINT means
+      # something only because of that ordering.
+      #
+      #   boundary   ordering intact, lower end merely truncated at the search
+      #              bound. Still a bracket -- just a conservative one: the
+      #              midpoint understates |eps| and the std understates the
+      #              width. Safe to keep.
+      #   inverted   ordering VIOLATED. Neither endpoint bounds the truth in
+      #              the assumed direction, so the midpoint is a number, not
+      #              an estimate. Averaging two figures whose bias directions
+      #              we no longer know is not a measurement.
+      #
+      # So an inverted category falls back -- but read
+      # `identifying_variation_share` before concluding anything. The
+      # controlled fit is identified ONLY by within-hour price variation; near
+      # zero, it is noise that can land anywhere and the inversion says
+      # nothing about the category. BABY FOOD is the live case: naive -1.55,
+      # controlled -2.7, both firmly negative.
     path: "artifacts/prior.json"
     per_category: null                 # MEASURED  re-run section 9.5 after bound fix
 

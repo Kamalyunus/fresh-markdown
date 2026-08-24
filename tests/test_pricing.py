@@ -773,8 +773,11 @@ def _bracket_verdict(naive, ctrl, cfg, lo=-4.0, hi=-0.05, step=0.025):
     return why
 
 
-def test_only_the_sign_rejects_a_bracket_by_default():
+def test_a_measured_bracket_beats_the_fallback_constant():
     """PRD 9.5 as amended by the owner, 2026-08-24.
+
+    Boundary-pinned and clean brackets are kept; only wrong sign and an
+    inverted ordering reject (the latter pinned in the test below).
 
     The rule used to be all-or-nothing with boundary AND orientation both
     fatal, and it was discarding measured information for a constant. On the
@@ -791,26 +794,56 @@ def test_only_the_sign_rejects_a_bracket_by_default():
     cfg = copy.deepcopy(CFG)
 
     # the four production categories, verbatim from artifacts/prior.json
-    live = {
-        "BABY FOOD":       (-1.55, -2.7),     # inverted, both negative
+    keeps_bracket = {
         "BAKERY & PASTRY": (-2.7, -0.525),    # clean
         "BEVERAGE":        (-2.325, -2.15),   # clean, near-identical endpoints
         "DAIRY PRODUCT":   (-4.0, -0.575),    # naive pinned to the search bound
     }
-    for cat, (n, c) in live.items():
+    for cat, (n, c) in keeps_bracket.items():
         assert _bracket_verdict(n, c, cfg) == [], \
             f"{cat} should keep its measured bracket, not take the fallback"
 
-    # the sign is the one thing that always rejects
-    assert _bracket_verdict(0.4, -1.2, cfg) == ["wrong sign"]
-    assert _bracket_verdict(-1.2, 0.05, cfg) == ["wrong sign"]
+    # the sign always rejects, whatever else is or is not wrong
+    assert _bracket_verdict(-1.2, 0.05, cfg) == ["wrong sign"]      # sign only
+    assert "wrong sign" in _bracket_verdict(0.4, -1.2, cfg)         # and inverted
 
-    # ...and the stricter rule is still reachable, so the change is a choice
+    # ...and boundary rejection is still reachable, so keeping it is a choice
     strict = copy.deepcopy(CFG)
     strict["posterior"]["prior"]["reject_boundary_solutions"] = True
-    strict["posterior"]["prior"]["reject_orientation_violations"] = True
     assert _bracket_verdict(-4.0, -0.575, strict) == ["boundary solution"]
-    assert _bracket_verdict(-1.55, -2.7, strict) == ["orientation violated"]
+
+
+def test_an_inverted_bracket_rejects_but_a_boundary_one_does_not():
+    """They break different things, and only one of them breaks the argument.
+
+    The bracket identifies a SET, and the reasoning is DIRECTIONAL: naive
+    absorbs the evening lift into price so it is biased too elastic;
+    controlled strips the confounded variation so it is biased toward zero.
+    `naive <= eps_true <= controlled` is what makes the midpoint mean anything.
+
+      boundary   ordering intact, lower end truncated at the search bound.
+                 Still a bracket, just conservative -- midpoint understates
+                 |eps|, std understates the width. KEPT.
+      inverted   ordering violated. Neither endpoint bounds the truth in the
+                 assumed direction, so averaging two figures whose bias
+                 directions we no longer know is not a measurement. REJECTED.
+
+    The owner's rule "only the sign rejects" was refined here: sign rejects
+    because the estimate is nonsensical, inversion because the ESTIMATOR's
+    argument has failed. Boundary survives both tests.
+    """
+    import copy
+    cfg = copy.deepcopy(CFG)
+    assert cfg["posterior"]["prior"]["reject_orientation_violations"] is True
+    assert cfg["posterior"]["prior"]["reject_boundary_solutions"] is False
+
+    # BABY FOOD, verbatim: both firmly negative, but naive is the WEAKER one
+    assert _bracket_verdict(-1.55, -2.7, cfg) == ["orientation violated"]
+    # DAIRY PRODUCT, verbatim: pinned to the bound, ordering intact -> kept
+    assert _bracket_verdict(-4.0, -0.575, cfg) == []
+    # equal endpoints are not inverted -- a zero-width bracket is degenerate,
+    # not backwards, and std_floor already covers it
+    assert _bracket_verdict(-1.5, -1.5, cfg) == []
 
 
 def test_a_passing_category_is_not_punished_for_another_ones_failure():

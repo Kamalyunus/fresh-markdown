@@ -758,18 +758,32 @@ reasons, in order of force.
    cannot per subcategory — the same confound with less data behind it.
 
 > **⚠ §9.5 acceptance was amended by the owner on 2026-08-24, and every prior
-> figure in this document predates it.** Acceptance is now PER CATEGORY and
-> only the SIGN rejects unconditionally; boundary and inverted brackets are
-> reported rather than discarded. On the four categories inspected from the
-> 174-day extract, all four keep their measured bracket where previously all
-> 16 took the fallback — means around −1.6 to −2.3 rather than a uniform −1.0.
+> figure in this document predates it.** Acceptance is now PER CATEGORY. A
+> category falls back on a **wrong sign** or an **inverted** bracket; a
+> **boundary**-pinned one is kept and flagged. Of the four categories
+> inspected from the 174-day extract, three keep their measured bracket where
+> previously all 16 took the fallback:
 >
-> That moves the measured deepening bar (median **2.429**) from 2.38σ away to
-> **0.08–0.75σ**, so the "enter-and-hold at the launch prior" conclusion in
-> risk 6 below, and the 0%-deepened backtest result behind it, **no longer
-> follow**. Both must be re-measured on the next full run before anything in
-> this section is quoted. Point 3 above still holds for a different reason:
-> per-subcategory brackets would divide the same identifying variation further.
+> | | bracket | | bar at 2.429 |
+> | --- | --- | --- | --- |
+> | BAKERY & PASTRY | −1.6125 ± 1.0875 | kept | 0.75σ *(was 2.38σ)* |
+> | BEVERAGE | −2.2375 ± 0.4000 | kept | 0.48σ |
+> | DAIRY PRODUCT | −2.2875 ± 1.7125 | kept, boundary | 0.08σ |
+> | BABY FOOD | −2.1250 ± 0.5750 | **falls back**, inverted | — |
+>
+> Boundary keeps its bracket because the ordering survives — only the lower
+> end is truncated. Inversion does not, because the bracket's argument is
+> directional: `naive ≤ ε_true ≤ controlled` is the only thing that makes the
+> midpoint an estimate rather than an average of two numbers.
+>
+> The kept brackets move the measured deepening bar (median **2.429**) from
+> 2.38σ away to **0.08–0.75σ**, so the "enter-and-hold at the launch prior"
+> conclusion in risk 6 below, and the 0%-deepened backtest behind it, **no
+> longer follow**. Both must be re-measured on the next full run before
+> anything in this section is quoted. Point 3 above still holds for a
+> different reason: per-subcategory brackets would divide the same identifying
+> variation further — and `identifying_variation_share`, now reported per
+> category, is the figure that says how much there is to divide.
 
 Categories above 250 episodes/week earn their own cell, everything below
 reads and feeds the global cell, assignment fixed at launch. The honest
