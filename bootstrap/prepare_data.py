@@ -207,8 +207,22 @@ def edge_truncated_episodes(d):
     left = pd.Series(
         episodes.leftover_units(last.starting_inventory, last.units_sold).to_numpy(),
         index=ids)
-    edge = ((ts + pd.to_timedelta(hr, unit="h") > extract_end)
-            | (ts >= extract_end))
+    # "Would this window still be running at the extract's last hour?"
+    #
+    # Compared NUMERICALLY, in hours, and it has to be. The obvious form --
+    # `ts + pd.to_timedelta(hr, unit="h") > extract_end` -- builds a timedelta
+    # out of the SOURCE counter, and a timedelta64[ns] tops out around 2.56
+    # million hours (292 years). Production carries counters in the millions,
+    # so the addition overflowed and silently wrapped, deciding this flag on a
+    # garbage timestamp. Those rows are exactly the ones `window_too_long`
+    # exists to gate -- the counter is nonsense above `max_window_hours` --
+    # but this runs before that flag is set and must survive them.
+    #
+    # `extract_end - ts` is bounded by the extract's own span, so the
+    # subtraction cannot overflow whatever the counter says. The rule is
+    # unchanged: `ts + hr > extract_end`  <=>  `hr > extract_end - ts`.
+    hours_to_end = (extract_end - ts).dt.total_seconds() / 3600.0
+    edge = (hr > hours_to_end) | (hours_to_end <= 0)
 
     at_edge = unknown[edge.loc[unknown].to_numpy()]
     not_edge = unknown[~edge.loc[unknown].to_numpy()]

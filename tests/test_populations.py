@@ -180,6 +180,38 @@ def test_an_unfinished_episode_is_kept_but_gated_out_of_everything(cfg):
     assert edge["share_of_unclosed_explained_by_edge"] == 1.0
     assert "edge_truncated" not in [n for n, _ in DP_INELIGIBLE]
 
+def test_edge_truncation_survives_a_counter_of_millions_of_hours(cfg):
+    """The source emits counters in the MILLIONS, and this ran before the flag
+    that gates them.
+
+    `edge_truncated` asks "would this window still be running at the extract's
+    last hour?". The obvious way to ask -- `ts + pd.to_timedelta(hr, unit="h")
+    > extract_end` -- builds a timedelta out of the source counter, and
+    `timedelta64[ns]` tops out near 2.56 million hours (292 years). On a
+    ns-resolution pandas that overflows: it either raises or silently wraps and
+    decides the flag on a garbage timestamp. Not hypothetical -- it stopped a
+    production run.
+
+    `window_too_long` is what gates these rows, but it is set AFTER this, so
+    this has to survive them rather than assume they are gone. Asking the
+    question numerically -- `hr > (extract_end - ts)` in hours -- is the same
+    rule with no timedelta built from the counter, and `extract_end - ts` is
+    bounded by the extract's own span.
+    """
+    absurd = _frame(episode_id="huge", ending_inventory=[9, 7],
+                    hours_remaining=[9_000_000.0, 8_999_999.0])
+    d = pd.concat([_frame(), absurd], ignore_index=True)
+
+    tagged, detail = tag_dp_eligibility(d, cfg)     # must not raise
+
+    # it is unclosed and its window plainly outruns the extract, so it is edge
+    assert tagged.loc[tagged.episode_id == "huge", "edge_truncated"].all()
+    assert detail["edge_truncated"]["episodes_edge_truncated"] == 1
+    # and the counter is nonsense, which is a DIFFERENT flag's job
+    assert (tagged.loc[tagged.episode_id == "huge",
+                       "dp_ineligible_reason"] == "window_too_long").all()
+
+
 def test_a_closed_episode_is_never_flagged_edge_truncated(cfg):
     """The flag has to mean 'the extract stopped', or the residue it is meant
     to isolate -- unclosed for a reason a longer extract will NOT fix -- has
