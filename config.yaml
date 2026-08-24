@@ -285,31 +285,32 @@ posterior:
       # information, and -1.0 +- 0.6 is not. DAIRY PRODUCT pinned at -4.0 on
       # the production extract; under the old rule that discarded the whole
       # prior for all 16 categories.
-    reject_orientation_violations: true   # SET BY OWNER 2026-08-24.
-      # `naive > controlled`, and this one DOES reject -- unlike boundary,
-      # because it breaks a different thing.
+    reject_orientation_violations: false  # SET BY OWNER 2026-08-24.
+      # `naive > controlled`. FLAGGED LOUDLY, NOT REJECTED -- the owner's call,
+      # and the argument for it is that a measured midpoint is still the best
+      # reading the data supports, where the alternative is a constant.
       #
-      # The bracket identifies a SET, and the whole argument is directional:
-      # naive absorbs the evening lift into price so it is biased too elastic;
-      # controlled strips the confounded variation so it is biased toward
-      # zero. Hence naive <= eps_true <= controlled, and the MIDPOINT means
-      # something only because of that ordering.
+      # The caveat, recorded because it is real and the flag exists to carry
+      # it: the bracket identifies a SET, and the argument is DIRECTIONAL --
+      # naive absorbs the evening lift so it is biased too elastic, controlled
+      # strips the confounded variation so it is biased toward zero, hence
+      # naive <= eps_true <= controlled. That ordering is the only thing making
+      # the midpoint set-identified. When it reverses, the midpoint is still
+      # the centre of the two measurements but no longer a bracket on the
+      # truth, so an inverted category's prior is weaker evidence than an
+      # upright one's even though the artifact reports them the same way.
       #
-      #   boundary   ordering intact, lower end merely truncated at the search
-      #              bound. Still a bracket -- just a conservative one: the
-      #              midpoint understates |eps| and the std understates the
-      #              width. Safe to keep.
-      #   inverted   ordering VIOLATED. Neither endpoint bounds the truth in
-      #              the assumed direction, so the midpoint is a number, not
-      #              an estimate. Averaging two figures whose bias directions
-      #              we no longer know is not a measurement.
+      #   boundary   ordering intact, lower end truncated at the search bound.
+      #              Conservative but sound: midpoint understates |eps|.
+      #   inverted   ordering violated. Used, flagged, and listed at the top
+      #              of the artifact as `inverted_categories`.
       #
-      # So an inverted category falls back -- but read
-      # `identifying_variation_share` before concluding anything. The
-      # controlled fit is identified ONLY by within-hour price variation; near
-      # zero, it is noise that can land anywhere and the inversion says
-      # nothing about the category. BABY FOOD is the live case: naive -1.55,
-      # controlled -2.7, both firmly negative.
+      # Read `identifying_variation_share` before trusting one. The controlled
+      # fit is identified ONLY by within-hour price variation; near zero it is
+      # noise that can land anywhere, and the inversion says nothing about the
+      # category -- pool hours or coarsen the control instead. BABY FOOD is the
+      # live case: naive -1.55, controlled -2.7, both firmly negative,
+      # midpoint -2.125 +- 0.575.
     path: "artifacts/prior.json"
     per_category: null                 # MEASURED  re-run section 9.5 after bound fix
 

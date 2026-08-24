@@ -31,8 +31,8 @@ The system is built in the order below. Each step's output is the next step's in
 | 4b | `backtest` (§17) | 2, 4 | Replay harness. Needed by the calibration gate, and re-run after every correction — build it as a module, not a script. |
 | 5 | **GATE — calibration** (§9.3) | 3, 4b | **BLOCKING.** Run measurement 10. Establish the level/slope split. Do not proceed until `fidelity_episode_sold_ratio` is inside `calibration_gate_band`. |
 | 6 | `bootstrap.fit_dispersion` (§9.4) | 2, 4 | `r_lookup`, `rho`. Re-fit `rho` against fitted residuals — the phase-0 value is a proxy. |
-| 7 | `bootstrap.estimate_prior` (§9.5) | 2, 4 | **Widen the search bound to `epsilon_min` before running.** Boundary endpoints are reported, not rejected; inverted brackets fall back (owner, 2026-08-24). |
-| 8 | **GATE — prior acceptance** (§9.5) | 7 | **BLOCKING, PER CATEGORY.** Wrong sign or an inverted bracket rejects that category; constant std rejects the whole prior. Boundary is reported, not fatal. `source` is `bracket`, `mixed`, or `fallback`. |
+| 7 | `bootstrap.estimate_prior` (§9.5) | 2, 4 | **Widen the search bound to `epsilon_min` before running.** Boundary and inverted brackets are flagged and used, not rejected (owner, 2026-08-24). |
+| 8 | **GATE — prior acceptance** (§9.5) | 7 | **BLOCKING, PER CATEGORY.** Only a wrong sign rejects a category; constant std rejects the whole prior. Boundary and inversion are flagged, not fatal — read `inverted_categories`. `source` is `bracket`, `mixed`, or `fallback`. |
 | 9 | `pricing.demand`, `pricing.posterior`, `pricing.dp` (§9.3, §10, §11) | 1, 4, 6, 7 | Decision core. |
 | 10 | `pricing.explore` (§12) | 9, 4b | Derive `tau_initial` as a **currency** quantile from replay, per §12.3. |
 | 11 | `inference` (§11.4, §16.1) | 9, 10 | Validation, decision, event emission. |
@@ -573,7 +573,7 @@ Identifying variation is **same-hour cross-episode**, never adjacent-hour within
 | --- | --- | --- |
 | **wrong sign** — an endpoint not strictly negative | **rejects; category takes the fallback** | Demand rising with price is nonsensical, not weak. No midpoint of it means anything. |
 | **boundary** — an endpoint at a search bound | reported as `boundary`, **does not reject** | The ordering survives; only the lower end is truncated. Still a bracket, just a conservative one — the midpoint understates \|ε\| and the std understates the width. "At least this elastic" is information; `-1.0 ± 0.6` is not. |
-| **inverted** — `epsilon_naive > epsilon_controlled` | **rejects; category takes the fallback** | This breaks what boundary does not. The bracket's argument is **directional** — naive absorbs the evening lift so it is biased too elastic, controlled strips the confounded variation so it is biased toward zero — and `naive ≤ ε_true ≤ controlled` is the *only* reason the midpoint means anything. Reverse the ordering and neither endpoint bounds the truth in the assumed direction; averaging two figures whose bias directions are unknown is not a measurement. |
+| **inverted** — `epsilon_naive > epsilon_controlled` | **flagged loudly, does not reject** | The midpoint is the best reading the data supports and the alternative is a constant, so it is used. But the bracket's argument is **directional** — naive absorbs the evening lift so it is biased too elastic, controlled strips the confounded variation so it is biased toward zero — and `naive ≤ ε_true ≤ controlled` is the only thing making the midpoint *set-identified*. Reversed, it is the centre of two measurements rather than a bracket on the truth: **weaker evidence than an upright category's, though the artifact reports them the same way.** Listed at the top of the artifact as `inverted_categories` and marked `[INVERTED]` in the CLI output, because nothing downstream refuses one. |
 | **constant `prior_std`** across categories | rejects the WHOLE prior | Frame-wide by nature: it asserts uniform confidence the data does not support. |
 
 Both non-sign checks stay configurable (`reject_boundary_solutions`, `reject_orientation_violations`) so the stricter rule can be restored, and `acceptance_scope` can be set back to `all_or_nothing`.
@@ -598,7 +598,7 @@ Note the acceptance checks are **pre-registered in config**, not chosen after se
 - **Near zero** — the controlled estimate is not identified. Whatever number it returned is noise and can land anywhere, including past the naive one. The inversion says nothing about the category; pool hours or coarsen the control and re-run. Expect this to be common under the legacy ramp, which is exactly the confound that motivates the bracket, and it connects directly to the `share_cells_low_variation` figure from measurement 2.
 - **Ample** — the control *is* identified, so the inversion is a real result: the evening-lift confound story does not hold for that category. Worth investigating rather than dismissing.
 
-The fallback is the right answer in both cases, but only the first is a data problem you can fix.
+The midpoint is used in both cases, but only the first is a data problem you can fix -- and where `identifying_variation_share` is near zero, the prior you are adopting rests on a control that was not identified. That is the situation to chase, not to accept quietly.
 
 `prior.source` is now `bracket`, `mixed`, or `fallback`, and every category records `bracket_mean` / `bracket_std` alongside the values in force — so the cost of a rejection stays visible in the artifact instead of having to be recomputed by hand.
 

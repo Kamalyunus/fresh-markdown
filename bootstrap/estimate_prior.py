@@ -38,12 +38,16 @@ sigma under the brackets.
                  lower end is truncated at the search bound. Still a bracket,
                  just a conservative one -- the midpoint understates |eps| and
                  the std understates the width.
-    inverted     REJECTS that category. This breaks something boundary does
-                 not: the bracket's argument is DIRECTIONAL, and the midpoint
-                 means something only because naive <= eps_true <= controlled.
-                 When the ordering reverses, neither endpoint bounds the truth
-                 in the assumed direction and averaging two figures whose bias
-                 directions we no longer know is not a measurement.
+    inverted     FLAGGED, not rejected (owner, 2026-08-24). The midpoint is
+                 used because it is the best reading the data supports and the
+                 alternative is a constant. The caveat is real and the flag
+                 carries it: the bracket's argument is DIRECTIONAL, and the
+                 midpoint is set-identified only because
+                 naive <= eps_true <= controlled. Reverse the ordering and it
+                 is the centre of two measurements rather than a bracket on
+                 the truth -- weaker evidence than an upright category's,
+                 though the artifact reports both the same way. Listed at the
+                 top of the artifact as `inverted_categories`.
 
 READ `identifying_variation_share` BEFORE ACTING ON AN INVERSION. The
 controlled fit profiles out hour effects, so it is identified by WITHIN-HOUR
@@ -244,7 +248,11 @@ def estimate_prior(d, cfg, seed=0):
                 "epsilon_naive > epsilon_controlled: the hour control "
                 "STRENGTHENED the estimate when the bracket argument requires "
                 "it to weaken it, so neither endpoint bounds the truth in the "
-                "assumed direction and the midpoint is not an estimate. "
+                "assumed direction. The midpoint is USED -- it is the best "
+                "reading the data supports and the alternative is a constant "
+                "-- but it is the centre of two measurements rather than a "
+                "set-identified bracket, so treat it as weaker evidence than "
+                "an upright category's. "
                 f"Within-hour price variation is {identifying:.1%} of total -- "
                 + ("below 10%, so the controlled fit is barely identified and "
                    "this is most likely noise rather than a finding: pool "
@@ -303,6 +311,22 @@ def estimate_prior(d, cfg, seed=0):
         "search_bounds": [lo, hi],
         "grid_step": float(step),
         "per_category": per_category,
+        # SURFACED AT THE TOP, not left for someone to notice per category. An
+        # inverted bracket still supplies its midpoint (owner, 2026-08-24), so
+        # nothing downstream refuses it -- which is exactly why the count has
+        # to be somewhere a reader cannot miss.
+        "inverted_categories": sorted(c for c, v in per_category.items()
+                                      if v["inverted"]),
+        "inverted_note": (
+            "These categories have epsilon_naive > epsilon_controlled, so the "
+            "bracket's DIRECTIONAL argument -- naive biased too elastic, "
+            "controlled biased toward zero, truth between them -- does not "
+            "hold. Their midpoint is the best available reading of the data "
+            "and is used, but it is not set-identified the way the others "
+            "are. Read identifying_variation_share: near zero means the "
+            "controlled fit was not identified and the inversion is noise "
+            "(pool hours or coarsen the control); ample means the confound "
+            "story genuinely fails for that category."),
         "episodes_per_week": {str(k): round(float(v), 1)
                               for k, v in episodes_per_week.items()},
         "acceptance": {"passed": all_accepted, "failures": failures,
@@ -335,7 +359,15 @@ def main():
         print(f"  {cat:12s} naive {v['epsilon_naive']:+.3f}  "
               f"controlled {v['epsilon_controlled']:+.3f}  "
               f"-> mean {v['mean']:+.3f} std {v['std']:.3f}"
-              + ("  [BOUNDARY]" if v["boundary"] else ""))
+              + ("  [BOUNDARY]" if v["boundary"] else "")
+              + (f"  [INVERTED ident={v['identifying_variation_share']:.2f}]"
+                 if v["inverted"] else ""))
+    if prior.get("inverted_categories"):
+        print(f"  !! {len(prior['inverted_categories'])} inverted bracket(s): "
+              + ", ".join(prior["inverted_categories"])
+              + " -- midpoint used anyway (owner, 2026-08-24); the bracket's "
+                "directional argument does NOT hold for these. Read "
+                "identifying_variation_share before trusting them.")
     print(f"wrote {path}")
 
 

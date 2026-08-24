@@ -813,37 +813,46 @@ def test_a_measured_bracket_beats_the_fallback_constant():
     assert _bracket_verdict(-4.0, -0.575, strict) == ["boundary solution"]
 
 
-def test_an_inverted_bracket_rejects_but_a_boundary_one_does_not():
-    """They break different things, and only one of them breaks the argument.
+def test_an_inverted_bracket_is_used_but_must_be_flagged():
+    """Owner's call, 2026-08-24: the midpoint is the best reading the data
+    supports and the alternative is a constant, so an inverted bracket is
+    FLAGGED rather than rejected.
 
-    The bracket identifies a SET, and the reasoning is DIRECTIONAL: naive
-    absorbs the evening lift into price so it is biased too elastic;
-    controlled strips the confounded variation so it is biased toward zero.
-    `naive <= eps_true <= controlled` is what makes the midpoint mean anything.
+    The caveat the flag exists to carry, recorded because it is real: the
+    bracket identifies a SET and the reasoning is DIRECTIONAL -- naive absorbs
+    the evening lift so it is biased too elastic, controlled strips the
+    confounded variation so it is biased toward zero, hence
+    `naive <= eps_true <= controlled`. That ordering is the only thing making
+    the midpoint set-identified. Reversed, it is the centre of two
+    measurements rather than a bracket on the truth: weaker evidence than an
+    upright category's, though the artifact reports them the same way.
 
-      boundary   ordering intact, lower end truncated at the search bound.
-                 Still a bracket, just conservative -- midpoint understates
-                 |eps|, std understates the width. KEPT.
-      inverted   ordering violated. Neither endpoint bounds the truth in the
-                 assumed direction, so averaging two figures whose bias
-                 directions we no longer know is not a measurement. REJECTED.
-
-    The owner's rule "only the sign rejects" was refined here: sign rejects
-    because the estimate is nonsensical, inversion because the ESTIMATOR's
-    argument has failed. Boundary survives both tests.
+    So the flag is not decoration -- nothing downstream refuses an inverted
+    prior, which is exactly why it has to be impossible to miss.
     """
     import copy
     cfg = copy.deepcopy(CFG)
-    assert cfg["posterior"]["prior"]["reject_orientation_violations"] is True
+    assert cfg["posterior"]["prior"]["reject_orientation_violations"] is False
     assert cfg["posterior"]["prior"]["reject_boundary_solutions"] is False
 
-    # BABY FOOD, verbatim: both firmly negative, but naive is the WEAKER one
-    assert _bracket_verdict(-1.55, -2.7, cfg) == ["orientation violated"]
-    # DAIRY PRODUCT, verbatim: pinned to the bound, ordering intact -> kept
+    # BABY FOOD, verbatim: both firmly negative, naive the WEAKER one
+    assert _bracket_verdict(-1.55, -2.7, cfg) == []
+    # DAIRY PRODUCT, verbatim: pinned to the bound, ordering intact
     assert _bracket_verdict(-4.0, -0.575, cfg) == []
-    # equal endpoints are not inverted -- a zero-width bracket is degenerate,
-    # not backwards, and std_floor already covers it
+    # equal endpoints are not inverted -- degenerate, not backwards, and
+    # std_floor already covers a zero-width bracket
     assert _bracket_verdict(-1.5, -1.5, cfg) == []
+    # a wrong sign still rejects, inverted or not
+    assert "wrong sign" in _bracket_verdict(-1.2, 0.05, cfg)
+
+    # the artifact must surface inversions at the TOP, not only per category
+    import inspect
+    from bootstrap import estimate_prior as ep
+    src = inspect.getsource(ep)
+    assert '"inverted_categories"' in src, \
+        "inverted categories must be listed at the top of the artifact"
+    assert "inversion_note" in src and "identifying_variation_share" in src, \
+        "an inverted category must say WHY, and how identified its control was"
 
 
 def test_a_passing_category_is_not_punished_for_another_ones_failure():
