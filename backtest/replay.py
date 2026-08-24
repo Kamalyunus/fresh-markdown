@@ -406,6 +406,21 @@ def _episode_frame(g, unfinished=frozenset()):
         "mu_ref_path": g.mu_ref_hat.to_numpy(),
         "r": float(g.r.iloc[0]),
         "eps": float(g.eps.iloc[0]),
+        # LABELS, carried only so a traced replay can identify its rows. None
+        # of the economics reads these -- `_replay_one` uses them exclusively
+        # inside `if e.get("trace")`. Tolerant of a missing column on purpose:
+        # callers construct minimal frames to exercise the arms, and a
+        # diagnostic label must not be able to break the replay.
+        "episode_id": str(g.episode_id.iloc[0]) if "episode_id" in g else "",
+        "sku_id": (int(g.sku_id.iloc[0]) if "sku_id" in g else None),
+        "fc": str(g.fc.iloc[0]) if "fc" in g else "",
+        "category": str(g.category.iloc[0]) if "category" in g else "",
+        "hour_dates": ([str(x) for x in g.date] if "date" in g
+                       else [""] * len(g)),
+        "hours_of_day": ([int(x) for x in g.hour_of_day]
+                         if "hour_of_day" in g else list(range(len(g)))),
+        "is_observed": obs.astype(bool),
+        "starting_inventory": g.starting_inventory.to_numpy(),
     }
 
 
@@ -423,6 +438,17 @@ def _replay_one(e, cfg):
     if not tiers:
         return None
     spreads = []
+
+    # PER-HOUR TRACE, off by default and read by nothing in the report.
+    # `tools.export_backtest` turns it on to show the three arms hour by hour;
+    # it exists here rather than in that tool because PRD 17.2 forbids a
+    # parallel implementation, and an exporter that re-ran these loops itself
+    # would be one -- it would drift the moment either arm changed.
+    tr = {} if e.get("trace") else None
+
+    def rec(t, **kw):
+        if tr is not None:
+            tr.setdefault(t, {}).update(kw)
 
     # ---- actual path economics (observed world, legacy prices)
     a_sold = e["actual_sold"]
@@ -456,6 +482,12 @@ def _replay_one(e, cfg):
             lg_disc_weighted += d_t * sold
             lg_sold_total += sold
             q -= sold
+            rec(t, legacy_q=q_int, legacy_discount=d_t,
+                legacy_price=p0 * (1 - d_t), legacy_mu=float(mu),
+                legacy_units=float(sold))
+        else:
+            rec(t, legacy_q=0, legacy_discount=None, legacy_price=None,
+                legacy_mu=None, legacy_units=0.0)
         q = max(q + adj[t], 0.0)
         if q <= 0 and not adj[t + 1:].any():
             break
@@ -473,6 +505,8 @@ def _replay_one(e, cfg):
         # the next hour, which is exactly what happens in production because
         # `ending[t]` is `starting[t+1]`.
         if q_int <= 0:
+            rec(t, dp_q=0, dp_discount=None, dp_price=None, dp_mu=None,
+                dp_units=0.0)
             q = max(q + adj[t], 0.0)
             if q <= 0 and not adj[t + 1:].any():
                 break
@@ -500,6 +534,10 @@ def _replay_one(e, cfg):
         dp_disc_cost += p0 * d_t * sold
         dp_disc_weighted += d_t * sold
         dp_sold_total += sold
+        rec(t, dp_q=q_int, dp_discount=d_t, dp_price=p0 * (1 - d_t),
+            dp_mu=float(mu), dp_units=float(sold),
+            dp_is_entry=bool(t == 0),
+            dp_feasible_tiers=len(res.tiers))
         q = max(q - sold + adj[t], 0.0)
     dp_scrap = cost * (max(q, 0.0) + e["shrink"])
     row = {
@@ -528,14 +566,69 @@ def _replay_one(e, cfg):
         "eps": e["eps"],
         "deepening_threshold": dp_mod.deepening_threshold_epsilon(
             e["original_price"], e["cost"], e["d_ref"]),
+        "episode_id": e["episode_id"], "sku_id": e["sku_id"],
+        "fc": e["fc"], "category": e["category"],
+        "q0": e["q0"], "supply": e["supply"], "shrink": e["shrink"],
+        "end_inv": e["end_inv"], "hours": e["hours"],
+        "n_observed": e["n_observed"], "r": e["r"],
+        "original_price": p0, "cost": cost, "d_ref": e["d_ref"],
     }
+    if tr is not None:
+        # ONE ROW PER HOUR with all three arms side by side. The actual arm is
+        # the observed world; legacy and DP are both simulated under the SAME
+        # demand model, which is the only way the policy comparison is
+        # like-for-like -- model bias hits both identically.
+        hours = []
+        for t in range(e["hours"]):
+            rt = tr.get(t, {})
+            a_d = float(e["actual_discounts"][t])
+            hours.append({
+                "episode_id": e["episode_id"], "sku_id": e["sku_id"],
+                "fc": e["fc"], "category": e["category"],
+                "date": e["hour_dates"][t], "hour_of_day": e["hours_of_day"][t],
+                "t": t, "is_observed": bool(e["is_observed"][t]),
+                "original_price": p0, "cost": cost, "d_ref": e["d_ref"],
+                "mu_ref": float(e["mu_ref_path"][t]),
+                "hour_adjustment": float(e["adjustment"][t]),
+                # observed world
+                "actual_q": int(e["starting_inventory"][t]),
+                "actual_discount": a_d,
+                "actual_price": p0 * (1 - a_d),
+                "actual_units": float(e["actual_sold"][t]),
+                # legacy prices under the MODEL's demand
+                "legacy_q": rt.get("legacy_q"),
+                "legacy_discount": rt.get("legacy_discount"),
+                "legacy_price": rt.get("legacy_price"),
+                "legacy_mu": rt.get("legacy_mu"),
+                "legacy_units": rt.get("legacy_units"),
+                # the DP's own choice, same demand model
+                "dp_q": rt.get("dp_q"),
+                "dp_discount": rt.get("dp_discount"),
+                "dp_price": rt.get("dp_price"),
+                "dp_mu": rt.get("dp_mu"),
+                "dp_units": rt.get("dp_units"),
+                "dp_is_entry": rt.get("dp_is_entry", False),
+                "dp_feasible_tiers": rt.get("dp_feasible_tiers"),
+            })
+            h = hours[-1]
+            h["dp_minus_actual_discount"] = (
+                None if h["dp_discount"] is None
+                else h["dp_discount"] - h["actual_discount"])
+        row["hours_trace"] = hours
     return row, spreads
 
 
-def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
+def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None,
+                  trace=False):
     """Section 17.3 policy block: what the DP would have done differently, plus
     the q-spread distribution for tau_initial. Deterministic expected-value
-    transitions; replays the same pricing.dp code path production uses."""
+    transitions; replays the same pricing.dp code path production uses.
+
+    `trace=True` additionally returns a per-hour frame with all three arms side
+    by side, for `tools.export_backtest`. It changes the RETURN ARITY -- 4
+    elements instead of 3 -- rather than always returning an empty frame,
+    because the trace is large and every existing caller wants three.
+    """
     rng = np.random.default_rng(seed)
     pcfg = cfg["pricing"]
     max_k = pcfg["negbin_max_k"]
@@ -556,6 +649,7 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
     for _, g in sub.groupby("episode_id"):
         e = _episode_frame(g, unfinished)
         if e["q0"] > 0 and e["hours"] >= 1:
+            e["trace"] = trace
             frames.append(e)
 
     results = map_episodes(_replay_one, frames, cfg, workers)
@@ -572,6 +666,14 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
     ep_all = pd.DataFrame(rows)
     if not len(ep_all):
         raise RuntimeError("no episodes replayed")
+
+    # pulled OUT of the episode frame before anything aggregates it: a column
+    # of lists would break every groupby below
+    hourly = None
+    if trace:
+        hourly = pd.DataFrame(
+            [h for r in rows for h in r.get("hours_trace", [])])
+        ep_all = ep_all.drop(columns=["hours_trace"], errors="ignore")
 
     # EVERY aggregate is taken over episodes whose outcome is KNOWN, and the
     # rest are counted rather than quietly averaged in. An unclosed episode is
@@ -671,6 +773,8 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
                  "evidence (PRD 17.1)."),
     }
     block["q_spread_distribution"] = ledger.distribution()
+    if trace:
+        return block, ep, ledger, hourly
     return block, ep, ledger
 
 

@@ -730,3 +730,48 @@ def test_the_backtest_grades_on_known_outcomes_only(cfg):
         "the backtest is aggregating over unfinished episodes again"
     assert "episodes_excluded_unclosed" in src, \
         "the exclusion must be counted, not silent"
+
+
+def test_the_hourly_export_reads_the_replay_rather_than_reimplementing_it():
+    """PRD 17.2: "No parallel implementation."
+
+    An exporter that re-ran the DP and legacy arms to produce its own hourly
+    rows would be exactly that, and it would drift the first time either arm
+    changed -- silently, because nothing compares the two. So the per-hour
+    trace lives in `backtest.replay._replay_one` beside the loops it records,
+    and `tools.export_backtest` only reads it.
+    """
+    import inspect
+    from backtest import replay
+    from tools import export_backtest as ex
+
+    src = inspect.getsource(ex)
+    assert "policy_replay(" in src and "trace=True" in src, \
+        "the exporter must obtain its rows from the traced replay"
+    for banned in ("dp_mod.solve(", "expected_min_demand_inventory(", "mu_at("):
+        assert banned not in src, (
+            f"{banned} in the exporter means it is re-running the pricing "
+            "path instead of reading the replay's trace")
+
+    # tracing is OFF by default, so the report path is unaffected
+    assert "trace=False" in inspect.signature(
+        replay.policy_replay).__str__().replace(" ", "") or \
+        inspect.signature(replay.policy_replay).parameters["trace"].default is False
+
+
+def test_tracing_changes_no_reported_number():
+    """The trace is diagnostics. If turning it on moved a figure, every export
+    would be quietly reporting something the backtest did not."""
+    import inspect
+    from backtest import replay
+
+    src = inspect.getsource(replay._replay_one)
+    # every write to the trace goes through `rec`, which is a no-op when off
+    assert "def rec(" in src and "if tr is not None" in src
+    # ...and the economics never read it back
+    body = src.split("def rec(")[1]
+    for accumulator in ("dp_disc_cost", "lg_disc_cost", "a_disc_cost"):
+        for line in body.split("\n"):
+            if accumulator in line and "+=" in line:
+                assert "tr" not in line and "rec(" not in line, \
+                    f"{accumulator} is being computed from the trace"
