@@ -65,7 +65,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt            # noqa: E402
 
-from common.config import load_config
+from common.config import load_config, design_effect
 from common import episodes
 from bootstrap.prepare_data import population, split_frames
 from bootstrap.train_baseline import BaselineModel
@@ -80,20 +80,56 @@ GOOD = "#2f6b4f"
 CUTOFF = 1.920729
 
 
-def entry_rows(d, cfg):
-    """The rows the bracket scores, rebuilt exactly as `estimate_prior` does.
+def row_sets(d, cfg):
+    """The two candidate scoring populations, so the profiles can be compared.
 
-    Duplicated deliberately rather than refactored out of `estimate_prior`: a
-    diagnostic that shares mutable setup with the thing it audits can be made
-    to agree with it by changing the shared part. This function is allowed to
-    drift only if the fit does, and the test pins them together.
+    entry      what `estimate_prior` uses today: the first hour of each
+               episode, censored ones dropped. One row per episode, so the rows
+               are near-independent and no design-effect correction is needed
+               -- and, as the profiles show, almost no price variation, because
+               the entry hour is BEFORE the legacy ramp starts discounting, so
+               it sits at the opening discount, which is the reference.
+
+    all_hours  every hour with stock. This is where the price variation lives,
+               since the ramp is what creates it. Three costs come with it, and
+               all three are real:
+                 1. rows within an episode are correlated, so the likelihood
+                    overstates its own information -- corrected below.
+                 2. the hour confound is now fully in play, which is what the
+                    controlled arm exists to profile out. The naive arm on this
+                    set is the MOST confounded estimate in the whole procedure.
+                 3. censored rows are back, so `nbinom.logsf` fires and `r`
+                    matters through the channel where it really bites -- the
+                    reference r stops being a cheap approximation.
+
+    Both are built here rather than shared with `estimate_prior`: a diagnostic
+    that shares mutable setup with the thing it audits can be made to agree
+    with it by editing the shared part.
     """
     train = population(split_frames(d, cfg)["train"], cfg).copy()
     train["censored"] = episodes.censored_hours(train)
-    entry = (train.sort_values(["episode_id", "hour_of_day"])
-             .groupby("episode_id").head(1))
-    entry = entry[entry.starting_inventory >= 1]
-    return entry[~entry.censored.to_numpy()].copy()
+    stocked = train[train.starting_inventory >= 1].copy()
+    entry = stocked.sort_values(["episode_id", "hour_of_day"]) \
+                   .groupby("episode_id").head(1)
+    return {"entry": entry[~entry.censored.to_numpy()].copy(),
+            "all_hours": stocked}
+
+
+def design_effect_for(g, cfg):
+    """How much to deflate a likelihood built as if the rows were independent.
+
+    deff = 1 + (mean rows per episode - 1) * rho, the same formula the posterior
+    update uses. The mean cluster size is measured on THESE rows; `rho` comes
+    from config, since measuring it needs an elasticity and that is the thing
+    being profiled.
+
+    Applied by dividing the log-likelihood before the 1.92 cutoff. Without it,
+    `all_hours` looks dramatically better identified than `entry` purely
+    because it has ~6x the rows -- and most of those rows are repeat
+    observations of the same episode, not new information.
+    """
+    m = float(g.groupby("episode_id").size().mean()) if len(g) else 1.0
+    return max(1.0, design_effect(float(cfg["dispersion"]["rho"]), m)), m
 
 
 def curve(g, mu_ref, grid, controlled):
@@ -206,82 +242,106 @@ def build(d, cfg):
     grid = np.linspace(lo, hi, pc["search_grid_size"])
     model = BaselineModel(cfg)
 
-    entry = entry_rows(d, cfg)
-    r_by_cat, pooled, r_basis = ep._reference_r(entry, cfg, model, pc)
-    entry["r"] = (entry.category.astype(str).map(r_by_cat)
-                  .fillna(float(pooled)).astype(float))
+    sets = row_sets(d, cfg)
+    # ONE reference r for both row sets, fitted on the entry rows, so the two
+    # profiles differ ONLY in which rows they score. Fitting a separate r per
+    # row set would confound "more rows" with "different dispersion".
+    r_by_cat, pooled, r_basis = ep._reference_r(sets["entry"], cfg, model, pc)
 
     out = {"grid": [float(x) for x in grid],
            "reference_r_basis": r_basis,
-           "rows": int(len(entry)),
-           "per_category": {}}
-    for cat, g in entry.groupby("category"):
-        mu_ref = model.predict_mu_ref(g)
-        ll_n = curve(g, mu_ref, grid, controlled=False)
-        ll_c = curve(g, mu_ref, grid, controlled=True)
-        n, c = read_curve(grid, ll_n), read_curve(grid, ll_c)
-        pv = price_variation(g)
-        out["per_category"][str(cat)] = {
-            "rows": int(len(g)),
-            "reference_r": round(float(g.r.iloc[0]), 4),
-            "price_variation": pv,
-            "naive": n, "controlled": c,
-            "bracket_mean": round((n["epsilon_hat"] + c["epsilon_hat"]) / 2, 4),
-            "verdict": verdict(n, c, pv),
-            # the curves themselves, so the picture can be redrawn without
-            # refitting and so a reader can check the shape by eye in the JSON
-            "ll_naive": [round(float(x), 4) for x in ll_n],
-            "ll_controlled": [round(float(x), 4) for x in ll_c],
+           "rho_used_for_deff": float(cfg["dispersion"]["rho"]),
+           "row_sets": {}, "per_category": {}}
+
+    for name, rows in sets.items():
+        rows = rows.copy()
+        rows["r"] = (rows.category.astype(str).map(r_by_cat)
+                     .fillna(float(pooled)).astype(float))
+        out["row_sets"][name] = {
+            "rows": int(len(rows)),
+            "episodes": int(rows.episode_id.nunique()),
+            "censored_rows": int(rows.censored.sum()),
         }
+        for cat, g in rows.groupby("category"):
+            mu_ref = model.predict_mu_ref(g)
+            ll_n = curve(g, mu_ref, grid, controlled=False)
+            ll_c = curve(g, mu_ref, grid, controlled=True)
+            deff, m = design_effect_for(g, cfg)
+            n = read_curve(grid, ll_n / deff)
+            c = read_curve(grid, ll_c / deff)
+            pv = price_variation(g)
+            out["per_category"].setdefault(str(cat), {})[name] = {
+                "rows": int(len(g)),
+                "episodes": int(g.episode_id.nunique()),
+                "mean_rows_per_episode": round(m, 3),
+                "deff": round(deff, 3),
+                "censored_share": round(float(g.censored.mean()), 4),
+                "reference_r": round(float(g.r.iloc[0]), 4),
+                "price_variation": pv,
+                "naive": n, "controlled": c,
+                "bracket_mean": round(
+                    (n["epsilon_hat"] + c["epsilon_hat"]) / 2, 4),
+                "verdict": verdict(n, c, pv),
+                # curves as SCORED (deff-deflated), so the picture and the
+                # intervals cannot disagree
+                "ll_naive": [round(float(x), 4) for x in ll_n / deff],
+                "ll_controlled": [round(float(x), 4) for x in ll_c / deff],
+            }
     return out
 
 
+SETS = ("entry", "all_hours")
+
+
 def plot(res, path):
+    """One ROW per category, one COLUMN per row set, so the comparison the plot
+    exists for -- does scoring beyond the entry hour buy identification? -- is
+    a horizontal glance rather than a memory exercise."""
     cats = sorted(res["per_category"])
     grid = np.asarray(res["grid"])
-    ncol = 2 if len(cats) > 1 else 1
-    nrow = int(np.ceil(len(cats) / ncol))
-    fig, axes = plt.subplots(nrow, ncol, figsize=(6.2 * ncol, 3.4 * nrow),
+    fig, axes = plt.subplots(len(cats), len(SETS),
+                             figsize=(5.8 * len(SETS), 2.9 * len(cats)),
                              squeeze=False)
-    # ONE Y-SCALE FOR EVERY PANEL. The comparison the plot exists to support is
-    # "which categories are flat and which are not", and per-panel autoscaling
-    # destroys exactly that -- it draws a 0.01-unit wiggle and a 7-unit slope
-    # at the same apparent steepness.
-    worst = max(max(p["naive"]["span"], p["controlled"]["span"])
-                for p in res["per_category"].values())
-    ylim = -min(12.0, max(3.0, worst * 1.05))
-    for ax, cat in zip(axes.ravel(), cats):
-        p = res["per_category"][cat]
-        # naive dashed: where both curves are constant they sit on top of each
-        # other, and a solid line hides the other entirely
-        for key, colour, style, label in (
-                ("ll_naive", MUTED, "--", "naive"),
-                ("ll_controlled", ACCENT, "-", "controlled")):
-            ll = np.asarray(p[key])
-            ax.plot(grid, ll - ll.max(), color=colour, lw=1.6, ls=style,
-                    label=label)
-        # the 95% cutoff. Everything above this line is elasticity the data
-        # cannot distinguish from the best one.
-        ax.axhline(-CUTOFF, color=GOOD, lw=1, ls="--")
-        ax.text(grid[0], -CUTOFF, " 95% support", color=GOOD, fontsize=7.5,
-                va="bottom")
-        ax.set_ylim(ylim, 0.6)
-        ax.set_title(f"{cat}   n={p['rows']:,}   r={p['reference_r']}",
-                     loc="left", fontsize=10, color=INK)
-        ax.set_xlabel("epsilon", fontsize=8.5, color=MUTED)
-        ax.set_ylabel("log-lik  -  max", fontsize=8.5, color=MUTED)
-        for side in ("top", "right"):
-            ax.spines[side].set_visible(False)
-        for side in ("left", "bottom"):
-            ax.spines[side].set_color(MUTED)
-        ax.tick_params(colors=MUTED, labelsize=8)
-        ax.legend(frameon=False, fontsize=8, loc="lower right")
-    for ax in axes.ravel()[len(cats):]:
-        ax.set_visible(False)
-    fig.suptitle("Profile likelihood in epsilon -- a flat curve means the data "
-                 "does not identify it", x=0.01, ha="left", fontsize=12,
-                 color=INK)
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    # ONE Y-SCALE FOR EVERY PANEL. The comparison is "which of these is flat",
+    # and per-panel autoscaling draws a 0.01-unit wiggle and a 40-unit slope at
+    # the same apparent steepness.
+    worst = max(max(p[s]["naive"]["span"], p[s]["controlled"]["span"])
+                for p in res["per_category"].values() for s in SETS)
+    ylim = -min(20.0, max(3.0, worst * 1.05))
+    for row, cat in enumerate(cats):
+        for col, s in enumerate(SETS):
+            ax = axes[row][col]
+            p = res["per_category"][cat][s]
+            # naive dashed: where both curves are constant they sit on top of
+            # each other and a solid line hides the other entirely
+            for key, colour, style, label in (
+                    ("ll_naive", MUTED, "--", "naive"),
+                    ("ll_controlled", ACCENT, "-", "controlled")):
+                ll = np.asarray(p[key])
+                ax.plot(grid, ll - ll.max(), color=colour, lw=1.6, ls=style,
+                        label=label)
+            # everything above this line is elasticity the data cannot
+            # distinguish from the best one
+            ax.axhline(-CUTOFF, color=GOOD, lw=1, ls="--")
+            ax.set_ylim(ylim, 0.6)
+            ax.set_title(f"{cat} -- {s}   n={p['rows']:,}  "
+                         f"deff={p['deff']}  sd(log ratio)="
+                         f"{p['price_variation']['log_ratio_sd']:.4f}",
+                         loc="left", fontsize=9, color=INK)
+            ax.set_xlabel("epsilon", fontsize=8, color=MUTED)
+            if col == 0:
+                ax.set_ylabel("log-lik / deff  -  max", fontsize=8, color=MUTED)
+            for side in ("top", "right"):
+                ax.spines[side].set_visible(False)
+            for side in ("left", "bottom"):
+                ax.spines[side].set_color(MUTED)
+            ax.tick_params(colors=MUTED, labelsize=8)
+            if row == 0 and col == 0:
+                ax.legend(frameon=False, fontsize=8, loc="lower right")
+    fig.suptitle("Profile likelihood in epsilon -- entry rows vs every stocked "
+                 "hour, both deflated by the design effect",
+                 x=0.01, ha="left", fontsize=12, color=INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.98))
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     fig.savefig(path, dpi=160, facecolor="white")
     plt.close(fig)
@@ -303,30 +363,33 @@ def main():
         json.dump(res, f, indent=2)
     plot(res, args.chart)
 
-    print(f"entry rows: {res['rows']:,}   reference r: {res['reference_r_basis']}\n")
-    hdr = (f"{'category':14s} {'arm':11s} {'eps':>7s} {'span':>7s} "
-           f"{'95% support':>18s} {'width':>7s} {'SE':>7s}")
+    for name, s in res["row_sets"].items():
+        print(f"{name:10s} rows {s['rows']:>9,}  episodes {s['episodes']:>8,}  "
+              f"censored rows {s['censored_rows']:>8,}")
+    print(f"reference r: {res['reference_r_basis']}")
+    print(f"deff uses rho = {res['rho_used_for_deff']} from config\n")
+
+    hdr = (f"{'category':12s} {'set':10s} {'arm':11s} {'sd(lr)':>8s} "
+           f"{'deff':>6s} {'eps':>7s} {'span':>8s} {'95% support':>17s} "
+           f"{'width':>7s}")
     print(hdr)
     print("-" * len(hdr))
     for cat in sorted(res["per_category"]):
-        p = res["per_category"][cat]
-        pv = p["price_variation"]
-        # the cause, printed BEFORE the curves it explains
-        print(f"{cat:14s} n={p['rows']:,}  r={p['reference_r']}  "
-              f"discounts={pv['distinct_discounts']}  "
-              f"log_ratio sd={pv['log_ratio_sd']:.5f}  "
-              f"at reference={pv['share_at_reference']:.1%}  "
-              f"zero-sale={pv['zero_sale_share']:.1%}")
-        for arm in ("naive", "controlled"):
-            a = p[arm]
-            se = "--" if a["se_curvature"] is None else f"{a['se_curvature']:.3f}"
-            flags = ("  AT BOUND" if a["at_bound"] else "") + \
-                    ("  OPEN" if a["open_interval"] else "")
-            print(f"{'':14s} {arm:11s} "
-                  f"{a['epsilon_hat']:>7.3f} {a['span']:>7.2f} "
-                  f"{str(a['support_95']):>18s} {a['support_95_width']:>7.3f} "
-                  f"{se:>7s}{flags}")
-        print(f"{'':14s} -> {p['verdict']}\n")
+        for s in SETS:
+            p = res["per_category"][cat][s]
+            pv = p["price_variation"]
+            for arm in ("naive", "controlled"):
+                a = p[arm]
+                flags = ("  AT BOUND" if a["at_bound"] else "") + \
+                        ("  OPEN" if a["open_interval"] else "")
+                print(f"{cat if (s == SETS[0] and arm == 'naive') else '':12s} "
+                      f"{s if arm == 'naive' else '':10s} {arm:11s} "
+                      f"{pv['log_ratio_sd']:>8.5f} {p['deff']:>6.2f} "
+                      f"{a['epsilon_hat']:>7.3f} {a['span']:>8.2f} "
+                      f"{str(a['support_95']):>17s} "
+                      f"{a['support_95_width']:>7.3f}{flags}")
+            print(f"{'':12s} {'':10s} -> {p['verdict'][:120]}")
+        print()
     print(f"wrote {args.out} and {args.chart}")
 
 
