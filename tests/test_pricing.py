@@ -963,19 +963,23 @@ def test_the_documented_run_order_works_from_a_cold_start():
     the bracket reproducible: it no longer depends on whether a previous run
     left an artifact behind.
     """
-    ref = CFG["posterior"]["prior"]["reference_r"]
-    assert ref is not None, (
-        "reference_r is null, so a fresh clone cannot run step 4 -- the "
-        "documented order would fail before it started")
-    assert isinstance(ref, (int, float)) and ref > 0
-
-    # null must still be ACCEPTED, as the escape hatch for the old order --
-    # it just cannot be the shipped default
     import inspect
     from bootstrap import estimate_prior as ep
-    src = inspect.getsource(ep.estimate_prior)
-    assert 'pc.get("reference_r")' in src and "if ref_r is None" in src, \
-        "the null path must remain, for a re-run in the old order"
+
+    # null is the DEFAULT, and it must mean "derive it", never "refuse".
+    # A pinned constant was the first attempt: it goes stale against a
+    # retrain, has to be re-pasted by hand, and describes whatever extract
+    # produced it rather than the one in front of you.
+    assert CFG["posterior"]["prior"]["reference_r"] is None, \
+        "reference_r should be derived by default, not pinned"
+
+    src = inspect.getsource(ep._reference_r)
+    assert "fit_r(" in src, "the reference must be FITTED, not assumed"
+    assert 'pc.get("reference_r") is not None' in src, \
+        "an explicit value must still win, for reproducing an older run"
+    # nothing may be read from disk to get it, or the cold start breaks again
+    assert "r_lookup" not in src and "open(" not in src, \
+        "the reference must be computed, not borrowed from an artifact"
 
 
 def test_the_bounded_step_holds_in_the_REPORT_not_just_in_the_store(): # noqa: N802

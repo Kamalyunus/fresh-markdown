@@ -136,6 +136,48 @@ def _estimate(g, mu_ref, grid, controlled):
     return float(grid[int(np.argmax(lls))])
 
 
+def _reference_r(rows, cfg, model, pc):
+    """One global dispersion for the bracket's likelihood. (value, basis).
+
+    Fitted on THE ROWS THE BRACKET SCORES -- entry rows, censored ones already
+    dropped -- at the fallback elasticity, using the same `fit_dispersion.fit_r`
+    the frozen artifact uses. A seed, not the artifact: `fit_dispersion` runs
+    after this module and fits per subcategory at each category's real prior
+    mean.
+
+    THE WINDOW MATTERS MORE THAN THE ROW TYPE, which is why this is fitted here
+    rather than borrowed. Measured on the fixture: entry rows give 2.34 and all
+    train rows 2.31 -- the same answer -- while `fit_dispersion`'s calibration
+    window gives 0.48, five times lower. They are different windows serving
+    different purposes, so borrowing the artifact's global would describe the
+    calibration period rather than the rows this likelihood sums over.
+
+    Explicit config wins if set -- for reproducing an old run, or pinning the
+    bootstrap against a known value. Otherwise it is derived, so a new extract
+    gets its own reference and there is no constant to re-paste.
+    """
+    if pc.get("reference_r") is not None:
+        return float(pc["reference_r"]), "config reference_r (pinned)"
+
+    from bootstrap.fit_dispersion import fit_r
+
+    eps0 = float(pc["fallback_mean"])
+    mu_ref = model.predict_mu_ref(rows)
+    ratio = (1 - rows.total_discount.to_numpy()) / (1 - rows.d_ref.to_numpy())
+    mu = np.clip(mu_ref * ratio ** eps0, cfg["pricing"]["demand_floor"], None)
+    r, ok = fit_r(rows.units_sold.to_numpy(), mu,
+                  rows.censored.to_numpy(), cfg["dispersion"]["r_search_bounds"])
+    if not ok:
+        # the scalar fit failing at all means something is wrong with the
+        # window, and a silent midpoint would hide it
+        raise SystemExit(
+            "could not fit a reference dispersion on the bracket's own rows. "
+            "Set posterior.prior.reference_r explicitly, or check the train "
+            "window has usable entry rows.")
+    return (float(r),
+            f"fitted on {len(rows)} entry rows at fallback elasticity {eps0}")
+
+
 def estimate_prior(d, cfg, seed=0):
     pc = cfg["posterior"]["prior"]
     lo, hi = pc["search_bounds"]
@@ -162,29 +204,32 @@ def estimate_prior(d, cfg, seed=0):
     # reference constant and `fit_dispersion` runs AFTER, on the real
     # per-category elasticities.
     #
-    # `reference_r` may be left null, in which case the fitted global is used
-    # if an r_lookup already exists -- for a re-run in the old order, or when
-    # someone wants the fitted value. It is never the per-cell r: that is the
-    # artifact this step now precedes.
-    ref_r = pc.get("reference_r")
-    r_basis = "config reference_r"
-    if ref_r is None:
-        path = cfg["dispersion"]["r_lookup_path"]
-        if not os.path.exists(path):
-            raise SystemExit(
-                "posterior.prior.reference_r is null and no r_lookup exists. "
-                "The bracket needs a dispersion; set reference_r, or run "
-                "bootstrap.fit_dispersion first (the old order).")
-        with open(path) as f:
-            ref_r = float(json.load(f)["global"])
-        r_basis = "fitted global from r_lookup"
-
     # the widest price spread in the extract is the below-cost hours, and
     # the bracket is the quantity most starved of variation -- so this is
     # the fit that gains most from train_population "integrity"
     train = population(split_frames(d, cfg)["train"], cfg).copy()
     train["censored"] = episodes.censored_hours(train)
-    train["r"] = float(ref_r)
+
+    # THE REFERENCE IS MEASURED FROM THIS DATA, not pinned to a constant.
+    #
+    # A pinned number was the first attempt and it was worse in every way that
+    # matters: it goes stale against a retrain, it has to be re-pasted by hand,
+    # and it says nothing about the extract in front of it. One scalar fit on
+    # the train window costs a bounded scalar minimisation.
+    #
+    # This does NOT reintroduce the cycle, because the seed is COMPUTED here
+    # rather than read from `r_lookup.json`. It uses the fallback elasticity,
+    # which is exactly the approximation the old ordering made -- except it now
+    # lands on the quantity that barely cares. `r` reaches the bracket only
+    # through the weighting term `r/(r+mu)` once censored entry rows are gone,
+    # and a +-2x change moved the endpoints ~0.099 against stds of 0.4-1.7. So
+    # the seed's own imprecision is immaterial, while fitting DISPERSION at the
+    # wrong elasticity cost 26% of the learning rate.
+    #
+    # Same estimator `fit_dispersion` uses -- imported, not reimplemented, so
+    # the two cannot drift.
+    # `r` is assigned after `entry` is built -- the reference is fitted on
+    # those rows, so it cannot be known yet.
 
     weeks = max(train.date.astype(str).map(
         lambda x: pd.Timestamp(x).to_period("W")).nunique(), 1)
@@ -224,7 +269,11 @@ def estimate_prior(d, cfg, seed=0):
     entry_total_by_cat = entry.groupby("category").size().to_dict()
     dropped_censored = int(censored_entry.sum())
     dropped_share = float(censored_entry.mean()) if len(censored_entry) else 0.0
-    entry = entry[~censored_entry]
+    entry = entry[~censored_entry].copy()
+
+    # NOW the reference can be fitted, on exactly these rows
+    ref_r, r_basis = _reference_r(entry, cfg, model, pc)
+    entry["r"] = float(ref_r)
 
     per_category, failures = {}, []
     for cat, g in entry.groupby("category"):

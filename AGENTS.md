@@ -379,10 +379,24 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
    prior; with brackets accepted per category it measured correlation against
    a demand curve nothing uses. The two steps are circular — the bracket's
    censored NB likelihood needs `r` — and the loop is cut on the prior's
-   side because `r → ε` is weak (±2× moved endpoints ~0.099, against stds of
-   0.4–1.7) while `ε → rho` is strong (26% of the learning rate). What makes
-   `r → ε` weak is that the bracket drops its censored entry rows, so the
-   dispersion-sensitive `logsf` term never fires; see PRD §9.4/§9.5.
+   side. What makes `r → ε` weak is that the bracket drops its censored entry
+   rows, so the dispersion-sensitive `logsf` term never fires; see PRD
+   §9.4/§9.5.
+
+   **`reference_r` is DERIVED, not pinned** — one global `r` fitted on the
+   bracket's own entry rows at the fallback elasticity, so it cannot go stale
+   and there is no constant to re-paste. Computed, not read from
+   `r_lookup.json`, so a fresh clone runs. **Do not borrow the artifact's
+   global:** it is fitted on the CALIBRATION window and measured 0.48 against
+   2.34 on the bracket's own rows — five times off, because the window differs,
+   not the row type.
+
+   **The `r → ε` sensitivity is category-dependent.** At ±2× around the right
+   anchor, four of five fixture categories move 0.049 (two grid steps) and one
+   moves 0.592 — the least-identified cell. So the reference matters most
+   exactly where `identifying_variation_share` is already low; read them
+   together. An earlier "~0.099 for ±2×" figure in this repo was measured
+   around the wrong anchor and understated the tail.
    `pipeline.assurance` shares `_working_elasticity` so its live `rho` check
    cannot drift onto a different basis.
 

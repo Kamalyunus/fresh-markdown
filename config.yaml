@@ -256,24 +256,29 @@ posterior:
     fallback_mean: -1.00               # SET  used if bracket rejected
     fallback_std: 0.60                 # SET
     std_floor: 0.40                    # SET  floor on bracket-derived std
-    reference_r: 0.42                  # SET  dispersion the BRACKET fits at.
-      # A NUMBER, not null, so a cold start works. This step now runs first,
-      # so on a fresh clone there is no r_lookup.json to borrow from and a
-      # null here made `run_bootstrap.sh` fail on its own documented order --
-      # which it did, immediately, the first time anyone ran it.
+    reference_r: null                  # SET  dispersion the BRACKET fits at.
+      # null = MEASURE IT from the train window, which is the default and the
+      # right answer. One global `fit_r` at the fallback elasticity, using the
+      # same estimator fit_dispersion uses. Reported as `reference_r` and
+      # `reference_r_basis` in prior.json.
       #
-      # 0.42 is the fitted global measured on the production extract
-      # (artifacts/r_lookup.json, "global": 0.4207). It is a documented
-      # constant in exactly the way `fallback_mean: -1.00` is: a stand-in that
-      # breaks a cold start, chosen from a real measurement rather than
-      # invented. Pinning it also makes the bracket REPRODUCIBLE -- it no
-      # longer depends on whether a previous run happened to leave an artifact
-      # lying around.
+      # Why derived rather than pinned: a pinned constant goes stale against a
+      # retrain, has to be re-pasted by hand, and says nothing about the
+      # extract in front of it. Deriving it costs one bounded scalar
+      # minimisation.
       #
-      # Re-paste after a retrain if the fitted global has moved materially,
-      # the same discipline as `dispersion.rho`. null still means "use the
-      # fitted global from r_lookup.json if one exists", for a re-run in the
-      # old order.
+      # Why this does not reintroduce the cold-start cycle: the seed is
+      # COMPUTED here, not read from r_lookup.json, so nothing has to exist
+      # first. It uses the fallback elasticity -- the same approximation the
+      # old ordering made -- except now it lands on the quantity that barely
+      # cares. With censored entry rows dropped, `r` reaches the bracket only
+      # through `r/(r+mu)`: a +-2x change moved the endpoints ~0.099 against
+      # stds of 0.4-1.7. Fitting DISPERSION at the wrong elasticity, by
+      # contrast, cost 26% of the learning rate.
+      #
+      # Set a number to PIN it -- reproducing an older run, or holding the
+      # bootstrap against a known value. Then it is used verbatim and nothing
+      # is fitted.
       # estimate_prior now runs BEFORE fit_dispersion, so the fitted r_lookup
       # does not exist yet and the bracket needs a stand-in. The two steps are
       # circular; the loop is cut here because this side is far weaker.
