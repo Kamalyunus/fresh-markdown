@@ -376,6 +376,33 @@ monitoring:
     duplicate_or_unmatched_rate: 0.01  # SET
     price_mismatch_rate: 0.01          # SET
     exploration_cost_vs_budget: 2.0    # SET
+    deterioration_basis:               # SET  how each guardrail compares to
+      scrap: "relative"                # its baseline. Changes what the
+      margin: "absolute_pp"            # threshold MEANS, so it is explicit.
+      # "relative"     t/c - 1. The right scale for a strictly positive rate
+      #                whose level drifts: 20% worse means the same thing
+      #                whatever this week's baseline is. Scrap works here --
+      #                measured 3-sigma 0.4156 against a mean level of 0.1814,
+      #                not outlier-dominated, worst observed 0.3789.
+      # "absolute_pp"  t - c, in percentage points of the rate. REQUIRED when
+      #                the metric can cross zero, because a ratio to a
+      #                near-zero denominator has no scale.
+      #
+      # Margin is absolute_pp because it MEASURABLY crosses zero: on the
+      # production extract the daily series runs mean 0.0308, min -0.0464, and
+      # 36 of 134 days are at or below zero. On the relative basis that gave a
+      # raw 3-sigma of 65.4497 (6,545%), robust 3.5853, worst observed 155.23
+      # -- no threshold can sit above a floor larger than the series' own
+      # level, so the stop condition was structurally impossible to set rather
+      # than merely mistuned. Smoothing does not help: averaging a series that
+      # changes sign averages across the crossing. On the absolute basis the
+      # same series has a daily sigma of 0.0374, so a 3-sigma floor lands near
+      # 11 percentage points -- and close to the 0.1363/0.15 recorded here
+      # before the population changed.
+      #
+      # derive_thresholds emits `unusable_floor` on any RELATIVE floor >= 1.0,
+      # so this failure announces itself next time instead of reading as
+      # "margin is volatile".
     deterioration_smoothing_days:      # SET  days averaged BEFORE comparing,
       scrap: 7                         # per metric, chosen from measured noise
       margin: 1

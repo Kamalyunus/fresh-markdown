@@ -23,6 +23,9 @@ from pricing.posterior import PosteriorStore
 from pipeline import assurance as assurance_mod
 from pricing import explore
 from common import episodes
+# aliased: `stop_conditions` below takes a parameter called `guardrail`, and a
+# module shadowed by an argument is a trap worth not setting
+from common import guardrail as guard
 
 
 def _still_running(ep):
@@ -174,32 +177,32 @@ def guardrail_series(decisions, outcomes, cfg):
 
     smoothing = cfg["monitoring"]["stop_conditions"]["deterioration_smoothing_days"]
 
-    def deterioration(metric, worse_when_higher, smooth):
-        """Relative deterioration, positive = worse than baseline.
+    def deterioration(metric, worse_when_higher, smooth, dev_basis):
+        """Deterioration against baseline, positive = worse.
 
-        Both series are averaged over `smooth` days before comparing, exactly
-        as bootstrap.derive_thresholds measures the noise floor. A low-base
-        series like daily scrap swings by more than its own level day to day;
+        Both series are averaged over `smooth` days before comparing, and the
+        comparison itself comes from `common.guardrail.deviation`, exactly as
+        bootstrap.derive_thresholds measures the noise floor. A low-base series
+        like daily scrap swings by more than its own level day to day;
         smoothing is what makes the floor smaller than the failure the
         condition exists to catch. Floor and trigger MUST use the same
-        smoothing or the threshold is set against the wrong yardstick.
+        smoothing AND the same basis, or the threshold is set against a
+        yardstick nothing computes -- which is why the comparison lives in one
+        shared function rather than in two that resemble each other.
         """
-        def sm(x):
-            return (x.rolling(smooth, min_periods=smooth).mean().dropna()
-                    if smooth > 1 else x)
-
         treat = by_arm.get("treatment")
         ctrl = by_arm.get("control")
         if treat is not None and ctrl is not None:
-            t, c = sm(treat[metric]), sm(ctrl[metric])
+            t = guard.smooth(treat[metric], smooth)
+            c = guard.smooth(ctrl[metric], smooth)
             common = t.index.intersection(c.index)
             t, c, basis = t.loc[common], c.loc[common], "control_arm"
         else:
-            t = sm(overall[metric])
+            t = guard.smooth(overall[metric], smooth)
             c = t.rolling(window, min_periods=window).mean().shift(smooth)
             basis = f"trailing_{window}d_mean"
-        rel = (t / c - 1) if worse_when_higher else (1 - t / c)
-        return rel.replace([np.inf, -np.inf], np.nan).dropna(), basis
+        dev = guard.deviation(t, c, worse_when_higher, dev_basis)
+        return dev.replace([np.inf, -np.inf], np.nan).dropna(), basis
 
     out = {"days_observed": int(len(overall)),
            "daily_scrap_rate": {str(k): round(float(v), 6)
@@ -208,12 +211,18 @@ def guardrail_series(decisions, outcomes, cfg):
                                  for k, v in overall.margin_rate.dropna().items()}}
     for metric, worse_high, key in (("scrap_rate", True, "scrap"),
                                     ("margin_rate", False, "margin")):
-        rel, basis = deterioration(metric, worse_high, smoothing[key])
+        dev_basis = guard.basis_for(cfg, key)
+        dev, basis = deterioration(metric, worse_high, smoothing[key], dev_basis)
         out[f"{key}_deterioration"] = {
             "basis": basis,
+            "deterioration_basis": dev_basis,
+            # say what the numbers ARE. A reader cannot tell 0.15 relative from
+            # 0.15 percentage points by looking, and the two differ by an order
+            # of magnitude for margin.
+            "units": guard.units_of(dev_basis),
             "smoothing_days": smoothing[key],
-            "by_day": {str(k): round(float(v), 4) for k, v in rel.items()},
-            "latest": round(float(rel.iloc[-1]), 4) if len(rel) else None,
+            "by_day": {str(k): round(float(v), 4) for k, v in dev.items()},
+            "latest": round(float(dev.iloc[-1]), 4) if len(dev) else None,
         }
     return out
 

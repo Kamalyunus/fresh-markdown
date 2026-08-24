@@ -583,6 +583,19 @@ decisions — an agent must never invent these).
 MEASURED values produced by the pipeline are pasted into `config.yaml` by
 hand; SET BY OWNER values come from the PRD owner only.
 
+**A guardrail threshold means nothing without its basis.**
+`monitoring.stop_conditions.deterioration_basis` says, per metric, whether the
+comparison is `relative` (`t/c − 1`) or `absolute_pp` (`t − c`), and 0.15
+means two different things under the two. Scrap is `relative` — strictly
+positive, mean level 0.1814, 3σ floor 0.4156. Margin is `absolute_pp` because
+it **crosses zero**: 36 of 134 production days at or below it, which drove the
+relative floor to a raw 3σ of 65.4497 and a robust 3.5853, i.e. a guardrail
+that could not be set at all. Smoothing cannot fix a sign change; only the
+basis can. `derive_thresholds` now stamps `BLOCKED` on any relative floor ≥
+1.0 and names the remedy, and the comparison lives once in
+`common.guardrail.deviation` so the floor and the live trigger cannot measure
+different quantities.
+
 **`dispersion.rho` and `dispersion.mean_forced_hours_per_episode` must be
 re-pasted from `artifacts/rho.json` after every retrain.** They set `deff`,
 which divides accumulated information in `pipeline.update`, so a paste left

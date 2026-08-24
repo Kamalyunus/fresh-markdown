@@ -34,6 +34,7 @@ from scipy.stats import norm
 from common.ab import arm
 from common.config import load_config
 from common import episodes
+from common import guardrail
 from bootstrap.measure import m6_il_pct
 
 
@@ -167,12 +168,7 @@ def _floor_of(block):
     return block["three_sigma"], "3-sigma"
 
 
-def _smooth(series, days):
-    """Average `days` days before comparing -- the same transform
-    pipeline.monitor.deterioration applies. On a low-base series the daily
-    relative swing can exceed the failure the stop condition must detect."""
-    s = series.dropna()
-    return (s.rolling(days, min_periods=days).mean().dropna() if days > 1 else s)
+_smooth = guardrail.smooth   # one definition, shared with pipeline.monitor
 
 
 def control_arm_noise(d, cfg):
@@ -233,6 +229,7 @@ def control_arm_noise(d, cfg):
     for metric, worse_high, key in (("scrap_rate", True, "scrap"),
                                     ("margin_rate", False, "margin")):
         smooth = sm[key]
+        basis = guardrail.basis_for(cfg, key)
         # smooth each arm FIRST, then intersect and difference -- the order
         # pipeline.monitor.deterioration uses. Reversing it, or skipping the
         # smoothing, measures a floor the live comparison never sees.
@@ -240,16 +237,19 @@ def control_arm_noise(d, cfg):
         c = _smooth(arms["control"][metric], smooth)
         common = t.index.intersection(c.index)
         t, c = t.loc[common], c.loc[common]
-        rel = ((t / c - 1) if worse_high else (1 - t / c))
+        rel = guardrail.deviation(t, c, worse_high, basis)
         rel = rel.replace([np.inf, -np.inf], np.nan).dropna()
         if len(rel) < 8:
             out[metric] = {"days": int(len(rel)), "smoothing_days": smooth,
+                           "deterioration_basis": basis,
                            "note": f"too few paired days after {smooth}-day "
                                    "smoothing"}
             continue
         out[metric] = {
             "days": int(len(rel)),
             "smoothing_days": smooth,
+            "deterioration_basis": basis,
+            "units": guardrail.units_of(basis),
             **_sigma_summary(rel),
             "median_gap": round(float(np.median(rel)), 4),
         }
@@ -281,7 +281,11 @@ def recommend_thresholds(trailing, control_arm, cfg):
                  ((t_floor, t_label, "trailing"),
                   (c_floor, c_label, "control_arm")) if f is not None]
         threshold = sc[key]
+        metric_key = "scrap" if metric == "scrap_rate" else "margin"
+        dev_basis = guardrail.basis_for(cfg, metric_key)
         rec = {"config_key": f"monitoring.stop_conditions.{key}",
+               "deterioration_basis": dev_basis,
+               "units": guardrail.units_of(dev_basis),
                "current_threshold": threshold,
                "trailing_floor": t_floor,
                "control_arm_floor": c_floor}
@@ -292,6 +296,21 @@ def recommend_thresholds(trailing, control_arm, cfg):
         binding, label, basis = max(known, key=lambda x: x[0])
         rec.update(binding_floor=binding, binding_basis=basis,
                    binding_label=label)
+        # A floor no threshold can clear is a BLOCKED guardrail, not a large
+        # number. Said out loud here as well as in the noise block, because
+        # this is the block an owner reads to pick a value -- and the failure
+        # it names looked for one run like "margin is just volatile".
+        if guardrail.floor_is_unusable(binding, dev_basis):
+            rec["verdict"] = (
+                f"BLOCKED -- the binding {label} floor is {binding} on the "
+                f"RELATIVE basis, i.e. ordinary daily swing exceeds the "
+                f"series' own level. No threshold can clear it without also "
+                f"clearing the failure this guardrail exists to catch. This is "
+                f"the wrong basis for this metric, not a tuning problem: set "
+                f"monitoring.stop_conditions.deterioration_basis.{metric_key} "
+                f"to 'absolute_pp' and re-derive.")
+            out[metric] = rec
+            continue
         if c_floor is None:
             rec["caveat"] = ("control-arm floor not measurable yet; re-derive "
                              "before the A/B starts -- the binding floor can "
@@ -328,7 +347,7 @@ def guardrail_noise(d, cfg):
     window = cfg["monitoring"]["guardrail_noise_window_days"]
     day = _daily_series(d)
 
-    def noise(series, smooth=1):
+    def noise(series, smooth=1, basis=guardrail.RELATIVE):
         # average `smooth` days BEFORE comparing. On a low-base series the
         # daily relative swing can exceed the failure it must detect; sigma
         # falls ~1/sqrt(smooth), and the trailing baseline is shifted by the
@@ -342,24 +361,51 @@ def guardrail_noise(d, cfg):
         # which manufactures enormous relative deviations that are an artifact
         # of the estimator rather than a property of the series
         trailing = s.rolling(window, min_periods=window).mean().shift(smooth)
-        rel_dev = (s / trailing - 1).dropna()
+        # `worse_when_higher=True` here for BOTH metrics on purpose: this
+        # measures the SIZE of ordinary daily swing, not its direction, and a
+        # noise floor is two-sided. The direction convention belongs to the
+        # trigger, which applies it in pipeline.monitor.
+        rel_dev = guardrail.deviation(s, trailing, True, basis).dropna()
         # a plain std over a ratio series is dominated by any day whose
         # denominator is small -- a single low-volume day can move it by an
         # order of magnitude. The MAD-based estimate is the one to set a
         # threshold against when the two disagree.
         #
-        # units: these are RELATIVE deviations, so 0.1336 means 13.36% and
-        # 9.1386 means 914%. A value above 1.0 is not a percentage point --
-        # it is a series whose daily swing exceeds its own level.
+        # units depend on the basis and the report says which. On RELATIVE,
+        # 0.1336 means 13.36% and 9.1386 means 914% -- a value above 1.0 is
+        # not a percentage point, it is a series whose daily swing exceeds its
+        # own level, and `unusable_floor` below calls that out. On ABSOLUTE_PP
+        # the numbers are percentage points of the rate itself.
         out = {
             "days": int(len(s)),
             "days_scored": int(len(rel_dev)),
             "smoothing_days": smooth,
+            "deterioration_basis": basis,
+            "units": guardrail.units_of(basis),
             "mean_level": round(float(s.mean()), 4),
+            # the fact that decides whether RELATIVE is even defined for this
+            # metric: a series that changes sign has no meaningful ratio to its
+            # own mean, and this is what made the margin floor read 65.4497
+            "days_at_or_below_zero": int((s <= 0).sum()),
             **_sigma_summary(rel_dev),
             "p95_abs_rel_dev": round(float(np.percentile(np.abs(rel_dev), 95)), 4),
             "worst_observed_rel_dev": round(float(rel_dev.abs().max()), 4),
         }
+        floor, label = _floor_of(out)
+        if guardrail.floor_is_unusable(floor, basis):
+            out["unusable_floor"] = (
+                f"BLOCKED: the {label} floor is {floor} on the RELATIVE basis "
+                f"-- at or above 1.0, so ordinary daily swing exceeds the "
+                f"series' own level ({out['mean_level']}) and no threshold can "
+                f"sit above it without also clearing the failure the guardrail "
+                f"exists to catch. "
+                + (f"The series is at or below zero on "
+                   f"{out['days_at_or_below_zero']} of {out['days']} days, so "
+                   "a ratio to its mean is undefined in practice: switch this "
+                   "metric to deterioration_basis 'absolute_pp'."
+                   if out["days_at_or_below_zero"] else
+                   "Consider deterioration_basis 'absolute_pp', or more "
+                   "smoothing if the series is strictly positive."))
         if out["outlier_dominated"]:
             sigma = out["daily_rel_dev_sigma"]
             sigma_robust = out["daily_rel_dev_sigma_robust"]
@@ -373,8 +419,10 @@ def guardrail_noise(d, cfg):
 
     sc = cfg["monitoring"]["stop_conditions"]
     sm = sc["deterioration_smoothing_days"]
-    scrap = noise(day.scrap_rate, sm["scrap"])
-    margin = noise(day.margin_rate, sm["margin"])
+    scrap = noise(day.scrap_rate, sm["scrap"],
+                  guardrail.basis_for(cfg, "scrap"))
+    margin = noise(day.margin_rate, sm["margin"],
+                   guardrail.basis_for(cfg, "margin"))
 
     def verdict(block, key):
         """Grades against the TRAILING floor only -- the basis that applies

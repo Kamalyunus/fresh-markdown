@@ -1385,15 +1385,39 @@ the honest response is a different instrument — a longer smoothing window, an
 absolute scrap-unit floor, or monitored-and-escalated rather than
 auto-stopped — not a number that technically passes.
 
-**Margin-deterioration stop threshold — recommend 15% relative** vs control,
-with a 2-day persistence rule. This series is well behaved: 3σ noise
-**13.63%**, robust **14.94%**, *not* outlier-dominated. 15% clears the raw
-floor by ~10% and sits just under the robust one, so the persistence rule is
-what covers the gap rather than headroom. Anything at or below ~13.6% is
-inside the noise band and would false-fire on ordinary days — silently
-suspending exploration, which is the product. A tighter trigger than 15% must
-be paired with a longer persistence window (3+ consecutive days), never
-adopted alone.
+**Margin deterioration is measured in PERCENTAGE POINTS, not relative — and
+that is a correction.** For a while it was relative, like scrap, and on the
+first extract it looked well behaved: 3σ **13.63%**, robust **14.94%**, not
+outlier-dominated, recommending 15%.
+
+That was luck. `margin_rate` **crosses zero**: on the 174-day extract its
+daily series runs mean 0.0308, min −0.0464, with **36 of 134 days at or below
+zero**. A ratio to a mean that changes sign has no scale, and the same
+measurement then returned raw 3σ **65.4497** (6,545%), robust **3.5853**,
+worst observed **155.23**. No threshold can sit above a floor larger than the
+series' own level, so the guardrail was not mistuned — it was impossible to
+set. Smoothing does not help, because averaging a sign-changing series just
+averages across the crossing.
+
+The basis is now per metric in
+`monitoring.stop_conditions.deterioration_basis`: `scrap: relative`,
+`margin: absolute_pp`. On the absolute basis the same series has a daily σ of
+0.0374, giving a 3σ floor near **11 percentage points** — a quantity an owner
+can reason about, and close to the original 0.1363/0.15.
+
+Scrap stays relative and is right to: strictly positive, mean level 0.1814,
+3σ 0.4156, not outlier-dominated, worst observed 0.3789.
+
+**A relative floor at or above 1.0 is now reported as `BLOCKED`, not as a
+number.** `common.guardrail.floor_is_unusable` marks it and both the noise
+block and `guardrail_threshold_recommendation` name the remedy. Nothing said
+this out loud before, which is how 3.5853 spent a full run reading as "margin
+is volatile" rather than "this guardrail cannot be set".
+
+The comparison itself lives in `common.guardrail.deviation` and is imported by
+both `derive_thresholds` and `pipeline.monitor`. Two implementations that
+merely resembled each other would let the floor and the trigger measure
+different quantities, and nothing downstream would notice.
 
 **The persistence rule is load-bearing, not decorative.**
 `monitoring.stop_conditions.persistence_days` (default 2) means a condition

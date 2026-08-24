@@ -682,3 +682,73 @@ def test_threshold_recommendation_binds_on_the_larger_floor():
     sc["scrap_deterioration_pct"] = binding * 20
     assert "INERT" in dt.recommend_thresholds(
         trailing, control, cfg)["scrap_rate"]["verdict"]
+
+
+def test_a_relative_floor_above_one_is_reported_as_blocked_not_as_a_number():
+    """A floor at or above 1.0 means the series' ordinary daily swing exceeds
+    its own level. No threshold can clear it without also clearing the failure
+    the guardrail exists to catch -- so it is BLOCKED, and the report has to
+    say the word.
+
+    This went unsaid for a whole production run. `margin_rate` came back with a
+    robust 3-sigma of 3.5853 (raw 65.4497, worst observed 155.23) and it read
+    as "margin is volatile" rather than as "this guardrail cannot be set". The
+    cause was that margin CROSSES ZERO -- 36 of 134 production days at or below
+    it -- and a ratio to a near-zero mean has no scale. Smoothing cannot fix a
+    sign change; the basis has to change.
+    """
+    import copy
+    from bootstrap import derive_thresholds as dt
+    from common import guardrail
+
+    assert guardrail.floor_is_unusable(1.0, guardrail.RELATIVE)
+    assert guardrail.floor_is_unusable(3.5853, guardrail.RELATIVE)
+    assert not guardrail.floor_is_unusable(0.4156, guardrail.RELATIVE)
+    # absolute-pp floors are in the metric's own units and have no such bound
+    assert not guardrail.floor_is_unusable(3.5853, guardrail.ABSOLUTE_PP)
+
+    cfg = copy.deepcopy(CFG)
+    trailing = {"margin_rate": {"three_sigma": 3.5853,
+                                "three_sigma_robust": 3.5853,
+                                "outlier_dominated": True,
+                                "mean_level": 0.0308, "days": 134,
+                                "days_at_or_below_zero": 36}}
+    cfg["monitoring"]["stop_conditions"]["deterioration_basis"] = {
+        "scrap": "relative", "margin": "relative"}
+    v = dt.recommend_thresholds(trailing, {}, cfg)["margin_rate"]["verdict"]
+    assert v.startswith("BLOCKED"), v
+    assert "absolute_pp" in v, "the verdict must name the remedy, not just complain"
+
+    # ...and on the right basis the same magnitude is an ordinary, settable floor
+    cfg["monitoring"]["stop_conditions"]["deterioration_basis"]["margin"] = "absolute_pp"
+    v2 = dt.recommend_thresholds(trailing, {}, cfg)["margin_rate"]["verdict"]
+    assert not v2.startswith("BLOCKED"), v2
+
+
+def test_the_floor_and_the_trigger_compute_the_same_quantity():
+    """`derive_thresholds` measures the floor and `pipeline.monitor` evaluates
+    the trigger. If they compute different things the threshold is graded
+    against a yardstick nothing uses, and nothing downstream would notice --
+    so both import the comparison from `common.guardrail` rather than keeping
+    two implementations that resemble each other."""
+    import inspect
+    from bootstrap import derive_thresholds as dt
+    from pipeline import monitor
+
+    for mod in (dt, monitor):
+        src = inspect.getsource(mod)
+        assert "guardrail.deviation(" in src or "guard.deviation(" in src, \
+            f"{mod.__name__} is not using the shared comparison"
+        assert "guardrail.smooth(" in src or "guard.smooth(" in src \
+            or "_smooth = guardrail.smooth" in src, \
+            f"{mod.__name__} is not using the shared smoothing"
+
+    # the sign convention is the caller's, and it must be opposite per metric
+    from common import guardrail
+    import pandas as pd
+    t, c = pd.Series([0.12]), pd.Series([0.10])
+    for basis in (guardrail.RELATIVE, guardrail.ABSOLUTE_PP):
+        # scrap: higher is worse -> positive
+        assert guardrail.deviation(t, c, True, basis).iloc[0] > 0
+        # margin: higher is BETTER -> negative
+        assert guardrail.deviation(t, c, False, basis).iloc[0] < 0
