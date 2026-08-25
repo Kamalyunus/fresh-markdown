@@ -15,7 +15,7 @@ randomized exploration.
 | `config.yaml` | §7 | Every tunable parameter. Single source of truth; no numeric literals in code. |
 | `common/config.py` | §7 | Loader; strict mode refuses to start on null MEASURED values. |
 | `bootstrap/download_flc.py` | §9.1 | Redshift extract of the raw hourly FLC feed into `data/flc_raw.parquet`, aliased to the column names step 1 renames. Credentials from `REDSHIFT_*` in `~/.env`; the exclusion window from `config.yaml`. |
-| `bootstrap/prepare_data.py` | §9.1–9.2 | Schema mapping, 9-stage integrity/scope filter chain plus the `dp_eligible`, `below_cost_hours` and `edge_truncated` flags (only rows that cannot be believed or fall outside the study period are dropped; anything merely hard to price is flagged, so the frozen artifacts keep the population the DP cannot act on), window-keyed episode construction (not date-keyed — 36-hour windows are common), 12-row waterfall with COGS at risk, split manifest. |
+| `bootstrap/prepare_data.py` | §9.1–9.2 | Schema mapping, the integrity/scope filter chain plus the `dp_eligible`, `below_cost_hours` and `edge_truncated` flags (only rows that cannot be believed or fall outside the study period are dropped; anything merely hard to price is flagged, so the frozen artifacts keep the population the DP cannot act on), window-keyed episode construction (not date-keyed — 36-hour windows are common), 13-row waterfall with COGS at risk (cost × supply), split manifest. |
 | `common/episodes.py` | §9.2 | One definition of episode endings and true leftover: `ending_inventory` is written off to zero on an episode's last row, so scrap is `max(0, starting − sold)`. Also extends episodes to their full window so the DP horizon is not shortened by a realised sellout. |
 | `bootstrap/measure.py` | §8, App. A | Phase-0 measurement suite (m1–m8, m10, m11 episode endings) and reassessment gates. |
 | `bootstrap/train_baseline.py` | §9.3 | Frozen LightGBM/Tweedie `mu_ref`; price features overwritten to `d_ref` at inference; level-calibration factor fit. |
@@ -42,7 +42,7 @@ randomized exploration.
 | `tools/make_charts.py` | — | One diagnostic chart per component, generated from the report artifacts into `reports/charts/`. |
 | `tools/refresh_figures.py` | — | Rewrites the numbers in the docs from the artifacts on disk. Figures are anchored in place (`<!--f:rho.implied_deff\|dec3-->3.347<!--/f-->`, which renders as `3.347`), so the document IS the ledger and no second copy can disagree with it. `scripts/run_bootstrap.sh` runs it as step 10b. **Refuses to write from a dataset whose name says it is synthetic** — fixture numbers read as measurements. Anchor current-state figures only; historical ones keep their own date. |
 | `tools/walkthrough/` | — | Builds `docs/system_walkthrough.html`, the leadership-facing walkthrough — one tab per frozen artifact, plus the decision, the learning loop, replay, shadow and the assurance checks. The Population tab reads its figures live from `reports/eda.json` at build time and degrades to a named note when there is none. `figures.py` registers every measured figure against the report and model version it came from, so a re-run cannot leave the page silently stale. |
-| `tools/metrics_glossary.py` | — | Builds `docs/metrics.html`: 135 metrics across 17 components, each with its unit, owning component, and whether it gates anything. Filterable, with a gates-only toggle. |
+| `tools/metrics_glossary.py` | — | Builds `docs/metrics.html`: every measured quantity across the reports, each with its unit, owning component, and whether it gates anything. Filterable, with a gates-only toggle. |
 
 ## Running the bootstrap (PRD §1a order)
 
@@ -58,8 +58,9 @@ Step 0 needs `REDSHIFT_HOST`, `REDSHIFT_PORT`, `REDSHIFT_DATABASE`,
 skip it and pass that file instead; the pipeline takes the path as an argument
 and does not care what the file is called.
 
-This runs prepare → **eda** → measure → train_baseline → fit_dispersion →
-estimate_prior → backtest, then stops at the human gates. (The script
+This runs prepare → **eda** → measure → train_baseline → estimate_prior →
+fit_dispersion → backtest (the prior runs first — dispersion is fitted at the
+per-category prior means), then stops at the human gates. (The script
 retrains the baseline every time — to iterate on one step, run that step's
 module directly. Agents: read `AGENTS.md` before touching the pipeline.)
 
@@ -82,9 +83,12 @@ module directly. Agents: read `AGENTS.md` before touching the pipeline.)
 
    and record the fidelity ratio before and after — the comparison is valid
    only if `baseline_model_version` matches across the two reports.
-2. **Prior acceptance gate (blocking, §9.5)** — `artifacts/prior.json` records
-   orientation/boundary/std checks. Rejection falls back per config and is an
-   acceptable outcome.
+2. **Prior acceptance gate (blocking, human, §9.5)** — there is no reject flag
+   in the artifact; the gate is a reading of `artifacts/prior.json`:
+   `design_comparison` (which rows × hour-control combination this extract
+   supports), `wrong_sign_categories` (own density discarded for the pooled
+   one), `std_basis` per category, and the `holdout_comparison` against
+   `oracle` and `uniform`. A pooled or uniform prior is a designed outcome.
 3. Paste MEASURED values into `config.yaml` (`rho`,
    `mean_forced_hours_per_episode`, `tau_initial`,
    `il_pct_ratio_se_clustered`); the owner sets the SET BY OWNER keys.

@@ -653,7 +653,7 @@
         <tr><td class="f">is_stockout</td><td><span class="tag you">you</span></td><td class="t">bool</td><td class="ex">false</td><td>Whether demand hit the inventory ceiling. Derivable as <code>sold ≥ starting</code>, but the field must be present: <em>any</em> missing rate above zero fires a stop condition.</td></tr>
         <tr><td class="f">execution_status</td><td><span class="tag you">you</span></td><td class="t">string</td><td class="ex">"ok"</td><td>Only <code>"ok"</code>, <code>"success"</code> or absent make the outcome eligible for learning. Anything else is stored and excluded — which is the correct handling of an hour where the price never went live.</td></tr>
         <tr><td class="f">finalized_at</td><td><span class="tag you">you</span></td><td class="t">timestamp</td><td class="ex">"2026-08-19T19:00:00+00:00"</td><td>UTC with offset.</td></tr>
-        <tr class="groupsep"><td class="f">adjustment_reason</td><td><span class="tag cond">conditional</span></td><td class="t">string</td><td class="ex">"episode_close_write_off"</td><td>Required whenever inventory does not reconcile — omitted entirely otherwise, as in this example. Exactly two values are legitimate; see the box below.</td></tr>
+        <tr class="groupsep"><td class="f">adjustment_reason</td><td><span class="tag cond">conditional</span></td><td class="t">string</td><td class="ex">"episode_close_write_off"</td><td>Required whenever inventory does not reconcile — omitted entirely otherwise, as in this example. Exactly three values are legitimate; see the box below.</td></tr>
         <tr><td class="f">execution_failure_reason</td><td><span class="tag cond">conditional</span></td><td class="t">string</td><td class="ex">"price_push_timeout"</td><td>Free text, when <code>execution_status</code> is not a success value.</td></tr>
       </tbody>
     </table>
@@ -662,20 +662,25 @@
   <div class="note risk">
     <h4>The one that will bite: <code>episode_close_write_off</code></h4>
     <p>
-      When a clearance window closes, the source system writes off whatever is left and reports
-      <code>ending_inventory = 0</code> — even though stock remained. That is not a reconciling
-      outcome, so it needs <code>adjustment_reason</code> set or it quarantines. It happens on
-      <strong>about half of all episodes</strong>. An integration that omits it quarantines
-      roughly half its final-hour outcomes and fails the event-completeness gate for what will
-      look like a pipeline defect on our side.
+      When a clearance window closes with stock still on hand, the source system writes the
+      remainder off and reports <code>ending_inventory = 0</code>. That is not a reconciling
+      outcome, so it needs <code>adjustment_reason</code> set or it quarantines. On the
+      corrected extract <strong>about 13.5% of episodes end holding stock</strong> — an
+      integration that omits the reason quarantines every one of those final-hour outcomes and
+      fails the event-completeness gate for what will look like a pipeline defect on our side.
     </p>
     <p>
-      The two legitimate values, and how to decide between them, given
+      The three legitimate values, and how to decide between them, given
       <code>leftover = max(starting − sold, 0)</code>:
     </p>
     <ul class="plain">
       <li><code>intraday_restock</code> — <code>ending &gt; leftover</code>. Stock was added mid-window.</li>
       <li><code>episode_close_write_off</code> — <code>ending == 0</code> while <code>leftover &gt; 0</code>.</li>
+      <li><code>unexplained_shortfall</code> — <code>0 &lt; ending &lt; leftover</code>. Shrink: units left
+          the shelf that no sale or write-off accounts for. Named, not quarantined — the units stay
+          visible through <code>units_shrink</code> and <code>episode_scrap</code>, and shrink runs at
+          roughly 2.8% of decision hours, so leaving it unnamed fails the completeness gate for a
+          reason no integration work can fix.</li>
     </ul>
     <p style="margin-top:12px">
       <strong>Recognise the write-off by the zero, never by position in the episode.</strong> The
@@ -684,10 +689,9 @@
       and quarantined real outcomes in bulk.
     </p>
     <p>
-      A partial shortfall — <code>0 &lt; ending &lt; leftover</code> — matches neither, and is
-      left undocumented on purpose so that it quarantines. That is unexplained inventory loss,
-      and the quarantine file is the only place it is visible. Please don't add a catch-all
-      reason to drive the count to zero.
+      Anything matching none of the three quarantines with the reason attached. Please don't
+      add a catch-all reason to drive the quarantine count to zero — that file is where a
+      genuinely uninterpretable outcome stays visible.
     </p>
   </div>
 </section>
@@ -959,7 +963,8 @@
       Drop <code>adjustment_reason</code> from that last payload and the store writes it to
       quarantine with <em>"ending_inventory does not reconcile and no adjustment_reason
       documented"</em>. It never reaches learning, event completeness falls, and — because this
-      shape occurs at the close of roughly half of all episodes — the shadow gate will not pass.
+      shape occurs at the close of every episode that ends holding stock (~13.5% of episodes)
+      — the shadow gate will not pass.
     </p>
     <p>
       Note also that <code>is_stockout</code> is <code>false</code> on all three, including the
@@ -1020,9 +1025,10 @@
       <span class="sev hard">hard</span>
       <b>Can you emit the episode-close write-off?</b>
       <p>
-        About half of episodes end with the source zeroing inventory. If that reason can't be
-        produced, half the outcome stream quarantines and the shadow gate never passes. This is
-        the single most likely blocker.
+        Every closed episode's final row carries the zeroed field, and ~13.5% of episodes end
+        with stock still on hand — the case that needs the reason. If it can't be produced,
+        every one of those final-hour outcomes quarantines and the shadow gate never passes.
+        This is the single most likely blocker.
       </p>
     </li>
     <li>

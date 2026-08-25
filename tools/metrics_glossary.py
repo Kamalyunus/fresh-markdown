@@ -128,8 +128,9 @@ CATALOGUE = [
   ("m6 · il_absolute_total", "won",
    "The same loss in currency, always reported alongside the ratio.", ""),
   ("m6 · il_pct_ratio_se_clustered", "rate",
-   "Standard error of IL%, clustered by SKU × FC. Pasted into config; it sizes "
-   "the A/B.", "ab_test minimum detectable effect"),
+   "Standard error of IL%, clustered by SKU × FC. Informational — A/B power is "
+   "sized by `derive_thresholds`, which re-measures the SE on actual T-week "
+   "blocks rather than scaling this by √T.", ""),
   ("m7 · episodes_per_category_per_week", "count",
    "Volume per category. Below `min_episodes_per_week_for_cell` a category has no "
    "posterior cell of its own and pools into the global one.", "cell assignment"),
@@ -184,7 +185,10 @@ CATALOGUE = [
   ("r", "count",
    "Negative-binomial dispersion, `Var[D] = μ + μ²/r`. Small is lumpy, large is "
    "near-Poisson. Fitted per subcategory by maximum likelihood with censored hours "
-   "entering as `P(D ≥ q)`. Clamped only on the HIGH side.",
+   "entering as `P(D ≥ q)`. Clamped only on the HIGH side — and groups steadier "
+   "than Poisson (Pearson dispersion < 1) are EXEMPT and listed in "
+   "`under_dispersed_groups`: no NB can express Var < mean, so their fit rides the "
+   "search ceiling by necessity, not optimism.",
    "every probability the DP uses, and every posterior update"),
   ("rho", "rate",
    "Correlation between hours within one episode, measured on the FITTED MODEL'S "
@@ -352,8 +356,10 @@ CATALOGUE = [
    "differ, so the same tau buys a different amount of exploration.",
    "GATE — whether tau is affordable before the pilot"),
   ("exploration_budget · daily_budget", "won",
-   "`budget_share_of_il` × daily markdown IL over the SAME episodes and days. "
-   "Scrap is included via `classify_last`, which charges it only on a CLOSED "
+   "`budget_share_of_il` × the trailing 7-day mean of realised daily IL, where a "
+   "day's realised IL is the whole-episode IL (discount AND scrap) of episodes "
+   "that CLOSED that day — settled at midnight, never a forecast; `budget_basis` "
+   "names the basis. Scrap is charged via `classify_last`, only on a CLOSED "
    "episode — `ending_inventory == 0` on the last row. If the feed ever stops "
    "emitting that sentinel every episode reads unclosed, ALL scrap drops out "
    "and this reads ~10× too small; `ending_summary."
@@ -450,8 +456,9 @@ CATALOGUE = [
    "Only `ok`, `success` or absent make the outcome eligible for learning. Anything "
    "else is stored and excluded.", "learning eligibility"),
   ("adjustment_reason", "text",
-   "Required when inventory does not reconcile. Exactly two are legitimate: "
-   "`intraday_restock` and `episode_close_write_off` (~49.5% of episodes).",
+   "Required when inventory does not reconcile. Exactly three are legitimate: "
+   "`intraday_restock`, `episode_close_write_off` (~13.5% of episodes end holding "
+   "stock) and `unexplained_shortfall` (shrink — named, not quarantined).",
    "GATE — event completeness"),
  ]),
 

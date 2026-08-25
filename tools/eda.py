@@ -58,6 +58,17 @@ def _closings(d):
     return episodes.last_rows(d)
 
 
+def _episode_cogs(d, op=None):
+    """COGS at risk: unit cost x SUPPLY (opening + gross arrivals), once per
+    episode -- the same basis as `prepare_data.cogs_at_risk`, so this page and
+    the waterfall cannot disagree about what a SKU has at stake. Opening stock
+    alone understates every restocked episode."""
+    if op is None:
+        op = _openings(d)
+    supply = episodes.episode_flow(d).supply.reindex(op.episode_id)
+    return op.cost.to_numpy() * supply.to_numpy()
+
+
 def _share_table(frame, by, weights, top=12):
     """Grouped totals, biggest first, with a labelled `other` rather than a
     silent truncation."""
@@ -176,8 +187,7 @@ def p_splits(d, cfg):
             "skus": int(op.sku_id.nunique()),
             "units_sold": int(g.units_sold.sum()),
             "days": int(g.date.astype(str).nunique()),
-            "cogs_at_risk": round(float(
-                (op.cost * op.starting_inventory).sum()), 1),
+            "cogs_at_risk": round(float(_episode_cogs(g, op).sum()), 1),
         }
     return {"by_window": out,
             "chart": {"kind": "bars", "labels": order,
@@ -196,7 +206,7 @@ def p_splits(d, cfg):
             "spending.")
 def p_pareto(d, cfg, top=25):
     op = _openings(d).copy()
-    op["cogs"] = op.cost * op.starting_inventory
+    op["cogs"] = _episode_cogs(d, op)
     sold = d.groupby("sku_id").units_sold.sum()
     g = op.groupby("sku_id").agg(cogs=("cogs", "sum"),
                                  episodes=("episode_id", "size"))
@@ -236,7 +246,7 @@ def p_pareto(d, cfg, top=25):
             "the episodes is a different problem from the reverse.")
 def p_mix(d, cfg):
     op = _openings(d).copy()
-    op["cogs"] = op.cost * op.starting_inventory
+    op["cogs"] = _episode_cogs(d, op)
     op["units"] = d.groupby("episode_id").units_sold.sum().reindex(
         op.episode_id).to_numpy()
     op["one"] = 1.0

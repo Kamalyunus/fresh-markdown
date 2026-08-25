@@ -152,10 +152,15 @@ def test_exposure_is_counted_once_per_episode_not_summed_over_hours(frame, cfg):
     """Inventory persists hour to hour. A per-row sum multiplies the same
     stock by the window length -- the mistake the waterfall's cogs_at_risk
     was written to avoid, repeated here would be worse because nothing else
-    cross-checks it."""
+    cross-checks it. And the basis is SUPPLY (opening + gross arrivals),
+    the same one prepare_data.cogs_at_risk uses, so the two reports agree."""
+    from common import episodes
     got = eda.p_pareto(frame, cfg)["cogs_at_risk_total"]
     op = frame[~frame.episode_id.duplicated()]
-    assert got == pytest.approx(float((op.cost * op.starting_inventory).sum()), abs=1)
+    supply = episodes.episode_flow(frame).supply.reindex(op.episode_id)
+    expected = float((op.cost.to_numpy() * supply.to_numpy()).sum())
+    assert got == pytest.approx(expected, abs=1)
+    assert expected >= float((op.cost * op.starting_inventory).sum())
     assert got < float((frame.cost * frame.starting_inventory).sum())
 
 

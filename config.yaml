@@ -91,9 +91,9 @@ reassessment_gates:                    # SET  section 8.1 phase-0 review gates
     # explorable subset -- too many episodes have a cost floor so tight that
     # fewer than min_feasible_tiers discounts exist, so exploration cannot buy
     # evidence there at any price
-  max_share_cells_low_variation: 0.50  # above this, the bracket is not
-    # estimable and posterior.prior.source must fall back: too few
-    # (category, hour) cells carry same-hour price variation to identify from
+  max_share_cells_low_variation: 0.50  # above this, expect the prior's
+    # densities to degrade toward pooled/uniform (section 9.5's human gate):
+    # too few (category, hour) cells carry same-hour price variation
 
 baseline_model:
   objective: "tweedie"                 # SET
@@ -137,7 +137,7 @@ baseline_model:
     # causes from that hour onward is the cost floor working. Those episodes
     # stay dp_eligible and carry `below_cost_hours` for the record -- which
     # also means the widest price spread in the extract now reaches the
-    # elasticity bracket, the quantity most starved of variation.
+    # elasticity prior, the quantity most starved of variation.
     #
     # The risk of "integrity" is covariate shift: the model is fit on a
     # distribution wider than the one it serves. That is measurable, not
@@ -312,7 +312,8 @@ pricing:
     # hourly grid stays at tier_step; only ENTRY is coarse.
     #
     # The single deeper arm is the escape valve for the clearance/scrap trade
-    # (the replay's -12.0% IL came with -3.25pp clearance). It is an option,
+    # (the pre-correction replay's -12.0% IL came with -3.25pp clearance;
+    # the corrected run measures -38.0% at -0.97pp). It is an option,
     # not a default -- the DP takes it only when Q says so. Note the cost
     # floor removes it for the _default categories at cost ratios above ~0.65,
     # so it is available where margin allows and silently absent where not.
@@ -323,7 +324,7 @@ pricing:
     # the episode. Entering deeper than reference would spend margin in hour
     # one and forfeit the room to deepen later. And entry is where
     # identification lives (the confound-free variation is entry-hour
-    # variation ACROSS episodes), so four well-separated arms give a far
+    # variation ACROSS episodes), so five well-separated arms give a far
     # sharper elasticity read than sixteen 2.5pp arms whose demand
     # differences sit inside the noise. Offsets are snapped to the tier grid
     # and filtered by the cost floor.
@@ -520,5 +521,8 @@ ab_test:
   il_pct_ratio_se_clustered: 0.000875  # MEASURED  phase 0; 84,792 SKU x FC
     # units. 6x the 0.000383 originally assumed -- that figure was a
     # pre-measurement placeholder and sat here mislabelled as MEASURED.
+    # STALE in turn: the corrected extract with scrap counted in full
+    # measures 0.002915 (design section 12) -- re-paste from the next
+    # derive_thresholds run.
     # Not consumed for power: derive_thresholds re-measures the SE on actual
     # T-week blocks, since sqrt-T scaling is optimistic under clustering.
