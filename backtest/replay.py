@@ -656,6 +656,119 @@ def _replay_one(e, cfg):
     return row, spreads
 
 
+def _dp_arm(e, cfg, eps_belief, eps_world=None):
+    """The DP arm alone, with the BELIEF and the WORLD separable -- the same
+    loop as `_replay_one`'s DP section with the trace, spreads and other arms
+    stripped, for `step_sensitivity`. The solver prices at `eps_belief`;
+    demand transitions at `eps_world` (default: the same), so a shifted
+    belief is charged only for the PRICES it changes, never for imaginary
+    demand. Returns (il, mean_discount, path)."""
+    if eps_world is None:
+        eps_world = eps_belief
+    pcfg = cfg["pricing"]
+    max_k = pcfg["negbin_max_k"]
+    p0, cost = e["original_price"], e["cost"]
+    q = float(e["q0"])
+    adj = e["adjustment"]
+    anchor = None
+    disc_cost = sold_total = disc_weighted = 0.0
+    path = []
+    for t in range(e["hours"]):
+        q_int = int(round(q))
+        if q_int <= 0:
+            path.append(None)
+            q = max(q + adj[t], 0.0)
+            if q <= 0 and not adj[t + 1:].any():
+                break
+            continue
+        try:
+            res = dp_mod.solve(p0, cost, q_int, list(e["mu_ref_path"][t:]),
+                               e["d_ref"], eps_belief, e["r"], cfg,
+                               anchor_discount=anchor, entry=(t == 0))
+        except ValueError:
+            break
+        d_t = res.tiers[res.optimal_index]
+        anchor = d_t
+        mu = mu_at(e["mu_ref_path"][t], d_t, e["d_ref"], eps_world,
+                   pcfg["demand_floor"])
+        sold = min(expected_min_demand_inventory(mu, e["r"], q_int, max_k), q)
+        disc_cost += p0 * d_t * sold
+        disc_weighted += d_t * sold
+        sold_total += sold
+        path.append(d_t)
+        q = max(q - sold + adj[t], 0.0)
+    il = disc_cost + cost * (max(q, 0.0) + e["shrink"])
+    return il, (disc_weighted / sold_total if sold_total else 0.0), tuple(path)
+
+
+def step_sensitivity(frames, cfg, seed=0, sample=300):
+    """What one bounded posterior step is worth, priced on real episodes.
+
+    `learning.max_mean_step` is the calendar floor on learning and the bound
+    on the damage of one wrong-direction update. Its size is justified by
+    THIS measurement, not by judgment: re-solve the DP arm with each
+    episode's elasticity shifted by +-step (clipped to the grid bounds) and
+    report how many episodes change any price at all, and what the shift
+    costs in IL under the same demand model.
+
+    The expected shape: with |eps| far below the deepening bar
+    (1-d)/(gamma-d), a step changes nothing -- the policy is insensitive
+    there, so a wrong step is free. Episodes whose bar sits within one step
+    of |eps| are where prices actually move; `crossers` isolates them, since
+    an average over the whole book would read near-zero and hide the region
+    the cap exists to protect.
+    """
+    step = float(cfg["learning"]["max_mean_step"])
+    lo = cfg["posterior"]["epsilon_min"]
+    hi = cfg["posterior"]["epsilon_max"]
+    rng = np.random.default_rng(seed)
+    take = min(sample, len(frames))
+    picked = [frames[i] for i in rng.choice(len(frames), take, replace=False)]
+
+    shifts = {"deeper_belief": -step, "shallower_belief": +step}
+    out = {"step": step, "episodes_swept": take,
+           "note": ("DP arm re-solved at eps +- learning.max_mean_step on a "
+                    "sample of the replayed episodes, same demand model. "
+                    "share_prices_changed near 0 below the deepening bar is "
+                    "the measured insensitivity that makes a wrong step "
+                    "cheap; crossers (bar within one step of |eps|) are "
+                    "where the cap is actually load-bearing.")}
+    base = {id(e): _dp_arm(e, cfg, e["eps"]) for e in picked}
+    for label, shift in shifts.items():
+        changed = il_base = il_shift = 0.0
+        cross_n = cross_changed = 0
+        disc_delta = 0.0
+        for e in picked:
+            b_il, b_disc, b_path = base[id(e)]
+            eps_s = float(np.clip(e["eps"] + shift, lo, hi))
+            # belief shifts, the world does not: the shifted arm prices at
+            # eps_s but demand still follows e["eps"], so the delta is the
+            # cost of the CHANGED PRICES alone
+            s_il, s_disc, s_path = _dp_arm(e, cfg, eps_s, eps_world=e["eps"])
+            moved = s_path != b_path
+            changed += moved
+            il_base += b_il
+            il_shift += s_il
+            disc_delta += s_disc - b_disc
+            bar = dp_mod.deepening_threshold_epsilon(
+                e["original_price"], e["cost"], e["d_ref"])
+            if np.isfinite(bar) and abs(e["eps"]) < bar <= abs(e["eps"]) + step:
+                cross_n += 1
+                cross_changed += moved
+        out[label] = {
+            "share_prices_changed": round(changed / take, 4),
+            "il_base": round(il_base, 1),
+            "il_shifted": round(il_shift, 1),
+            "il_delta": round(il_shift - il_base, 1),
+            "il_delta_pct": (round((il_shift - il_base) / il_base, 4)
+                             if il_base > 0 else None),
+            "mean_discount_delta": round(disc_delta / take, 4),
+            "crossers": cross_n,
+            "crossers_prices_changed": cross_changed,
+        }
+    return out
+
+
 def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None,
                   trace=False):
     """Section 17.3 policy block: what the DP would have done differently, plus
@@ -811,6 +924,7 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None,
                  "evidence (design 5.14)."),
     }
     block["q_spread_distribution"] = ledger.distribution()
+    block["step_sensitivity"] = step_sensitivity(frames, cfg, seed=seed)
     if trace:
         return block, ep, ledger, hourly
     return block, ep, ledger

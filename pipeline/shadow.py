@@ -312,16 +312,19 @@ def _shadow_one(ep, ctx):
         if evt["is_exploration"]:
             out["n_forced"] += 1
             out["would_be_cost"] += evt["exploration_cost"]
-            # would-be learning yield. pipeline.update accumulates
-            # mu * (log price ratio)^2 with the ratio taken against the
-            # REFERENCE discount, not against the DP optimum -- so what
-            # drives information is how far the applied price sits from
-            # the anchor, not how large the perturbation was.
+            # would-be learning yield. pipeline.update accumulates the NB
+            # Fisher information mu * L^2 * r/(r+mu) with the ratio taken
+            # against the REFERENCE discount, not against the DP optimum --
+            # so what drives information is how far the applied price sits
+            # from the anchor, not how large the perturbation was. Same
+            # formula here or the shadow-predicted cadence misprices the
+            # increment.
             lr = np.log((1 - evt["applied_discount"])
                         / (1 - evt["reference_discount"]))
             mu_rec = max(ep["mu_ref_hat"][t] * np.exp(
                 evt["epsilon_posterior_mean"] * lr), cfg["pricing"]["demand_floor"])
-            out["raw_information"] += mu_rec * lr ** 2
+            r_ep = evt["dispersion_r"]
+            out["raw_information"] += mu_rec * lr ** 2 * r_ep / (r_ep + mu_rec)
         if evt["affordable_set_size"] == 0:
             out["empty_affordable"] += 1
         out["rec_disc"] += evt["applied_discount"]

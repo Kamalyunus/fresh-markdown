@@ -268,6 +268,15 @@ draws. The prior only needs to be *not confidently wrong* until then.
 
 ## Smaller lessons swept out of code comments (2026-08-25)
 
+- **Information was counted in Poisson units under an NB likelihood.**
+  `pipeline.update` accumulated `μ·L²` — the Poisson Fisher information —
+  while the likelihood is negative binomial, whose information is
+  `μ·L²·r/(r+μ)`. At production μ and r that overstated evidence ~1.6–1.9×
+  on top of what deff corrects, so `information_increment` fired earlier
+  than its face value. Fixed by theorem, not calibration: both `update` and
+  shadow's would-be yield now accumulate the NB form, on the frozen
+  artifacts' own μ and r.
+
 - **Gross, never netted.** An early `episode_flow` netted a shortfall against
   a same-size restock ("one sale bucketed an hour late"). Inference dressed as
   arithmetic: it read a window with 2 restocked and 2 shrunk as having

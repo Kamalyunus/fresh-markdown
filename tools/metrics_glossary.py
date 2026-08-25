@@ -297,6 +297,13 @@ CATALOGUE = [
    "Share of stock sold before the window closed, per arm.", ""),
   ("actual_mean_discount / dp_mean_discount", "rate",
    "Average discount applied per arm. The DP opens far shallower and holds.", ""),
+  ("step_sensitivity", "won",
+   "What one bounded posterior step (`learning.max_mean_step`) is worth on real "
+   "episodes: the DP arm re-solved at ε ± step, reporting the share of episodes "
+   "whose prices move at all and the IL delta under the same demand model. Below "
+   "the deepening bar a step changes nothing — the measured insensitivity that "
+   "makes a wrong-direction update cheap; `crossers` isolates the episodes where "
+   "the cap is load-bearing.", "the evidence behind the step cap"),
   ("tau_initial", "won",
    "The exploration budget's launch value: the currency quantile of the "
    "`Q(p*) − Q(p)` distribution whose implied daily spend matches "
@@ -347,7 +354,8 @@ CATALOGUE = [
    "States refused rather than priced. Refusal is the designed response to an "
    "implausible state, so a non-zero count is information, not failure.", ""),
   ("effective_information_total", "count",
-   "Fisher information for ε the run would have bought, after deff deflation. "
+   "Fisher information for ε the run would have bought, after deff deflation — "
+   "in NB units, `μ·L²·r/(r+μ)`, the same accumulation `pipeline.update` runs. "
    "Accumulated on EXPLORATION decisions only.", ""),
   ("exploration_budget · implied_daily_spend", "won",
    "What exploration would have spent per day, on SHADOW'S OWN anchored path. "

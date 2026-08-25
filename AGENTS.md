@@ -617,6 +617,14 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
   like-for-like, replay is internal consistency, not launch evidence.
 - `tau_initial_derivation.tau_initial` is a currency amount (design 5.8). Only
   paste it into config from a report whose fidelity gate PASSED.
+- `policy_deltas.step_sensitivity` prices `learning.max_mean_step` on real
+  episodes: the DP arm re-solved at ε ± step (belief shifts, the world does
+  not), reporting the share of episodes whose prices move and the IL cost of
+  the changed prices. Below the deepening bar a step changes nothing;
+  `crossers` isolates where the cap is load-bearing. Information is
+  accumulated in NB units everywhere — `μ·L²·r/(r+μ)`, `pipeline.update` and
+  shadow alike — so `information_increment` means what it says; the Poisson
+  `μ·L²` form overstated evidence ~1.6–1.9×.
 - Replay output is never evidence the policy works (design 5.14). The A/B is.
 
 ## Gate decision tree

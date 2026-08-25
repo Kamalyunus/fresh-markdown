@@ -133,10 +133,15 @@ def grid_update(pairs, cell_record, cfg):
     raw_mean = float(np.sum(w * grid))
     raw_std = float(np.sqrt(np.sum(w * (grid - raw_mean) ** 2)))
 
-    # information at the pre-update posterior mean (13.3)
+    # information at the pre-update posterior mean, in NB units: with
+    # Var[D] = mu + mu^2/r the per-hour Fisher information for epsilon is
+    # (dmu/deps)^2 / Var = mu * L^2 * r/(r+mu) -- NOT the Poisson mu * L^2,
+    # which at production mu and r overstates evidence ~1.6-1.9x on top of
+    # what deff corrects, so the increment fired earlier than its face value.
     mu_at_mean = np.clip(mu0 * np.exp(cell_record["mean"] * log_ratio),
                          cfg["pricing"]["demand_floor"], None)
-    information = float(np.sum(mu_at_mean * log_ratio ** 2))
+    information = float(np.sum(
+        mu_at_mean * log_ratio ** 2 * r / (r + mu_at_mean)))
     effective_information = information / deff(cfg)
     return raw_mean, raw_std, effective_information, {
         "zero_sales_share": round(float((k == 0).mean()), 4),

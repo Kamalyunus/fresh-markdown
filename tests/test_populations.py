@@ -776,3 +776,44 @@ def test_tracing_changes_no_reported_number():
             if accumulator in line and "+=" in line:
                 assert "tr" not in line and "rec(" not in line, \
                     f"{accumulator} is being computed from the trace"
+
+
+def test_step_sensitivity_prices_the_cap_on_real_episodes(cfg):
+    """`learning.max_mean_step` is justified by measurement, not judgment:
+    the sweep re-solves the DP arm at eps +- step and reports what moves.
+    Far below the deepening bar a step must change NOTHING -- that measured
+    insensitivity is what makes a wrong-direction update cheap (design
+    5.11). The block must also be structurally sound: shares in [0, 1],
+    finite IL on both sides, crossers a subset of the sample."""
+    from backtest.replay import _episode_frame, step_sensitivity
+
+    def episode(eid, eps):
+        g = pd.DataFrame({
+            "episode_id": [eid] * 4,
+            "date": ["2026-05-01"] * 4, "hour_of_day": [9, 10, 11, 12],
+            "total_discount": [0.25, 0.25, 0.30, 0.30],
+            "original_price": [10_000.0] * 4, "cost": [4000.0] * 4,
+            "d_ref": [0.25] * 4, "starting_inventory": [6, 5, 4, 3],
+            "units_sold": [1, 1, 1, 1], "mu_ref_hat": [1.5] * 4,
+            "r": [3.0] * 4, "eps": [eps] * 4,
+        })
+        g["ending_inventory"] = g.starting_inventory - g.units_sold
+        return _episode_frame(g)
+
+    # cost ratio 0.4, d_ref 0.25 -> deepening bar (1-d)/(gamma-d) ~ 5, so
+    # |eps| = 1.0 sits far below it and a 0.15 step is deep inside the
+    # insensitive region
+    frames = [episode(f"e{i}", -1.0) for i in range(4)]
+    out = step_sensitivity(frames, cfg, sample=4)
+
+    assert out["episodes_swept"] == 4
+    assert out["step"] == cfg["learning"]["max_mean_step"]
+    for label in ("deeper_belief", "shallower_belief"):
+        b = out[label]
+        assert 0.0 <= b["share_prices_changed"] <= 1.0
+        assert np.isfinite(b["il_base"]) and np.isfinite(b["il_shifted"])
+        assert b["crossers"] <= out["episodes_swept"]
+        assert b["crossers_prices_changed"] <= max(b["crossers"], 0)
+    # the load-bearing claim: far below the bar, a bounded step is free
+    assert out["deeper_belief"]["share_prices_changed"] == 0.0
+    assert out["deeper_belief"]["il_delta"] == pytest.approx(0.0, abs=1e-6)

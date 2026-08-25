@@ -698,7 +698,8 @@ it means three things should be said out loud before the pilot:
 
 One reassurance about the evidence side, since enter-and-hold sounds like it
 should starve the learner. It does the opposite. `pipeline.update` accumulates
-`mu × (log price ratio)²` with the ratio taken against the **reference**
+the NB Fisher information `mu · L² · r/(r+mu)` with the log price ratio `L`
+taken against the **reference**
 discount, not against the DP's own optimum — so what generates information is
 how far the applied price sits from the anchor, not how large the random
 perturbation was. Holding at `d_ref − 15pp` parks every hour of the episode
@@ -793,7 +794,8 @@ exactly-once per day. τ persists in the posterior artifact, not in config:
 `exploration.tau_initial` is only the launch value, and a production caller
 reads the artifact or τ stays pinned at launch forever. The
 theory that makes budget-only rationing sound: information about ε and the
-IL cost of a perturbation both scale as `mu × (log price ratio)²`, so
+IL cost of a perturbation both scale as `mu × (log price ratio)²` (information
+carries an extra NB damping `r/(r+mu)` that varies slowly across the book), so
 **information per won is approximately constant** — there is no clever
 targeting to do, only a budget to respect. High-volume SKUs automatically
 receive small perturbations because their loss curve is steeper. Measured
@@ -917,7 +919,12 @@ normalises, and takes moments. Mechanics and rationale:
 - **Bounded steps, human-gated.** An update applies when accumulated
   effective information crosses a threshold; each step moves the mean at
   most 0.15 and shrinks the std at most 25% (floored), with any clipped
-  bound flagged for review. A human approves each day's update, and the
+  bound flagged for review. The step size is priced rather than asserted:
+  `backtest`'s `step_sensitivity` block re-solves the DP arm at ε ± 0.15 on
+  real episodes and reports how many prices move and what the shift costs in
+  IL — below the deepening bar a step changes nothing, which is what makes a
+  wrong-direction step cheap, and `crossers` isolates the episodes where the
+  cap is actually load-bearing. A human approves each day's update, and the
   apply command *refuses* while event-quality gates fail (duplicate or
   unmatched events above 1%, applied-vs-recommended price mismatch above
   1%). **Why:** bounded steps make daily updating safe — no single batch can
@@ -1836,7 +1843,7 @@ definitions were corrected.
 
 | # | Risk | Evidence | Mitigation | Owner |
 | --- | --- | --- | --- | --- |
-| 1 | **Learning throughput** — and the deepening bar in risk 6 sets how far the posterior must travel, not just how fast | Per-outcome information is small (demand ~0.5–1/hr × squared log-price-ratio ~0.01–0.04, ÷ deff <!--f:rho.implied_deff|dec3-->3.347<!--/f-->); prior is wide (pooled/uniform density) where categories are unidentified; monotonicity concentrates identification at entry | Shadow now emits `learning_yield_would_be` — effective information per episode, episodes per bounded update — so weeks-to-convergence is read off before the pilot, not guessed. Two floors bind separately: evidence (episodes needed) and calendar (the 0.15 step cap with one human-gated update per day means ≥6 days to move the mean 1.0 → 1.9 however much evidence arrives). Levers: raise the budget share, coarser cells. A 21-day flat-posterior alert catches a dead loop | Eng + owner |
+| 1 | **Learning throughput** — and the deepening bar in risk 6 sets how far the posterior must travel, not just how fast | Per-outcome information is small (demand ~0.5–1/hr × squared log-price-ratio ~0.01–0.04, × the NB factor r/(r+μ) ~0.55–0.65, ÷ deff <!--f:rho.implied_deff|dec3-->3.347<!--/f-->); prior is wide (pooled/uniform density) where categories are unidentified; monotonicity concentrates identification at entry | Shadow now emits `learning_yield_would_be` — effective information per episode, episodes per bounded update — so weeks-to-convergence is read off before the pilot, not guessed. Two floors bind separately: evidence (episodes needed) and calendar (the 0.15 step cap with one human-gated update per day means ≥6 days to move the mean 1.0 → 1.9 however much evidence arrives). Levers: raise the budget share, coarser cells. A 21-day flat-posterior alert catches a dead loop | Eng + owner |
 | 2 | **Frozen-model drift over Sep–Dec** (seasonality incl. Chuseok; no trend features) | Drift already measured: 1.144 → 0.990 → 1.095 across windows; every economic quantity is denominated in the demand prediction | Final retrain immediately before the launch freeze (gate re-checked); daily drift ratio in shadow and production; pre-register a mid-window recalibration rule now so a drift response is not improvised | Eng |
 | 3 | **A/B power** — adequate, and duration is not the lever | SE 0.002915 once scrap is counted in full; 6.75% detectable at 2 weeks against a measured 38% effect (5.6×). The duration curve is nearly flat — 6 weeks reaches only 5.74% where √T promised 3.90%, because variance is between-unit and the same units recur weekly | Empirical duration table from the derivation tool; owner commits to a feasible (effect, duration) pair before launch. If more power is ever needed the lever is more SKU × FC units, not more weeks | Owner |
 | 4 | **Metric divergence at readout** — planner optimises IL, business reads IL% | Worked example in 2.3; likeliest A/B outcome is the escalation row | Both metrics + denominators in every cut; divergence flag monitored; decision table pre-committed | Owner |

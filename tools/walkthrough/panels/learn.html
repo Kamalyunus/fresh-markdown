@@ -137,13 +137,14 @@ applied     =  UNIFORM draw from affordable   ← never weighted, never targeted
 
 dμ ⁄ dε  =  μ · L                  a bigger price move, and a busier hour, both move μ more
 
-information  ≈  (dμ ⁄ dε)² ⁄ Var[D]  ≈  (μL)² ⁄ μ  =  μ · L²</div>
+information  =  (dμ ⁄ dε)² ⁄ Var[D]  =  (μL)² ⁄ (μ + μ²⁄r)  =  μ · L² · r ⁄ (r + μ)</div>
 
 <section class="prose">
   <p style="margin-top:16px">
     So an experiment's information is <strong>demand × (how far the price moved, in logs)
-    squared</strong>. Both halves are intuitive: a busier hour gives a bigger sample, and a
-    bigger price move gives a longer lever.
+    squared</strong>, damped by the negative-binomial factor r ⁄ (r + μ) — lumpy demand
+    carries less evidence per hour than Poisson would. Both main halves are intuitive: a
+    busier hour gives a bigger sample, and a bigger price move gives a longer lever.
   </p>
   <p>
     The catch is that the <em>cost</em> of the perturbation scales with the same product. More

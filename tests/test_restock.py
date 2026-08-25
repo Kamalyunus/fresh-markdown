@@ -233,3 +233,29 @@ def test_stock_arriving_mid_hour_is_an_exact_count_not_a_lower_bound(cfg):
     # mu at the prior mean and the log price ratio -- so it must NOT move
     assert info_over == pytest.approx(info_exact)
     assert info_stock == pytest.approx(info_exact)
+
+
+def test_information_is_in_nb_units_not_poisson(cfg):
+    """The information counter must be the NB Fisher information
+    mu * L^2 * r/(r+mu), not the Poisson mu * L^2. The Poisson form
+    overstated evidence by ~1.6-1.9x at production mu and r -- on top of
+    what deff corrects -- so `information_increment` fired earlier than its
+    face value. Design 5.11."""
+    from pipeline.update import deff
+
+    cell = {"mean": -1.0, "std": 0.6}
+    dec = _decision(0, 1, 9)
+    dec["applied_discount"] = 0.45
+    ratio = (1 - 0.45) / (1 - 0.30)
+    pairs = [(dec, _outcome(0, 1, 9, 8), ratio)] * 40
+
+    _, _, eff_info, _ = grid_update(pairs, cell, cfg)
+
+    mu = max(dec["reference_mu"] * ratio ** cell["mean"],
+             cfg["pricing"]["demand_floor"])
+    L2 = np.log(ratio) ** 2
+    r = dec["dispersion_r"]
+    nb = 40 * mu * L2 * (r / (r + mu)) / deff(cfg)
+    poisson = 40 * mu * L2 / deff(cfg)
+    assert eff_info == pytest.approx(nb, rel=1e-9)
+    assert eff_info < poisson  # the damping is real, not a no-op
