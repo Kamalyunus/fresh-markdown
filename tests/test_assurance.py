@@ -149,7 +149,7 @@ def _episodes(cfg, n_ep, hours, episode_shift, seed=0):
         for _ in range(hours):
             d = _decision(cfg, q=3, path=[0.8] * 2, episode=f"ep{e}")
             mu = mu_at(d["reference_mu"], d["applied_discount"], D_REF,
-                       cfg["posterior"]["prior"]["fallback_mean"],
+                       -1.0,
                        cfg["pricing"]["demand_floor"])
             sold = max(0, int(round(mu + shared + rng.normal(0, 0.3))))
             decs.append(d)

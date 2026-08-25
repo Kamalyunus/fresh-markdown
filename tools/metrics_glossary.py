@@ -189,8 +189,8 @@ CATALOGUE = [
    "every probability the DP uses, and every posterior update"),
   ("rho", "rate",
    "Correlation between hours within one episode, measured on the FITTED MODEL'S "
-   "residuals at the working elasticity. **0.3103.** Changing "
-   "`posterior.prior.fallback_mean` invalidates it.", "GATE — mirrored into config"),
+   "residuals at the working elasticity (the per-category prior means). "
+   "**0.3103.** A changed prior invalidates it.", "GATE — mirrored into config"),
   ("mean_forced_hours_per_episode", "hours",
    "Average number of hours per episode that carry forced (randomised) prices. "
    "**8.563.** The cluster size in the design effect.", "GATE — mirrored into config"),
@@ -201,20 +201,32 @@ CATALOGUE = [
  ]),
 
 ("Elasticity prior", "bootstrap.estimate_prior → artifacts/prior.json",
- "The cold-start guess at price response, and the record of why it is a guess.", [
-  ("epsilon_naive", "exp",
-   "Elasticity fitted on entry rows with no controls. Contaminated by the clock.", ""),
-  ("epsilon_controlled", "exp",
-   "The same fit with hour, day and category controls — the bracket's other end. "
-   "The two together are the bracket.", "the acceptance gate"),
-  ("source", "text",
-   "`bracket` when history identified a usable range, `fallback` when it did not. "
-   "**Fallback in all 16 categories** — a rejected bracket is the DESIGNED outcome, "
-   "not a failure.", "GATE — reported by pipeline.status"),
+ "The profile likelihood read as a density (PRD 9.5). No fallback constant: "
+ "a flat likelihood degrades to the uniform on the support, a wrong-signed one "
+ "takes the measured pooled density.", [
   ("mean / std", "exp",
-   "The prior in force per cell. **−1.0 ± 0.6** at launch. ε is always negative; "
-   "`epsilon_max` (−0.05) is a sign constraint, never a bound to widen.",
+   "Moments of each category's density. `std_basis` names which measured floor "
+   "bound the width (density / grid_resolution / fold_spread) — a zero-width "
+   "prior would freeze the posterior, so the std can never be zero. ε is always "
+   "negative; `epsilon_max` (−0.05) is a sign constraint, never a bound to widen.",
    "the DP until production learns better"),
+  ("own_information_weight", "rate",
+   "How much of the category's prior is its own data vs the pooled density — "
+   "min(1, likelihood span / own_information_saturation).", ""),
+  ("wrong_sign_categories", "text",
+   "Likelihoods whose UNCONSTRAINED peak (searched past the bounds) sits at or "
+   "above zero — demand rising with price. Their own densities are discarded; "
+   "they take the pooled one. Usually the ramp confound at full strength.",
+   "GATE — read before trusting any category"),
+  ("design_comparison", "text",
+   "All rows × hour-control combinations scored for sign every run. Fewer "
+   "wrong-signed first, then median span; then median_rows_per_time_cell, since "
+   "a thin time cell absorbs the price response it should control for.", ""),
+  ("holdout_comparison", "ratio",
+   "Log marginal predictive on a window the fit never saw, bracketed by `oracle` "
+   "and `uniform`. Read information_available_per_row FIRST — a method gap that "
+   "is a large share of a tiny number is still tiny. A candidate below `uniform` "
+   "is worse than knowing nothing.", "the prior-acceptance gate evidence"),
  ]),
 
 ("Replay — fidelity", "backtest → reports/backtest.json → fidelity",
@@ -564,7 +576,7 @@ CATALOGUE = [
    "Do the config pastes still match the artifacts they came from? Read the bundle "
    "line FIRST — the check says they disagree, not which is stale.", "GATE"),
   ("calibration gate", "verdict", "The level at the anchor, in band.", "GATE"),
-  ("elasticity prior", "verdict", "Source and how many categories accepted a bracket.", ""),
+  ("elasticity prior", "verdict", "How many categories stand on their own data, and how many are wrong-signed.", ""),
   ("exploration tau", "verdict", "What is in force, and the latest derivation.", "GATE"),
   ("shadow gate", "verdict", "Completeness, matched rate, cost-floor violations.", "GATE"),
   ("guardrail floors", "verdict", "The two owner thresholds against their noise floors.", "GATE"),

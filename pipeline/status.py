@@ -117,12 +117,16 @@ def _prior(cfg):
     if not prior:
         return _row("elasticity prior", NONE, "no prior artifact")
     per = prior.get("per_category", {})
-    accepted = sum(1 for v in per.values() if v.get("accepted"))
-    # A rejected bracket is the DESIGNED outcome, not a failure -- history
-    # cannot identify elasticity, and saying so is the honest answer (9.3).
+    own = sum(1 for v in per.values()
+              if v.get("own_information_weight", 0) >= 0.999
+              and not v.get("wrong_sign"))
+    wrong = len(prior.get("wrong_sign_categories", []))
+    # A pooled or uniform prior is the DESIGNED outcome, not a failure --
+    # history cannot always identify elasticity, and saying so is the honest
+    # answer (9.3/9.5).
     return _row("elasticity prior", PASS,
-                f"source {prior.get('source')} · {accepted}/{len(per)} "
-                f"categories accepted a bracket")
+                f"profile_density · {own}/{len(per)} categories on own data"
+                + (f" · {wrong} wrong-signed (pooled)" if wrong else ""))
 
 
 def _shadow(shadow):

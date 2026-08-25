@@ -20,7 +20,8 @@ randomized exploration.
 | `bootstrap/measure.py` | §8, App. A | Phase-0 measurement suite (m1–m8, m10, m11 episode endings) and reassessment gates. |
 | `bootstrap/train_baseline.py` | §9.3 | Frozen LightGBM/Tweedie `mu_ref`; price features overwritten to `d_ref` at inference; level-calibration factor fit. |
 | `bootstrap/fit_dispersion.py` | §9.4 | Frozen NB `r` by subcategory (censored MLE, fallback, clamp) and global `rho` vs fitted residuals. |
-| `bootstrap/estimate_prior.py` | §9.5 | Bracket procedure (naive vs hour-controlled) on entry rows over the full search bound, acceptance checks, fallback on rejection. |
+| `bootstrap/estimate_prior.py` | §9.5 | The elasticity prior as a profile-likelihood density (censored Poisson, naive + controlled arms on entry rows, pooled shrinkage, no fallback constant); writes its own held-out and design comparisons into `prior.json`. |
+| `bootstrap/prior_density.py` | §9.5 | The estimator itself — curves, densities, wrong-sign and zero-width guards, `design_comparison`, `holdout_comparison`. Superseded designs: `docs/learnings.md`. |
 | `bootstrap/init_posterior.py` | §10 | One-time posterior initialisation from the prior artifact; refuses overwrite without `--force`. |
 | `bootstrap/derive_thresholds.py` | §8, §15.4, §18 | Evidence for the owner decisions: empirical A/B duration vs MDE, 3σ guardrail noise floors. |
 | `pricing/demand.py` | §9.3, §11.3 | `mu(d) = mu_ref × ((1−d)/(1−d_ref))^ε`, truncated NB pmf. |

@@ -252,231 +252,50 @@ posterior:
   min_std: 0.05                        # SET  floor on posterior std
   path: "artifacts/posterior.json"
   prior:
-    method: "profile_density"          # SET BY OWNER 2026-08-24.
-      # "profile_density"  the prior IS the deff-deflated profile likelihood,
-      #                    read as a density. A censored POISSON profile, so
-      #                    `r` leaves the epsilon step by theorem (the Poisson
-      #                    QMLE is consistent for the MEAN whatever the true
-      #                    dispersion is) rather than by a measured
-      #                    sensitivity -- that is what cuts epsilon <-> r.
-      #                    NO fallback_mean, NO fallback_std, NO std_floor:
-      #                    a category the data says nothing about degrades to
-      #                    the uniform on the support and then borrows the
-      #                    POOLED density, which is measured across categories.
-      # "bracket"          PRD 9.5 as originally written: argmax of two arms,
-      #                    midpoint and half-gap, with a constant fallback when
-      #                    a category is rejected. Kept so an older run
-      #                    reproduces exactly.
-      #
-      # The two are not as different as they look. A 50/50 mixture of two POINT
-      # masses at a and b has mean (a+b)/2 and std |a-b|/2 -- exactly the
-      # bracket's formula -- so profile_density reproduces it wherever both
-      # arms are sharp, and widens instead of asserting false precision where
-      # they are not. Measured on the fixture, four of five categories had a
-      # likelihood span under 2.4 across the WHOLE support and two were exactly
-      # constant, yet the bracket reported -4.000 +- 0.400 for them, because
-      # argmax of a constant array returns index 0.
-      #
-      # Every run writes `holdout_comparison` scoring BOTH methods on data
-      # neither saw. Read it before changing this key.
+    # THE PRIOR IS THE PROFILE LIKELIHOOD, read as a density (PRD 9.5,
+    # bootstrap.prior_density). A censored POISSON profile per category and
+    # arm, deff-deflated, 50/50 arm mixture, shrunk toward a POOLED density
+    # built from the right-signed categories. No fallback constant anywhere:
+    # a flat likelihood degrades to the uniform on the support, a wrong-signed
+    # one (unconstrained peak at or above zero) is discarded for the pooled
+    # density, and the reported std is the widest of three MEASURED floors
+    # (density width, grid resolution, fold spread), named in `std_basis`.
+    # Every run writes design_comparison (all rows x control combinations)
+    # and holdout_comparison (log marginal predictive vs oracle and uniform).
+    # Superseded designs: docs/learnings.md.
     rows: "entry"                      # SET  "entry" | "all_stocked_hours"
-      # ENTRY ROWS, and PRD 9.5 said so from the start (owner, 2026-08-25).
-      # Under the legacy ramp a row at a deep discount exists PRECISELY because
-      # earlier hours did not sell, so within-episode rows carry a survivorship
-      # confound. `all_stocked_hours` was tried to buy price variation and it
-      # bought the confound with it, which is the larger effect.
-      #
-      # Both within-episode mechanisms push the same way. The ramp deepens the
-      # discount as hours pass while demand rises into the evening, so discount
-      # and demand climb together; and the episodes that SURVIVE to the deep
-      # hours are the ones that were not selling, so conditional on a
-      # price-neutral mu_ref a deeper price reads as lower demand.
-      # `hour_of_day` is already a mu_ref feature and the controlled arm
-      # profiles hour effects out on top -- so the first is handled twice, and
-      # the sign STILL came out positive on 4 of 5 fixture categories, because
-      # the second is selection on the unobserved demand shock and no hour
-      # control reaches it. Entry rows have neither.
-      #
-      # Fixture, unconstrained peaks searched past the bound:
-      #   entry              2 of 5 categories wrong-signed
-      #   all_stocked_hours  4 of 5
-      #
-      # THE COST IS REAL AND IT IS THE OTHER HORN: entry rows carry far less
-      # price variation, since the entry hour is before the ramp starts and
-      # sits at or near d_ref. SIDE DISH goes from sd 0.024 to 0.0014. So the
-      # choice is between weakly identified and confidently backwards -- and a
-      # weak right-signed estimate degrades to the uniform on the support,
-      # while a confident wrong-signed one is discarded entirely.
-      #
-      # `rows_comparison` in prior.json reports the sign outcome for BOTH sets
-      # on every run. Read it before changing this key.
-      #
-      # Censored entry rows are KEPT now. The old bracket had to drop them --
-      # its NB likelihood needed an `r` in exactly the term censoring fires --
-      # and the Poisson profile has no dispersion parameter, so that selection
-      # bias is gone.
+      # Which rows the profile scores. "entry" = one row per episode, before
+      # the legacy ramp starts -- no within-episode survivorship confound
+      # (a deep-discount row exists because earlier hours did not sell),
+      # little price variation. "all_stocked_hours" has the variation AND the
+      # confound. Read `design_comparison` in prior.json before changing:
+      # fewer wrong-signed categories first, then median span.
     hour_control: "date_hour"          # SET  "date_hour" | "hour_of_day"
-      # WHAT THE CONTROLLED ARM PROFILES OUT (owner, 2026-08-25).
-      #
-      # "hour_of_day"  the hour POOLED ACROSS DATES. Removes the average
-      #                evening lift and nothing else, so a Tuesday storm or a
-      #                rival's promotion is still in the residual -- and still
-      #                correlated with how far the legacy ramp has run.
-      # "date_hour"    the same clock hour OF THAT DAY, compared across
-      #                sku x fc. Absorbs every shock common to that moment.
-      #                This is what PRD 9.5 means by "same-hour cross-episode";
-      #                the pooled hour control was only ever an approximation.
-      #
-      # It does NOT fix the within-episode survivorship confound -- two
-      # episodes at 5pm on the same day differ in discount partly because one
-      # of them has not been selling -- which is why `rows: entry` still
-      # matters. The two controls are for different confounds and both are
-      # needed.
-      #
-      # Read `identifying_variation_share` and `median_rows_per_time_cell`
-      # after switching: a finer cell absorbs more, so LESS price variation
-      # survives to identify epsilon.
+      # What the controlled arm profiles out. "date_hour" compares the same
+      # clock hour of the SAME DAY across sku x fc -- absorbs every shock
+      # common to that moment (PRD 9.5's "same-hour cross-episode").
+      # "hour_of_day" pools across dates and removes only the average evening
+      # lift. Finer cells absorb more, so less variation survives to identify
+      # epsilon; thin cells fall back (below).
     min_rows_per_time_cell: 5          # SET  a time cell with fewer uncensored
-      # rows than this gets no multiplier of its own and falls back to 1.0.
-      #
-      # A CELL FITTED FROM THREE OBSERVATIONS ABSORBS THE PRICE RESPONSE IT IS
-      # SUPPOSED TO CONTROL FOR -- the incidental parameters problem -- and it
-      # biases |epsilon| TOWARD ZERO, the same direction the controlled arm is
-      # already biased. Matters much more under "date_hour", where cells are
-      # (day x hour) and can be thin.
-    own_information_saturation: 2.0    # SET  log-likelihood units, across the
-      # whole support, at which a category stops borrowing from the pool and
-      # stands on its own data. 2.0 is the chi-square 95% cutoff: a category
-      # that discriminates at least as much as its own significance threshold
-      # is entitled to its own answer. Lower = more categories stand alone;
-      # 0 = never pool. Reported per category as `own_information_weight`.
-    holdout_window: "calib"            # SET  which split the comparison scores
-      # on. Must be a window the prior did NOT see -- the whole point is that
-      # neither method can be judged from the inside.
-    source: "bracket"                  # SET  "bracket" | "fallback"
-      # BRACKET METHOD ONLY, ignored under profile_density.
-    fallback_mean: -1.00               # SET  BRACKET METHOD ONLY. Used if the
-      # bracket is rejected -- and nothing measured produced it, which is the
-      # objection that motivated profile_density. Unused under that method.
-    fallback_std: 0.60                 # SET  BRACKET METHOD ONLY, ditto
-    std_floor: 0.40                    # SET  BRACKET METHOD ONLY. Floor on the
-      # bracket-derived std. profile_density needs no floor: the density's own
-      # width is the floor.
-    reference_r: null                  # SET  dispersion the BRACKET fits at.
-      # null = MEASURE IT from the train window, PER CATEGORY, which is the
-      # default and the right answer. `fit_r` at the fallback elasticity on
-      # each category's entry rows, using the same estimator and the same
-      # boundary clamp fit_dispersion uses. Reported as
-      # `reference_r_by_category`, with `reference_r` the pooled fallback for a
-      # category thinner than reference_r_min_rows, and `reference_r_basis`.
-      #
-      # Why derived rather than pinned: a pinned constant goes stale against a
-      # retrain, has to be re-pasted by hand, and says nothing about the
-      # extract in front of it. Deriving it costs one bounded scalar
-      # minimisation per category.
-      #
-      # Why PER CATEGORY (owner, 2026-08-24): dispersion is a property of the
-      # category, not of the extract, and the spread swamps the +-2x band the
-      # approximation was justified over. Fixture entry rows, pooled 8.04:
-      # SEAFOOD 1.60, VEGETABLE 5.39, FRUIT 14.12, MEAT 28.71, SIDE DISH at the
-      # 50.0 search bound. Scoring SEAFOOD at the pooled value is not a small
-      # error in a nuisance parameter, it is the wrong likelihood.
-      #
-      # A FIT AT A SEARCH BOUND IS NOT AN ESTIMATE. SIDE DISH above is
-      # under-dispersed relative to Poisson, so the MLE runs to the ceiling.
-      # Those are clamped at dispersion.clamp_percentile of the converged set --
-      # the same key and the same treatment fit_dispersion applies, so the two
-      # modules cannot drift on how a boundary is handled.
-      #
-      # WHY THIS IS FITTED HERE AND NOT READ FROM r_lookup.json: estimate_prior
-      # runs BEFORE fit_dispersion, so that artifact does not exist yet on a
-      # cold start. The two steps are genuinely circular -- the bracket's
-      # likelihood needs r, and dispersion needs an elasticity -- and the loop
-      # is cut on THIS side because it is far weaker here. Even were the
-      # artifact present it would be the wrong number: it describes the
-      # CALIBRATION window, and this likelihood sums over TRAIN entry rows.
-      #
-      # `r` reaches the bracket two ways. The strong one is the censored term
-      # `nbinom.logsf(k-1, r, p)` -- how much mass sits above k is entirely a
-      # dispersion question -- and it never fires, because censoring is decided
-      # at an episode's LAST row while the bracket uses ENTRY rows, so a
-      # censored entry row is a one-hour episode and those are dropped. What
-      # remains is the weighting term `r/(r+mu)`, and fitting per category is
-      # what keeps even that term honest.
-      #
-      # Against this, fitting DISPERSION at the wrong elasticity cost 26% of the
-      # learning rate (-1.0 -> -1.5 moved rho 0.3103 -> 0.4236, deff
-      # 3.347 -> 4.204). So the approximation belongs on this side.
-      #
-      # Set a number to PIN it -- reproducing an older run, or holding the
-      # bootstrap against a known value. It then applies to EVERY category and
-      # nothing is fitted.
-    reference_r_min_rows: 150          # SET  entry rows a category needs to
-      # fit its own reference r; below this it takes the pooled fit.
-      #
-      # SEPARATE FROM dispersion.min_rows_per_group (200) ON PURPOSE, because
-      # the rows are not the same unit. That threshold counts calibration HOURS;
-      # this one counts ENTRY rows, one per episode, so the same number would be
-      # a far stricter bar and would silently push production categories onto
-      # the pooled value. Reported per category as `reference_r_scope`, so
-      # "category" vs "pooled" is visible rather than inferred.
-    search_bounds: [-4.00, -0.05]      # SET  must equal [epsilon_min, epsilon_max]
-    search_grid_size: 159              # SET  bracket search resolution
-    max_rows_per_category: 150000      # SET  row cap per category in the bracket fit
-    acceptance_scope: "per_category"   # SET BY OWNER 2026-08-24.
-      # "per_category"    a category that passes its own checks keeps its own
-      #                   bracket; only the failures take the fallback.
-      # "all_or_nothing"  one failure replaces EVERY category. What PRD 9.5
-      #                   originally specified, and it was costing real
-      #                   information: BAKERY & PASTRY passed every check on
-      #                   21,484 rows and was still overwritten with the
-      #                   fallback because two other categories failed. Its own
-      #                   bracket was -1.6125 +- 1.0875.
-      #
-      # The checks are pre-registered here, not chosen after seeing the
-      # answers, so applying them per cell and using the cells that pass is not
-      # selecting on the outcome.
-    #
-    # THE THREE CHECKS. Only the sign is unconditional -- see PRD 9.5, which
-    # was amended for this. The owner's rule: a measured bracket beats an
-    # assumption, and the SIGN is the thing worth rejecting on.
-    reject_wrong_sign: true            # SET  NOT configurable in practice: a
-      # non-negative endpoint says demand rises with price. Nonsensical, not
-      # weak, and no midpoint of it means anything.
-    reject_boundary_solutions: false   # SET BY OWNER 2026-08-24 (was true).
-      # A bound-pinned endpoint is not point-identified, but it still carries
-      # the sign and a magnitude floor -- "at least this elastic" is real
-      # information, and -1.0 +- 0.6 is not. DAIRY PRODUCT pinned at -4.0 on
-      # the production extract; under the old rule that discarded the whole
-      # prior for all 16 categories.
-    reject_orientation_violations: false  # SET BY OWNER 2026-08-24.
-      # `naive > controlled`. FLAGGED LOUDLY, NOT REJECTED -- the owner's call,
-      # and the argument for it is that a measured midpoint is still the best
-      # reading the data supports, where the alternative is a constant.
-      #
-      # The caveat, recorded because it is real and the flag exists to carry
-      # it: the bracket identifies a SET, and the argument is DIRECTIONAL --
-      # naive absorbs the evening lift so it is biased too elastic, controlled
-      # strips the confounded variation so it is biased toward zero, hence
-      # naive <= eps_true <= controlled. That ordering is the only thing making
-      # the midpoint set-identified. When it reverses, the midpoint is still
-      # the centre of the two measurements but no longer a bracket on the
-      # truth, so an inverted category's prior is weaker evidence than an
-      # upright one's even though the artifact reports them the same way.
-      #
-      #   boundary   ordering intact, lower end truncated at the search bound.
-      #              Conservative but sound: midpoint understates |eps|.
-      #   inverted   ordering violated. Used, flagged, and listed at the top
-      #              of the artifact as `inverted_categories`.
-      #
-      # Read `identifying_variation_share` before trusting one. The controlled
-      # fit is identified ONLY by within-hour price variation; near zero it is
-      # noise that can land anywhere, and the inversion says nothing about the
-      # category -- pool hours or coarsen the control instead. BABY FOOD is the
-      # live case: naive -1.55, controlled -2.7, both firmly negative,
-      # midpoint -2.125 +- 0.575.
+      # rows gets no multiplier of its own (falls back to 1.0). A cell fitted
+      # from a few observations absorbs the price response it is meant to
+      # control for and biases |epsilon| toward zero.
+    own_information_saturation: 2.0    # SET  log-likelihood units across the
+      # support at which a category stops borrowing from the pool and stands
+      # on its own data (2.0 = the chi-square 95% cutoff). Tune ONCE against
+      # production's likelihood_span distribution; `own_information_weight`
+      # per category says which way it went.
+    stability_folds: 3                 # SET  disjoint train slices for
+      # fold_spread, the model-uncertainty width floor.
+    holdout_window: "calib"            # SET  split the holdout_comparison
+      # scores on. Must be one the prior did NOT see.
+    search_bounds: [-4.00, -0.05]      # SET  must equal [epsilon_min,
+      # epsilon_max]. A POLICY statement about the range the DP supports, not
+      # a belief about demand -- the wrong-sign check searches PAST it.
+    search_grid_size: 159              # SET  profile resolution
+    max_rows_per_category: 150000      # SET  row cap per category
     path: "artifacts/prior.json"
-    per_category: null                 # MEASURED  re-run section 9.5 after bound fix
 
 pricing:
   tier_step: 0.025                     # SET  hourly discount grid granularity

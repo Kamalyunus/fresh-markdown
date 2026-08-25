@@ -89,10 +89,8 @@ def load_config(path="config.yaml", strict=False):
     if strict:
         missing = [".".join(p) for p in RUNTIME_REQUIRED
                    if config_get(cfg, p) is None]
-        if cfg["posterior"]["prior"]["source"] == "bracket" \
-                and cfg["posterior"]["prior"]["per_category"] is None \
-                and not os.path.exists(cfg["posterior"]["prior"]["path"]):
-            missing.append("posterior.prior.per_category (or artifacts/prior.json)")
+        if not os.path.exists(cfg["posterior"]["prior"]["path"]):
+            missing.append("artifacts/prior.json (run bootstrap.estimate_prior)")
         if missing:
             raise ConfigError(
                 "refusing to start: null MEASURED / SET BY OWNER values: "

@@ -1,67 +1,57 @@
 """bootstrap.prior_density -- the elasticity prior AS the profile likelihood.
 
-PRD section 9.5, method `profile_density`. Replaces two things at once, and
-they are separable questions that were previously entangled:
+PRD section 9.5. Two ideas, separable:
 
-  HOW THE CURVE IS COMPUTED.  A censored POISSON profile, not a censored NB.
-        The Poisson quasi-MLE is consistent for the MEAN parameters even when
-        the truth is negative binomial -- dispersion moves the standard errors,
-        not the point estimate (Gourieroux, Monfort & Trognon 1984). Epsilon
-        lives entirely in the mean, so `r` drops out of this step BY THEOREM
-        rather than by measuring a sensitivity and calling it small. That is
-        what removes the epsilon <-> r cycle: `fit_dispersion` still needs an
-        elasticity, but this no longer needs a dispersion.
+  HOW THE CURVE IS COMPUTED.  A censored POISSON profile. The Poisson
+        quasi-MLE is consistent for the MEAN parameters even when the truth is
+        negative binomial -- dispersion moves the standard errors, not the
+        point estimate (Gourieroux, Monfort & Trognon 1984). Epsilon lives
+        entirely in the mean, so no dispersion parameter enters this step and
+        there is no epsilon <-> r cycle: the prior runs FIRST and
+        `fit_dispersion` reads its per-category means.
 
   WHAT THE CURVE BECOMES.  The whole curve, read as a density, instead of its
-        argmax. The bracket kept two points and threw the shape away, so a
-        sharp peak and a horizontal line produced the same kind of answer: a
-        number with four decimals and a std derived from the gap between two
-        point estimates, which knows nothing about curvature. Measured on the
-        fixture, four of five categories had a likelihood span under 2.4 across
-        the ENTIRE support and two were exactly constant -- and still reported
-        -4.000 +- 0.400, because argmax of a constant array returns index 0.
+        argmax -- so a sharp peak and a flat line stop producing the same kind
+        of answer. A 50/50 mixture of the naive and controlled arms' densities
+        reproduces the classic midpoint-and-half-gap bracket exactly in the
+        sharp limit, and degrades to the uniform on the support where the data
+        says nothing.
 
-THE FALLBACK CONSTANT IS GONE, and that is the point of the change. There is no
-`fallback_mean`, no `fallback_std`, no `std_floor` in this path. A category the
-data says nothing about does not get someone's guess; it gets, in order:
+NO FALLBACK CONSTANT. A category the data says nothing about gets its own
+density (the uniform, by construction) shrunk toward the POOLED density
+fitted across the right-signed categories of this extract -- measured, never
+chosen. `own_information_weight` says how much of each was used. The only
+external input is `search_bounds`, a policy statement about the range the DP
+supports.
 
-  1. its own density, which for a flat likelihood IS the uniform on the
-     support -- mean -2.025, std 1.140 on [-4, -0.05], reached automatically
-     rather than configured, and
-  2. shrinkage toward the POOLED density fitted across every category, which is
-     also measured. `own_information_weight` says how much of each was used.
+TWO CONFOUNDS, TWO CONTROLS -- `rows` and `hour_control`, both measured per
+run by `design_comparison`:
 
-The only external input left is `search_bounds`, and that is a policy statement
-about the elasticity range the DP supports, not a guess about demand.
+  rows          within-episode SURVIVORSHIP: a deep-discount row exists
+                because earlier hours did not sell. Only `entry` (one row per
+                episode, before any selection) avoids it.
+  hour_control  the COMMON TIME SHOCK: `date_hour` compares the same clock
+                hour of the same day across sku x fc, absorbing everything
+                shared by that moment; `hour_of_day` only removes the average
+                evening lift. Thin time cells fall back to 1.0
+                (`min_rows_per_time_cell`) -- a cell fitted from a few rows
+                absorbs the price response it is meant to control for.
 
-EXACTLY REPRODUCES THE BRACKET IN THE SHARP LIMIT. A 50/50 mixture of two point
-masses at a and b has mean (a+b)/2 and std |a-b|/2 -- which is the bracket's
-own `prior_mean` and `prior_std` formula. So this is a strict generalisation:
-identical where the old procedure was justified, honestly wider where it was
-not, and it needs no floor because the density's own width is the floor.
+GUARDS, all measured:
 
-ROWS: ENTRY ROWS, one per episode, which is what PRD 9.5 specified from the
-start. Scoring every stocked hour was tried, to buy price variation, and it
-bought the within-episode survivorship confound with it -- 4 of 5 fixture
-categories came back with a POSITIVE unconstrained peak against 2 of 5 on entry
-rows. See `scored_rows` for the mechanism and the trade. `rows_comparison` in
-the artifact reports the sign outcome for both sets on every run, so the choice
-is made on the extract in hand.
+  wrong sign    the peak is searched PAST the search bounds; at or above zero
+                the category's own density is discarded (demand rising with
+                price is backwards, not weak) and it is excluded from the pool
+                it falls back to.
+  zero width    the reported std is the widest of the density's own width,
+                the grid resolution, and `fold_spread` (movement across
+                disjoint train slices) -- curvature alone is sampling
+                precision and collapses to zero at production scale.
+  deff          where multiple rows per episode are scored, the
+                log-likelihood is deflated by an eps-FREE design effect
+                (residuals against raw mu_ref) before any interval is read.
 
-Where more than one row per episode IS scored, the log-likelihood is deflated
-by the design effect first: repeated hours of one episode are not independent
-observations and an interval read off them would be too tight by about
-sqrt(deff).
-
-WHY THE DEFLATION deff IS eps-FREE. It is computed from `units_sold - mu_ref`
-residuals, with no elasticity applied, which is what keeps this acyclic --
-using the working elasticity would put rho back inside the epsilon step.
-`fit_dispersion` still re-fits rho properly at the estimated elasticity
-afterwards, and that value is the one the posterior update uses; this one only
-sets how much a repeated hour counts while reading the curve.
-
-Usage is via `bootstrap.estimate_prior`, which dispatches on
-`posterior.prior.method`.
+Superseded designs and why they died: docs/learnings.md.
 """
 
 import copy
@@ -69,7 +59,7 @@ import copy
 import numpy as np
 import pandas as pd
 from scipy.special import gammaln, logsumexp
-from scipy.stats import poisson, nbinom
+from scipy.stats import poisson
 
 from common.config import design_effect
 from common import episodes
@@ -182,42 +172,33 @@ def time_cell(g, control):
 
 
 def loglik(eps, base, log_ratio, k, censored, floor, controlled, cell, const,
-           r=None, min_cell=1):
-    """Censored log-likelihood at one elasticity.
-
-    `r=None` gives the censored POISSON -- no dispersion parameter, which is
-    the whole point. Pass an `r` array for the censored NB, kept so the two
-    families can be compared on identical rows.
-    """
+           min_cell=1):
+    """Censored POISSON log-likelihood at one elasticity. No dispersion
+    parameter -- which is the whole point: epsilon lives in the mean, so the
+    dispersion chain never enters this step."""
     mu = np.clip(base * np.exp(eps * log_ratio), floor, None)
     if controlled:
         mult, _ = hour_multipliers(mu, cell, k, censored, min_cell)
         mu = np.clip(mu * mult, floor, None)
-    if r is None:
-        exact = k * np.log(mu) - mu - const
-        tail = poisson.logsf(np.maximum(k, 1) - 1, mu)
-    else:
-        p = r / (r + mu)
-        exact = const + r * np.log(p) + k * np.log1p(-p)
-        tail = nbinom.logsf(np.maximum(k, 1) - 1, r, p)
+    exact = k * np.log(mu) - mu - const
+    tail = poisson.logsf(np.maximum(k, 1) - 1, mu)
     return float(np.sum(np.where(censored, tail, exact)))
 
 
-def curve(g, mu_ref, grid, controlled, cfg, r=None):
-    """The full log-likelihood over the grid. Everything the old `_estimate`
-    computed and then discarded except one index."""
+def curve(g, mu_ref, grid, controlled, cfg):
+    """The full log-likelihood over the grid -- the shape, not just an
+    argmax."""
     pc = cfg["posterior"]["prior"]
     k = g.units_sold.to_numpy()
     censored = g.censored.to_numpy()
-    cell = time_cell(g, pc.get("hour_control", "hour_of_day"))
+    cell = time_cell(g, pc.get("hour_control", "date_hour"))
     min_cell = int(pc.get("min_rows_per_time_cell", 1))
     log_ratio = np.log((1 - g.total_discount.to_numpy())
                        / (1 - g.d_ref.to_numpy()))
     floor = cfg["pricing"]["demand_floor"]
-    const = (gammaln(k + 1) if r is None
-             else gammaln(k + r) - gammaln(r) - gammaln(k + 1))
+    const = gammaln(k + 1)
     return np.array([loglik(e, mu_ref, log_ratio, k, censored, floor,
-                            controlled, cell, const, r, min_cell)
+                            controlled, cell, const, min_cell)
                      for e in grid])
 
 
@@ -265,15 +246,6 @@ def mixture(a, b, wa=0.5):
     return wa * np.asarray(a) + (1 - wa) * np.asarray(b)
 
 
-def normal_on_grid(grid, mean, std):
-    """A (mean, std) pair rendered as a density on the same grid, so the old
-    bracket prior and the new one are scored by identical arithmetic. Without
-    this the comparison would be between a density and a summary of one."""
-    z = -0.5 * ((np.asarray(grid) - mean) / max(std, 1e-6)) ** 2
-    w = np.exp(z - z.max())
-    return w / w.sum()
-
-
 def marginal_score(ll_hold, w):
     """log integral p(y_holdout | eps) pi(eps) deps, on the grid.
 
@@ -290,31 +262,28 @@ def marginal_score(ll_hold, w):
     return float(logsumexp(ll + logw) - logsumexp(logw))
 
 
-def build_curves(d, cfg, model, grid, window, r_by_cat=None, r_pooled=None):  # noqa: C901
+def build_curves(d, cfg, model, grid, window):
     """Per-category (naive, controlled) curves and the deff used, on one split
     window. Shared by the fit and by the held-out scoring so the two cannot
     diverge in how they build rows."""
     pc = cfg["posterior"]["prior"]
     frame = population(split_frames(d, cfg)[window], cfg)
-    rows = scored_rows(frame, cfg, pc.get("rows", "all_stocked_hours"))
+    rows = scored_rows(frame, cfg, pc.get("rows", "entry"))
     out = {}
     for cat, g in rows.groupby("category"):
-        r = None
-        if r_by_cat is not None:
-            r = np.full(len(g), float(r_by_cat.get(str(cat), r_pooled)))
         deff, rho, m = deflation_deff(g, model, cfg)
         mu_ref = model.predict_mu_ref(g)
         lr = np.log((1 - g.total_discount.to_numpy())
                     / (1 - g.d_ref.to_numpy()))
         # de-meaned on the SAME cell the controlled arm profiles out, or the
         # reported share would describe a control that is not being applied
-        cells = time_cell(g, pc.get("hour_control", "hour_of_day"))
+        cells = time_cell(g, pc.get("hour_control", "date_hour"))
         within = lr - pd.Series(lr).groupby(cells).transform("mean").to_numpy()
         v = float(np.var(lr))
         sizes = pd.Series(cells).value_counts()
         out[str(cat)] = {
-            "naive": curve(g, mu_ref, grid, False, cfg, r),
-            "controlled": curve(g, mu_ref, grid, True, cfg, r),
+            "naive": curve(g, mu_ref, grid, False, cfg),
+            "controlled": curve(g, mu_ref, grid, True, cfg),
             "deff": deff, "rho_eps_free": rho, "mean_rows_per_episode": m,
             "rows": int(len(g)), "episodes": int(g.episode_id.nunique()),
             "censored_share": float(g.censored.mean()),
@@ -388,7 +357,7 @@ def fold_spread(d, cfg, model, grid, folds=3):
             continue
         sl = train[train.date.astype(str).isin(set(chunk))]
         rows = scored_rows(sl, cfg, cfg["posterior"]["prior"].get(
-            "rows", "all_stocked_hours"))
+            "rows", "entry"))
         for cat, g in rows.groupby("category"):
             if len(g) < 50:
                 continue

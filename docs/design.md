@@ -537,38 +537,41 @@ gates learning. **Why legacy data is legitimate here** when it is banned for
 elasticity: these are second-moment structures — variance and correlation
 *around* the mean — and the policy confound moves the mean, not them.
 
-### 5.6 Elasticity prior — a bracket, not an estimate
+### 5.6 Elasticity prior — the profile likelihood as a density
 
-Two estimators per category, both by censored negative-binomial likelihood
-over the full sign-constrained grid, both on **entry-hour rows only**:
+Per category, a censored **Poisson** log-likelihood is profiled over the ε
+grid twice — *naive* (no time control) and *controlled* (same-`date_hour`
+fixed effects across sku × fc, profiled out by moment matching) — on **entry
+rows only** (the survivorship confound of section 3.2). The whole
+deff-deflated curve becomes the prior as a density: the 50/50 arm mixture,
+shrunk toward a pooled density built from the right-signed categories.
+Poisson rather than negative binomial because the quasi-MLE is consistent for
+the mean whatever the true dispersion — so no `r` enters, and the prior runs
+*before* the dispersion fit with nothing circular between them.
 
-```
-epsilon_naive        no hour control    → absorbs the evening lift into price
-                                        → biased TOO ELASTIC (too negative)
-epsilon_controlled   hour effects profiled out
-                                        → removes most price variation along
-                                          with the confound
-                                        → biased TOWARD ZERO
+**No fallback constant.** A flat likelihood degrades to the uniform on the
+support; a wrong-signed one (unconstrained peak at or above zero, searched
+*past* the sign bounds) is discarded for the pooled density and named in
+`wrong_sign_categories`; the std is the widest of three measured floors
+(density width, grid resolution, fold spread) and can never be zero — a
+zero-width prior would freeze the posterior. The upper bound (−0.05) remains
+a *sign constraint*, never to be widened.
 
-prior_mean = midpoint of the two        prior_std = max(half the width, 0.40)
-```
+**Why honesty over sharpness:** with bounded update steps (section 6.3), a
+confidently-wrong prior takes at least seven update cycles to walk back,
+across every cell at once; a weak honest prior costs only patience. A pooled
+or uniform prior is the system working, not failing. Every run scores itself
+on a held-out window (`holdout_comparison`, bracketed by `oracle` and
+`uniform`) and scores every rows × hour-control design (`design_comparison`),
+so the artifact carries the evidence for its own configuration. The full
+specification is PRD §9.5; the designs this replaced are in
+`docs/learnings.md`.
 
-**Why a bracket instead of one best estimate:** on this data any single
-estimator has bias of unknown magnitude but *known direction*; two
-estimators with opposite known directions bound the truth without pretending
-to point-identify it. **Why entry rows only:** the survivorship confound of
-section 3.2. **Why boundary solutions are rejected outright:** an optimiser
-pinned at a search bound is reporting the bound, not the data — an earlier
-run with a carelessly tight bound manufactured five fake "estimates" this
-way, and the upper bound (−0.05) is a *sign constraint*, never to be
-widened: positive elasticity is structurally unrepresentable, which replaces
-all wrong-sign filtering downstream. **Why rejection is a designed outcome:**
-with bounded update steps (section 6.3), a confidently-wrong prior takes at
-least seven update cycles to walk back, across every cell at once; a weak
-honest prior costs only patience. On production data, 14 of 16 categories
-rejected honestly and use the fallback (−1.0 ± 0.6); that is the system
-working, and the std floor is precisely the insurance that makes fallback
-safe.
+> **Production figures quoted elsewhere in this document** (fallback in all
+> 16 categories, bracket acceptance counts, deepening-bar sigmas) are from
+> the superseded bracket-era runs and stand as historical measurements until
+> the next production bootstrap refreshes them.
+
 
 ### 5.7 The decision core — exact DP over a safe action set
 

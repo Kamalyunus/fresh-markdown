@@ -74,7 +74,7 @@ class PosteriorStore:
 
         state = {"cells": cells, "cell_of": cell_of,
                  "processed_outcome_ids": [],
-                 "prior_source": cfg["posterior"]["prior"]["source"]}
+                 "prior_source": "profile_density"}
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         cls._atomic_write(path, state)
         store = cls.__new__(cls)

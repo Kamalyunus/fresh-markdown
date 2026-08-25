@@ -372,174 +372,57 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
    start-up will refuse on `ARTIFACT_MIRRORS` drift — which is the check
    working, not a nuisance.
 
-   **The working elasticity is now each category's PRIOR MEAN, not
-   `fallback_mean`** (owner, 2026-08-24), which is why `estimate_prior` runs
-   BEFORE `fit_dispersion`. Fitting at the constant was harmless only while
-   the bracket was rejected for all 16 categories and the fallback *was* the
-   prior; with brackets accepted per category it measured correlation against
-   a demand curve nothing uses. The two steps are circular — the bracket's
-   censored NB likelihood needs `r` — and the loop is cut on the prior's
-   side. What makes `r → ε` weak is that the bracket drops its censored entry
-   rows, so the dispersion-sensitive `logsf` term never fires; see PRD
-   §9.4/§9.5.
+   **The working elasticity is each category's PRIOR MEAN**, which is why
+   `estimate_prior` runs BEFORE `fit_dispersion`. There is no cycle in the
+   other direction: the prior is a censored POISSON profile with no dispersion
+   parameter, so it needs nothing from the dispersion step.
 
-   **THE DEFAULT PRIOR METHOD IS `profile_density`** (owner, 2026-08-24), and
-   it removes the epsilon <-> r cycle rather than managing it. The curve is a
-   censored POISSON profile -- the Poisson QMLE is consistent for the MEAN
-   whatever the true dispersion is, and epsilon lives entirely in the mean, so
-   `r` leaves this step by theorem. The whole curve then becomes the prior as a
-   density instead of its argmax. **There is no `fallback_mean`,
-   `fallback_std` or `std_floor` in this path**: a flat likelihood gives the
-   uniform on the support by construction (-2.025 +- 1.140 on [-4, -0.05]) and
-   then shrinks to the MEASURED pooled density. A 50/50 mixture of two point
-   masses at a and b has mean (a+b)/2 and std |a-b|/2, so this reproduces the
-   bracket exactly wherever both arms were sharp -- it is a generalisation, not
-   a replacement. Rows are every stocked hour, deflated by an eps-free deff.
-   `method: bracket` still reproduces an older run. See PRD 9.5a/9.5b.
+   **THE PRIOR IS THE PROFILE LIKELIHOOD, READ AS A DENSITY**
+   (`bootstrap.prior_density`, PRD 9.5). The whole deff-deflated curve becomes
+   the prior — a 50/50 mixture of the naive and controlled arms' densities,
+   shrunk toward a POOLED density built from the right-signed categories.
+   **There is no fallback constant**: a flat likelihood degrades to the
+   uniform on the support; a wrong-signed one (unconstrained peak at or above
+   zero, searched PAST the search bounds) is discarded for the pooled density
+   and listed in `wrong_sign_categories`; the reported std is the widest of
+   three MEASURED floors (density width, grid resolution, `fold_spread`),
+   named in `std_basis` — it can never be zero, because a zero-width prior
+   freezes the posterior.
 
-   **EVERY RUN SCORES BOTH METHODS ON HELD-OUT DATA**, in
-   `prior.json.holdout_comparison`: the log marginal predictive per row, with
-   `oracle` (best epsilon with hindsight) and `uniform` (flat prior) as the
-   ceiling and floor.
+   **Read `prior.json` in this order, every run:**
+   1. `design_comparison` — all `rows` × `hour_control` combinations scored
+      for sign. Fewer wrong-signed first, then `median_span`, then
+      `median_rows_per_time_cell` (below `min_rows_per_time_cell` the control
+      is not being applied; just above it, thin cells absorb the price
+      response itself and bias |ε| toward zero).
+   2. `wrong_sign_categories` — measured backwards, not weakly; usually the
+      legacy ramp confound at full strength. Only exogenous price variation
+      (`pricing.explore`) fixes it.
+   3. `holdout_comparison` — log marginal predictive on a window the fit
+      never saw, bracketed by `oracle` and `uniform`. Read
+      `information_available_per_row` (oracle − uniform) FIRST: a method gap
+      that is a large share of a tiny number is still tiny. A candidate below
+      `uniform` is worse than knowing nothing and is named as such.
 
-   **READ IT IN THIS ORDER, EVERY RUN.** These two fields decide whether any of
-   the prior machinery earned its place on your extract, and neither can be
-   guessed from the fixture.
-
-   1. **`information_available_per_row`** (= oracle - uniform). The entire
-      value of knowing this extract's elasticity on that window. **Under
-      ~0.01 nats/row the window cannot settle the method question at all** --
-      a method gap that is a large share of a tiny number is still tiny, so
-      decide on which prior is more honest about what it does not know and
-      compare their WIDTHS instead of their scores. The fixture measures
-      0.0013, which is why nothing there is evidence for either method.
-   2. **`worse_than_a_flat_prior`.** A prior listed here scored BELOW the
-      uniform: on that window it is worse than knowing nothing, which is a
-      stronger finding than any pairwise gap. On the full-span fixture
-      `bracket` lands here and `profile_density` does not -- a confident wrong
-      answer costing more than an honest wide one, in nats.
-   3. `ranking` and `verdict` last, and only once 1 and 2 are read.
-
-   **ROWS ARE ENTRY ROWS** (owner, 2026-08-25), one per episode, which is what
-   PRD 9.5 specified from the start. Scoring every stocked hour buys price
-   variation and the within-episode SURVIVORSHIP confound together: a row at a
-   deep discount exists precisely because earlier hours did not sell, so
-   conditional on a price-neutral `mu_ref` the deeper price reads as LOWER
-   demand. `hour_of_day` is already a `mu_ref` feature and the controlled arm
-   profiles hour effects out on top, so the evening-lift half is handled twice
-   — and the sign STILL came out positive on 4 of 5 fixture categories against
-   2 of 5 on entry rows, because selection on the unobserved demand shock is
-   not something an hour control can reach. **`rows_comparison` reports the
-   sign outcome for BOTH sets every run** — read it before changing
-   `posterior.prior.rows`.
-
-   **TWO CONFOUNDS, TWO CONTROLS, NOT THE SAME PROBLEM.** `rows` handles the
-   WITHIN-EPISODE survivorship confound (only `entry` avoids it).
-   `hour_control` handles the COMMON TIME SHOCK: `hour_of_day` removes the
-   average evening lift and leaves a Tuesday storm in the residual, still
-   correlated with how far the ramp has run; **`date_hour`** compares the same
-   clock hour of the SAME DAY across sku × fc, absorbing everything shared by
-   that moment — which is what PRD 9.5's "same-hour cross-episode" always
-   meant. Neither substitutes for the other. `design_comparison` scores all
-   four combinations every run:
-
-       rows + control                 wrong-signed  span   ident  rows/cell
-       entry+hour_of_day                    2/5     0.18   0.000       90.0
-       entry+date_hour                      2/5     0.18   0.000        1.0
-       all_stocked_hours+hour_of_day        4/5    11.42   0.246      211.0
-       all_stocked_hours+date_hour          2/5    11.42   0.172        2.0
-
-   Fewer wrong-signed first, then `median_span`. **Then check
-   `median_rows_per_time_cell`**: below `min_rows_per_time_cell` the control
-   is not being applied at all, and just above it the multipliers are fitted
-   from so few rows that they absorb the price response and bias |ε| toward
-   zero. The fixture cannot support day-level cells (1–2 rows); production has
-   far more sku × fc per hour and should, which is why the table is computed
-   on the extract rather than decided here.
-
-   **READ `wrong_sign_categories` AND `std_basis` FIRST.** Two failures the
-   method could not see until production data hit it, both now caught:
-
-   * A likelihood peaking OUTSIDE `search_bounds` was clipped to the nearest
-     bound and reported as measured — a category came back as a confident
-     `-0.05` on 125,749 rows. The peak is now searched past the bound; at or
-     above zero (demand rising with price) the category's own density is
-     discarded, it takes the pooled one, and it is listed. The cause is the
-     ramp: deep discounts land on stock that is not selling. A rejected
-     category is also excluded from the POOL, or the fallback inherits the
-     confound; with none left the pool IS the uniform, and `pooled_basis`
-     says so.
-   * `std` could be **zero**. A span of 9,402 log-likelihood units across a
-     159-point grid is 59 nats per step, so the density collapses onto one
-     point. A zero-width prior is a frozen posterior — `bounded_step` cannot
-     move it. The std is now the widest of three MEASURED quantities: the
-     density's width, the grid resolution, and `fold_spread` (how far the
-     estimate moves across disjoint slices of the train window).
-     `std_basis` names the binding one. `fold_spread` binding means the
-     estimate is unstable across the window and that instability IS the
-     honest width.
-
-   **THE DOCUMENTS REFRESH THEMSELVES FROM THE ARTIFACTS.** Numbers in the
-   docs are anchored — `<!--f:rho.implied_deff|dec3-->3.347<!--/f-->` renders
-   as `3.347` and nothing else — and `scripts/run_bootstrap.sh` calls
-   `tools.refresh_figures --write --dataset "$INPUT"` as step 10b, so a
-   completed run leaves the docs saying what its own artifacts say. Check
-   without writing at any time:
-
-       python3 -m tools.refresh_figures        # non-zero if anything is stale
-
-   Two rules when adding a figure to a document.
-
-   * **Anchor CURRENT-STATE measurements only.** A figure describing what a
-     PAST decision cost — "deleting restocked episodes took 18.1pp of the
-     extract's COGS" — is historical. Refreshing it against today's artifacts
-     replaces a fact about a decision with an unrelated number and destroys
-     the argument it supports. Leave those as prose with their own date.
-   * **Never anchor a config value.** `dispersion.rho` and
-     `mean_forced_hours_per_episode` are pasted by hand on purpose, and
-     `pipeline.status` refuses to start when they drift from the artifacts.
-     Auto-writing them would silence a gate that is meant to stop a human.
-
-   `--write` REFUSES a dataset whose name says it is synthetic. Fixture
-   numbers are plausible and silent — they read as measurements — and
-   production figures in `design.md` were once overwritten with them, with
-   nothing about the result looking wrong.
+   **Two confounds, two config knobs** (`posterior.prior`): `rows: entry`
+   avoids the within-episode survivorship confound (a deep-discount row
+   exists because earlier hours did not sell — no hour control reaches
+   selection on the unobserved demand shock); `hour_control: date_hour`
+   absorbs the common time shock by comparing the same clock hour of the
+   same day across sku × fc. Neither substitutes for the other.
 
    **TUNE `own_information_saturation` AGAINST PRODUCTION, ONCE.** It is the
    log-likelihood span at which a category stops borrowing from the pooled
    density and stands on its own data; the shipped 2.0 is the chi-square 95%
-   cutoff and is a principled default, not a measured one. Read
-   `likelihood_span` across categories in `prior.json`: if nearly every
-   category clears it, the pooling never fires and thin cells are trusting
-   their own noise -- raise it. If nearly none does, every category is being
-   dragged to the pool -- lower it. `own_information_weight` per category says
-   which way it went.
+   cutoff. Read `likelihood_span` across categories: nearly all clear it →
+   pooling never fires, thin cells trust their own noise — raise it; nearly
+   none → everything drags to the pool — lower it.
 
-   **`reference_r` (bracket method only) is DERIVED, not pinned, and fitted PER CATEGORY** — `r` on
-   each category's own entry rows at the fallback elasticity, so it cannot go
-   stale and there is no constant to re-paste. Computed, not read from
-   `r_lookup.json`, so a fresh clone runs. **Do not borrow the artifact's
-   global:** it is fitted on the CALIBRATION window, and this likelihood sums
-   over TRAIN entry rows.
+   The superseded designs — the bracket procedure, its fallback constants,
+   the reference-dispersion saga, all-hours rows, the pooled hour control —
+   live in **docs/learnings.md**, with what each one taught.
 
-   **Pooled was the wrong unit.** Dispersion belongs to the category, and the
-   spread swamps the ±2× band the approximation was justified over — fixture
-   entry rows against a pooled 8.04: SEAFOOD 1.60, VEGETABLE 5.39, FRUIT 14.12,
-   MEAT 28.71, SIDE DISH at the 50.0 search bound. Going per-category moved
-   FRUIT's midpoint 0.212, half the `std_floor`; the other four fixture
-   brackets are pinned at a search bound and cannot move, because the fixture
-   builds `corr(discount, hour) ≈ 0.97` by design and is a weak testbed here.
-   Boundary fits are clamped at `dispersion.clamp_percentile` — the same key
-   §9.4 uses, so the two cannot drift. Read `reference_r_by_category` and the
-   per-category `reference_r_scope` (`category` vs `pooled`), not the pooled
-   `reference_r` alone.
 
-   **Where it matters most.** The reference being right matters most exactly
-   where `identifying_variation_share` is already low, so read the two
-   together. Two figures previously in this repo were measured on bases that no
-   longer apply: "~0.099 for ±2×" was anchored at the wrong `r`, and the 0.049
-   / 0.592 pair that replaced it was measured against a pooled reference the
-   step no longer uses.
    **AN `r` AT THE SEARCH CEILING HAS TWO CAUSES AND THEY WANT OPPOSITE
    TREATMENT.** A thin group whose MLE wandered there wants clamping at
    `dispersion.clamp_percentile`. A group that is genuinely steadier than
@@ -569,10 +452,11 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
    unrepresentable. (Widening applies only to the LOWER bound, per the −1.5
    defect described in §9.5.)
 
-3. **Do not infer `fallback_mean` from bracket estimates that hit a search
-   bound.** A boundary solution is not an estimate (§9.5). If the bracket is
-   rejected, use the configured fallback and let production exploration learn
-   elasticity — that is the system's entire premise.
+3. **A boundary solution is not an estimate** (§9.5). An estimate pinned at a
+   search bound means the likelihood ran off the support, not that the truth
+   sits there — the wrong-sign check searches PAST the bounds for exactly
+   this reason. Let production exploration learn elasticity; that is the
+   system's entire premise.
 
 4. **The gate window is whatever `baseline_model.calibration_gate_window`
    says** — currently `test`; the run records it as `fidelity.gate_window`,
@@ -654,7 +538,7 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
     below-cost legacy hour needs no filter: the DP cannot express that price,
     so it refuses and says so. Dropping the episode instead deleted the good
     hours with the bad one, and deleted the widest price variation the
-    extract has from the elasticity bracket. Ask what actually happens if the
+    extract has from the elasticity prior. Ask what actually happens if the
     row stays — a loud refusal counted in a report is usually better than a
     silent removal upstream.
 14. **An INTEGRITY defect and an ECONOMIC condition are not the same thing.**
@@ -753,7 +637,7 @@ backtest fidelity gate FAIL
 │  → train_baseline --fit-calibration (factors ≥ 1 expected)
 │  → set apply_level_calibration: true, re-run backtest (NO retrain)
 ├─ anchor ≈ 1 but slope degrades with gap
-│  → re-run estimate_prior; if bracket rejected, fallback prior stands
+│  → re-run estimate_prior; a pooled/uniform prior is a valid outcome
 └─ still failing after both remedies → STOP (§8.1): the MVP does not
    proceed to a learning pilot; escalate to the PRD owner
 ```

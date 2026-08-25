@@ -11,25 +11,17 @@ value supersedes the phase-0 proxy (which used category-hour means). It
 measures correlation structure, not price response, so the policy confound
 does not affect it.
 
-THIS STEP NOW RUNS AFTER `bootstrap.estimate_prior`, and scales mu_ref to the
-actual price using each category's OWN prior mean. It used to run before, at
-`prior.fallback_mean` -- the constant -1.0 whatever the prior said -- which
-was harmless only while the bracket was rejected for all 16 categories and the
-fallback WAS the prior. With brackets accepted per category (-1.6 to -2.3
-measured), residuals formed at -1.0 measure correlation against a demand curve
-nothing uses, and this direction is strong: -1.0 -> -1.5 moved rho
-0.3103 -> 0.4236 and deff 3.347 -> 4.204, 26% of the learning rate.
+RUNS AFTER `bootstrap.estimate_prior`, and scales mu_ref to the actual price
+using each category's OWN prior mean. Fitting at a constant working
+elasticity measures correlation against a demand curve nothing uses, and the
+direction is strong: moving the working elasticity -1.0 -> -1.5 moved rho
+0.3103 -> 0.4236 and deff 3.347 -> 4.204, 26% of the learning rate. There is
+no cycle in the other direction: the prior is a censored POISSON profile with
+no dispersion parameter, so it needs nothing from this module.
 
-The two steps are genuinely circular -- the bracket's likelihood needs r. The
-loop is broken on the OTHER side now, because it is far weaker there:
-`estimate_prior` drops its censored entry rows (one-hour episodes) so the
-dispersion-sensitive `logsf` term never fires, leaving r to act only through
-the weighting term `r/(r+mu)` -- and it fits its own reference PER CATEGORY on
-its own train entry rows, so that term is not fed a pooled average. It does not
-read this module's `r_lookup.json`, which describes the CALIBRATION window.
-
-Run standalone with no prior artifact, this still falls back to the constant
-and says so in `working_elasticity_basis`.
+Run standalone with no prior artifact, this falls back to the -1.0 constant
+and says so in `working_elasticity_basis`. History of the orderings tried:
+docs/learnings.md.
 
 Usage:
     python3 -m bootstrap.fit_dispersion --input data/prepared.parquet
@@ -89,7 +81,9 @@ def _working_elasticity(cfg):
     the system actually uses.
     """
     pc = cfg["posterior"]["prior"]
-    fallback = float(pc["fallback_mean"])
+    # the standalone fallback: a working constant for a first run with no
+    # prior artifact on disk. NOT a prior -- the prior has no constant in it.
+    fallback = -1.0
     path = pc["path"]
     if not os.path.exists(path):
         return {}, fallback
@@ -109,20 +103,9 @@ def fit_dispersion(d, cfg):
         raise RuntimeError("calibration window contains no rows")
 
     model = BaselineModel(cfg)
-    # THE WORKING ELASTICITY, per category, from the prior that is actually in
-    # force. This used to be `prior.fallback_mean` -- the constant -1.0 --
-    # regardless of what the prior said, which was harmless only while the
-    # bracket was rejected for every category and the fallback WAS the prior.
-    # Once brackets are accepted per category, residuals formed at -1.0 measure
-    # correlation against a demand curve nothing uses, and this direction is
-    # strong: -1.0 -> -1.5 moved rho 0.3103 -> 0.4236 and deff 3.347 -> 4.204,
-    # 26% of the learning rate.
-    #
-    # The old ordering existed because the two steps are circular -- the prior
-    # fit needs r. That is broken on the OTHER side now: `estimate_prior` drops
-    # its censored entry rows, so the dispersion-sensitive term never fires, and
-    # fits its own per-category reference r on its own train entry rows. So the
-    # prior runs FIRST and this reads it.
+    # THE WORKING ELASTICITY, per category, from the prior actually in force
+    # (see module docstring: residuals formed at a constant measure the wrong
+    # curve, and the cost is ~26% of the learning rate)
     eps_by_cat, eps0 = _working_elasticity(cfg)
     mu_ref = model.predict_mu_ref(calib)
     ratio = (1 - calib.total_discount.to_numpy()) / (1 - calib.d_ref.to_numpy())
@@ -217,7 +200,7 @@ def fit_dispersion(d, cfg):
                 "working_elasticity": eps0,
                 "working_elasticity_basis": (
                     "per-category prior means" if eps_by_cat
-                    else "prior.fallback_mean (no prior artifact yet)"),
+                    else "constant -1.0 (no prior artifact yet)"),
                 "working_elasticity_by_category": {
                     k: round(v, 4) for k, v in sorted(eps_by_cat.items())}}
 

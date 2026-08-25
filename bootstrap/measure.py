@@ -396,9 +396,9 @@ def gates(res, cfg):
                        if m1["share_non_explorable"]
                        > g["max_share_non_explorable"] else "PASS",
         },
-        "gate_2_bracket_estimable": {
+        "gate_2_prior_estimable": {
             "share_cells_std_below_0.5pp": m2["share_cells_std_below_0.5pp"],
-            "verdict": "REVIEW — set posterior.prior.source=fallback"
+            "verdict": "REVIEW — expect a pooled/uniform prior (9.5)"
                        if m2["share_cells_std_below_0.5pp"]
                        > g["max_share_cells_low_variation"] else "PASS",
         },

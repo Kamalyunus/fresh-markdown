@@ -403,10 +403,12 @@ def test_the_density_prior_has_no_constant_in_it(workspace):
     assert abs(u["mean"] - (lo + hi) / 2) < 1e-6
     assert abs(u["std"] - (hi - lo) / np.sqrt(12)) < 1e-3
 
+    # the config carries NO prior constant at all any more -- the strongest
+    # form of "no fallback": there is nothing to land on
+    for gone in ("fallback_mean", "fallback_std", "std_floor", "reference_r"):
+        assert gone not in pc, f"{gone} is back in config -- the constant " \
+            "this method removed has been reintroduced"
     for cat, v in prior["per_category"].items():
-        assert v["mean"] != pc["fallback_mean"] or v["std"] != pc["fallback_std"], \
-            f"{cat} landed exactly on the fallback constant, which this " \
-            "method does not use -- check it is not being reintroduced"
         # a category with NO price variation has a flat likelihood, so its OWN
         # density must be the uniform, to the grid's resolution
         if v["log_ratio_sd"] < 1e-9:
