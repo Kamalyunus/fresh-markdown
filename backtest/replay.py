@@ -402,7 +402,7 @@ def _replay_one(e, cfg):
     # so model bias hits both identically (like-for-like)
     q = float(e["q0"])
     adj = e["adjustment"]
-    lg_disc_cost = lg_sold_total = lg_disc_weighted = 0.0
+    lg_disc_cost = lg_sold_total = lg_disc_weighted = lg_clip = 0.0
     for t in range(e["hours"]):
         q_int = int(round(q))
         # an empty shelf is not the end if stock is still to arrive
@@ -421,17 +421,23 @@ def _replay_one(e, cfg):
         else:
             rec(t, legacy_q=0, legacy_discount=None, legacy_price=None,
                 legacy_mu=None, legacy_units=0.0)
+        # a negative adjustment can only take what the SIMULATED shelf still
+        # holds -- units this arm already sold cannot also shrink. The clipped
+        # remainder is shrink that never happened in this world, and charging
+        # it anyway broke the supply identity by exactly the clipped amount.
+        lg_clip += max(0.0, -(q + adj[t]))
         q = max(q + adj[t], 0.0)
         if q <= 0 and not adj[t + 1:].any():
             break
     # captured before the DP loop reuses `q`
     lg_q_final = q
-    lg_scrap = cost * (max(q, 0.0) + e["shrink"])
+    lg_shrink = max(e["shrink"] - lg_clip, 0.0)
+    lg_scrap = cost * (max(q, 0.0) + lg_shrink)
 
     # ---- DP path, deterministic expected transitions
     q = float(e["q0"])
     anchor = None
-    dp_disc_cost, dp_sold_total, dp_disc_weighted = 0.0, 0.0, 0.0
+    dp_disc_cost, dp_sold_total, dp_disc_weighted, dp_clip = 0.0, 0.0, 0.0, 0.0
     for t in range(e["hours"]):
         q_int = int(round(q))
         # empty shelf ends the episode only if nothing more is coming; the DP
@@ -439,6 +445,7 @@ def _replay_one(e, cfg):
         if q_int <= 0:
             rec(t, dp_q=0, dp_discount=None, dp_price=None, dp_mu=None,
                 dp_units=0.0)
+            dp_clip += max(0.0, -(q + adj[t]))
             q = max(q + adj[t], 0.0)
             if q <= 0 and not adj[t + 1:].any():
                 break
@@ -466,12 +473,15 @@ def _replay_one(e, cfg):
             dp_mu=float(mu), dp_units=float(sold),
             dp_is_entry=bool(t == 0),
             dp_feasible_tiers=len(res.tiers))
+        dp_clip += max(0.0, -(q - sold + adj[t]))
         q = max(q - sold + adj[t], 0.0)
-    dp_scrap = cost * (max(q, 0.0) + e["shrink"])
+    dp_shrink = max(e["shrink"] - dp_clip, 0.0)
+    dp_scrap = cost * (max(q, 0.0) + dp_shrink)
 
     # units emitted as their own fields, never derived downstream from
-    # scrap_cost/cost; scrap = leftover + shrink, and exogenous shrink is
-    # identical across arms so only the leftover differs
+    # scrap_cost/cost; scrap = leftover + APPLIED shrink. Shrink is exogenous
+    # but each simulated arm absorbs only what its own shelf still held --
+    # units it already sold cannot also shrink
     a_left = max(e["end_inv"], 0) if e["outcome_known"] else 0
     lg_left, dp_left = max(lg_q_final, 0.0), max(q, 0.0)
     row = {
@@ -482,19 +492,21 @@ def _replay_one(e, cfg):
                                               if e["outcome_known"] else 0)),
         "legacy_model_sold_units": float(lg_sold_total),
         "legacy_model_leftover_units": float(lg_left),
-        "legacy_model_scrap_units": float(lg_left + e["shrink"]),
+        "legacy_model_scrap_units": float(lg_left + lg_shrink),
+        "legacy_model_shrink_applied": float(lg_shrink),
         "dp_sold_units": float(dp_sold_total),
         "dp_leftover_units": float(dp_left),
-        "dp_scrap_units": float(dp_left + e["shrink"]),
+        "dp_scrap_units": float(dp_left + dp_shrink),
+        "dp_shrink_applied": float(dp_shrink),
         # per-arm identity: supply = sold + leftover + shrink -- holds by
         # construction, so a nonzero residual is a real defect, not rounding
         "actual_supply_residual": float(
             e["supply"] - a_sold.sum() - a_left
             - (e["shrink"] if e["outcome_known"] else 0)),
         "legacy_model_supply_residual": float(
-            e["supply"] - lg_sold_total - lg_left - e["shrink"]),
+            e["supply"] - lg_sold_total - lg_left - lg_shrink),
         "dp_supply_residual": float(
-            e["supply"] - dp_sold_total - dp_left - e["shrink"]),
+            e["supply"] - dp_sold_total - dp_left - dp_shrink),
         "actual_il": a_disc_cost + a_scrap,
         "actual_discount_cost": a_disc_cost, "actual_scrap_cost": a_scrap,
         "actual_denom": a_denom,
@@ -582,12 +594,13 @@ def _dp_arm(e, cfg, eps_belief, eps_world=None):
     q = float(e["q0"])
     adj = e["adjustment"]
     anchor = None
-    disc_cost = sold_total = disc_weighted = 0.0
+    disc_cost = sold_total = disc_weighted = clip = 0.0
     path = []
     for t in range(e["hours"]):
         q_int = int(round(q))
         if q_int <= 0:
             path.append(None)
+            clip += max(0.0, -(q + adj[t]))
             q = max(q + adj[t], 0.0)
             if q <= 0 and not adj[t + 1:].any():
                 break
@@ -607,8 +620,10 @@ def _dp_arm(e, cfg, eps_belief, eps_world=None):
         disc_weighted += d_t * sold
         sold_total += sold
         path.append(d_t)
+        clip += max(0.0, -(q - sold + adj[t]))
         q = max(q - sold + adj[t], 0.0)
-    il = disc_cost + cost * (max(q, 0.0) + e["shrink"])
+    # applied shrink only: units this arm already sold cannot also shrink
+    il = disc_cost + cost * (max(q, 0.0) + max(e["shrink"] - clip, 0.0))
     return il, (disc_weighted / sold_total if sold_total else 0.0), tuple(path)
 
 

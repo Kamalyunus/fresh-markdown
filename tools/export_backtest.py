@@ -223,8 +223,9 @@ def _summary(ep):
         "THE physical policy comparison, the units counterpart of "
         "dp_minus_legacy_il")
     add("shrink_units", round(float(k.shrink.sum()), 1),
-        "EXOGENOUS and identical across arms -- no policy can price away "
-        "stock that went missing, so only the leftover differs")
+        "EXOGENOUS, observed-world total. Each simulated arm absorbs only "
+        "what its own shelf still held when the shrink landed "
+        "(*_shrink_applied) -- units an arm already sold cannot also shrink")
     return pd.DataFrame(rows)
 
 

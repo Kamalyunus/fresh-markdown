@@ -817,3 +817,36 @@ def test_step_sensitivity_prices_the_cap_on_real_episodes(cfg):
     # the load-bearing claim: far below the bar, a bounded step is free
     assert out["deeper_belief"]["share_prices_changed"] == 0.0
     assert out["deeper_belief"]["il_delta"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_simulated_arms_absorb_only_the_shrink_their_shelf_held(cfg):
+    """A negative adjustment can only take what the SIMULATED shelf still
+    holds -- units an arm already sold cannot also shrink. Charging the full
+    observed shrink anyway drove the supply residual negative by exactly the
+    clipped amount (the workbook's 'episode and hourly sheets disagree')."""
+    from backtest.replay import _episode_frame, _replay_one
+
+    g = pd.DataFrame({
+        "episode_id": ["e"] * 3,
+        "date": ["2026-05-01"] * 3, "hour_of_day": [9, 10, 11],
+        "total_discount": [0.30] * 3,
+        "original_price": [10_000.0] * 3, "cost": [4000.0] * 3,
+        "d_ref": [0.25] * 3,
+        # observed world sells nothing, then 2 units shrink mid-window
+        "starting_inventory": [3, 3, 1], "units_sold": [0, 0, 0],
+        "ending_inventory": [3, 1, 1],
+        "mu_ref_hat": [2.5] * 3, "r": [3.0] * 3, "eps": [-1.5] * 3,
+    })
+    e = _episode_frame(g)
+    assert e["shrink"] == 2
+    row, _ = _replay_one(e, cfg)
+    # the identity holds for ALL THREE arms, exactly
+    for arm in ("actual", "legacy_model", "dp"):
+        assert row[f"{arm}_supply_residual"] == pytest.approx(0.0, abs=1e-9)
+    # the sim arms sold most of the stock before the shrink hour, so they
+    # absorb strictly less than the observed 2 units -- and are not charged
+    # scrap for units they sold
+    for arm in ("legacy_model", "dp"):
+        assert 0.0 <= row[f"{arm}_shrink_applied"] < 2.0
+        assert row[f"{arm}_scrap_units"] == pytest.approx(
+            row[f"{arm}_leftover_units"] + row[f"{arm}_shrink_applied"])
