@@ -161,17 +161,22 @@ information  ≈  (dμ ⁄ dε)² ⁄ Var[D]  ≈  (μL)² ⁄ μ  =  μ · L²<
   </p>
 </section>
 
-<div class="math">τ₀      :  bisect until  implied daily spend  =  1% of daily IL
-τ_next  =  τ × clip( budget ⁄ realised spend, 0.5, 2.0 )      recomputed daily
-budget  =  1% of IL × clip( posterior std ⁄ 0.40, 0.25, 1 )   shrinks as belief tightens</div>
+<div class="math">daily IL =  trailing 7-day mean of the IL of episodes that CLOSED each day
+            — settled at midnight, before any of today's episodes open
+budget   =  1% of that × clip( posterior std ⁄ 0.40, 0.25, 1 )  shrinks as belief tightens
+τ₀       :  bisect until  implied daily spend  =  the budget     (launch constant)
+τ_next   =  τ × clip( budget ⁄ realised spend, 0.5, 1.25 )       recomputed daily</div>
 
 <section class="prose">
   <p style="margin-top:16px">
     The <strong>₩447.78</strong> quoted today was derived on the replay population — a sample
     of prepared history, not the launch book. It is a starting point, not a production
     constant. It <strong>corrects itself daily</strong> against realised spend, and the clip
-    is the safety: at most a halving or doubling a day, so no single anomalous day runs away
-    with the budget.
+    is asymmetric on purpose: τ can <strong>halve</strong> in a day, because cutting is the
+    safety direction and a mis-sized launch must be walked inside the stop condition in days
+    — but it can rise at most <strong>25%</strong>, because raising τ is never urgent and the
+    budget base is already smooth. An episode's IL lands on the day it <em>closes</em>, so
+    the budget is a share of a settled number, never a forecast of a day still in motion.
   </p>
   <div class="callout">
     <h3>The launch value has to be right on day one — the controller cannot rescue it</h3>
@@ -241,8 +246,8 @@ budget  =  1% of IL × clip( posterior std ⁄ 0.40, 0.25, 1 )   shrinks as beli
   <h3 style="margin-top:34px">So how long does it take?</h3>
   <p>
     It is tempting to count steps to the point where the agent would start discounting — the
-    belief starts at 1.0, the switch sits somewhere above 2, the cap is 0.15 a step, so ten
-    updates. <strong>The arithmetic is right and the question is wrong.</strong> Where true ε
+    cell's launch belief sits below the switch, the switch sits somewhere above 2, the cap
+    is 0.15 a step, so divide and count. <strong>The arithmetic is right and the question is wrong.</strong> Where true ε
     sits is exactly what we do not know; that is the premise of the project. It may be high,
     in which case the agent will start deepening. It may be low, in which case the agent holds
     price and <em>that is the correct answer</em>, not a failure to converge. Planning a

@@ -591,7 +591,7 @@
     <caption>Everything the agent stands on</caption>
     <thead><tr><th>Artifact</th><th>What it holds</th><th>State</th></tr></thead>
     <tbody>
-      <tr><td>split_manifest.json</td><td>the analysis population — 12 counted waterfall rows</td><td class="good">frozen</td></tr>
+      <tr><td>split_manifest.json</td><td>the analysis population — 13 counted waterfall rows</td><td class="good">frozen</td></tr>
       <tr><td>baseline_model.txt</td><td>μ_ref — units next hour at the reference discount</td><td class="good">frozen</td></tr>
       <tr><td>calibration.json</td><td>one level factor per subcategory</td><td class="good">frozen</td></tr>
       <tr><td>r_lookup.json</td><td>demand dispersion, by subcategory</td><td class="good">frozen</td></tr>
@@ -639,7 +639,7 @@
   <div class="step-head"><h2>The population every other number is measured on</h2></div>
   <p class="lede">
     Before anything is modelled, the raw feed is reduced to a population we are willing to
-    defend, through <strong>twelve counted waterfall rows</strong>. Every stage is counted
+    defend, through <strong>thirteen counted waterfall rows</strong>. Every stage is counted
     and written to the manifest — so any figure anywhere in this system traces back to the
     rows behind it.
   </p>
@@ -655,28 +655,31 @@
 <section class="prose">
   <p style="margin-top:24px">
     Every stage is counted twice over: in <strong>rows and episodes</strong>, and in
-    <strong>money</strong> — unit cost times opening stock, once per episode. The two
+    <strong>money</strong> — unit cost times the episode's whole supply, opening stock
+    plus everything that arrived mid-window, once per episode. The two
     disagree, and the disagreement is what matters. A filter can remove one percent of
     the rows and fifteen percent of the exposure, and only the second number says
     whether what survives still looks like the business.
   </p>
 
   <p style="margin-top:16px">
-    The drops are all structural — duplicate hour rows, out-of-range discounts,
-    impossible quantities, null categories, zero base prices, sales exceeding
-    inventory, and an inventory chain that neither reconciles nor names why not.
+    The drops are all structural — duplicate hour rows, windows split by holes in
+    the feed, the exclusion window, out-of-range discounts, negative quantities,
+    an inventory chain that contradicts itself between hours, null categories, and
+    zero base prices. An hour that sells more than it opened with is <em>not</em> on
+    that list: it is a restock — real stock arrived — and it is flagged, not dropped.
     Then a labelling pass marks what the <em>planner</em> cannot handle without
     removing it: a missing cost (a zero cost is missing, not free), a cost at or above
     the full price, an untrustworthy window counter, a window longer than 120 hours,
-    and a mid-window restock. Nothing is dropped silently, and nothing is dropped
-    for being awkward to price.
+    and a restock in the final hour. Nothing is dropped silently, and nothing is
+    dropped for being awkward to price.
   </p>
 </section>
 
 <ul class="chips" style="margin-top:26px">
   <li><span class="k">Hourly rows</span><span class="v">2.07M</span></li>
   <li><span class="k">Episodes</span><span class="v">334k</span></li>
-  <li><span class="k">Waterfall rows</span><span class="v">12</span></li>
+  <li><span class="k">Waterfall rows</span><span class="v">13</span></li>
   <li><span class="k">Window cap</span><span class="v">120 h</span></li>
 </ul>
 
@@ -700,9 +703,9 @@
   <h3 style="margin-top:34px">What gets removed, and what only gets labelled</h3>
   <p>
     A filter <strong>drops</strong> an episode only when its rows cannot be believed —
-    impossible quantities, an inventory chain that does not reconcile, two conflicting
-    states for the same hour — or when it falls outside the period the study covers.
-    Everything else is <strong>flagged and kept</strong>.
+    negative quantities, an inventory chain whose hours contradict each other, two
+    conflicting states for the same hour — or when it falls outside the period the
+    study covers. Everything else is <strong>flagged and kept</strong>.
   </p>
   <p>
     The distinction matters because the two populations answer different questions. The
@@ -713,13 +716,16 @@
     flag instead.
   </p>
   <p>
-    A restocked window is the clearest case. It mixes two inventory pools, so the planner's
-    state transition — one pool draining hour by hour — no longer describes it. But the
-    hours themselves are honest: each one's sales were censored against the stock actually
-    on the shelf at the time. So it trains the demand model and sits out the backtest.
+    A restocked window is the clearest case. The hours themselves are honest — each one's
+    sales were censored against the stock actually on the shelf at the time — so it trains
+    the demand model, is replayed in the backtest (arrivals applied as an exogenous
+    adjustment at the hour they landed), and its scrap and discount cost count toward
+    Inventory Loss like any other episode's. The one restock that still gates is a restock
+    in the <em>final</em> hour: it lands after the last decision, so no close state can be
+    read for the episode at all.
   </p>
   <p>
-    <strong>And it is not a limitation of the agent.</strong> In production a restock is
+    <strong>Restocks are not a limitation of the agent.</strong> In production a restock is
     trivial — inventory is part of the state, the DP re-solves from scratch every hour, and
     a shelf that went from 2 units to 6 is simply a different starting position at the next
     decision. Nothing carries over that a restock would invalidate.
@@ -780,8 +786,9 @@
     head SKU and buys a fraction of the measurable evidence.
   </p>
   <p>
-    The curve below is cumulative COGS at risk — unit cost times opening stock, counted once
-    per episode — against SKUs ordered by it. The dashed diagonal is what a perfectly even
+    The curve below is cumulative COGS at risk — unit cost times the episode's whole
+    supply, opening stock plus mid-window arrivals, counted once per episode — against
+    SKUs ordered by it. The dashed diagonal is what a perfectly even
     business would look like. The gap between them is the whole point.
   </p>
 </section>
@@ -1399,6 +1406,7 @@ f  =  f_cell ^ w  ×  f_parent ^ (1 − w)    blended in log space, since factor
       <tr><td>thin cell (&lt; 200 rows)</td><td>fall back to the parent outright — no blending</td><td>an inherited estimate from real data beats an invented compromise</td></tr>
       <tr><td>fitted r comes back <em>high</em></td><td>clamped at the 90th percentile of converged values</td><td>the optimistic direction: we refuse to be talked into near-Poisson by a thin cell</td></tr>
       <tr><td>fitted r comes back <em>low</em></td><td>kept exactly as fitted, uncapped</td><td>the safe direction: a lumpy estimate only ever makes the agent more careful</td></tr>
+      <tr><td>a group is <em>steadier than Poisson</em></td><td>exempt from the clamp, and listed by name with its measured Pearson dispersion</td><td>its variance sits <em>below</em> the mean, which no negative binomial can express at any r — its fit rides the search ceiling by necessity, not because the data is near-Poisson, and clamping it would hide the misfit instead of reporting it</td></tr>
     </tbody>
   </table></div>
   <figcaption>
@@ -2449,17 +2457,22 @@ information  ≈  (dμ ⁄ dε)² ⁄ Var[D]  ≈  (μL)² ⁄ μ  =  μ · L²<
   </p>
 </section>
 
-<div class="math">τ₀      :  bisect until  implied daily spend  =  1% of daily IL
-τ_next  =  τ × clip( budget ⁄ realised spend, 0.5, 2.0 )      recomputed daily
-budget  =  1% of IL × clip( posterior std ⁄ 0.40, 0.25, 1 )   shrinks as belief tightens</div>
+<div class="math">daily IL =  trailing 7-day mean of the IL of episodes that CLOSED each day
+            — settled at midnight, before any of today's episodes open
+budget   =  1% of that × clip( posterior std ⁄ 0.40, 0.25, 1 )  shrinks as belief tightens
+τ₀       :  bisect until  implied daily spend  =  the budget     (launch constant)
+τ_next   =  τ × clip( budget ⁄ realised spend, 0.5, 1.25 )       recomputed daily</div>
 
 <section class="prose">
   <p style="margin-top:16px">
     The <strong>₩447.78</strong> quoted today was derived on the replay population — a sample
     of prepared history, not the launch book. It is a starting point, not a production
     constant. It <strong>corrects itself daily</strong> against realised spend, and the clip
-    is the safety: at most a halving or doubling a day, so no single anomalous day runs away
-    with the budget.
+    is asymmetric on purpose: τ can <strong>halve</strong> in a day, because cutting is the
+    safety direction and a mis-sized launch must be walked inside the stop condition in days
+    — but it can rise at most <strong>25%</strong>, because raising τ is never urgent and the
+    budget base is already smooth. An episode's IL lands on the day it <em>closes</em>, so
+    the budget is a share of a settled number, never a forecast of a day still in motion.
   </p>
   <div class="callout">
     <h3>The launch value has to be right on day one — the controller cannot rescue it</h3>
@@ -2529,8 +2542,8 @@ budget  =  1% of IL × clip( posterior std ⁄ 0.40, 0.25, 1 )   shrinks as beli
   <h3 style="margin-top:34px">So how long does it take?</h3>
   <p>
     It is tempting to count steps to the point where the agent would start discounting — the
-    belief starts at 1.0, the switch sits somewhere above 2, the cap is 0.15 a step, so ten
-    updates. <strong>The arithmetic is right and the question is wrong.</strong> Where true ε
+    cell's launch belief sits below the switch, the switch sits somewhere above 2, the cap
+    is 0.15 a step, so divide and count. <strong>The arithmetic is right and the question is wrong.</strong> Where true ε
     sits is exactly what we do not know; that is the premise of the project. It may be high,
     in which case the agent will start deepening. It may be low, in which case the agent holds
     price and <em>that is the correct answer</em>, not a failure to converge. Planning a

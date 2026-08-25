@@ -122,6 +122,7 @@
       <tr><td>thin cell (&lt; 200 rows)</td><td>fall back to the parent outright — no blending</td><td>an inherited estimate from real data beats an invented compromise</td></tr>
       <tr><td>fitted r comes back <em>high</em></td><td>clamped at the 90th percentile of converged values</td><td>the optimistic direction: we refuse to be talked into near-Poisson by a thin cell</td></tr>
       <tr><td>fitted r comes back <em>low</em></td><td>kept exactly as fitted, uncapped</td><td>the safe direction: a lumpy estimate only ever makes the agent more careful</td></tr>
+      <tr><td>a group is <em>steadier than Poisson</em></td><td>exempt from the clamp, and listed by name with its measured Pearson dispersion</td><td>its variance sits <em>below</em> the mean, which no negative binomial can express at any r — its fit rides the search ceiling by necessity, not because the data is near-Poisson, and clamping it would hide the misfit instead of reporting it</td></tr>
     </tbody>
   </table></div>
   <figcaption>
