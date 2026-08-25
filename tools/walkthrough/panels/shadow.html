@@ -155,7 +155,9 @@
 
   <h3 style="margin-top:34px">Does the pilot survive its own first day?</h3>
   <p>
-    Exploration is a budgeted line item: at most <strong>1% of markdown loss</strong>, spent
+    Exploration is a budgeted line item: at most <strong>1% of markdown loss</strong> —
+    measured as the trailing 7-day average of the IL of episodes that <em>closed</em> each
+    day, so the day's budget is fully knowable at midnight — spent
     on deliberately non-optimal prices in exchange for evidence about price response. The
     threshold τ controls how much gets bought, it corrects itself daily against realised
     spend, and above <strong>2× budget</strong> a stop condition suspends exploration
@@ -166,7 +168,9 @@
 <div class="callout">
   <h3>The correction reads only yesterday — so the launch value has to be right</h3>
   <p>
-    τ adjusts by comparing yesterday's spend to yesterday's budget. On day one there is no
+    τ adjusts by comparing yesterday's spend to yesterday's budget, clipped asymmetrically —
+    it can halve in a day (cutting is the safety direction) but rise at most 25% (raising is
+    never urgent). On day one there is no
     yesterday. So the first day is spent at whatever τ the system launched with, the stop
     condition is evaluated on <em>that</em> day's spend, and a τ that is badly too generous
     suspends exploration before the first correction exists. The learning loop would then

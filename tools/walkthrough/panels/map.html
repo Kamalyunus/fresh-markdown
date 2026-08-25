@@ -27,9 +27,9 @@
       <rect class="box" x="390" y="19" width="180" height="56" rx="6"/>
       <text class="t" x="480" y="42">Dispersion r</text><text class="s" x="480" y="60">how lumpy demand is</text>
       <rect class="box" x="585" y="19" width="180" height="56" rx="6"/>
-      <text class="t" x="675" y="42">Correlation ρ</text><text class="s" x="675" y="60">→ deff 3.347</text>
+      <text class="t" x="675" y="42">Correlation ρ</text><text class="s" x="675" y="60">→ deff divides evidence</text>
       <rect class="box" x="780" y="19" width="180" height="56" rx="6"/>
-      <text class="t" x="870" y="42">Elasticity prior</text><text class="s" x="870" y="60">−1.0 ± 0.6, the start</text>
+      <text class="t" x="870" y="42">Elasticity prior</text><text class="s" x="870" y="60">a density per category</text>
     </g>
 
     <path class="wire" d="M677 75 V 112"/><polygon class="head" points="677,120 672,110 682,110"/>
@@ -173,7 +173,7 @@
       <tr><td>calibration.json</td><td>one level factor per subcategory</td><td class="good">frozen</td></tr>
       <tr><td>r_lookup.json</td><td>demand dispersion, by subcategory</td><td class="good">frozen</td></tr>
       <tr><td>rho.json</td><td>within-episode correlation, and the evidence tax it implies</td><td class="good">frozen</td></tr>
-      <tr><td>prior.json</td><td>the cold-start price response — −1.0 ± 0.6</td><td class="good">frozen</td></tr>
+      <tr><td>prior.json</td><td>the cold-start price response — a measured density per category, with its own held-out evidence</td><td class="good">frozen</td></tr>
       <tr><td>posterior.json</td><td>what production has learned about price response</td><td class="loss">the only one that moves</td></tr>
       <tr><td>pricing/dp.py</td><td>nothing — it holds no state, and solves from scratch each hour</td><td class="good">code</td></tr>
     </tbody>

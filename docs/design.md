@@ -185,8 +185,8 @@ different hours and are truncated differently by the cost floor), never from
 adjacent hours within an episode. After that fix the boundary pinning
 stopped — the estimates moved into the interior, evidence the mechanism and
 not the data was the problem. They still do not survive the acceptance
-checks: on the corrected extract **no category brackets cleanly** (section
-9.3), so every cell launches on the wide fallback prior.
+checks: where a category's data cannot identify ε (section 9.3), its cell
+launches on the wide pooled or uniform density instead of a sharp guess.
 
 ### 3.3 How the design responds
 
@@ -196,7 +196,7 @@ checks: on the corrected extract **no category brackets cleanly** (section
    it absorbed in training is never queried. Price response enters through
    exactly one learned scalar per category:
    `mu(d) = mu_ref × ((1−d)/(1−d_ref))^ε`.
-2. **History contributes a bracketed prior, not an estimate** (section 5.6):
+2. **History contributes a density, not an estimate** (section 5.6):
    two deliberately-biased estimators with *opposite, known* bias directions
    bound the plausible range; the prior is the midpoint with a width-derived,
    floored standard deviation. If acceptance checks fail, the system falls
@@ -229,9 +229,9 @@ failure the calibration gate exists to prevent, induced by the number that
 made the gate green. Optimising replay optics with ε is how a pricing
 system fails while its dashboard smiles.
 
-What history legitimately contributes is therefore bounded: honest brackets
-where the acceptance checks pass, and a neutral, wide, cheap-to-correct
-cold start (−1.0 ± 0.6) where they do not. The wide std is not resignation
+What history legitimately contributes is therefore bounded: sharp densities
+where the data supports them, and the wide pooled or uniform density —
+neutral and cheap to correct — where it does not. The wide std is not resignation
 — it deliberately holds the exploration budget at full scale, so **the
 first weeks of the learning pilot are themselves the ε fit**, run on
 randomized data where the optimum finally means price response, at a cost
@@ -248,7 +248,8 @@ FROZEN (fit offline, unchanged during the MVP window)
   calibration.json        per-category level factors (fitted; NOT applied — gate passed without)
   r_lookup.json           negative-binomial dispersion by subcategory
   rho.json                intra-episode demand correlation (one scalar)
-  prior.json              elasticity prior: bracket or recorded fallback
+  prior.json              elasticity prior: a density per category, with
+                          its own design and held-out comparisons
 
 LEARNING (the only thing that updates in production)
   posterior.json          elasticity by cell {mean, std, n_obs, information,
@@ -669,7 +670,7 @@ flowchart LR
   subgraph FROZEN["FROZEN at launch"]
     M["baseline mu_ref<br/>(price-blind)"]
     R["dispersion r<br/>+ correlation rho"]
-    P["elasticity prior<br/>(bracket or fallback)"]
+    P["elasticity prior<br/>(profile-likelihood density)"]
   end
   subgraph HOURLY["HOURLY decision path"]
     V["validate state<br/>reject, never guess"] --> T["feasible tiers<br/>from cost floor"]
@@ -755,45 +756,20 @@ reasons, in order of force.
    Split a category into three subcategories and each receives roughly a
    third of the forced outcomes, so each takes about three times the calendar
    to travel the same distance — against a throughput that is already risk 1.
-3. **There is no finer-grained prior to preserve.** The bracket was rejected
-   for all 16 categories, so every cell starts at the same −1.0 ± 0.6.
-   Subcategory cells would begin identical and learn slower: dilution bought
-   for nothing. And history cannot identify ε per category, so it certainly
-   cannot per subcategory — the same confound with less data behind it.
+3. **There is little finer-grained prior to preserve.** Where history cannot
+   identify ε per category, it certainly cannot per subcategory — the same
+   confound with less data behind it. Subcategory cells would begin nearly
+   identical and learn slower: dilution bought for nothing.
+   `identifying_variation_share`, reported per category, is the figure that
+   says how much there would be to divide.
 
-> **⚠ §9.5 acceptance was amended by the owner on 2026-08-24, and every prior
-> figure in this document predates it.** Acceptance is now PER CATEGORY, and
-> **only a wrong sign rejects**. Boundary-pinned and inverted brackets are
-> used and flagged. Of the four categories inspected from the 174-day extract,
-> all four keep their measured bracket where previously all 16 took the
-> fallback:
->
-> | | bracket | | bar at 2.429 |
-> | --- | --- | --- | --- |
-> | BAKERY & PASTRY | −1.6125 ± 1.0875 | clean | 0.75σ *(was 2.38σ)* |
-> | BEVERAGE | −2.2375 ± 0.4000 | clean | 0.48σ |
-> | DAIRY PRODUCT | −2.2875 ± 1.7125 | **boundary** | 0.08σ |
-> | BABY FOOD | −2.1250 ± 0.5750 | **inverted** | 0.53σ |
->
-> The two flags do not mean the same thing. **Boundary** leaves the ordering
-> intact — only the lower end is truncated, so the bracket is sound and merely
-> conservative. **Inversion** breaks the directional argument that makes the
-> midpoint set-identified (`naive ≤ ε_true ≤ controlled`), so BABY FOOD's
-> −2.125 is the centre of two measurements rather than a bracket on the truth.
-> It is used because it is still the best reading the data supports, but it is
-> weaker evidence than the other three and `inverted_categories` says so at
-> the top of the artifact. Read `identifying_variation_share` alongside it:
-> near zero means the controlled fit was never identified and the inversion is
-> noise rather than a finding.
->
-> The brackets move the measured deepening bar (median **2.429**) from
-> 2.38σ away to **0.08–0.75σ**, so the "enter-and-hold at the launch prior"
-> conclusion in risk 6 below, and the 0%-deepened backtest behind it, **no
-> longer follow**. Both must be re-measured on the next full run before
-> anything in this section is quoted. Point 3 above still holds for a
-> different reason: per-subcategory brackets would divide the same identifying
-> variation further — and `identifying_variation_share`, now reported per
-> category, is the figure that says how much there is to divide.
+> **⚠ The prior figures in this document are from superseded bracket-era
+> runs** (the method history is in `docs/learnings.md`; the current method is
+> section 5.6 / PRD §9.5). In particular, the "enter-and-hold at the launch
+> prior" conclusion in risk 6 below, and the 0%-deepened backtest behind it,
+> were measured under the old constant prior and **must be re-measured on the
+> next full production run before being quoted** — the current per-category
+> densities can sit on either side of the deepening bar.
 
 Categories above 250 episodes/week earn their own cell, everything below
 reads and feeds the global cell, assignment fixed at launch. The honest
@@ -1094,8 +1070,8 @@ because miscalibration flat in `mu` is a level problem and miscalibration that
 grows with `mu` is a shape problem, and only the second indicts `r`.
 
 **`rho` is re-measured on the basis it was frozen on** — residuals against raw
-`mu` at the *working* elasticity (the prior fallback), never at the posterior
-mean. Measuring at a moved posterior would make `rho` drift for a reason that has
+`mu` at the *working* elasticity (the per-category prior means), never at the
+posterior mean. Measuring at a moved posterior would make `rho` drift for a reason that has
 nothing to do with the world, and the number would stop being comparable to the
 one `deff` came from.
 
@@ -1185,14 +1161,14 @@ direction those corrections predicted.
 | Correlation `rho` / forced hours / implied deff | <!--f:rho.rho|dec4-->0.3103<!--/f--> / <!--f:rho.mean_forced_hours_per_episode|dec3-->8.563<!--/f--> / **<!--f:rho.implied_deff|dec3-->3.347<!--/f-->** (fitted-residual basis, `artifacts/rho.json`) |
 | IL% clustered SE | **0.002915** (SKU × FC, 71,559 units) |
 | A/B minimum detectable effect | **6.75% at 2 weeks** (9 blocks); the duration curve is flat — 6 weeks reaches only 5.74% |
-| Elasticity prior | **fallback −1.0 ± 0.6 for all 16 categories — 0 brackets accepted** |
+| Elasticity prior | *(bracket-era figure — superseded; the current method reports per-category densities with held-out evidence, re-measure on the next run)* |
 | Exploration `tau` | ₩447.78, pasted from the gate-passing calibrated backtest |
 | Would-be learning yield (shadow) | 1.09 bounded updates from the window; 1,837 episodes per update |
 | Guardrail 3σ noise, trailing-mean basis | realised margin **13.63%** (robust 14.94%, well behaved); scrap **480%** raw / **153%** robust — outlier-dominated and unusable, see section 12 |
 
 Four of these changed the story rather than the digits, and each is picked up
-where it belongs: the **elasticity bracket now fails everywhere** (section
-9.3), the **DP's IL advantage tripled while its clearance cost nearly
+where it belongs: the **history could not identify elasticity anywhere**
+(section 9.3), the **DP's IL advantage tripled while its clearance cost nearly
 vanished** (section 5.7), the **A/B became cheap** (section 12), and the
 **scrap guardrail lost its yardstick** (section 12).
 
@@ -1257,17 +1233,18 @@ level multiplier tracks the world, which is exactly what a multiplier is
 for. Status: final retrain + re-gate at the launch freeze, with scheduled
 in-window recalibration adopted in response to the measured August trend.
 
-### 9.3 Prior-acceptance gate (blocking) — is the bracket honest?
+### 9.3 Prior-acceptance gate (blocking) — is the prior honest?
 
-Orientation must hold (naive ≤ controlled < 0), neither endpoint may sit at
-a search bound, and the width-derived std must not be a constant. Any
-failure → fallback prior, recorded. Status: applied; **all 16 categories
-fell back** on the corrected extract. An earlier run accepted MEAT; the
-data-definition fixes in section 12a changed the identifying sample and it no
-longer clears the checks. That is the gate doing its job — a bracket that
-survives one definition of an episode and not another was never an estimate —
-but it removes the single category that would have launched informed, and it
-raises the weight the exploration budget carries.
+A human reading of `prior.json`, not a flag in it (PRD §9.5): the
+`design_comparison` (which rows × time-control combination this extract
+supports), `wrong_sign_categories` (likelihoods peaking at positive ε —
+discarded for the pooled density), `std_basis` per category (which measured
+floor set the width), and the `holdout_comparison` against `oracle` and
+`uniform`. A pooled or uniform prior is a designed outcome: history that
+cannot identify ε says so and hands the job to exploration — an estimate that
+survives one definition of an episode and not another was never an estimate.
+The bracket-era run of this gate (all 16 categories rejected to a constant)
+is recorded in `docs/learnings.md`.
 
 ### 9.4 Shadow gate (blocking) — is the pipeline production-ready?
 
@@ -1784,19 +1761,20 @@ A/B is adequately powered rather than comfortable;
 `deff` fell to 3.347 as whole windows replaced fragments; and the DP's
 measured advantage tripled to 38.0% once the planner stopped being handed a
 horizon shortened by each episode's own realised sellout. One moved against
-expectation and is called out in section 9.3: the elasticity bracket, which
-previously accepted MEAT, now fails for all 16 categories.
+expectation and is called out in section 9.3: history, which previously
+appeared to identify MEAT's elasticity, identified none once the episode
+definitions were corrected.
 
 ## 13. Risk register
 
 | # | Risk | Evidence | Mitigation | Owner |
 | --- | --- | --- | --- | --- |
-| 1 | **Learning throughput** — and the deepening bar in risk 6 sets how far the posterior must travel, not just how fast | Per-outcome information is small (demand ~0.5–1/hr × squared log-price-ratio ~0.01–0.04, ÷ deff <!--f:rho.implied_deff|dec3-->3.347<!--/f-->); prior is wide fallback for **all 16** categories; monotonicity concentrates identification at entry | Shadow now emits `learning_yield_would_be` — effective information per episode, episodes per bounded update — so weeks-to-convergence is read off before the pilot, not guessed. Two floors bind separately: evidence (episodes needed) and calendar (the 0.15 step cap with one human-gated update per day means ≥6 days to move the mean 1.0 → 1.9 however much evidence arrives). Levers: raise the budget share, coarser cells. A 21-day flat-posterior alert catches a dead loop | Eng + owner |
+| 1 | **Learning throughput** — and the deepening bar in risk 6 sets how far the posterior must travel, not just how fast | Per-outcome information is small (demand ~0.5–1/hr × squared log-price-ratio ~0.01–0.04, ÷ deff <!--f:rho.implied_deff|dec3-->3.347<!--/f-->); prior is wide (pooled/uniform density) where categories are unidentified; monotonicity concentrates identification at entry | Shadow now emits `learning_yield_would_be` — effective information per episode, episodes per bounded update — so weeks-to-convergence is read off before the pilot, not guessed. Two floors bind separately: evidence (episodes needed) and calendar (the 0.15 step cap with one human-gated update per day means ≥6 days to move the mean 1.0 → 1.9 however much evidence arrives). Levers: raise the budget share, coarser cells. A 21-day flat-posterior alert catches a dead loop | Eng + owner |
 | 2 | **Frozen-model drift over Sep–Dec** (seasonality incl. Chuseok; no trend features) | Drift already measured: 1.144 → 0.990 → 1.095 across windows; every economic quantity is denominated in the demand prediction | Final retrain immediately before the launch freeze (gate re-checked); daily drift ratio in shadow and production; pre-register a mid-window recalibration rule now so a drift response is not improvised | Eng |
 | 3 | **A/B power** — adequate, and duration is not the lever | SE 0.002915 once scrap is counted in full; 6.75% detectable at 2 weeks against a measured 38% effect (5.6×). The duration curve is nearly flat — 6 weeks reaches only 5.74% where √T promised 3.90%, because variance is between-unit and the same units recur weekly | Empirical duration table from the derivation tool; owner commits to a feasible (effect, duration) pair before launch. If more power is ever needed the lever is more SKU × FC units, not more weeks | Owner |
 | 4 | **Metric divergence at readout** — planner optimises IL, business reads IL% | Worked example in 2.3; likeliest A/B outcome is the escalation row | Both metrics + denominators in every cut; divergence flag monitored; decision table pre-committed | Owner |
 | 5 | **Single-elasticity misspecification** — threshold-shaped price response averaged into one exponent | Discount-gap diagnostics are noisy/non-monotonic | Residuals logged by discount region so the failure is visible before it is modelled; piecewise response in phase 2 | Eng |
-| 6 | **Enter-and-hold at the launch prior** — deepening pays only when \|ε\| > (1−d)/(γ−d), measured median **2.429**, against a prior of 1.0 | Backtest `intra_episode_deepening`: 0% of episodes clear the bar, the DP deepens in none of them; mean discount 0.1285 vs legacy 0.2935; clearance −0.97pp. **Measured sensitivity:** a full bootstrap re-run at a fallback prior of −1.5 produced IDENTICAL prices — mean discount 0.1285, 0% deepened — because 1.5 is still far below the bar. It also cost 26% of the learning rate (`deff` 3.347 → 4.204, since `fit_dispersion` measures residual correlation at the working elasticity) and 1pp of the IL gain (38.0% → 37.0%) | The policy is INSENSITIVE to the prior mean anywhere below ~2.43, so guessing a larger \|ε\| buys no behaviour change and slows the loop that would find the real value. Correct behaviour given the prior, not a bug — but pre-brief the pilot on lower clearance and higher scrap, and track the threshold gap every run. Exploration is the only thing that closes it | Eng + owner |
+| 6 | **Enter-and-hold at the launch prior** — deepening pays only when \|ε\| > (1−d)/(γ−d), measured median **2.429** | *(bracket-era measurement, superseded — re-measure on the next full run; see the warning above section 6's cell map)* Under the old constant prior of 1.0, 0% of episodes cleared the bar and the DP deepened in none; a re-run at −1.5 produced identical prices because 1.5 is still below the bar. The current per-category densities can sit on either side of 2.43, so this behaviour is now an open question, not a conclusion | Track the threshold gap every run; pre-brief the pilot that behaviour depends on which side of the bar each category's posterior sits; exploration closes the gap | Eng + owner |
 | 7 | **Multi-day episode fix invalidates the measured baseline** (section 12a) — 36-hour windows are common, so every episode-terminal figure was measured under a broken key | Monotonicity reset mid-window; DP terminal value fired 2-3x per window; carried inventory counted as scrap at each seam | Fixed at the source: episodes are now maximal runs with a consistent `hours_remaining` countdown, split assignment and the feature leakage guard follow the episode. **Full bootstrap must be re-run before any number is quoted** | Eng |
 | 8 | **Episode fragmentation from missing source hours** — a single absent hour splits one economic episode into two | Worked example: a BABY FOOD episode runs 06:00–15:00, hour 16 is absent, and the feed resumes at 17:00 with `flc_window` stepping 33→31. The clock and the counter still AGREE (both step 2), but `assign_episode_ids` requires both to step exactly 1, so it starts a new episode. Measured: **2.61% of episodes (8,711) end with no closure sentinel**, holding **27,105 units of ambiguous scrap** against 111,694 counted; median 21 hours nominally unrecorded | Conservative today — ambiguous leftover is excluded rather than invented, and the later fragment usually carries the real outcome, so scrap TOTALS are close to right. What is distorted: episode counts are inflated, and the second fragment's first hour looks like an entry hour when it is mid-episode, which is dirt in exactly the rows section 9.5 identification depends on. Fix is to stitch where clock and counter agree (capped), with interior synthetic rows so `validate_state`'s horizon invariant still holds — deferred to after the launch decision because it changes the analysis population again | Eng |
 | 9 | **Model under-prediction from censored training labels** | Anchor under-prediction with median starting inventory ~2 and ~12.6% stocked-out hours | First phase-2 priority: censored-count training | Eng |
@@ -1825,8 +1803,8 @@ Charts are generated from the reports, never drawn by hand — re-run
 moves with the numbers. A chart that disagrees with the pipeline cannot
 exist. Beyond those embedded above, the run also produces the exploration
 threshold against the Q-spread (07), the learning-yield calendar floor (10),
-the shadow gate against its thresholds (11) and the elasticity bracket by
-category (12), all under `reports/charts/`.
+the shadow gate against its thresholds (11) and the per-category profile
+likelihoods (`tools.profile_epsilon`), all under `reports/charts/`.
 
 ```bash
 # bootstrap, in order (retrains the model — see AGENTS.md before iterating)
