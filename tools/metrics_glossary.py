@@ -56,14 +56,13 @@ CATALOGUE = [
    "`cogs_dropped` appears at exactly one stage, `contiguous_episodes_built`, where "
    "re-segmentation turns one opening row into two.",
    "whether the surviving population still looks like the business"),
-  ("dp_eligible · unreconciled", "count",
-   "Episodes where supply != sold + remaining -- stock moved that no sale, restock "
-   "or write-off accounts for. Kept and FLAGGED, out of dp_eligible and out of every "
-   "scrap/IL/clearance figure (scrap_units returns NaN). Their clearance would read "
-   "above 1, or they would show scrap on a window that sold everything it had. "
-   "`unreconciled_anomalies` breaks them out by category and month: one incident, one "
-   "corner of the catalogue, or a standing feed property are three different "
-   "investigations.", "every scrap, IL and clearance figure"),
+  ("unreconciled_anomalies", "count",
+   "Episodes with SHRINK -- stock left the shelf that no sale or write-off accounts "
+   "for. Kept and dp_eligible: the shrink settles into scrap at the episode level "
+   "(scrap = leftover + shrink), so the identity still closes and the units stay in "
+   "every scrap/IL figure. The block breaks them out by category and month: one "
+   "incident, one corner of the catalogue, or a standing feed property are three "
+   "different investigations.", "a report for the business, not a gate"),
   ("units_restocked / episode_supply", "count",
    "Units that ARRIVED mid-window, and the resulting supply = opening + arrivals. "
    "Opening stock stopped being an episode's supply once restocked episodes were "

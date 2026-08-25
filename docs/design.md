@@ -197,11 +197,11 @@ launches on the wide pooled or uniform density instead of a sharp guess.
    exactly one learned scalar per category:
    `mu(d) = mu_ref × ((1−d)/(1−d_ref))^ε`.
 2. **History contributes a density, not an estimate** (section 5.6):
-   two deliberately-biased estimators with *opposite, known* bias directions
-   bound the plausible range; the prior is the midpoint with a width-derived,
-   floored standard deviation. If acceptance checks fail, the system falls
-   back to a wide, honest prior — a designed outcome, not a failure.
-3. **Truth comes from production randomization** (section 6.2): a small,
+   the censored profile likelihood itself, deff-deflated and read as a
+   density per category — sharp where the data identifies ε, degrading to
+   the pooled or uniform density where it does not. A wide density is a
+   designed outcome, not a failure.
+3. **Truth comes from production randomization** (section 5.8): a small,
    costed, uniformly-randomized set of price perturbations whose outcomes
    are the only evidence the learner consumes.
 
@@ -329,7 +329,7 @@ artifact. Dropping them removed **>70% of the extract's COGS** from every fit.
 | `eligible` | *(not a filter — a GATE)* `accounting_closes & final_hour_clean & closed`. The population the demand model and the frozen artifacts read (when `baseline_model.train_population` is `eligible`), and the one every scrap / IL / clearance figure reads unconditionally — `scrap_units` returns NaN outside it |
 | `dp_eligible` | *(not a filter — a GATE)* how much of the surviving population the DP can act on, with the per-flag breakdown in its detail block. Read by the DP solver, the backtest, shadow, the calibration gate and the A/B |
 
-`tag_dp_eligibility` then flags, on the surviving frame. Five conditions gate
+`tag_dp_eligibility` then flags, on the surviving frame. Six conditions gate
 `dp_eligible`, each naming something the *solver* cannot do; an episode is
 labelled with the first it trips.
 
@@ -397,7 +397,7 @@ estimable at all?), demand density and censoring shares, intra-episode
 correlation, per-category weekly volumes, and the A/B variance. **Why:**
 each of these, guessed wrong, produces a system that is confidently wrong in
 a specific way — e.g. assuming independent hourly evidence declares learning
-converged four times too early (section 6.3). Three measurement outcomes
+converged four times too early (section 5.11). Three measurement outcomes
 were designated in advance as *design-changing* rather than parameterising
 (non-explorable catalogue → scope shrinks; no identifying variation → prior
 falls back; A/B variance too high → duration or effect size must change), and
@@ -558,7 +558,7 @@ support; a wrong-signed one (unconstrained peak at or above zero, searched
 zero-width prior would freeze the posterior. The upper bound (−0.05) remains
 a *sign constraint*, never to be widened.
 
-**Why honesty over sharpness:** with bounded update steps (section 6.3), a
+**Why honesty over sharpness:** with bounded update steps (section 5.11), a
 confidently-wrong prior takes at least seven update cycles to walk back,
 across every cell at once; a weak honest prior costs only patience. A pooled
 or uniform prior is the system working, not failing. Every run scores itself
@@ -633,13 +633,15 @@ The first term of the derivative is the cost of discounting units that would
 have sold anyway; it dominates until demand responds hard enough to outrun
 it. On the corrected extract the **measured median bar is |ε| = 2.429**, and
 censoring at a median starting inventory of 2 pushes the true switch point
-higher still. **Against the launch prior of −1.0, the DP is therefore
-structurally an enter-and-hold policy**: on the synthetic harness the median
-threshold is 2.429 against |ε| = 1.0 in use, and the DP deepens
-intra-episode in 0% of episodes — 0% of them clear the bar. This is not a defect — if demand really is that
-inelastic, holding price *is* the IL-minimising action, and the replay's
-−12.0% IL comes precisely from refusing to ramp. But it means three things
-should be said out loud before the pilot:
+higher still. **Whenever a cell's posterior mean sits below that bar, the DP
+is structurally an enter-and-hold policy** — and the bracket-era run measured
+exactly that: at the old constant prior of −1.0 the DP deepened intra-episode
+in 0% of episodes (superseded measurement — see the warning in section 5.9;
+the current per-category densities can sit on either side of the bar, so this
+must be re-measured on the next full run). Enter-and-hold is not a defect —
+if demand really is that inelastic, holding price *is* the IL-minimising
+action, and the replay's IL gain comes precisely from refusing to ramp. But
+it means three things should be said out loud before the pilot:
 
 - The day-one policy's entire IL advantage comes from **the entry choice and
   from not ramping**, not from dynamic intra-episode markdown.
@@ -661,8 +663,9 @@ how far the applied price sits from the anchor, not how large the random
 perturbation was. Holding at `d_ref − 15pp` parks every hour of the episode
 at `(log ratio)² ≈ 0.038`, whereas a 2.5pp wiggle around a price sitting *on*
 the reference would yield ≈ 0.001. The enter-and-hold regime is a
-high-information regime, not a desert; on the launch prior, moving the mean
-from 1.0 to 1.9 needs roughly 8,600 exploration outcomes. `shadow` reports
+high-information regime, not a desert (the bracket-era run put moving the mean
+from 1.0 to 1.9 at roughly 8,600 exploration outcomes; the distance each
+cell's density now has to travel varies). `shadow` reports
 the realised figure as `learning_yield_would_be` before any price is applied.
 
 ```mermaid
@@ -724,8 +727,14 @@ evidence; any smarter state-dependent choice reintroduces the endogeneity
 that poisoned the historical data. **Why a currency budget instead of an
 exploration probability:** epsilon-greedy-style schedules spend an
 un-costed, invisible amount; here the spend is an explicit budget line — 1%
-of markdown IL per day, scaled down (never below 25%) as the posterior
-narrows — and `tau` self-calibrates daily so realised spend tracks it. The
+of the trailing 7-day mean of realised daily IL, where a day's realised IL is
+the whole-episode IL (discount and scrap) of episodes that *closed* that day,
+so the budget set at midnight is a share of a settled number, never a
+forecast — scaled down (never below 25%) as the posterior narrows. `tau`
+self-calibrates daily against that budget,
+`tau_next = tau × clip(budget/spend, 0.5, 1.25)`: asymmetric because halving
+is the safety direction (a badly oversized `tau` must walk inside the 2×
+stop condition in days) while raising is never urgent. The
 theory that makes budget-only rationing sound: information about ε and the
 IL cost of a perturbation both scale as `mu × (log price ratio)²`, so
 **information per won is approximately constant** — there is no clever
@@ -1120,9 +1129,10 @@ the design — each caught by a gate or diagnostic doing its job:
    by construction; under-fed categories stay uncorrected rather than
    contaminated.
 3. **The survivorship confound** (section 3.2). **Change:** entry-rows-only
-   identification; the boundary pinning stopped, though on the corrected
-   extract no category clears the acceptance checks and all 16 fall back
-   honestly.
+   identification; the boundary pinning stopped. (The bracket-era acceptance
+   result measured then — all 16 categories falling back to a constant — is
+   superseded; the current density method of section 5.6 has no accept/reject
+   step and reports per-category densities with held-out evidence instead.)
 4. **Per-SKU velocity features** (section 5.4). Adding them improved per-row
    accuracy (hourly MAE 0.405 → 0.373) and cut residual intra-episode
    correlation (deff 4.07 → 3.347, ~18% more information per exploration
@@ -1157,7 +1167,7 @@ direction those corrections predicted.
 | Actual IL% (replay sample, 2,000 episodes) | **32.27%** (IL ≈ ₩14.27M), clearance 93.3% |
 | DP vs legacy (like-for-like, same demand model) | **−38.0% IL** at **−0.97pp clearance** (77.58% → 76.61% … see section 5.7) |
 | DP vs legacy mean discount | 0.1285 vs 0.2935 — the DP opens far shallower and holds |
-| Intra-episode deepening | 0% of episodes; median \|ε\| needed 2.429 against 1.0 in use |
+| Intra-episode deepening | 0% of episodes; median \|ε\| needed 2.429 against 1.0 in use *(bracket-era prior — re-measure on the next run)* |
 | Correlation `rho` / forced hours / implied deff | <!--f:rho.rho|dec4-->0.3103<!--/f--> / <!--f:rho.mean_forced_hours_per_episode|dec3-->8.563<!--/f--> / **<!--f:rho.implied_deff|dec3-->3.347<!--/f-->** (fitted-residual basis, `artifacts/rho.json`) |
 | IL% clustered SE | **0.002915** (SKU × FC, 71,559 units) |
 | A/B minimum detectable effect | **6.75% at 2 weeks** (9 blocks); the duration curve is flat — 6 weeks reaches only 5.74% |
@@ -1774,9 +1784,9 @@ definitions were corrected.
 | 3 | **A/B power** — adequate, and duration is not the lever | SE 0.002915 once scrap is counted in full; 6.75% detectable at 2 weeks against a measured 38% effect (5.6×). The duration curve is nearly flat — 6 weeks reaches only 5.74% where √T promised 3.90%, because variance is between-unit and the same units recur weekly | Empirical duration table from the derivation tool; owner commits to a feasible (effect, duration) pair before launch. If more power is ever needed the lever is more SKU × FC units, not more weeks | Owner |
 | 4 | **Metric divergence at readout** — planner optimises IL, business reads IL% | Worked example in 2.3; likeliest A/B outcome is the escalation row | Both metrics + denominators in every cut; divergence flag monitored; decision table pre-committed | Owner |
 | 5 | **Single-elasticity misspecification** — threshold-shaped price response averaged into one exponent | Discount-gap diagnostics are noisy/non-monotonic | Residuals logged by discount region so the failure is visible before it is modelled; piecewise response in phase 2 | Eng |
-| 6 | **Enter-and-hold at the launch prior** — deepening pays only when \|ε\| > (1−d)/(γ−d), measured median **2.429** | *(bracket-era measurement, superseded — re-measure on the next full run; see the warning above section 6's cell map)* Under the old constant prior of 1.0, 0% of episodes cleared the bar and the DP deepened in none; a re-run at −1.5 produced identical prices because 1.5 is still below the bar. The current per-category densities can sit on either side of 2.43, so this behaviour is now an open question, not a conclusion | Track the threshold gap every run; pre-brief the pilot that behaviour depends on which side of the bar each category's posterior sits; exploration closes the gap | Eng + owner |
+| 6 | **Enter-and-hold at the launch prior** — deepening pays only when \|ε\| > (1−d)/(γ−d), measured median **2.429** | *(bracket-era measurement, superseded — re-measure on the next full run; see the warning in section 5.9)* Under the old constant prior of 1.0, 0% of episodes cleared the bar and the DP deepened in none; a re-run at −1.5 produced identical prices because 1.5 is still below the bar. The current per-category densities can sit on either side of 2.43, so this behaviour is now an open question, not a conclusion | Track the threshold gap every run; pre-brief the pilot that behaviour depends on which side of the bar each category's posterior sits; exploration closes the gap | Eng + owner |
 | 7 | **Multi-day episode fix invalidates the measured baseline** (section 12a) — 36-hour windows are common, so every episode-terminal figure was measured under a broken key | Monotonicity reset mid-window; DP terminal value fired 2-3x per window; carried inventory counted as scrap at each seam | Fixed at the source: episodes are now maximal runs with a consistent `hours_remaining` countdown, split assignment and the feature leakage guard follow the episode. **Full bootstrap must be re-run before any number is quoted** | Eng |
-| 8 | **Episode fragmentation from missing source hours** — a single absent hour splits one economic episode into two | Worked example: a BABY FOOD episode runs 06:00–15:00, hour 16 is absent, and the feed resumes at 17:00 with `flc_window` stepping 33→31. The clock and the counter still AGREE (both step 2), but `assign_episode_ids` requires both to step exactly 1, so it starts a new episode. Measured: **2.61% of episodes (8,711) end with no closure sentinel**, holding **27,105 units of ambiguous scrap** against 111,694 counted; median 21 hours nominally unrecorded | Conservative today — ambiguous leftover is excluded rather than invented, and the later fragment usually carries the real outcome, so scrap TOTALS are close to right. What is distorted: episode counts are inflated, and the second fragment's first hour looks like an entry hour when it is mid-episode, which is dirt in exactly the rows section 9.5 identification depends on. Fix is to stitch where clock and counter agree (capped), with interior synthetic rows so `validate_state`'s horizon invariant still holds — deferred to after the launch decision because it changes the analysis population again | Eng |
+| 8 | **Episode fragmentation from missing source hours** — a single absent hour splits one economic episode into two | Worked example: a BABY FOOD episode runs 06:00–15:00, hour 16 is absent, and the feed resumes at 17:00 with `flc_window` stepping 33→31. The clock and the counter still AGREE (both step 2), but `assign_episode_ids` requires both to step exactly 1, so it starts a new episode. Measured: **2.61% of episodes (8,711) end with no closure sentinel**, holding **27,105 units of ambiguous scrap** against 111,694 counted; median 21 hours nominally unrecorded | Conservative today — ambiguous leftover is excluded rather than invented, and the later fragment usually carries the real outcome, so scrap TOTALS are close to right. What is distorted: episode counts are inflated, and the second fragment's first hour looks like an entry hour when it is mid-episode, which is dirt in exactly the rows the section 5.6 identification depends on. Fix is to stitch where clock and counter agree (capped), with interior synthetic rows so `validate_state`'s horizon invariant still holds — deferred to after the launch decision because it changes the analysis population again | Eng |
 | 9 | **Model under-prediction from censored training labels** | Anchor under-prediction with median starting inventory ~2 and ~12.6% stocked-out hours | First phase-2 priority: censored-count training | Eng |
 
 ## 14. Phase 2 (deferred until the loop demonstrably works)
@@ -1784,9 +1794,7 @@ definitions were corrected.
 Priority-ordered by what bootstrap revealed: censored-count model training
 (risk 9); episode stitching across missing source hours (risk 8 — relax the
 contiguity rule from "both step exactly one" to "clock and counter agree",
-capped, with interior synthetic rows); per-category prior acceptance (currently any failure falls the
-whole prior back, the conservative reading — and on the corrected extract
-every category fails, so nothing is lost by it today); subcategory learning cells with leave-one-out
+capped, with interior synthetic rows); subcategory learning cells with leave-one-out
 pooling (deferred, not dismissed — see 5.9: finer cells change no price below
 the deepening bar and dilute evidence, so the gain only exists once cells have
 moved); automated posterior updates with criteria drafted from observed

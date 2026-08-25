@@ -1112,8 +1112,8 @@ def tag_dp_eligibility(d, cfg):
                  "equal and the hours adjacent, a sale recorded an hour after "
                  "the stock moved would look identical -- but that is a guess, "
                  "and the counts here are not netted on the strength of it. "
-                 "Both figures stand, the episode is flagged restocked AND "
-                 "unreconciled, and it stays out of the DP-side population."),
+                 "Both figures stand: the episode is flagged restocked, the "
+                 "shrink settles into scrap, and it stays dp_eligible."),
     }
 
     # WHERE THE ANOMALIES SIT, so the business can go and find out what moved.
@@ -1146,11 +1146,11 @@ def tag_dp_eligibility(d, cfg):
             "median_units_per_episode": float(ep.units.median()),
             "by_category": _by("category"),
             "by_month": _by("month"),
-            "note": ("supply != sold + remaining. Stock moved that no sale, "
-                     "restock or write-off accounts for. These episodes are "
-                     "KEPT and flagged, out of dp_eligible and out of every "
-                     "scrap/IL/clearance figure (scrap_units returns NaN for "
-                     "them). Concentrated in one month reads as an incident; "
+            "note": ("Hours where stock left the shelf that no sale or "
+                     "write-off accounts for. These episodes are KEPT and "
+                     "stay dp_eligible: the shrink settles into scrap at the "
+                     "episode level, so the identity still closes. "
+                     "Concentrated in one month reads as an incident; "
                      "spread evenly reads as a standing feed property; "
                      "concentrated in a few categories names the subset. "
                      "This is the list to hand back to the business."),

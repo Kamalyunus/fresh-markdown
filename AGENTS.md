@@ -52,8 +52,9 @@ step                                          writes                            
 ### Two populations, and who reads which
 
 `prepare_data` emits ONE parquet carrying `dp_eligible` (bool) and
-`dp_ineligible_reason` (`cost_missing` | `non_priceable` | `window_too_long`,
-first match in that order). Nothing economic is dropped.
+`dp_ineligible_reason` (`cost_missing` | `non_priceable` | `negative_window` |
+`window_too_long` | `outcome_unknown` | `final_hour_restock`, first match in
+that order). Nothing economic is dropped.
 
 **A below-cost hour is NOT one of the three.** It is a price the legacy policy
 set, and the agent is constrained never to set one, so it is a property of the
@@ -148,9 +149,14 @@ replay path**. Shadow runs the **anchored** path, where each hour's action set
 is constrained by the price already in force, so the affordable sets differ
 and the same `tau` buys a different amount of exploration. Shadow now reports
 both sides on its own basis, same episodes and same days, plus the ratio and
-whether it clears the `exploration_cost_vs_budget` stop multiple. **Read it
-before the pilot**: over 2× and exploration suspends on day one; between 1×
-and 2× the `tau` controller walks it down, capped at halving per day.
+whether it clears the `exploration_cost_vs_budget` stop multiple. The daily
+budget is `budget_share_of_il` (1%) of the **trailing 7-day mean of realised
+daily IL**, where a day's realised IL is the whole-episode IL (discount and
+scrap) of episodes that CLOSED that day — settled at midnight, never a
+forecast. **Read it before the pilot**: over 2× and exploration suspends on
+day one; between 1× and 2× the `tau` controller walks it down —
+`tau_next = tau × clip(budget/spend, 0.5, 1.25)`, asymmetric because halving
+is the safety direction and raising is never urgent.
 
 Two numbers in that block do the deciding:
 
@@ -907,7 +913,7 @@ The prepared frame carries `units_restocked`, `units_shrink`,
 
 ### The flags (`tag_dp_eligibility`)
 
-Five conditions gate `dp_eligible`. Each names something the SOLVER cannot do,
+Six conditions gate `dp_eligible`. Each names something the SOLVER cannot do,
 never something wrong with the data. An episode failing one stays in the frame
 with `dp_eligible = False` and `dp_ineligible_reason` set to the FIRST it
 trips, so the reason column reads as a cause.
@@ -920,7 +926,12 @@ trips, so the reason column reads as a cause.
 | `window_too_long` | `hours_remaining` above `data.max_window_hours` (**120**) — flc_window carries very large values from upstream data issues. Raised from 48 by the owner: 48 was cutting legitimate multi-day windows, not only defects. `extend_to_window` RAISES above the cap, so this is a crash rather than a refusal |
 | `outcome_unknown` | the episode never closed inside this data — no write-off sentinel on its last row. Gates `eligible` too: an unfinished episode is not a complete observation of anything, and two consumers silently mis-weighted one before this flag existed |
 | `final_hour_restock` | the last row sold more than it opened with, so stock arrived during the close and the leftover is a guess — two unknowns, one equation. Gates `eligible` too |
-| `unreconciled` | the episode's flow identity fails: `supply != sold + remaining`. Stock moved that no sale, restock or write-off accounts for, so clearance would read above 1 or scrap would appear on a window that sold everything. No trustworthy clearance, scrap or IL — `scrap_units` returns NaN and `unreconciled_anomalies` in the manifest says where they sit, by category and month, for the business to deep-dive |
+
+There is no shrink gate: an hour-level shortfall settles into scrap at the
+episode level (`scrap = leftover + shrink`), so the identity still closes and
+those episodes stay `dp_eligible`. `unreconciled_anomalies` in the manifest
+locates them by category and month for the business to deep-dive — a report,
+not a gate.
 
 Two more are flagged and gate **nothing**:
 
@@ -1049,10 +1060,11 @@ quarantined** — and a quarantined outcome never lands, so event completeness
 drops and the shadow gate fails. Exactly three reasons are legitimate:
 
 - `intraday_restock` — `ending_inventory > max(0, starting - sold)`
-- `episode_close_write_off` — `ending_inventory == 0` while stock remained.
-  This is ~49.5% of episodes. An integration that omits it quarantines
-  roughly half its outcomes and fails the gate for what looks like a pipeline
-  defect.
+- `episode_close_write_off` — `ending_inventory == 0` while stock remained
+  (~13.5% of episodes on the corrected extract end holding stock; an earlier
+  ~49.5% figure came from a different extract). An integration that omits it
+  quarantines every one of those outcomes and fails the gate for what looks
+  like a pipeline defect.
 - `unexplained_shortfall` — shrink: `0 < ending_inventory < starting - sold`.
   **This one returned None on purpose until it was measured.** The theory was
   that an unexplained loss should quarantine and stay visible; the effect was
@@ -1072,13 +1084,6 @@ ITS OWN episode boundary, and once a window is merged across midnight that
 row sits in the MIDDLE of ours. Position is our bookkeeping; the zero is the
 source's fact. `pipeline.shadow.adjustment_reason` is the one implementation
 — production integrations should call it rather than reimplement.
-
-A PARTIAL shortfall — `0 < ending_inventory < leftover` — matches no
-convention and is left undocumented on purpose, so it quarantines. That is
-unexplained inventory loss and the quarantine file is the only place it is
-visible; do not add a catch-all reason to drive the count to zero. Do not add a blanket reason to
-make the count go to zero — the quarantine file is the only place that
-failure is visible.
 
 The window cap is load-bearing beyond data hygiene: `hours_remaining` drives
 episode identification, the DP horizon, and the synthetic tail that
@@ -1119,18 +1124,23 @@ window counter stops being monotone.
 
 An episode ends at the window end OR at zero inventory, whichever comes
 first, so its row count is NOT its window length. `m11_episode_endings` in
-`reports/phase0.json` splits the three cases: `completed` (hours_remaining
-hit 0 -- leftover inventory IS scrap), `sold_out_early` (no scrap by
-construction), `truncated` (no recorded window end -- scrap UNKNOWN).
+`reports/phase0.json` splits the cases (`common.episodes.classify_last`):
+`sold_out_early` (closed, leftover zero — no scrap by fact),
+`completed` (closed, leftover non-zero — the remainder was written off and IS
+scrap), `not_closed` (no closure sentinel — not an ending at all; scrap
+UNKNOWN). The counter is never consulted: `hours_remaining` is nominal and
+still positive on ~99.9% of final rows.
 
-**`ending_inventory` IS ALWAYS ZERO ON AN EPISODE'S LAST ROW** -- the source
-writes off the remainder when the window closes (~49.5% of episodes end this
-way). Reading it as scrap reports ZERO SCRAP EVERYWHERE and silently deletes
-the scrap term from IL; dropping those episodes as "broken chain" keeps only
-guaranteed sellouts. Scrap is `max(0, starting_inventory - units_sold)` on the
+**The source zeroes `ending_inventory` when a listing closes, whatever
+remained** — so on a CLOSED episode's last row the field is always zero and
+reading it as scrap reports ZERO SCRAP EVERYWHERE, silently deleting the
+scrap term from IL; dropping those episodes as "broken chain" keeps only
+guaranteed sellouts. A final row WITHOUT the zero means the window was still
+running when the extract stopped (3.38% of episodes on the current extract —
+`not_closed`). Scrap is `max(0, starting_inventory - units_sold)` on the
 last row -- `common.episodes.leftover_units` is the only definition, and
-`scrap_units` wraps it, returning NaN for truncated episodes so a sum cannot
-treat unknown as zero. Truncated episodes are excluded from scrap
+`scrap_units` wraps it, returning NaN outside `eligible` so a sum cannot
+treat unknown as zero. Unclosed episodes are excluded from scrap
 and IL aggregates, with the excluded share reported.
 
 **No unclosed episode is dropped, and the two reasons are told apart by a
