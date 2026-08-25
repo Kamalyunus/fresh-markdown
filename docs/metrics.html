@@ -105,7 +105,7 @@ footer code{font-family:var(--data)}
 <div class="bar"><div class="inner">
   <input id="q" type="search" placeholder="filter — try  il, tau, censor, rho, gate" aria-label="Filter metrics">
   <button class="toggle" id="gateonly" aria-pressed="false">gates only</button>
-  <span id="count">139 metrics</span>
+  <span id="count">140 metrics</span>
 </div></div>
 
 <div class="wrap">
@@ -292,6 +292,7 @@ footer code{font-family:var(--data)}
 <div class="row" data-gate="1"><div class="nm">information_required<span class="u">n</span></div><div class="mn"><strong>12.0</strong> — the threshold a cell&#x27;s batch must clear. SET, not derived from data.<span class="rd"><b>gates</b>whether the posterior moves</span></div></div>
 <div class="row" data-gate="0"><div class="nm">batch_oldest_outcome_age_days<span class="u">d</span></div><div class="mn">How long the batch has been accumulating without firing. Surfaces a stalled learning loop long before the 21-day flat-posterior alert.</div></div>
 <div class="row" data-gate="0"><div class="nm">accumulated_information<span class="u">n</span></div><div class="mn">Running total across COMMITTED revisions. The artifact-level survivor of the old pending counter.</div></div>
+<div class="row" data-gate="0"><div class="nm">predictive_check<span class="u">×</span></div><div class="mn">The unconsumed batch scored against the PRE-update posterior — an out-of-sample grade of the current belief, since every outcome in it arrived after that belief was set. Bracketed by <code>oracle</code> and <code>uniform</code> like the prior&#x27;s holdout_comparison; <code>worse_than_a_flat_prior</code> persisting across batches means the posterior tightened faster than the evidence justified. Correlated hours inflate all three scores alike — read the differences, never the absolutes.<span class="rd">the operator gate, before approving</span></div></div>
 <div class="row" data-gate="0"><div class="nm">bound_clipped<span class="u">✓/✗</span></div><div class="mn">Whether the bounded step bound. Mean moves at most 0.15, std shrinks at most 25%, floored at <code>min_std</code>. A clipped cell is flagged for operator review.</div></div>
 <div class="row" data-gate="0"><div class="nm">tau<span class="u">₩</span></div><div class="mn">The exploration budget in force. Recalibrated on <strong>spend, not evidence</strong>, on every <code>--apply</code> — a day that explored and learned nothing still cost money.</div></div>
 <div class="row" data-gate="0"><div class="nm">tau_calibrated_through<span class="u">…</span></div><div class="mn">The last date tau consumed. The exactly-once guard: two runs in a day would otherwise move tau by the square of the ratio.</div></div>

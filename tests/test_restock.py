@@ -259,3 +259,31 @@ def test_information_is_in_nb_units_not_poisson(cfg):
     poisson = 40 * mu * L2 / deff(cfg)
     assert eff_info == pytest.approx(nb, rel=1e-9)
     assert eff_info < poisson  # the damping is real, not a no-op
+
+
+def test_the_predictive_check_grades_the_belief_out_of_sample(cfg):
+    """Tomorrow's real outcomes grade today's belief (design 5.11): every
+    batch is scored against the PRE-update posterior, bracketed by oracle
+    and uniform. A posterior sitting near what the data says must beat a
+    flat belief; a confident posterior far from it must score BELOW uniform
+    and be named -- that is the only test of max_std_shrink/min_std real
+    data can run, and it runs rolling-forward in production."""
+    dec = _decision(0, 1, 5)
+    dec["applied_discount"] = 0.45
+    ratio = (1 - 0.45) / (1 - 0.30)
+    pairs = [(dec, _outcome(0, 1, 5, 4), ratio)] * 60
+
+    _, _, _, d_good = grid_update(pairs, {"mean": -1.0, "std": 0.6}, cfg)
+    _, _, _, d_bad = grid_update(pairs, {"mean": -3.9, "std": 0.06}, cfg)
+
+    g, b = d_good["predictive_check"], d_bad["predictive_check"]
+    # brackets are ordered: oracle is the hindsight best, so nothing beats it
+    for c in (g, b):
+        assert c["oracle_log_pred_per_row"] >= c["posterior_log_pred_per_row"]
+        assert c["oracle_log_pred_per_row"] >= c["uniform_log_pred_per_row"]
+        assert c["information_available_per_row"] >= 0
+    # a reasonable belief predicts the batch better than no opinion
+    assert g["posterior_minus_uniform"] > 0 and not g["worse_than_a_flat_prior"]
+    # a confident belief far from the data is worse than knowing nothing,
+    # and the report says so in those words
+    assert b["posterior_minus_uniform"] < 0 and b["worse_than_a_flat_prior"]

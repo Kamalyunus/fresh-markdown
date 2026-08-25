@@ -485,6 +485,14 @@ CATALOGUE = [
   ("accumulated_information", "count",
    "Running total across COMMITTED revisions. The artifact-level survivor of the "
    "old pending counter.", ""),
+  ("predictive_check", "ratio",
+   "The unconsumed batch scored against the PRE-update posterior — an "
+   "out-of-sample grade of the current belief, since every outcome in it "
+   "arrived after that belief was set. Bracketed by `oracle` and `uniform` "
+   "like the prior's holdout_comparison; `worse_than_a_flat_prior` persisting "
+   "across batches means the posterior tightened faster than the evidence "
+   "justified. Correlated hours inflate all three scores alike — read the "
+   "differences, never the absolutes.", "the operator gate, before approving"),
   ("bound_clipped", "verdict",
    "Whether the bounded step bound. Mean moves at most 0.15, std shrinks at most 25%, "
    "floored at `min_std`. A clipped cell is flagged for operator review.", ""),

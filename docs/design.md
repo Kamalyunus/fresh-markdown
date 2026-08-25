@@ -916,6 +916,18 @@ normalises, and takes moments. Mechanics and rationale:
   moved.) `pipeline.update` reports `batch_oldest_outcome_age_days` so a batch
   that keeps growing without firing is visible long before the 21-day
   flat-posterior alert.
+- **Every batch grades the belief before it updates it.** The outcomes in a
+  batch arrived *after* the current posterior was set, so their log marginal
+  predictive under the pre-update posterior is an honest out-of-sample score
+  of the belief — the production continuation of the prior's
+  `holdout_comparison`, rolling forward. Each cell's report carries
+  `predictive_check`, bracketed by `oracle` (best single ε for the batch,
+  with hindsight) and `uniform` (no opinion); `worse_than_a_flat_prior`
+  persisting across batches is the signature of a posterior that tightened
+  faster than the evidence justified — the failure `max_std_shrink` and
+  `min_std` exist to prevent, and the only test of them real data can run.
+  Correlated hours inflate all three scores alike, so read the differences,
+  never the absolute values.
 - **Bounded steps, human-gated.** An update applies when accumulated
   effective information crosses a threshold; each step moves the mean at
   most 0.15 and shrinks the std at most 25% (floored), with any clipped

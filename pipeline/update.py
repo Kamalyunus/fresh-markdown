@@ -39,7 +39,7 @@ import math
 
 import numpy as np
 import pandas as pd
-from scipy.special import gammaln
+from scipy.special import gammaln, logsumexp
 from scipy.stats import nbinom
 
 from common.config import load_config, deff
@@ -133,6 +133,39 @@ def grid_update(pairs, cell_record, cfg):
     raw_mean = float(np.sum(w * grid))
     raw_std = float(np.sqrt(np.sum(w * (grid - raw_mean) ** 2)))
 
+    # SEQUENTIAL PREDICTIVE CHECK -- tomorrow's real outcomes grade today's
+    # belief. Every outcome in this batch arrived AFTER the current posterior
+    # was set, so the log marginal predictive of the batch under the
+    # PRE-UPDATE posterior is an honest out-of-sample score of the belief --
+    # the production continuation of the prior's holdout_comparison, rolling
+    # forward. Bracketed the same way: `oracle` (the best single epsilon for
+    # this batch, with hindsight) and `uniform` (a flat belief on the
+    # support). A posterior scoring BELOW uniform predicted these outcomes
+    # worse than no opinion would have -- the signature of a belief that
+    # tightened too far or in the wrong place, which is exactly what
+    # max_std_shrink / min_std exist to prevent and nothing offline can test.
+    # Correlated hours inflate all three scores alike (no deff here), so read
+    # the DIFFERENCES, never the absolute values.
+    n = len(pairs)
+    log_w_prior = log_prior - logsumexp(log_prior)
+    pred_posterior = float((logsumexp(loglik + log_w_prior)) / n)
+    pred_uniform = float((logsumexp(loglik) - np.log(len(grid))) / n)
+    pred_oracle = float(loglik.max() / n)
+    predictive_check = {
+        "posterior_log_pred_per_row": round(pred_posterior, 5),
+        "uniform_log_pred_per_row": round(pred_uniform, 5),
+        "oracle_log_pred_per_row": round(pred_oracle, 5),
+        "information_available_per_row": round(pred_oracle - pred_uniform, 5),
+        "posterior_minus_uniform": round(pred_posterior - pred_uniform, 5),
+        "worse_than_a_flat_prior": bool(pred_posterior < pred_uniform),
+        "note": ("batch scored against the PRE-update posterior -- an "
+                 "out-of-sample grade of the current belief. Read "
+                 "information_available_per_row first; a gap that is a large "
+                 "share of a tiny number is still tiny. worse_than_a_flat_"
+                 "prior persisting across batches means the posterior "
+                 "tightened faster than the evidence justified."),
+    }
+
     # information at the pre-update posterior mean, in NB units: with
     # Var[D] = mu + mu^2/r the per-hour Fisher information for epsilon is
     # (dmu/deps)^2 / Var = mu * L^2 * r/(r+mu) -- NOT the Poisson mu * L^2,
@@ -148,6 +181,7 @@ def grid_update(pairs, cell_record, cfg):
         "stockout_share": round(float(censored.mean()), 4),
         "exploration_cost": round(float(sum(
             d["exploration_cost"] for d, _, _ in pairs)), 2),
+        "predictive_check": predictive_check,
     }
 
 

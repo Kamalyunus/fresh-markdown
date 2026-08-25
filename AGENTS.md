@@ -280,6 +280,15 @@ ratio twice and move `tau` by its square.
 Everything else in that file is static by design: `cell_of` (cell assignment
 does not move during the MVP window) and `prior_source` (provenance).
 
+**Each cell's report block carries `predictive_check`** — the batch scored
+against the PRE-update posterior, bracketed by `oracle` and `uniform`, the
+same reading as the prior's `holdout_comparison` but rolling forward on real
+exploration outcomes. Read `information_available_per_row` first;
+`worse_than_a_flat_prior` persisting across batches means the posterior
+tightened faster than the evidence justified (the failure
+`max_std_shrink`/`min_std` guard), and is worth raising at the operator gate
+before approving further updates.
+
 **There is no `information_since_update` counter, and adding one back would be
 a bug.** The trigger is evaluated on the UNCONSUMED BATCH, not on a running
 total, because nothing consumes a sub-threshold batch — so incrementing a
