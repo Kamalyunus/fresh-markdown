@@ -29,7 +29,7 @@ The system is built in the order below. Each step's output is the next step's in
 | 3 | `bootstrap.measure` (§8, Appendix A) | 2 | Already written — see Appendix A. Three bugs from the first run are fixed there. Re-run it. |
 | 4 | `bootstrap.train_baseline` (§9.3) | 2 | Fit and freeze `mu_ref`. |
 | 4b | `backtest` (§17) | 2, 4 | Replay harness. Needed by the calibration gate, and re-run after every correction — build it as a module, not a script. |
-| 5 | **GATE — calibration** (§9.3) | 3, 4b | **BLOCKING.** Run measurement 10. Establish the level/slope split. Do not proceed until `fidelity_episode_sold_ratio` is inside `calibration_gate_band`. |
+| 5 | **GATE — calibration** (§9.3) | 3, 4b | **BLOCKING.** Run measurement 10. Establish the level/slope split. Do not proceed until the `calibration_gate_metric` (owner-set: `level_at_anchor`) is inside `calibration_gate_band`. |
 | 6 | `bootstrap.estimate_prior` (§9.5) | 2, 4 | **Runs BEFORE dispersion** — see §9.4. The prior is the censored-Poisson profile likelihood read as a density; no dispersion parameter enters, so there is nothing circular to order around. |
 | 7 | `bootstrap.fit_dispersion` (§9.4) | 2, 4, **6** | `r_lookup`, `rho`, fitted at each category's OWN prior mean. Re-fit `rho` against fitted residuals — the phase-0 value is a proxy. |
 | 8 | **GATE — prior acceptance** (§9.5) | 6 | **BLOCKING, HUMAN.** No reject flag in the artifact — read `design_comparison`, `wrong_sign_categories` and `holdout_comparison`. A pooled or uniform prior is a designed outcome. |
@@ -51,13 +51,12 @@ The system is built in the order below. Each step's output is the next step's in
 
 ### What is already measured
 
-These come from the first phase-0 run and are already in §7. They do not need re-deriving unless the filter chain changes.
-
-```
-dispersion.rho                       0.3553
-dispersion.mean_forced_hours_per_episode  9.278   -> deff 3.941
-ab_test.il_pct_ratio_se_clustered    0.000383     -> ~0.7% relative MDE
-```
+*(Superseded.)* The first phase-0 run measured `rho` 0.3553, forced hours
+9.278 (deff 3.941) and a clustered SE of 0.000383 — all three moved when the
+filter chain and episode definition were corrected. Current values come from
+the artifacts, not from this list: `rho`/forced hours from `artifacts/rho.json`
+(0.3103 / 8.563 → deff 3.347 on the corrected extract), and the clustered SE
+from `bootstrap.derive_thresholds` (0.002915 once scrap is counted in full).
 
 ### Known-wrong values from the first run — do not reuse
 
@@ -202,7 +201,7 @@ Out of scope entirely: pricing outside the FLC window, non-perishables, replenis
 
 | Term | Definition |
 | --- | --- |
-| Episode | One `(sku_id, fc, date)` selling window, built from contiguous selling hours |
+| Episode | One SKU × FC selling window: a maximal run of consecutive hourly rows over which the source `hours_remaining` counter decrements by exactly one per elapsed hour. **Deliberately NOT keyed by date** — windows routinely run past midnight, and a date key splits one economic episode in two |
 | Decision interval | One hour within an episode for which a price is chosen |
 | `d` | Total discount as a fraction, `(original_price - applied_price) / original_price` |
 | `d_ref` | Category reference discount; the anchor at which the baseline model predicts |
@@ -218,16 +217,19 @@ Out of scope entirely: pricing outside the FLC window, non-perishables, replenis
 
 ## 6. Architecture
 
-Three frozen artifacts, one learning artifact, one decision path.
+Six frozen artifacts, one learning artifact, one decision path.
 
 ```
 FROZEN (fit offline, unchanged during the MVP window)
   baseline_model.txt     mu_ref by context at d_ref
+  feature_schema.json    feature order and categorical levels
+  calibration.json       per-subcategory level factors (fitted; applied per config)
   r_lookup.json          NB dispersion by subcategory
   rho.json               intra-episode demand correlation (scalar)
+  prior.json             elasticity prior: a density per category (§9.5)
 
 LEARNING (updates in production)
-  posterior.json         epsilon by category: {mean, std, n_obs, info, version}
+  posterior.json         epsilon by cell: {mean, std, n_obs, info, version}
 
 DECISION PATH
   state -> feasible tiers -> DP over Q(p) -> exploit or explore -> price
@@ -286,8 +288,12 @@ baseline_model:
   objective: "tweedie"                 # SET
   freeze_at_launch: true               # SET  no retraining in MVP window
   feature_schema_path: "artifacts/feature_schema.json"
-  calibration_gate_band: [0.95, 1.05]  # SET  fidelity_episode_sold_ratio must land here
-  calibration_factor_path: "artifacts/calibration.json"   # per-category level correction
+  calibration_gate_band: [0.90, 1.10]  # SET BY OWNER 2026-08-09 — ~2σ of measured
+                                       # weekly demand volatility
+  calibration_gate_metric: "level_at_anchor"  # SET BY OWNER 2026-08-09 — the model's
+                                       # only production job is the level at d_ref
+  calibration_gate_window: "test"      # SET  must be disjoint from the fit window
+  calibration_factor_path: "artifacts/calibration.json"   # per-subcategory level correction
   apply_level_calibration: null        # DECIDE after §9.3 diagnostic; null blocks start
 
 reference_discount:                    # SET  category anchors
@@ -297,9 +303,11 @@ reference_discount:                    # SET  category anchors
 
 dispersion:
   fallback_order: ["subcategory", "category", "global"]
-  clamp_percentile: 0.90               # SET  clamp high converged r
-  rho: 0.3553                          # MEASURED  phase 0
-  mean_forced_hours_per_episode: 9.278 # MEASURED  phase 0 -> deff = 3.941
+  clamp_percentile: 0.90               # SET  clamp high converged r (groups with
+                                       # Pearson dispersion < 1 are exempt and listed)
+  rho: 0.3103                          # MEASURED  bootstrap.fit_dispersion — re-pasted
+                                       # from artifacts/rho.json after every retrain
+  mean_forced_hours_per_episode: 8.563 # MEASURED  ditto -> deff = 3.347
 
 posterior:
   min_episodes_per_week_for_cell: 250  # SET  below this -> read the global cell
@@ -307,17 +315,24 @@ posterior:
   epsilon_max: -0.05                   # SET  sign constraint
   grid_size: 801                       # SET
   min_std: 0.05                        # SET  floor on posterior std
-  prior:
+  prior:                               # profile-likelihood density, §9.5
     rows: "entry"                      # SET  which rows the profile scores
     hour_control: "date_hour"          # SET  same clock hour of the same day
-    fallback_std: 0.60                 # SET
+    min_rows_per_time_cell: 5          # SET  thinner time cells get no multiplier
+    own_information_saturation: 2.0    # SET  span at which a category stops
+                                       # borrowing from the pooled density
+    stability_folds: 3                 # SET  disjoint slices for fold_spread
+    holdout_window: "calib"            # SET  window the holdout_comparison scores on
     search_bounds: [-4.00, -0.05]      # SET  must equal [epsilon_min, epsilon_max]
-    reject_boundary_solutions: true    # SET  a bound-pinned estimate is not an estimate
+    search_grid_size: 159              # SET  profile resolution
+    max_rows_per_category: 150000      # SET
     path: "artifacts/prior.json"
 
 pricing:
-  tier_step: 0.025                     # SET  discount grid granularity
-  entry_window: 0.10                   # SET  entry arms within d_ref ± this
+  tier_step: 0.025                     # SET  hourly discount grid granularity
+  entry_offsets: [-0.15, -0.10, -0.05, 0.0, 0.05]  # SET  ENTRY action set relative
+                                       # to the category reference: up to 15pp
+                                       # shallower, at it, or one 5pp step deeper
   negbin_max_k: 25                     # SET  demand truncation
   demand_floor: 0.01                   # SET
 
@@ -349,7 +364,10 @@ monitoring:
 ab_test:
   allocation: 0.50                     # SET
   min_detectable_effect_pct: null      # SET BY OWNER
-  il_pct_ratio_se_clustered: 0.000383  # MEASURED  phase 0; 84,792 SKU x FC units
+  il_pct_ratio_se_clustered: 0.002915  # MEASURED  derive_thresholds on the corrected
+                                       # extract, scrap counted in full (the phase-0
+                                       # 0.000383 and interim 0.000875 predate the
+                                       # scrap and episode-definition corrections)
 ```
 
 ---
@@ -363,7 +381,7 @@ All measurements run on filtered data (§9.2) with the exclusion window removed,
 | # | Measurement | Definition | Grouping | Sets / decides |
 | --- | --- | --- | --- | --- |
 | 1 | **Cost ratio and feasible ceiling** | `cost / original_price`; `d_max = 1 - cost/original_price`. Report p10/p25/p50/p75/p90. Also share of episodes with `d_max < 0.15`, and share with fewer than `min_feasible_tiers` feasible tiers. | category, overall | **Viability of the exploration mechanism.** A high non-explorable share means no budget produces learning, and the answer becomes a cost-ratio conversation rather than a pricing-algorithm one. |
-| 2 | **Same-hour identifying variation** | Within `(category, hour)` cells: std of discount, count of distinct discount levels, episode count. Report the distribution across cells and the share of cells with std below 0.5pp. | category × hour | **How much same-hour identifying variation §9.5 has to work with.** Acceptance thresholds must be agreed *before* the estimate is run. |
+| 2 | **Same-hour identifying variation** | Within `(category, hour)` cells: std of discount, count of distinct discount levels, episode count. Report the distribution across cells and the share of cells with std below 0.5pp. | category × hour | **How much same-hour identifying variation §9.5 has to work with.** Low variation means the per-category densities carry little information and the prior degrades toward pooled/uniform — a designed outcome, read at the §9.5 human gate. |
 | 3 | **Intra-episode correlation** | Correlation of within-episode demand residuals against the baseline model, pooled to one global scalar. Also mean hours per episode, and mean hours per episode among episodes with any price change. | global; by category for reference | `dispersion.rho`, `mean_forced_hours_per_episode`. Sets `deff` and therefore the real information gate. |
 | 4 | **Demand density** | Zero-sale rate; mean and p50/p90 `units_sold` per hour; distribution of episode length and of starting inventory. | category | Information per outcome, and realistic time-to-convergence. |
 | 5 | **Censoring share** | Share of hours with `units_sold >= starting_inventory`; share of episodes reaching zero inventory before window end. | category | How much of the likelihood is censored rather than exact. |
@@ -431,25 +449,25 @@ Three load-bearing properties:
 
 ### 9.2 Filter chain
 
-Deterministic, auditable order — **twelve named waterfall rows**, each counted, followed by a flagging pass. **Almost every stage drops the WHOLE EPISODE, not the offending row**: a hole punched mid-window re-segments into a spurious short episode, which is worse than losing the episode.
+Deterministic, auditable order — **thirteen named waterfall rows**, each counted, followed by a flagging pass. **Almost every stage drops the WHOLE EPISODE, not the offending row**: a hole punched mid-window re-segments into a spurious short episode, which is worse than losing the episode.
 
 **A stage may only DROP for an integrity or scope reason** — rows that cannot be believed, cannot be used by anything at all, or fall outside the period the study covers. Nothing may be dropped for being hard to *price*. That distinction is load-bearing: `FEATURES` (§9.3) carries neither `cost` nor `hours_remaining` nor anything about the inventory chain, so an unpriceable episode is an ordinary demand observation to every frozen artifact, and removing them took **>70% of the extract's COGS** out of every fit — including the elasticity prior, which is starved of price variation and for which below-cost hours are the widest spread the data contains.
 
 | # | Stage | Scope | Drops |
 | --- | --- | --- | --- |
 | 1 | `raw` | — | the starting count |
-| 2 | `gap_split_windows_dropped` | episode, **every fragment** | a hole in the hourly feed splits one source window into two episodes, and neither is one — the first ends unclosed, the second opens mid-window with the wrong starting stock and a first row that reads as an ENTRY row. Detected from the counter falling in step with the clock |
 | 2 | `duplicate_hour_rows_dropped` | rows, **both** copies | two states for one `sku × fc × hour`; no principled way to choose, and they collide two runs into one episode id |
-| 3 | `exclusion_window_removed` | episode | any episode with ANY hour in the known demand-issue window. SCOPE, not integrity |
-| 4 | `discount_out_of_range_dropped` | episode | discount outside `[0, 1]` — the percent→fraction conversion applied twice or not at all |
-| 5 | `negative_quantities_dropped` | episode | impossible quantities: negative inventory or sales. **Not `cost <= 0`** — see the flags below |
-| 6 | `null_category_dropped` | rows | missing category/subcategory |
-| 7 | `zero_base_price_dropped` | rows | `original_price` still null or zero after ffill+bfill within the episode |
-| 8 | `episode_universe` | episode | the three conditions that make an episode's inventory readable — CONTINUITY (`ending[t] == starting[t+1]`, the only one that drops), the IDENTITY (`opening + restocked == sold + scrap`), and a CLEAN CLOSE (`starting >= sold` on the last row). `units_sold > starting_inventory` is a RESTOCK, not an impossible quantity |
-| 9 | `contiguous_episodes_built` | — | re-segmentation, not a filter — and a NO-OP that RAISES if it stops being one, since every drop after the ids are assigned is episode-scoped |
-| 10 | `negative_window_recovered` | episode | **not a drop.** An episode whose counter enters ALREADY negative and runs no longer than `data.manufacturing_window_hours` is a known source pattern, not a defect; its counter is rewritten as a synthetic countdown. The stage reports what it recovered, since it changes no counts. **Runs after step 9 deliberately:** it is the only step that MUTATES `hours_remaining`, the field episode ids are derived from, so running it earlier graded the step-9 invariant against an invented counter — and the synthetic countdown could line up with a genuine neighbouring window and merge the two |
-| 11 | `eligible` | — | **not a drop — a GATE.** `accounting_closes & final_hour_clean & closed`: what a FROZEN ARTIFACT needs, since a censored likelihood is only correct if we know which hours ran out. Read by the demand model and the artifact fits (when `baseline_model.train_population` is `eligible`), and by every scrap / IL / clearance figure unconditionally — `scrap_units` returns NaN outside it |
-| 12 | `dp_eligible` | — | **not a drop — a GATE.** How much of the surviving population the DP can act on, with the per-flag breakdown in its detail block. Read by the DP solver, the backtest, shadow, the calibration gate and the A/B |
+| 3 | `gap_split_windows_dropped` | episode, **every fragment** | a hole in the hourly feed splits one source window into two episodes, and neither is one — the first ends unclosed, the second opens mid-window with the wrong starting stock and a first row that reads as an ENTRY row. Detected from the counter falling in step with the clock |
+| 4 | `exclusion_window_removed` | episode | any episode with ANY hour in the known demand-issue window. SCOPE, not integrity |
+| 5 | `discount_out_of_range_dropped` | episode | discount outside `[0, 1]` — the percent→fraction conversion applied twice or not at all |
+| 6 | `negative_quantities_dropped` | episode | impossible quantities: negative inventory or sales. **Not `cost <= 0`** — see the flags below |
+| 7 | `episode_universe` | episode | the three conditions that make an episode's inventory readable — CONTINUITY (`ending[t] == starting[t+1]`, the only one that drops), the IDENTITY (`opening + restocked == sold + scrap`), and a CLEAN CLOSE (`starting >= sold` on the last row). `units_sold > starting_inventory` is a RESTOCK, not an impossible quantity |
+| 8 | `null_category_dropped` | episode | missing category/subcategory. EPISODE-scoped: a row-scoped drop punches a hole mid-window |
+| 9 | `zero_base_price_dropped` | episode | `original_price` still null or zero after ffill+bfill within the episode. EPISODE-scoped, same reason |
+| 10 | `contiguous_episodes_built` | — | re-segmentation, not a filter — and a NO-OP that RAISES if it stops being one, since every drop after the ids are assigned is episode-scoped |
+| 11 | `negative_window_recovered` | episode | **not a drop.** An episode whose counter enters ALREADY negative and runs no longer than `data.manufacturing_window_hours` is a known source pattern, not a defect; its counter is rewritten as a synthetic countdown. The stage reports what it recovered, since it changes no counts. **Runs after step 10 deliberately:** it is the only step that MUTATES `hours_remaining`, the field episode ids are derived from, so running it earlier graded the step-10 invariant against an invented counter — and the synthetic countdown could line up with a genuine neighbouring window and merge the two |
+| 12 | `eligible` | — | **not a drop — a GATE.** `accounting_closes & final_hour_clean & closed`: what a FROZEN ARTIFACT needs, since a censored likelihood is only correct if we know which hours ran out. Read by the demand model and the artifact fits (when `baseline_model.train_population` is `eligible`), and by every scrap / IL / clearance figure unconditionally — `scrap_units` returns NaN outside it |
+| 13 | `dp_eligible` | — | **not a drop — a GATE.** How much of the surviving population the DP can act on, with the per-flag breakdown in its detail block. Read by the DP solver, the backtest, shadow, the calibration gate and the A/B |
 
 **Every row carries `kind` and `used_by`.** `hard_drop` means the rows leave the frame, so every consumer sees the same population and the question does not arise; `population_gate` marks the last two rows, which drop nothing and are where the consumers diverge. The three populations that come out are **nested — `integrity ⊃ eligible ⊃ dp_eligible`** — so their exclusions must never be added together. `integrity` is not a row of its own: it is the last `hard_drop` row's counts.
 
@@ -643,7 +661,7 @@ feasible = { k × tier_step : k integer, 0 <= k × tier_step <= d_max }
 
 ### 11.2 Entry arms
 
-Entry is not constrained by monotonicity and is the widest action set in the episode. Entry arms are the feasible tiers within `d_ref ± entry_window`, clipped to `[0, d_max]`.
+Entry is not constrained by monotonicity and is the widest action set in the episode. Entry arms are `pricing.entry_offsets` — discount offsets relative to the category reference, `[−15, −10, −5, 0, +5] pp`: up to 15pp shallower than reference, at it, or one 5pp step deeper. Snapped to the tier grid and clipped to `[0, d_max]`; if the cost floor forbids every requested arm, the deepest feasible tier is the only action — a single-action decision, correctly non-explorable. The spacing is a deliberate 5pp (information scales as (log price ratio)², so a 2.5pp arm carries ~24% of a 5pp arm's information while taking an equal share of the uniform draw), and the deep side is a single arm rather than a symmetric band — under monotonicity a deep entry is irreversible.
 
 Entry carries most of the identifying variation. Hourly decisions are monotone and cost-floor-bound and frequently have no feasible alternative at all.
 
@@ -977,7 +995,7 @@ Validation: sales and inventories are non-negative integers; `ending_inventory` 
 | Reason | Condition |
 | --- | --- |
 | `intraday_restock` | `ending_inventory > starting − sold` — stock arrived during the hour |
-| `episode_close_write_off` | `ending_inventory == 0` while stock remained — the source's closure sentinel, ~49.5% of episodes |
+| `episode_close_write_off` | `ending_inventory == 0` while stock remained — the source's closure sentinel (~13.5% of episodes end holding stock on the corrected extract) |
 | `unexplained_shortfall` | `0 < ending_inventory < starting − sold` — shrink |
 
 `unexplained_shortfall` was deliberately absent until it was measured: the theory was that unexplained loss should quarantine and stay visible. The effect was that the live path treated shrink as an anomaly while the offline chain treated it as an ordinary event — counted gross, booked into scrap, gating nothing. Because a quarantined outcome never lands, `event_completeness` then fell by the feed's whole shrink rate and the §19 shadow gate (`min_event_completeness`, 0.99) failed for a reason no integration work could fix; at ~2.8% of decision hours the harness read 0.9718. Quarantine is for what the system cannot interpret, and a shrink is interpreted — the units stay visible through `units_shrink` and `episode_scrap`.
@@ -1025,10 +1043,14 @@ slope_ratio_by_discount_gap          # measurement 10, §8
 **Policy deltas — what the DP would have done differently:**
 
 ```
-actual_il, actual_discount_cost, actual_scrap_cost
+actual_il, actual_discount_cost, actual_scrap_cost          # observed world
 actual_il_pct, actual_clearance, actual_mean_discount
-dp_il, dp_discount_cost, dp_scrap_cost
+legacy_model_il, legacy_model_discount_cost, ...            # legacy prices, OUR model
+dp_il, dp_discount_cost, dp_scrap_cost                      # DP prices, same model
 dp_il_pct, dp_clearance, dp_mean_discount
+policy_gap_like_for_like             # legacy-under-model vs DP-under-model — the
+                                     # only pairing that is a policy statement;
+                                     # actual_* vs model figures are fidelity only
 pct_dp_deepened
 q_spread_distribution                # for tau_initial, §12.3
 ```
@@ -1079,7 +1101,7 @@ The second row is the case this design makes most likely, and it must not be res
 | Phase | Exit gate |
 | --- | --- |
 | 0. Measurement | §8 complete, results reviewed, `MEASURED` config values populated, §8.1 reassessment gates cleared. |
-| 0b. Calibration | §9.3 diagnostic run and the level/slope split established. Epsilon search bound widened to `epsilon_min` and §9.5 re-estimated with no boundary solutions. `fidelity_episode_sold_ratio` inside `calibration_gate_band`. **Blocking — nothing proceeds until this clears.** |
+| 0b. Calibration | §9.3 diagnostic run and the level/slope split established; §9.5 prior estimated and its human gate read. The `calibration_gate_metric` (owner-set: `level_at_anchor`) inside `calibration_gate_band`. **Blocking — nothing proceeds until this clears.** |
 | 1. Shadow | Decisions logged, no prices applied. Event completeness above 99%, matched decision rate above 99%, no cost-floor violations. |
 | 2. Exploit-only pilot | Small SKU set, exploration disabled. Price mismatch below threshold, finalization lag within SLA. |
 | 3. Learning pilot | Exploration enabled at half budget on the pilot set. Posterior std falling in at least one category, exploration cost within budget. |
@@ -1496,7 +1518,7 @@ def gates(res):
         },
         "gate_2_prior_estimable": {
             "share_cells_std_below_0.5pp": m2["share_cells_std_below_0.5pp"],
-            "verdict": "REVIEW — set posterior.prior.source=fallback"
+            "verdict": "REVIEW — expect a pooled/uniform prior (9.5)"
                        if m2["share_cells_std_below_0.5pp"] > 0.50 else "PASS",
         },
         "gate_3_ab_powerable": {

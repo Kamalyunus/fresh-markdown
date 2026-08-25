@@ -196,7 +196,39 @@ had already made the same correction.
 
 ---
 
-## Process
+## Exploration budget and tau
+
+### Budget base: same-day / window-mean IL → trailing close-day IL
+**Was:** the daily budget was 1% of a markdown-IL figure that mixed bases —
+the replay derivation used a window mean, the shadow harness charged an
+episode's discount cost to the day it was spent and its scrap to the day it
+closed, and "today's budget" implicitly needed today's own IL, which is
+unobservable until today's episodes close.
+
+**Learned (owner's rule):** an episode's IL is a settled number only at its
+close, and tau for today must be computable at midnight from history alone.
+Attributing discount and scrap to different days split one episode's loss
+across the calendar; funding exploration from the same day's own IL would
+spend hardest on exactly the days already losing most.
+
+**Now:** a day's realised IL is the whole-episode IL (discount AND scrap) of
+episodes that CLOSED that day, attributed at close; the budget is 1% of the
+mean of that series over the trailing `budget_il_window_days` (7) calendar
+days ending yesterday — a moving window that adds yesterday and drops the
+eighth day back. Nothing about today needs to be known when tau is set.
+`derive_tau_initial` keeps a window-mean base (one launch constant) and
+records `budget_basis`.
+
+### tau clip: symmetric [0.5, 2.0] → asymmetric [0.5, 1.25]
+**Was:** `tau_adjust_clip: [0.5, 2.0]` — tau could halve or double in a day,
+sized for a noisy single-day budget basis.
+
+**Learned:** with a 7-day trailing base the budget barely moves day to day,
+so a 2× daily rise had nothing legitimate to do. The two directions are not
+symmetric: cutting is the safety direction (the measured 8.7× overspend
+incident needs three halvings to walk inside the 2× stop condition — a 0.75
+floor would take ~8 days, all of them above the stop), while raising tau is
+never urgent. **Now:** down stays 0.5, up is capped at 1.25.
 
 ### Stale numbers in docs → anchored figures refreshed by the run
 Figures (`rho 0.3103`, `deff 3.347`, the IL table) outlived the runs that
