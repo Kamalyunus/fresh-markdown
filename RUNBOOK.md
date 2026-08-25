@@ -131,7 +131,8 @@ exactly once per day — a second run in the same day is a no-op, not a bug.
 | --- | --- |
 | stop condition fired (overspend >2×, mismatch, duplicates, missing stockout field) | exploration suspends for the cohort automatically; **exploitation pricing continues**. Investigate, don't restart blindly |
 | `assurance · reproduction` FAIL | something moved under the solver (config edit, artifact swap, deploy, library). Diff the bundle first: `artifact bundle` line, then `artifact mirrors` |
-| `artifact mirrors` FAIL | config paste and artifact disagree. Read the **bundle** line before re-pasting — the stale side is not always config |
+| `artifact mirrors` FAIL | config paste and its source disagree (rho, forced hours, or the phase-0 A/B power SE). Read the **bundle** line before re-pasting — the stale side is not always config |
+| `report vintages` FAIL | backtest/shadow report was produced against a model no longer on disk — its gate rows grade a ghost. Re-run that report; do not launch on it |
 | posterior std flat ≥ alert days | the loop is dead: no committed update. Check batch age, tau, volumes — in that order |
 | guardrail breach (scrap/margin, 2 consecutive days) | business decision, not a code fix — escalate to the owner with the monitor's arm comparison |
 | `INSUFFICIENT` verdicts | not a pass. A thin window said so; widen or wait |

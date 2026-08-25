@@ -331,12 +331,22 @@ artifacts on disk are an older bundle than the model in force, pasting their
 numbers into config walks the system backwards — a smaller `deff` over-counts
 every future update. Establish the live bundle, then align the stale side.
 
+**`report vintages` closes the other half of the same hole.** Mirrors catch a
+stale *paste*; vintages catch a stale *report*: after a retrain, yesterday's
+`backtest.json` and `shadow.json` still parse, still show green gates, and
+silently grade a model that is no longer on disk (hard rule 1 — cross-version
+comparisons are void). `status` compares each report's stamped
+`baseline_model_version` against the bundle on disk (mismatch → FAIL:
+re-run the report) and its `config_version` against the current config
+(moved → WARN: re-run to re-grade under it).
+
 **Start with `python3 -m pipeline.status`.** The four reports carry ~200 fields
 between them, which is the right number to write and the wrong number to read.
 `status` prints only the checks that gate a decision — launch blockers, artifact
-mirrors, calibration level (diagnostic), prior, tau, shadow gate, guardrail floors, stop
-conditions, assurance — each with the figure behind it and, when red, which
-diagnostic block to open next. It computes nothing; every line is read from a
+bundle, artifact mirrors (config pastes vs `artifacts/rho.json` AND the phase-0
+A/B power SE), report vintages, calibration level (diagnostic), prior, tau,
+shadow gate, guardrail floors, stop conditions, assurance — each with the
+figure behind it and, when red, which diagnostic block to open next. It computes nothing; every line is read from a
 report some other step wrote. Exit code 1 on any FAIL, so it can gate a script.
 
 A check that did not run reports `not run`, never `PASS`: an unrun check and a

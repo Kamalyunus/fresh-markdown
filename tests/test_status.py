@@ -89,6 +89,56 @@ def test_stop_conditions_that_cannot_fire_are_flagged(cfg, tmp_path):
     assert _verdicts(status.collect(cfg, str(tmp_path)))["stop conditions"] == status.FAIL
 
 
+def test_a_stale_report_vintage_fails_rather_than_grading_a_ghost_model(cfg):
+    """After a retrain, yesterday's backtest/shadow reports describe a model
+    that is no longer on disk -- every row they feed would still read green
+    without this check (hard rule 1: cross-version comparisons are void)."""
+    state = {"bundle": "bundle-NEW"}
+    old = {"artifact_versions": {
+        "baseline_model_version": "bundle-OLD",
+        "config_version": cfg["meta"]["config_version"]}}
+    row = status._vintages(cfg, state, old, None)
+    assert row["verdict"] == status.FAIL and "bundle-OLD" in row["detail"]
+
+    fresh = {"artifact_versions": {
+        "baseline_model_version": "bundle-NEW",
+        "config_version": cfg["meta"]["config_version"]}}
+    assert status._vintages(cfg, state, fresh, fresh)["verdict"] == status.PASS
+
+
+def test_a_report_from_an_edited_config_warns(cfg):
+    state = {"bundle": "b"}
+    rep = {"artifact_versions": {"baseline_model_version": "b",
+                                 "config_version": "0.0.0-old"}}
+    row = status._vintages(cfg, state, None, rep)
+    assert row["verdict"] == status.WARN and "0.0.0-old" in row["detail"]
+
+
+def test_vintages_without_a_bundle_read_not_run_never_pass(cfg):
+    row = status._vintages(cfg, {"bundle": None}, {}, {})
+    assert row["verdict"] == status.NONE
+
+
+def test_the_ab_power_se_paste_is_mirrored_against_phase0(cfg):
+    """The MEASURED A/B power SE is pasted from phase 0 and consumed nowhere
+    at runtime, so a stale paste is silent forever without this mirror."""
+    c = dict(cfg, ab_test=dict(cfg["ab_test"],
+                               il_pct_ratio_se_clustered=0.000875))
+    stale = {"config_values_measured":
+             {"ab_test.il_pct_ratio_se_clustered": 0.002915}}
+    row = status._mirrors(c, stale)
+    assert row["verdict"] == status.FAIL
+    assert "0.002915" in row["detail"] and "0.000875" in row["detail"]
+    # a matching paste adds no drift line, and a missing phase0 report is
+    # not drift (measure has not run yet). Assert on THIS mirror's line, not
+    # the row verdict -- the artifact mirrors may drift independently in a
+    # local checkout
+    fresh = {"config_values_measured":
+             {"ab_test.il_pct_ratio_se_clustered": 0.000875}}
+    assert "il_pct_ratio_se_clustered" not in status._mirrors(c, fresh)["detail"]
+    assert "il_pct_ratio_se_clustered" not in status._mirrors(c, None)["detail"]
+
+
 def test_overall_verdict_and_render(cfg, tmp_path):
     report = status.collect(cfg, str(tmp_path))
     assert report["verdict"] in (status.PASS, status.FAIL)

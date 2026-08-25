@@ -607,8 +607,14 @@ CATALOGUE = [
    "Do the frozen artifacts form ONE bundle, unedited since sealing? Mixed vintages "
    "and edited files are separate failures with different remedies.", "GATE"),
   ("artifact mirrors", "verdict",
-   "Do the config pastes still match the artifacts they came from? Read the bundle "
-   "line FIRST — the check says they disagree, not which is stale.", "GATE"),
+   "Do the config pastes still match their source — the frozen artifacts (rho, "
+   "forced hours) and phase 0's A/B power SE? Read the bundle line FIRST — the "
+   "check says they disagree, not which is stale.", "GATE"),
+  ("report vintages", "verdict",
+   "Were backtest.json and shadow.json produced against the artifacts on disk? "
+   "After a retrain the old reports still show green gates while grading a model "
+   "that no longer exists (hard rule 1). Model mismatch FAILs — re-run the "
+   "report; a moved config_version WARNs.", "GATE"),
   ("calibration level", "verdict", "The level at the anchor, in band. Diagnostic — WARN out of band, since calibration is always applied.", ""),
   ("elasticity prior", "verdict", "How many categories stand on their own data, and how many are wrong-signed.", ""),
   ("exploration tau", "verdict", "What is in force, and the latest derivation.", "GATE"),

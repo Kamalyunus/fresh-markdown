@@ -1143,6 +1143,23 @@ the two differed but not which was stale, and the obvious remedy — re-paste fr
 the artifact — is wrong whenever the artifacts on disk are an older bundle than
 the model in force: a smaller `deff` then over-counts every future update.
 `pipeline.status` reports the bundle line above the mirror line for that reason.
+The mirror check also covers the report-sourced pastes: the A/B power SE
+(`ab_test.il_pct_ratio_se_clustered`) against phase 0's
+`config_values_measured`, at a relative tolerance, and `tau_initial` through
+its own provenance check (§5.13).
+
+Stale *reports* are the other half of the same hole, and `report vintages`
+closes it: after a retrain, yesterday's `backtest.json` and `shadow.json`
+still parse, still show green gates, and silently grade a model that is no
+longer on disk — hard rule 1 makes those rows void, not merely old. Every
+gate-feeding report stamps `artifact_versions` (model bundle plus
+`config_version`); `status` compares them against the artifacts on disk. A
+model mismatch is FAIL (re-run the report), a moved `config_version` is WARN
+(re-run to re-grade under the current tuning). Daily-cadence outputs need no
+vintage row of their own: `monitor` and `assurance` are recomputed each day
+from events that are individually stamped, and assurance's reproduction check
+re-solves those events against the current artifacts, so a vintage mix
+surfaces there as a mismatch with the stamped versions in the failure record.
 
 ### 5.15 Production assurance — testing the assumptions, not the code
 

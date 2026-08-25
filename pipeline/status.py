@@ -47,9 +47,8 @@ def _launch_blockers(cfg):
                 "config.yaml")
 
 
-def _bundle(cfg):
+def _bundle(cfg, state):
     """Do the frozen artifacts form one bundle, unedited since sealing?"""
-    state = provenance.verify(cfg, provenance.load_seal(cfg))
     if state["verdict"] == "INSUFFICIENT":
         return _row("artifact bundle", NONE, "no stamped artifacts",
                     "run the bootstrap, then python3 -m bootstrap.seal")
@@ -66,15 +65,26 @@ def _bundle(cfg):
                 "python3 -m bootstrap.seal" if not state["sealed_bundle"] else "")
 
 
-def _mirrors(cfg):
+def _mirrors(cfg, phase0=None):
     """A stale paste mis-weights every posterior step, silently. The remedy
     is NOT automatically "re-paste": the check says the two disagree, not
     which is right -- read the bundle line first."""
     drift = artifact_mirror_drift(cfg)
+    # report-sourced paste, same class as the artifact mirrors: the A/B power
+    # SE is measured in phase 0 (m6) and pasted; relative tolerance, because
+    # the value is ~1e-3 and the artifact mirrors' absolute one cannot see it
+    src = (phase0 or {}).get("config_values_measured", {}).get(
+        "ab_test.il_pct_ratio_se_clustered")
+    pasted = cfg["ab_test"]["il_pct_ratio_se_clustered"]
+    if src is not None and pasted is not None \
+            and abs(float(pasted) - float(src)) > 1e-3 * abs(float(src)):
+        drift.append(f"ab_test.il_pct_ratio_se_clustered={pasted} but "
+                     f"phase0 measured {src}")
     if drift:
         return _row("artifact mirrors", FAIL, "; ".join(drift),
                     "check the bundle line first, then align the stale side")
-    return _row("artifact mirrors", PASS, "config matches the frozen artifacts")
+    return _row("artifact mirrors", PASS,
+                "config matches the frozen artifacts and phase 0")
 
 
 def _calibration(cfg, backtest):
@@ -129,6 +139,47 @@ def _shadow(shadow):
                 f"{val('matched_decision_rate')} · cost-floor violations "
                 f"{val('cost_floor_violations')}",
                 "" if ok else "shadow.rejected_reasons, quarantined_event_count")
+
+
+def _vintages(cfg, state, backtest, shadow):
+    """Gate evidence is only evidence about the artifacts it ran against
+    (hard rule 1): after a retrain, yesterday's backtest and shadow reports
+    silently grade a model that is no longer on disk, and every row they
+    feed above would still read green. Model mismatch is FAIL; a config
+    edited since the report is WARN (re-run to re-grade under it)."""
+    bundle = state["bundle"]
+    if bundle is None:
+        return _row("report vintages", NONE,
+                    "no single artifact bundle to compare against",
+                    "see the artifact bundle line")
+    stale, moved, checked = [], [], []
+    for name, rep in (("backtest", backtest), ("shadow", shadow)):
+        if not rep:
+            continue                # its own row already reads "not run"
+        av = rep.get("artifact_versions") or {}
+        if av.get("baseline_model_version") != bundle:
+            stale.append(f"{name} ran against bundle "
+                         f"{av.get('baseline_model_version')}")
+        elif av.get("config_version") != cfg["meta"]["config_version"]:
+            moved.append(f"{name} ran under config_version "
+                         f"{av.get('config_version')}")
+        else:
+            checked.append(name)
+    if stale:
+        return _row("report vintages", FAIL,
+                    "; ".join(stale) + f" -- artifacts on disk are {bundle}",
+                    "re-run it: every row it feeds grades a model that is "
+                    "no longer deployed")
+    if moved:
+        return _row("report vintages", WARN,
+                    "; ".join(moved)
+                    + f" (now {cfg['meta']['config_version']})",
+                    "re-run to re-grade under the current config")
+    if not checked:
+        return _row("report vintages", NONE, "no version-stamped reports yet")
+    return _row("report vintages", PASS,
+                f"{', '.join(checked)} match bundle {bundle} and "
+                f"config_version {cfg['meta']['config_version']}")
 
 
 def _tau(cfg, backtest, shadow=None):
@@ -235,10 +286,12 @@ def collect(cfg, root="reports"):
     a status view that cannot itself be tested is not worth trusting."""
     backtest = _read(os.path.join(root, "backtest.json"))
     shadow = _read(os.path.join(root, "shadow.json"))
+    state = provenance.verify(cfg, provenance.load_seal(cfg))
     rows = [
         _launch_blockers(cfg),
-        _bundle(cfg),
-        _mirrors(cfg),
+        _bundle(cfg, state),
+        _mirrors(cfg, _read(os.path.join(root, "phase0.json"))),
+        _vintages(cfg, state, backtest, shadow),
         _calibration(cfg, backtest),
         _prior(cfg),
         _tau(cfg, backtest, shadow),

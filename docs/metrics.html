@@ -105,7 +105,7 @@ footer code{font-family:var(--data)}
 <div class="bar"><div class="inner">
   <input id="q" type="search" placeholder="filter — try  il, tau, censor, rho, gate" aria-label="Filter metrics">
   <button class="toggle" id="gateonly" aria-pressed="false">gates only</button>
-  <span id="count">141 metrics</span>
+  <span id="count">142 metrics</span>
 </div></div>
 
 <div class="wrap">
@@ -357,7 +357,8 @@ footer code{font-family:var(--data)}
 <div class="rows">
 <div class="row" data-gate="1"><div class="nm">launch blockers<span class="u">✓/✗</span></div><div class="mn">Config values strict mode refuses to start without.<span class="rd"><b>gates</b></span></div></div>
 <div class="row" data-gate="1"><div class="nm">artifact bundle<span class="u">✓/✗</span></div><div class="mn">Do the frozen artifacts form ONE bundle, unedited since sealing? Mixed vintages and edited files are separate failures with different remedies.<span class="rd"><b>gates</b></span></div></div>
-<div class="row" data-gate="1"><div class="nm">artifact mirrors<span class="u">✓/✗</span></div><div class="mn">Do the config pastes still match the artifacts they came from? Read the bundle line FIRST — the check says they disagree, not which is stale.<span class="rd"><b>gates</b></span></div></div>
+<div class="row" data-gate="1"><div class="nm">artifact mirrors<span class="u">✓/✗</span></div><div class="mn">Do the config pastes still match their source — the frozen artifacts (rho, forced hours) and phase 0&#x27;s A/B power SE? Read the bundle line FIRST — the check says they disagree, not which is stale.<span class="rd"><b>gates</b></span></div></div>
+<div class="row" data-gate="1"><div class="nm">report vintages<span class="u">✓/✗</span></div><div class="mn">Were backtest.json and shadow.json produced against the artifacts on disk? After a retrain the old reports still show green gates while grading a model that no longer exists (hard rule 1). Model mismatch FAILs — re-run the report; a moved config_version WARNs.<span class="rd"><b>gates</b></span></div></div>
 <div class="row" data-gate="0"><div class="nm">calibration level<span class="u">✓/✗</span></div><div class="mn">The level at the anchor, in band. Diagnostic — WARN out of band, since calibration is always applied.</div></div>
 <div class="row" data-gate="0"><div class="nm">elasticity prior<span class="u">✓/✗</span></div><div class="mn">How many categories stand on their own data, and how many are wrong-signed.</div></div>
 <div class="row" data-gate="1"><div class="nm">exploration tau<span class="u">✓/✗</span></div><div class="mn">What is in force, and the latest derivation.<span class="rd"><b>gates</b></span></div></div>
