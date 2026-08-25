@@ -829,6 +829,10 @@ def derive_tau_initial(ledger, ep, cfg):
     """
     if not ledger.decisions:
         return None
+    # the LAUNCH constant solves against the window's mean daily IL -- a
+    # single tau needs a single representative base. Production's budget then
+    # moves day to day on the trailing basis (`explore.trailing_daily_il`),
+    # and `tau_next` walks tau with it.
     daily_il = pd.DataFrame(ep).groupby("date")["actual_il"].sum()
     budget_per_day = float(cfg["exploration"]["budget_share_of_il"]
                            * daily_il.mean())
@@ -841,6 +845,9 @@ def derive_tau_initial(ledger, ep, cfg):
             "implied_daily_spend": round(
                 ledger.implied_daily_spend(tau, n_days), 1),
             "daily_budget": round(budget_per_day, 1),
+            "budget_basis": ("window mean daily IL for this launch constant; "
+                             "production budgets on the trailing "
+                             "budget_il_window_days mean"),
             "cost_distribution_quantile": round(ledger.quantile_of(tau), 4),
             "spread_decisions": ledger.decisions,
             "basis": ("every decision hour on the exploit-only replay path. "

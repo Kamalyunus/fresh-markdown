@@ -709,8 +709,15 @@ def test_shadow_phase_harness(workspace):
     b = report["exploration_budget_would_be"]
     spend = report["exploration_would_be"]["would_be_cost_total"] / b["days"]
     assert b["implied_daily_spend"] == pytest.approx(spend, rel=1e-3)
-    assert b["daily_budget"] == pytest.approx(
-        b["budget_share_of_il"] * b["markdown_il_total"] / b["days"], rel=1e-3)
+    # the budget is on the TRAILING realised-IL basis -- the budget production
+    # would apply -- so it need not equal share x window-mean IL. It must be
+    # positive, carry its basis, and sit within the range trailing means can
+    # reach (bounded by the window's own worst and best trailing days).
+    assert b["daily_budget"] > 0
+    assert "trailing" in b["budget_basis"]
+    whole_window = b["budget_share_of_il"] * b["markdown_il_total"] / b["days"]
+    assert b["daily_budget"] < whole_window * 2.5, \
+        "trailing-basis budget wildly above the window mean -- check the basis"
     assert b["markdown_il_total"] == pytest.approx(
         b["markdown_il_discount"] + b["markdown_il_scrap"])
     # `spend_over_budget` is computed from UNROUNDED quantities and reported

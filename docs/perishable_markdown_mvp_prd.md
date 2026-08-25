@@ -700,7 +700,9 @@ Budget is a share of markdown IL:
 ```
 budget_today = budget_share_of_il
              × clip(posterior_std / budget_scale_ref_std, budget_scale_floor, 1.0)
-             × projected_markdown_il_today
+             × trailing_daily_markdown_il      # mean of REALISED daily IL over
+                                                # the trailing budget_il_window_days
+                                                # (7), ending yesterday
 ```
 
 `tau` is calibrated daily from realised spend:
@@ -717,7 +719,7 @@ The calibration runs inside `pipeline.update --apply`, behind the same operator 
 
 `tau` is persisted to the posterior artifact (§10.1), not written back to config: it is production learning state, and a running system must not edit its own hand-maintained source of truth. `exploration.tau_initial` is the launch value and the fallback until the first calibration; a production caller reads the artifact, not the config key, or `tau` stays pinned at its launch value forever.
 
-`tau_initial` is derived from the phase-0 replay as a quantile of the observed `Q(p_star) - Q(p)` distribution across feasible non-optimal prices — pick the quantile whose implied daily spend matches `budget_share_of_il`. The phase-0 run instead reported the share of hourly transitions carrying a markdown increase (0.5436), which is a rate and dimensionally wrong for this purpose; it must not be used as `tau_initial`. Budget scales down as the posterior narrows, so a converged system spends a quarter of the launch budget on learning. It never reaches zero, so drift remains detectable.
+`tau_initial` is derived from the phase-0 replay as a quantile of the observed `Q(p_star) - Q(p)` distribution across feasible non-optimal prices — pick the quantile whose implied daily spend matches `budget_share_of_il`. The phase-0 run instead reported the share of hourly transitions carrying a markdown increase (0.5436), which is a rate and dimensionally wrong for this purpose; it must not be used as `tau_initial`. The IL base is **trailing and realised** — never the same day's own IL, which is unobservable until its episodes close and which would fund exploration hardest on exactly the days already losing most, and never a forecast, since nothing in the system forecasts IL. Seven days smooths the weekday cycle exactly once while following real drift in markdown volume. Budget scales down as the posterior narrows, so a converged system spends a quarter of the launch budget on learning. It never reaches zero, so drift remains detectable.
 
 ### 12.4 Safety
 

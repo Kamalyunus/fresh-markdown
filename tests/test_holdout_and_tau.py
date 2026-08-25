@@ -426,3 +426,42 @@ def test_holdout_is_disjoint_from_every_fitting_window():
                    (s["calib_start"], s["calib_end"]),
                    (s["test_start"], s["test_end"])]:
         assert not (h["start"] <= hi and lo <= h["end"])
+
+
+def test_the_budget_base_is_the_trailing_realised_il():
+    """The IL base for a day's budget is the mean of REALISED daily IL over
+    the trailing budget_il_window_days, ending YESTERDAY -- never the same
+    day's own IL.
+
+    Same-day IL is unobservable when the budget is needed (scrap lands only
+    at episode close), and it funds exploration hardest on exactly the days
+    already losing most, since IL is discount plus scrap. The trace and the
+    aggregate gate must grade against the budget production would actually
+    apply, or the stop condition tests a counterfactual.
+    """
+    import inspect
+
+    from pricing.explore import trailing_daily_il
+    from pipeline import shadow
+
+    cfg = load_config()
+    assert cfg["exploration"]["budget_il_window_days"] == 7
+
+    il = {f"2026-08-{d:02d}": 700.0 for d in range(1, 8)}   # 7 flat days
+    # day 8's base is the mean of days 1-7; day 8's own IL must not enter
+    il["2026-08-08"] = 99_999.0
+    assert trailing_daily_il(il, "2026-08-08", cfg) == pytest.approx(700.0)
+
+    # a zero-IL calendar day inside the window counts as ZERO, not skipped:
+    # the budget is a share of the actual run-rate
+    il2 = {"2026-08-01": 700.0, "2026-08-07": 700.0}
+    assert trailing_daily_il(il2, "2026-08-08", cfg) == pytest.approx(200.0)
+
+    # no history at all -> no budget. The conservative side to start on.
+    assert trailing_daily_il({}, "2026-08-08", cfg) == 0.0
+
+    # and shadow actually uses it, in the trace and in the aggregate gate
+    src = inspect.getsource(shadow)
+    assert src.count("trailing_daily_il(") >= 2, \
+        "both the controller trace and the aggregate gate must budget on " \
+        "the trailing basis, or they grade different quantities"

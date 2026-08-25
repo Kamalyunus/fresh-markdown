@@ -109,7 +109,11 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
     for rank, i in enumerate(order[:max_days]):
         day = days[i]
         spend = float(ledger.spend_by_day(tau)[i])
-        budget = explore.budget_today(il_by_day.get(day, 0.0), widest_std, cfg)
+        # the budget production would apply on this day: a share of the
+        # TRAILING realised IL, observable at the start of the day -- never
+        # the same day's own IL, which is unknown until its episodes close
+        budget = explore.budget_today(
+            explore.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
         over = (spend / budget) if budget > 0 else None
         fired = bool(over is not None and over > stop_at)
         suspend_days += int(fired)
@@ -538,7 +542,15 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     # larger multiple of a smaller budget.
     cells = posterior.state["cells"]
     widest_std = max(rec["std"] for rec in cells.values())
-    daily_budget = explore.budget_today(markdown_il, widest_std, cfg) / n_days
+    # the aggregate gate grades mean spend against the MEAN of the daily
+    # budgets production would have applied -- same trailing basis as the
+    # controller trace, so the two cannot disagree about what the budget was
+    daily_budgets = [explore.budget_today(
+        explore.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
+        for day in sorted(il_by_day)]
+    daily_budget = (float(np.mean(daily_budgets)) if daily_budgets
+                    else explore.budget_today(markdown_il / max(n_days, 1),
+                                              widest_std, cfg))
     implied_daily_spend = would_be_cost / n_days
     over = (implied_daily_spend / daily_budget) if daily_budget > 0 else None
     stop_at = cfg["monitoring"]["stop_conditions"]["exploration_cost_vs_budget"]
@@ -554,6 +566,11 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         "days": int(n_days),
         "implied_daily_spend": round(implied_daily_spend, 1),
         "daily_budget": round(daily_budget, 1),
+        "budget_basis": (f"mean of per-day budgets on the trailing "
+                         f"{cfg['exploration']['budget_il_window_days']}-day "
+                         "realised-IL base (explore.trailing_daily_il) -- the "
+                         "budget production would apply, not a whole-window "
+                         "average"),
         "spend_over_budget": round(over, 2) if over is not None else None,
         "stop_condition_multiple": stop_at,
         "markdown_il_total": round(markdown_il, 1),

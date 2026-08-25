@@ -18,6 +18,7 @@ std.
 """
 
 import numpy as np
+import pandas as pd
 
 
 def affordable_set(dp_result, tau):
@@ -234,13 +235,48 @@ def tau_provenance_error(cfg, backtest):
     return None
 
 
-def budget_today(projected_markdown_il, posterior_std, cfg):
-    """Section 12.3: a share of markdown IL, scaled down as the posterior
-    narrows, never below budget_scale_floor of the full budget."""
+def trailing_daily_il(il_by_day, day, cfg):
+    """The IL base for a day's budget: the mean of REALISED daily markdown IL
+    over the trailing `budget_il_window_days` calendar days, ending yesterday.
+
+    TRAILING AND REALISED, not same-day and not a forecast (section 12.3).
+    Same-day IL is not observable when the day's budget is needed -- scrap
+    lands only when an episode closes -- and it funds exploration hardest on
+    exactly the days already losing most, since IL is discount plus scrap.
+    A trailing mean is observable at the start of the day, smooths the
+    weekday cycle once at 7 days, and follows real drift in markdown volume,
+    which a whole-history mean would not. The fast dynamics belong to the
+    posterior-std scale in `budget_today` and the daily `tau_next` controller,
+    not to the base.
+
+    Calendar days, not data days: a day with no closed IL counts as zero in
+    the mean, because the budget is a share of the actual run-rate. Days with
+    no history at all (the window's first day) fall back to whatever trailing
+    days exist; with none, zero -- no IL history means no exploration budget,
+    which is the conservative side to start a pilot on.
+    """
+    window = int(cfg["exploration"]["budget_il_window_days"])
+    d0 = pd.Timestamp(str(day))
+    days = [(d0 - pd.Timedelta(days=k)).strftime("%Y-%m-%d")
+            for k in range(1, window + 1)]
+    known = [k for k in days if k in il_by_day]
+    if not known:
+        return 0.0
+    # zero-IL calendar days inside the known span count as zero, so the mean
+    # is over the window, not over the days that happened to carry IL
+    span = (d0 - pd.Timestamp(min(known))).days
+    denom = min(max(span, 1), window)
+    return float(sum(il_by_day.get(k, 0.0) for k in days) / denom)
+
+
+def budget_today(trailing_il, posterior_std, cfg):
+    """Section 12.3: a share of the trailing daily markdown IL
+    (`trailing_daily_il`), scaled down as the posterior narrows, never below
+    budget_scale_floor of the full budget."""
     ec = cfg["exploration"]
     scale = min(max(posterior_std / ec["budget_scale_ref_std"],
                     ec["budget_scale_floor"]), 1.0)
-    return ec["budget_share_of_il"] * scale * projected_markdown_il
+    return ec["budget_share_of_il"] * scale * trailing_il
 
 
 def tau_next(tau, budget, realised_cost, cfg):

@@ -345,6 +345,14 @@ exploration:
     # It is a CURRENCY amount compared against Q(p*) - Q(p), never a rate.
   tau_adjust_clip: [0.5, 2.0]          # SET  max daily multiplicative change
   tau_spend_guard: 1.0                 # SET  divide-by-zero guard on realised cost, currency
+  budget_il_window_days: 7             # SET  the IL base for a day's budget
+    # is the mean of REALISED daily markdown IL over this many trailing
+    # calendar days, ending yesterday. Trailing, not same-day (unobservable
+    # until the day closes, and it funds exploration hardest on the worst
+    # days) and not a forecast (nothing here forecasts IL). 7 smooths the
+    # weekday cycle exactly once while still following drift in markdown
+    # volume. Zero-IL days count as zero -- the budget is a share of the
+    # actual run-rate.
   budget_scale_ref_std: 0.40           # SET  budget scales with std / this
   budget_scale_floor: 0.25             # SET  never below 25% of budget
   min_feasible_tiers: 2                # SET  below this: non-explorable
