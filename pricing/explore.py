@@ -110,8 +110,15 @@ class SpreadLedger:
             self._chunks.append(np.asarray(self._buf, dtype=np.float64))
             self._buf = []
         if getattr(self, "_costs", None) is None or self._chunks:
-            self._costs = (np.concatenate(self._chunks) if self._chunks
-                           else np.zeros(0))
+            # keep what earlier builds materialised: _lens/_day_of span the
+            # FULL history, so _costs must too -- rebuilding from only the
+            # new chunks after an add()-query-add() sequence mis-aligns every
+            # boolean index against _dec_of (IndexError at best, silently
+            # mis-attributed spend at worst)
+            prior = ([self._costs] if getattr(self, "_costs", None) is not None
+                     and len(self._costs) else [])
+            self._costs = (np.concatenate(prior + self._chunks)
+                           if (prior or self._chunks) else np.zeros(0))
             self._chunks = []
             lens = np.asarray(self._lens, dtype=np.int64)
             self._dec_of = np.repeat(np.arange(len(lens)), lens)

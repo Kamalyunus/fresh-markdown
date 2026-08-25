@@ -65,6 +65,8 @@ def business_metrics(decisions, outcomes, cfg):
                              * o["units_sold"],
             "arm": arm(d["sku_id"], d["fc"], cfg["ab_test"]["allocation"]),
         })
+    if not rows:
+        return {"note": "no outcome matches a decision -- nothing to measure"}
     df = pd.DataFrame(rows)
 
     ep = df.sort_values("hours_remaining", ascending=False).groupby("episode_id").agg(

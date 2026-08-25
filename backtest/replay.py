@@ -370,6 +370,15 @@ def _episode_frame(g, unfinished=frozenset()):
     disc = pd.Series(g.total_discount.to_numpy()).where(
         pd.Series(obs)).ffill().to_numpy()
     obs_rows = g[obs] if obs.any() else g
+    # the exogenous adjustment is computed on the OBSERVED rows only:
+    # hour_adjustment's write-off exemption keys on the LAST row, and after
+    # extend_to_window the last row is a synthetic tail row -- computed on
+    # the extended frame, the observed close's zeroed ending read as shrink
+    # and every arm double-counted the leftover as scrap
+    adj_obs = (episodes.hour_adjustment(obs_rows).to_numpy()
+               if obs.any() else np.zeros(0))
+    adjustment = np.zeros(len(g))
+    adjustment[obs] = adj_obs
     return {
         "n_observed": int(obs.sum()),
         # the listing ending IS the disposal, whatever the nominal counter
@@ -395,14 +404,11 @@ def _episode_frame(g, unfinished=frozenset()):
         # anticipate a delivery -- they find out at the next hour exactly as
         # production does, because `ending[t]` IS `starting[t+1]`. Synthetic
         # extension rows carry 0.
-        "adjustment": np.where(
-            obs, episodes.hour_adjustment(g).to_numpy(), 0).astype(float),
+        "adjustment": adjustment,
         # what the episode actually had to sell, and what it actually lost
         "supply": int(g.starting_inventory.iloc[0])
-                  + int(np.clip(episodes.hour_adjustment(g).to_numpy()[obs],
-                                0, None).sum()),
-        "shrink": int(-np.clip(episodes.hour_adjustment(g).to_numpy()[obs],
-                               None, 0).sum()),
+                  + int(np.clip(adj_obs, 0, None).sum()),
+        "shrink": int(-np.clip(adj_obs, None, 0).sum()),
         "mu_ref_path": g.mu_ref_hat.to_numpy(),
         "r": float(g.r.iloc[0]),
         "eps": float(g.eps.iloc[0]),
@@ -752,7 +758,13 @@ def step_sensitivity(frames, cfg, seed=0, sample=300):
             disc_delta += s_disc - b_disc
             bar = dp_mod.deepening_threshold_epsilon(
                 e["original_price"], e["cost"], e["d_ref"])
-            if np.isfinite(bar) and abs(e["eps"]) < bar <= abs(e["eps"]) + step:
+            # a crosser is an episode whose bar lies BETWEEN |eps| and
+            # |eps_shifted| -- direction-aware, since the deeper shift can
+            # only cross upward through the bar and the shallower one only
+            # downward
+            lo_abs = min(abs(e["eps"]), abs(eps_s))
+            hi_abs = max(abs(e["eps"]), abs(eps_s))
+            if np.isfinite(bar) and lo_abs < bar <= hi_abs:
                 cross_n += 1
                 cross_changed += moved
         out[label] = {

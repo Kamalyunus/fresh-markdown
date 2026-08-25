@@ -85,9 +85,17 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
     cell = posterior_store.get(s["category"])
     eps = cell["mean"]
 
-    result = dp_mod.solve(
-        s["original_price"], s["cost"], int(s["q"]), s["mu_ref_path"],
-        d_ref, eps, s["r"], cfg, anchor_discount=anchor, entry=entry)
+    # the contract is REJECT, never crash: validate_state accepts q == 0
+    # ("non-negative integer"), but the DP cannot price an empty shelf and
+    # raises a bare ValueError -- which would escape the caller's
+    # StateRejected handler and take the pricing loop down for a state that
+    # is merely unpriceable (inventory hit zero between snapshot and call)
+    try:
+        result = dp_mod.solve(
+            s["original_price"], s["cost"], int(s["q"]), s["mu_ref_path"],
+            d_ref, eps, s["r"], cfg, anchor_discount=anchor, entry=entry)
+    except ValueError as e:
+        raise StateRejected(str(e))
 
     # explorability is a property of the actions allowed AT THIS DECISION, not
     # of the full grid: late in an episode the monotonicity anchor can leave

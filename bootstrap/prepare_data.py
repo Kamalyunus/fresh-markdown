@@ -180,8 +180,14 @@ def cogs_at_risk(d):
     opening = (~d.episode_id.duplicated()).to_numpy()
     # gross arrivals per episode: `ending[t]` IS `starting[t+1]`, so a positive
     # step between them is stock that arrived
-    arrivals = (episodes.hour_adjustment(d).clip(lower=0)
-                .groupby(d.episode_id.to_numpy()).sum())
+    # ALIGN BEFORE GROUPING: hour_adjustment returns its values in
+    # (date, hour)-sorted order, and the frame is sku-major, so positional
+    # pairing attributed one episode's arrival to another's cost. A unique
+    # positional index + sort_index restores frame order whatever labels the
+    # caller's frame carries (duplicates included).
+    dd = d.reset_index(drop=True)
+    arrivals = (episodes.hour_adjustment(dd).sort_index().clip(lower=0)
+                .groupby(dd.episode_id).sum())
     opening_ids = pd.Series(d.episode_id.to_numpy()[opening])
     supply = (d.starting_inventory.to_numpy()[opening]
               + opening_ids.map(arrivals).fillna(0.0).to_numpy())
@@ -977,7 +983,10 @@ def tag_dp_eligibility(d, cfg):
     d["episode_eligible"] = d.episode_id.map(flow.eligible).astype(bool)
 
     tests = {
-        "cost_missing": d.cost <= 0,
+        # ~(cost > 0), not cost <= 0: a genuinely NULL cost is the most
+        # missing a cost can be, and NaN <= 0 is False -- it sailed through
+        # the gate and handed the DP a NaN d_max
+        "cost_missing": ~(d.cost > 0),
         "non_priceable": d.cost >= d.original_price,
         "negative_window": d.hours_remaining < 0,
         "window_too_long": d.hours_remaining > cap,
@@ -1035,7 +1044,12 @@ def tag_dp_eligibility(d, cfg):
     # independent of how fast a SKU sells. Skew between a transaction feed and
     # a stock snapshot is NOT: it grows with `units_sold`, because a sale is
     # likelier to straddle the hour boundary the more there are.
-    adj = episodes.hour_adjustment(d).to_numpy()
+    # realign to the FRAME's order before pairing with units_sold --
+    # hour_adjustment returns (date, hour)-sorted values, and pairing them
+    # positionally with a sku-major frame matched each shrink hour with some
+    # other episode's sales
+    adj = (episodes.hour_adjustment(d.reset_index(drop=True))
+           .sort_index().to_numpy())
     lost, sold = -adj[adj < 0], d.units_sold.to_numpy()
     corr = None
     if len(lost) > 2:

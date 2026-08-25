@@ -6,6 +6,8 @@ quarantined with the validation failure attached and surfaced to monitoring.
 """
 
 import json
+
+import numpy as np
 import os
 
 DECISION_REQUIRED = [
@@ -26,6 +28,21 @@ DECISION_REQUIRED = [
     "timestamp",
 ]
 
+def _json_scalar(v):
+    """numpy scalars serialise as their native values; anything else raises.
+    `default=str` used to stringify silently, which corrupted the one log the
+    reproduction check replays decisions from -- a cost written as "4000.0"
+    no longer round-trips into arithmetic."""
+    if isinstance(v, np.bool_):
+        return bool(v)
+    if isinstance(v, np.integer):
+        return int(v)
+    if isinstance(v, np.floating):
+        return float(v)
+    raise TypeError(f"event field of type {type(v).__name__} is not "
+                    "JSON-serialisable; emit native types")
+
+
 OUTCOME_REQUIRED = [
     "outcome_id", "decision_id", "units_sold", "starting_inventory",
     "ending_inventory", "applied_price", "is_stockout", "execution_status",
@@ -37,7 +54,11 @@ def _validate_outcome(evt):
     problems = []
     for f in ("units_sold", "starting_inventory", "ending_inventory"):
         v = evt.get(f)
-        if not isinstance(v, int) or v < 0:
+        # np.integer counts -- a producer reading quantities off a pandas
+        # frame without int() casts must not have every outcome quarantined
+        # in bulk. bool does NOT count: True is not a quantity of 1.
+        if (isinstance(v, bool) or not isinstance(v, (int, np.integer))
+                or v < 0):
             problems.append(f"{f} must be a non-negative integer")
     if not problems:
         reconciles = (evt["ending_inventory"]
@@ -46,7 +67,7 @@ def _validate_outcome(evt):
             # THREE breaks are legitimate and MUST be named by the producer:
             # "intraday_restock" (stock added), "episode_close_write_off" (the
             # source zeroes ending_inventory on an episode's FINAL row, writing
-            # off whatever remains -- ~49.5% of episodes), and
+            # off whatever remains), and
             # "unexplained_shortfall" (shrink: stock left without a sale and
             # without a write-off). An integration that omits any of them
             # quarantines real outcomes in bulk and fails the
@@ -124,7 +145,7 @@ class EventStore:
 
     def _append(self, path, evt):
         with open(path, "a") as f:
-            f.write(json.dumps(evt, default=str) + "\n")
+            f.write(json.dumps(evt, default=_json_scalar) + "\n")
             f.flush()
             os.fsync(f.fileno())
 

@@ -51,8 +51,11 @@ from pricing.posterior import PosteriorStore, bounded_step
 
 def collect_batch(store, posterior, cfg):
     """Match outcomes to decisions, compute event-quality gates, and return
-    eligible (decision, outcome) pairs per cell."""
-    decisions = {d["decision_id"]: d for d in store.load_decisions()}
+    eligible (decision, outcome) pairs per cell -- plus the loaded event
+    lists, so the caller does not re-parse the whole JSONL log a second time
+    for tau calibration."""
+    decision_list = store.load_decisions()
+    decisions = {d["decision_id"]: d for d in decision_list}
     outcomes = store.load_outcomes()
 
     unmatched = [o for o in outcomes if o["decision_id"] not in decisions]
@@ -94,7 +97,7 @@ def collect_batch(store, posterior, cfg):
             continue
         cell = posterior.cell_name(dec["category"])
         per_cell.setdefault(cell, []).append((dec, o, ratio))
-    return per_cell, gates
+    return per_cell, gates, decision_list, outcomes
 
 
 def grid_update(pairs, cell_record, cfg):
@@ -268,7 +271,8 @@ def tau_calibration(decisions, outcomes, posterior, cfg):
 def run(cfg, apply=False, events_root=None, posterior_path=None):
     store = EventStore(cfg, root=events_root)
     posterior = PosteriorStore(cfg, path=posterior_path)
-    per_cell, gates = collect_batch(store, posterior, cfg)
+    per_cell, gates, decision_list, outcome_list = collect_batch(
+        store, posterior, cfg)
 
     hard_fail = [name for name, g in gates.items() if not g["pass"]]
     report = {"event_quality_gates": gates, "cells": {}, "applied": False}
@@ -287,8 +291,14 @@ def run(cfg, apply=False, events_root=None, posterior_path=None):
                       if o.get("finalized_at")), default=None)
         age_days = None
         if oldest is not None:
+            # tolerate a tz-naive finalized_at: the contract says UTC with
+            # offset, but a producer omitting it must age the batch, not
+            # crash the whole daily run before any gate can report
+            ts = pd.Timestamp(oldest)
+            if ts.tzinfo is None:
+                ts = ts.tz_localize("UTC")
             age_days = round((pd.Timestamp.now("UTC")
-                              - pd.Timestamp(oldest)).total_seconds() / 86400, 2)
+                              - ts).total_seconds() / 86400, 2)
 
         report["cells"][cell] = {
             "forced_outcomes": len(pairs),
@@ -319,7 +329,7 @@ def run(cfg, apply=False, events_root=None, posterior_path=None):
     # any cell crossed the information threshold -- a day that explored and
     # learned nothing still cost money, and that is exactly what tau prices.
     report["tau_calibration"] = tau_calibration(
-        store.load_decisions(), store.load_outcomes(), posterior, cfg)
+        decision_list, outcome_list, posterior, cfg)
 
     if apply:
         if hard_fail:

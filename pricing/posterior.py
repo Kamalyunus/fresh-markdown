@@ -85,9 +85,21 @@ class PosteriorStore:
     def _atomic_write(path, state):
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
                                    prefix=".posterior-")
+        # fsync the file AND the directory: os.replace is atomic against
+        # crashes of this process, but without the fsyncs a power failure can
+        # leave the one file production writes -- the learning state and its
+        # exactly-once ledger -- truncated or lost, which events.store already
+        # guards against for its own appends.
         with os.fdopen(fd, "w") as f:
             json.dump(state, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
+        dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
     def cell_name(self, category):
         return self.state["cell_of"].get(str(category), GLOBAL_CELL)
@@ -98,7 +110,11 @@ class PosteriorStore:
         return self.state["cells"][self.cell_name(category)]
 
     def is_processed(self, outcome_id):
-        return outcome_id in set(self.state["processed_outcome_ids"])
+        # cached: the ledger only grows, and rebuilding the set per lookup
+        # made the daily batch quadratic in its own history
+        if getattr(self, "_processed", None) is None:
+            self._processed = set(self.state["processed_outcome_ids"])
+        return outcome_id in self._processed
 
     def commit_update(self, cell, new_mean, new_std, n_new_obs,
                       effective_information, outcome_ids, applied):
@@ -131,6 +147,8 @@ class PosteriorStore:
         rec["updated_at"] = pd.Timestamp.now("UTC").isoformat()
         rec["n_obs"] += n_new_obs
         self.state["processed_outcome_ids"].extend(outcome_ids)
+        if getattr(self, "_processed", None) is not None:
+            self._processed.update(outcome_ids)
         self._atomic_write(self.path, self.state)
 
     # ------------------------------------------------------------------ tau

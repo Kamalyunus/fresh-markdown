@@ -205,7 +205,7 @@ def m6_il_pct(d):
     )
     # A missing cost makes scrap read zero, which deflates IL rather than
     # widening the population. Out of both baselines, counted separately.
-    cost_missing = int((ep.cost <= 0).sum())
+    cost_missing = int((~(ep.cost > 0)).sum())   # NaN counts as missing
     ep = ep[ep.cost > 0]
     # An episode that sold out early scrapped nothing. One that ended with
     # stock on hand disposed of it -- the listing ending IS the disposal,
