@@ -349,10 +349,25 @@ def test_prior_artifact_within_bounds(workspace):
         if prior["source"] == "profile_density":
             assert v["own_mean"] < 0 and v["own_std"] > 0
             assert 0.0 <= v["own_information_weight"] <= 1.0
-            if v["own_information_weight"] >= 0.999:
+            # a category standing on its own data carries its own density's
+            # MEAN unchanged -- but only if its likelihood is right-signed. A
+            # wrong-sign category has its own density discarded whatever its
+            # information weight says, because the weight measures how SHARP
+            # the curve is and the sign says it points the wrong way.
+            if v["own_information_weight"] >= 0.999 and not v.get("wrong_sign"):
                 assert abs(v["mean"] - v["own_mean"]) < 1e-9, \
-                    "a category standing on its own data must carry its own " \
-                    "density's moments unchanged"
+                    "a right-signed category standing on its own data must " \
+                    "carry its own density's mean unchanged"
+            if v.get("wrong_sign"):
+                assert abs(v["mean"] - prior["pooled"]["pooled_mean"]) < 1e-3, \
+                    "a wrong-sign category must take the POOLED density"
+                assert max(v["unconstrained_argmax"].values()) >= -0.05, \
+                    "wrong_sign must be decided on the UNCONSTRAINED peak"
+            # a prior of zero width is a frozen posterior -- bounded_step can
+            # never move it, whatever evidence arrives
+            assert v["std"] > 0, f"{cat} has a zero-width prior"
+            assert v["std_basis"] in ("density", "grid_resolution",
+                                      "fold_spread")
             # the whole point of the method: no constant anywhere in it
             assert "using" not in v and "rejected_for" not in v
         else:

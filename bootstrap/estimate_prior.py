@@ -311,6 +311,11 @@ def estimate_prior_density(d, cfg):
         # get their own cell, so it is required of any method, not a bracket
         # detail. Measured on the same train window the prior is fitted on.
         "episodes_per_week": _episodes_per_week(d, cfg),
+        # SURFACED AT THE TOP. A category whose likelihood peaks at positive
+        # elasticity is not weakly measured, it is measured backwards, and the
+        # reader must not have to find that per category.
+        "wrong_sign_categories": sorted(
+            c for c, v in per_category.items() if v.get("wrong_sign")),
         "no_price_variation_categories": sorted(
             c for c, v in per_category.items() if "no_price_variation" in v),
         "holdout_comparison": comparison,
@@ -644,16 +649,29 @@ def _print_density(prior):
     print(f"  flat-likelihood limit: {u['mean']:+.3f} +- {u['std']:.3f}  "
           f"(a category AT these values learned nothing)")
     print(f"  pooled across categories: {prior['pooled']['pooled_mean']:+.3f} "
-          f"+- {prior['pooled']['pooled_std']:.3f}\n")
-    print(f"  {'category':12s} {'mean':>7s} {'std':>6s} {'own':>6s} "
-          f"{'span':>7s} {'sd(lr)':>8s} {'deff':>5s}  note")
+          f"+- {prior['pooled']['pooled_std']:.3f}")
+    print(f"  pooled basis: {prior['pooled'].get('pooled_basis', '')}\n")
+    print(f"  {'category':12s} {'mean':>7s} {'std':>6s} {'std from':>9s} "
+          f"{'peak':>7s} {'own':>5s} {'span':>9s} {'deff':>5s}  note")
     for cat, v in prior["per_category"].items():
-        note = ("NO PRICE VARIATION -- pooled" if "no_price_variation" in v
+        note = ("WRONG SIGN -- pooled" if v.get("wrong_sign")
+                else "NO PRICE VARIATION -- pooled" if "no_price_variation" in v
                 else "own data" if v["own_information_weight"] >= 0.999
                 else f"{v['own_information_weight']:.0%} own, rest pooled")
+        u = v.get("unconstrained_argmax") or {}
+        peak = max(u.values()) if u else float("nan")
         print(f"  {cat:12s} {v['mean']:>+7.3f} {v['std']:>6.3f} "
-              f"{v['own_information_weight']:>6.2f} {v['likelihood_span']:>7.2f} "
-              f"{v['log_ratio_sd']:>8.5f} {v['deff']:>5.2f}  {note}")
+              f"{v.get('std_basis', '?'):>9s} {peak:>+7.3f} "
+              f"{v['own_information_weight']:>5.2f} {v['likelihood_span']:>9.1f} "
+              f"{v['deff']:>5.2f}  {note}")
+    if prior.get("wrong_sign_categories"):
+        print(f"\n  !! {len(prior['wrong_sign_categories'])} category(s) with a "
+              f"WRONG-SIGN likelihood -- its unconstrained peak is at or above "
+              f"zero, i.e. demand rising with price: "
+              + ", ".join(prior["wrong_sign_categories"])
+              + ". Their own densities are discarded and they take the pooled "
+                "one. `peak` above is where the likelihood really wanted to "
+                "sit before search_bounds clipped it.")
     c = prior.get("holdout_comparison", {})
     if c.get("total_per_row"):
         print(f"\n  held out on '{c['window']}' ({c['rows_scored']:,} rows), "

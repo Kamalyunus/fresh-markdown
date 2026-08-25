@@ -234,27 +234,137 @@ def build_curves(d, cfg, model, grid, window, r_by_cat=None, r_pooled=None):
     return out
 
 
+def unconstrained_argmax(d, cfg, model, lo, hi, n):
+    """Where the likelihood's peak REALLY is, searched past the policy bounds.
+
+    `search_bounds` is a statement about the elasticities the DP supports, not
+    a belief about demand, so a peak outside it is clipped to the nearest bound
+    and reported as if measured. That is how a category whose likelihood
+    prefers POSITIVE elasticity -- demand rising with price, which is
+    nonsensical -- comes back as a confident -0.05.
+
+    It is not a rare pathology on this data. Measured on the fixture, three of
+    five categories had their unconstrained optimum above zero, and the legacy
+    ramp is the reason: deep discounts land on stock that is not selling, so
+    conditional on a price-neutral `mu_ref` the deeper price reads as LOWER
+    demand. The old bracket method rejected exactly this as `wrong_sign` -- its
+    single unconditional reject -- and the density method dropped the check
+    when it dropped the reject path. This puts it back.
+    """
+    wide = np.linspace(lo, max(1.0, hi), n)
+    out = {}
+    for cat, c in build_curves(d, cfg, model, wide, "train").items():
+        out[cat] = {
+            "naive": float(wide[int(np.argmax(c["naive"]))]),
+            "controlled": float(wide[int(np.argmax(c["controlled"]))]),
+        }
+    return out
+
+
+def fold_spread(d, cfg, model, grid, folds=3):
+    """How far the estimate moves between disjoint slices of the train window.
+
+    THE WIDTH A 125,000-ROW LIKELIHOOD CANNOT GIVE YOU. Curvature measures
+    SAMPLING precision, and at production scale that is enormous -- a span of
+    9,402 log-likelihood units across the grid collapses `exp(ll)` onto a
+    single grid point and returns a prior std of ZERO. A prior of zero width is
+    not a confident belief, it is a broken one: `bounded_step` can never move
+    it, and the posterior is frozen before the first outcome arrives.
+
+    What is actually uncertain here is not the sample, it is the MODEL. The
+    history is confounded, `mu_ref` is imperfect, and demand is not stationary
+    -- none of which the within-sample curvature can see, and all of which the
+    bracket procedure existed to express. Re-fitting on disjoint time slices
+    measures it directly: if the estimate moves 0.4 between the first half of
+    the window and the second, then 0.4 is what is known, whatever the
+    curvature claims.
+
+    Measured, not configured, which is the whole point -- this is the width the
+    data supports, not one somebody chose.
+    """
+    frames = split_frames(d, cfg)
+    train = population(frames["train"], cfg)
+    if train.empty:
+        return {}
+    dates = np.array_split(np.sort(train.date.astype(str).unique()), folds)
+    out = {}
+    per_cat = {}
+    for chunk in dates:
+        if not len(chunk):
+            continue
+        sl = train[train.date.astype(str).isin(set(chunk))]
+        rows = scored_rows(sl, cfg, cfg["posterior"]["prior"].get(
+            "rows", "all_stocked_hours"))
+        for cat, g in rows.groupby("category"):
+            if len(g) < 50:
+                continue
+            mu_ref = model.predict_mu_ref(g)
+            n = grid[int(np.argmax(curve(g, mu_ref, grid, False, cfg)))]
+            c = grid[int(np.argmax(curve(g, mu_ref, grid, True, cfg)))]
+            per_cat.setdefault(str(cat), []).append((n + c) / 2.0)
+    for cat, vals in per_cat.items():
+        if len(vals) >= 2:
+            out[cat] = {"folds": len(vals),
+                        "estimates": [round(float(v), 4) for v in vals],
+                        "spread": round(float(np.std(vals, ddof=1)), 4)}
+    return out
+
+
 def estimate(d, cfg, model):
     """The prior, as a density per category. No constant anywhere in it."""
     pc = cfg["posterior"]["prior"]
     lo, hi = pc["search_bounds"]
     grid = np.linspace(lo, hi, pc["search_grid_size"])
+    step = float(grid[1] - grid[0])
     sat = float(pc["own_information_saturation"])
 
     fit = build_curves(d, cfg, model, grid, "train")
+    unconstrained = unconstrained_argmax(d, cfg, model, lo, hi,
+                                         pc["search_grid_size"])
+    folds = fold_spread(d, cfg, model, grid,
+                        int(pc.get("stability_folds", 3)))
     if not fit:
         raise SystemExit("no rows to profile epsilon on in the train window")
+
+    # THE SIGN IS DECIDED BEFORE THE POOL IS BUILT, because a pool that
+    # includes the categories it is meant to rescue inherits exactly the
+    # confound they were rejected for. Summing a backwards likelihood into the
+    # fallback makes the fallback backwards too, quietly, and it still reads as
+    # a measurement.
+    signs = {}
+    for cat in fit:
+        u = unconstrained.get(cat, {})
+        peak = max(u.get("naive", lo), u.get("controlled", lo))
+        signs[cat] = (peak >= -step, peak)
 
     # POOLED ACROSS CATEGORIES, by summing log-likelihoods -- categories are
     # independent samples of the same question, so this is one likelihood over
     # all of them, not an average of summaries. It is what a category with no
-    # variation of its own borrows, and it is MEASURED, which is the whole
-    # difference from a fallback constant.
-    pooled_deff = float(np.mean([c["deff"] for c in fit.values()]))
-    pooled = mixture(
-        density(np.sum([c["naive"] for c in fit.values()], axis=0), pooled_deff),
-        density(np.sum([c["controlled"] for c in fit.values()], axis=0),
-                pooled_deff))
+    # usable variation of its own borrows, and it is MEASURED, which is the
+    # whole difference from a fallback constant.
+    usable = [c for cat, c in fit.items()
+              if not signs[cat][0] and c["log_ratio_sd"] > 1e-9]
+    if usable:
+        pooled_deff = float(np.mean([c["deff"] for c in usable]))
+        pooled = mixture(
+            density(np.sum([c["naive"] for c in usable], axis=0), pooled_deff),
+            density(np.sum([c["controlled"] for c in usable], axis=0),
+                    pooled_deff))
+        pooled_basis = (f"{len(usable)} of {len(fit)} categories -- those with "
+                        "a right-signed likelihood and some price variation")
+    else:
+        # NOTHING LEFT TO POOL. Every category is either backwards or flat, so
+        # there is no measured fallback to fall back TO, and inventing one
+        # would be the constant this method exists to remove. The uniform on
+        # the support is what the data supports: it says, correctly, that this
+        # extract does not identify elasticity at all.
+        pooled_deff = 1.0
+        pooled = np.full(len(grid), 1.0 / len(grid))
+        pooled_basis = (
+            "UNIFORM ON THE SUPPORT -- no category had both a right-signed "
+            "likelihood and price variation, so there is no measured pool. "
+            "This extract does not identify elasticity; only exogenous price "
+            "variation will.")
     pooled_mean, pooled_std = moments(grid, pooled)
 
     per_category, densities = {}, {}
@@ -280,11 +390,52 @@ def estimate(d, cfg, model):
                          np.ptp(c["controlled"]) / c["deff"]))
         w_own = float(min(1.0, span / sat)) if sat > 0 else 1.0
 
-        w = mixture(own, pooled, w_own)
+        # WRONG SIGN REJECTS, and it is the only thing that does. The peak is
+        # searched PAST the policy bounds, so a likelihood that prefers
+        # positive elasticity -- demand rising with price -- is caught instead
+        # of being clipped to the nearest bound and reported as measured. Its
+        # own density is not used at all: the number is not weak, it is
+        # nonsensical, and no part of a curve peaked in the wrong direction
+        # belongs in a prior. The category takes the POOLED density, which is
+        # still measured, and is listed at the top of the artifact.
+        u = unconstrained.get(cat, {})
+        wrong_sign, peak = signs[cat]
+
+        w = pooled if wrong_sign else mixture(own, pooled, w_own)
         mean, std = moments(grid, w)
+
+        # THE WIDTH A SHARP LIKELIHOOD CANNOT GIVE. Curvature is SAMPLING
+        # precision; at 125,000 rows a span of 9,402 log-likelihood units puts
+        # every grid point but one at exp(-59) and returns a std of ZERO. A
+        # zero-width prior is not confidence, it is a frozen posterior --
+        # `bounded_step` cannot move it and no outcome ever will.
+        #
+        # What is uncertain is the MODEL, not the sample: confounded history, an
+        # imperfect mu_ref, non-stationary demand. `fold_spread` measures that
+        # by re-fitting on disjoint slices of the train window, and the grid
+        # step bounds it from below because nothing finer than one grid cell was
+        # ever resolved. Both are MEASURED -- neither is a floor someone chose,
+        # which is what the fallback constant was.
+        fold = folds.get(cat, {})
+        floor_reasons = {"density": std, "grid_resolution": step}
+        if fold.get("spread") is not None:
+            floor_reasons["fold_spread"] = float(fold["spread"])
+        binding = max(floor_reasons, key=floor_reasons.get)
+        std = float(floor_reasons[binding])
         densities[cat] = w
         per_category[cat] = {
             "mean": round(mean, 4), "std": round(std, 4),
+            # WHICH FLOOR IS DOING THE WORK. `density` means the curve's own
+            # width is the widest of the three and nothing was imposed;
+            # `fold_spread` means the estimate is unstable across the window
+            # and that instability is the honest width; `grid_resolution` means
+            # the likelihood is sharper than the grid can express and the prior
+            # is as tight as this machinery can defend.
+            "std_basis": binding,
+            "std_candidates": {k: round(float(v), 4)
+                               for k, v in floor_reasons.items()},
+            "wrong_sign": bool(wrong_sign),
+            "unconstrained_argmax": {k: round(v, 4) for k, v in u.items()},
             "own_mean": round(own_mean, 4), "own_std": round(own_std, 4),
             "own_information_weight": round(w_own, 4),
             "likelihood_span": round(span, 3),
@@ -304,6 +455,18 @@ def estimate(d, cfg, model):
             # moments
             "density": [round(float(x), 8) for x in w],
         }
+        if fold:
+            per_category[cat]["stability"] = fold
+        if wrong_sign:
+            per_category[cat]["wrong_sign_note"] = (
+                f"the likelihood's unconstrained peak is at {peak:+.3f} -- at "
+                "or above zero, which says demand RISES with price. That is "
+                "nonsensical rather than weak, so this category's own density "
+                "is discarded and it takes the pooled one. The usual cause is "
+                "the legacy ramp: deep discounts land on stock that is not "
+                "selling, so conditional on a price-neutral mu_ref the deeper "
+                "price reads as lower demand. Only exogenous price variation "
+                "fixes it -- see pricing.explore.")
         if c["log_ratio_sd"] < 1e-9:
             per_category[cat]["no_price_variation"] = (
                 "every scored row sits at the same discount, so epsilon is "
@@ -317,6 +480,9 @@ def estimate(d, cfg, model):
         "pooled_mean": round(pooled_mean, 4),
         "pooled_std": round(pooled_std, 4),
         "pooled_deff": round(pooled_deff, 3),
+        "pooled_basis": pooled_basis,
+        "pooled_categories": sorted(
+            c for c in fit if not signs[c][0] and fit[c]["log_ratio_sd"] > 1e-9),
         "pooled_density": [round(float(x), 8) for x in pooled],
     }
 

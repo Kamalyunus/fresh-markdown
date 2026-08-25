@@ -420,6 +420,28 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
       answer costing more than an honest wide one, in nats.
    3. `ranking` and `verdict` last, and only once 1 and 2 are read.
 
+   **READ `wrong_sign_categories` AND `std_basis` FIRST.** Two failures the
+   method could not see until production data hit it, both now caught:
+
+   * A likelihood peaking OUTSIDE `search_bounds` was clipped to the nearest
+     bound and reported as measured — a category came back as a confident
+     `-0.05` on 125,749 rows. The peak is now searched past the bound; at or
+     above zero (demand rising with price) the category's own density is
+     discarded, it takes the pooled one, and it is listed. The cause is the
+     ramp: deep discounts land on stock that is not selling. A rejected
+     category is also excluded from the POOL, or the fallback inherits the
+     confound; with none left the pool IS the uniform, and `pooled_basis`
+     says so.
+   * `std` could be **zero**. A span of 9,402 log-likelihood units across a
+     159-point grid is 59 nats per step, so the density collapses onto one
+     point. A zero-width prior is a frozen posterior — `bounded_step` cannot
+     move it. The std is now the widest of three MEASURED quantities: the
+     density's width, the grid resolution, and `fold_spread` (how far the
+     estimate moves across disjoint slices of the train window).
+     `std_basis` names the binding one. `fold_spread` binding means the
+     estimate is unstable across the window and that instability IS the
+     honest width.
+
    **THE DOCUMENTS REFRESH THEMSELVES FROM THE ARTIFACTS.** Numbers in the
    docs are anchored — `<!--f:rho.implied_deff|dec3-->3.347<!--/f-->` renders
    as `3.347` and nothing else — and `scripts/run_bootstrap.sh` calls

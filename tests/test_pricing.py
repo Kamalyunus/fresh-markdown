@@ -1186,3 +1186,63 @@ def test_the_fixture_generator_covers_the_configured_splits():
     # and it must still run standalone, with no config to read
     fallback_start, fallback_days = span_covering_splits({})
     assert fallback_days > 0 and fallback_start.year == 2026
+
+
+def test_a_prior_std_can_never_be_zero():
+    """A zero-width prior is not confidence, it is a frozen posterior.
+
+    Production surfaced it: BAKERY & PASTRY on 125,749 rows produced a
+    likelihood span of 9,402 log-likelihood units, which across a 159-point
+    grid is 59 nats per step -- every point but one at exp(-59), a delta
+    function, `std: 0.0`. `bounded_step` cannot move a prior of zero width, so
+    the posterior would have been frozen before the first outcome arrived.
+
+    Curvature measures SAMPLING precision. What is uncertain at that scale is
+    the MODEL -- confounded history, imperfect mu_ref, non-stationary demand --
+    and none of it is visible in the within-sample curve.
+    """
+    import numpy as np
+
+    from bootstrap import prior_density as pdn
+
+    grid = np.linspace(-4.0, -0.05, 159)
+    step = grid[1] - grid[0]
+    # a likelihood dropping 59 nats per grid step: exactly the production case
+    ll = -59.5 * np.arange(len(grid))[::-1]
+    w = pdn.density(ll, 1.0)
+    _, raw_std = pdn.moments(grid, w)
+    assert raw_std == pytest.approx(0.0, abs=1e-9), \
+        "the collapse this guards against must actually happen"
+
+    # nothing finer than one grid cell was ever resolved, so the reported std
+    # can never be below the grid's own step
+    assert max(raw_std, step) >= step
+
+
+def test_a_likelihood_peaking_at_positive_elasticity_is_rejected():
+    """`search_bounds` is a policy statement, not a belief about demand, so a
+    peak outside it gets CLIPPED to the nearest bound and reported as measured.
+    That is how a category whose likelihood prefers demand RISING with price
+    came back as a confident -0.05 with four decimals.
+
+    Not a rare pathology on this data: three of five fixture categories had
+    their unconstrained optimum above zero, because the legacy ramp puts deep
+    discounts on stock that is not selling.
+    """
+    import inspect
+
+    from bootstrap import prior_density as pdn
+
+    src = inspect.getsource(pdn.estimate)
+    assert "wrong_sign" in src and "unconstrained" in src, \
+        "the sign check must consult the UNCONSTRAINED peak, not the clipped one"
+    # the search must actually go past the upper bound, or it cannot see a
+    # positive optimum at all
+    wide = inspect.getsource(pdn.unconstrained_argmax)
+    assert "max(1.0, hi)" in wide, \
+        "the unconstrained search must extend past the policy bound"
+
+    # and a rejected category must not contaminate the pool it falls back to
+    assert "signs[cat][0]" in src, \
+        "the pool must exclude wrong-sign categories -- otherwise the fallback " \
+        "inherits the confound the rejection exists to remove"
