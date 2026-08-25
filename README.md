@@ -1,6 +1,7 @@
 # Perishable Markdown MVP
 
-Implementation of the [Perishable Markdown MVP PRD](docs/perishable_markdown_mvp_prd.md):
+Implementation of the Perishable Markdown MVP — specified in
+[`docs/design.md`](docs/design.md), the authoritative design doc:
 the smallest markdown-pricing system that can run in production and improve
 itself from its own decisions. Legacy history cannot point-identify price
 elasticity (price is collinear with hour-of-day under the legacy ramp), so
@@ -10,30 +11,30 @@ randomized exploration.
 
 ## Layout
 
-| Path | PRD | Responsibility |
+| Path | Design | Responsibility |
 | --- | --- | --- |
-| `config.yaml` | §7 | Every tunable parameter. Single source of truth; no numeric literals in code. |
-| `common/config.py` | §7 | Loader; strict mode refuses to start on null MEASURED values. |
-| `bootstrap/download_flc.py` | §9.1 | Redshift extract of the raw hourly FLC feed into `data/flc_raw.parquet`, aliased to the column names step 1 renames. Credentials from `REDSHIFT_*` in `~/.env`; the exclusion window from `config.yaml`. |
-| `bootstrap/prepare_data.py` | §9.1–9.2 | Schema mapping, the integrity/scope filter chain plus the `dp_eligible`, `below_cost_hours` and `edge_truncated` flags (only rows that cannot be believed or fall outside the study period are dropped; anything merely hard to price is flagged, so the frozen artifacts keep the population the DP cannot act on), window-keyed episode construction (not date-keyed — 36-hour windows are common), 13-row waterfall with COGS at risk (cost × supply), split manifest. |
-| `common/episodes.py` | §9.2 | One definition of episode endings and true leftover: `ending_inventory` is written off to zero on an episode's last row, so scrap is `max(0, starting − sold)`. Also extends episodes to their full window so the DP horizon is not shortened by a realised sellout. |
-| `bootstrap/measure.py` | §8, App. A | Phase-0 measurement suite (m1–m8, m10, m11 episode endings) and reassessment gates. |
-| `bootstrap/train_baseline.py` | §9.3 | Frozen LightGBM/Tweedie `mu_ref`; price features overwritten to `d_ref` at inference; level-calibration factor fit. |
-| `bootstrap/fit_dispersion.py` | §9.4 | Frozen NB `r` by subcategory (censored MLE, fallback, clamp) and global `rho` vs fitted residuals. |
-| `bootstrap/estimate_prior.py` | §9.5 | The elasticity prior as a profile-likelihood density (censored Poisson, naive + controlled arms on entry rows, pooled shrinkage, no fallback constant); writes its own held-out and design comparisons into `prior.json`. |
-| `bootstrap/prior_density.py` | §9.5 | The estimator itself — curves, densities, wrong-sign and zero-width guards, `design_comparison`, `holdout_comparison`. Superseded designs: `docs/learnings.md`. |
-| `bootstrap/init_posterior.py` | §10 | One-time posterior initialisation from the prior artifact; refuses overwrite without `--force`. |
-| `bootstrap/derive_thresholds.py` | §8, §15.4, §18 | Evidence for the owner decisions: empirical A/B duration vs MDE, 3σ guardrail noise floors. |
-| `pricing/demand.py` | §9.3, §11.3 | `mu(d) = mu_ref × ((1−d)/(1−d_ref))^ε`, truncated NB pmf. |
-| `pricing/dp.py` | §11 | Monotone DP over feasible tiers; absolute-IL reward; entry arms. |
-| `pricing/explore.py` | §12 | Affordable-set uniform selection under currency `tau`; budget and `tau` calibration. |
-| `pricing/posterior.py` | §10, §13.4–13.5 | Cell records, bounded step, atomic commit with processed outcome IDs (exactly-once). |
-| `inference/decide.py` | §11.4, §16.1 | State validation (reject, never an unsafe price), decision event emission. |
-| `events/store.py` | §16 | JSONL event log: dedup, quarantine for malformed events, replay. |
-| `pipeline/update.py` | §13–14 | Censored NB grid update, deff deflation, bounded step, operator gate (`--apply`). |
-| `pipeline/monitor.py` | §15 | Business (IL% ratio-of-sums with denominators), learning, safety series; stop conditions. |
-| `pipeline/shadow.py` | §19 | Phase-1 harness: full decision path against live data, no prices applied; exit-gate report. |
-| `backtest/` | §17 | Fidelity gate, policy deltas, `Q(p*) − Q(p)` spread and `tau_initial` derivation. |
+| `config.yaml` | 5.1 | Every tunable parameter. Single source of truth; no numeric literals in code. |
+| `common/config.py` | 5.1 | Loader; strict mode refuses to start on null MEASURED values. |
+| `bootstrap/download_flc.py` | 5.2 | Redshift extract of the raw hourly FLC feed into `data/flc_raw.parquet`, aliased to the column names step 1 renames. Credentials from `REDSHIFT_*` in `~/.env`; the exclusion window from `config.yaml`. |
+| `bootstrap/prepare_data.py` | 5.2 | Schema mapping, the integrity/scope filter chain plus the `dp_eligible`, `below_cost_hours` and `edge_truncated` flags (only rows that cannot be believed or fall outside the study period are dropped; anything merely hard to price is flagged, so the frozen artifacts keep the population the DP cannot act on), window-keyed episode construction (not date-keyed — 36-hour windows are common), 13-row waterfall with COGS at risk (cost × supply), split manifest. |
+| `common/episodes.py` | 5.2, 12a | One definition of episode endings and true leftover: `ending_inventory` is written off to zero on an episode's last row, so scrap is `max(0, starting − sold)`. Also extends episodes to their full window so the DP horizon is not shortened by a realised sellout. |
+| `bootstrap/measure.py` | 5.3 | Phase-0 measurement suite (m1–m8, m10, m11 episode endings) and reassessment gates. |
+| `bootstrap/train_baseline.py` | 5.4, 9.2 | Frozen LightGBM/Tweedie `mu_ref`; price features overwritten to `d_ref` at inference; level-calibration factor fit. |
+| `bootstrap/fit_dispersion.py` | 5.5 | Frozen NB `r` by subcategory (censored MLE, fallback, clamp) and global `rho` vs fitted residuals. |
+| `bootstrap/estimate_prior.py` | 5.6 | The elasticity prior as a profile-likelihood density (censored Poisson, naive + controlled arms on entry rows, pooled shrinkage, no fallback constant); writes its own held-out and design comparisons into `prior.json`. |
+| `bootstrap/prior_density.py` | 5.6 | The estimator itself — curves, densities, wrong-sign and zero-width guards, `design_comparison`, `holdout_comparison`. Superseded designs: `docs/learnings.md`. |
+| `bootstrap/init_posterior.py` | 5.9 | One-time posterior initialisation from the prior artifact; refuses overwrite without `--force`. |
+| `bootstrap/derive_thresholds.py` | 5.3, 5.12, 11, 12 | Evidence for the owner decisions: empirical A/B duration vs MDE, 3σ guardrail noise floors. |
+| `pricing/demand.py` | 5.4, 5.7 | `mu(d) = mu_ref × ((1−d)/(1−d_ref))^ε`, truncated NB pmf. |
+| `pricing/dp.py` | 5.7 | Monotone DP over feasible tiers; absolute-IL reward; entry arms. |
+| `pricing/explore.py` | 5.8 | Affordable-set uniform selection under currency `tau`; budget and `tau` calibration. |
+| `pricing/posterior.py` | 5.9, 5.11 | Cell records, bounded step, atomic commit with processed outcome IDs (exactly-once). |
+| `inference/decide.py` | 5.10 | State validation (reject, never an unsafe price), decision event emission. |
+| `events/store.py` | 5.10 | JSONL event log: dedup, quarantine for malformed events, replay. |
+| `pipeline/update.py` | 5.11 | Censored NB grid update, deff deflation, bounded step, operator gate (`--apply`). |
+| `pipeline/monitor.py` | 5.12 | Business (IL% ratio-of-sums with denominators), learning, safety series; stop conditions. |
+| `pipeline/shadow.py` | 5.13 | Phase-1 harness: full decision path against live data, no prices applied; exit-gate report. |
+| `backtest/` | 5.14 | Fidelity gate, policy deltas, `Q(p*) − Q(p)` spread and `tau_initial` derivation. |
 | `common/parallel.py` | — | Runs the per-episode work across CPUs (`--workers N`, `0` = all but one). Results in submission order, never completion order; workers compute and the parent commits, so the event path the shadow gate measures is unchanged. Reports are identical either way. |
 | `tools/make_dummy_flc.py` | — | Synthetic FLC generator (legacy + randomized policies, known ground-truth elasticity). The generated span defaults to whatever covers `data.split` (`--start`/`--days` override), so `scripts/run_bootstrap.sh <fixture>` runs end to end — it previously stopped at `fit_dispersion` with an empty calibration window. |
 | `tools/export_backtest.py` | — | The backtest's three arms **hour by hour** as an xlsx (`summary` / `episodes` / `hourly` / `reconciliation`), optionally with a browsable HTML view. Every arm reports **units** — sold, leftover, scrap — beside its currency figures, and the `reconciliation` sheet proves per episode that the hourly units sum to the episode totals and that `supply = sold + leftover + shrink`. Reads `backtest.replay`'s opt-in per-hour trace rather than re-running the arms, so it cannot drift from the report. Read `legacy vs dp` for the policy gap — both are simulated under the same demand model; `actual vs legacy` is a fidelity read, not a policy one. |
@@ -44,7 +45,7 @@ randomized exploration.
 | `tools/walkthrough/` | — | Builds `docs/system_walkthrough.html`, the leadership-facing walkthrough — one tab per frozen artifact, plus the decision, the learning loop, replay, shadow and the assurance checks. The Population tab reads its figures live from `reports/eda.json` at build time and degrades to a named note when there is none. `figures.py` registers every measured figure against the report and model version it came from, so a re-run cannot leave the page silently stale. |
 | `tools/metrics_glossary.py` | — | Builds `docs/metrics.html`: every measured quantity across the reports, each with its unit, owning component, and whether it gates anything. Filterable, with a gates-only toggle. |
 
-## Running the bootstrap (PRD §1a order)
+## Running the bootstrap
 
 ```bash
 pip install -r requirements.txt
@@ -64,7 +65,7 @@ per-category prior means), then stops at the human gates. (The script
 retrains the baseline every time — to iterate on one step, run that step's
 module directly. Agents: read `AGENTS.md` before touching the pipeline.)
 
-1. **Calibration gate (blocking, §9.3)** — `reports/backtest.json` carries
+1. **Calibration gate (blocking, design 9.2)** — `reports/backtest.json` carries
    `calibration_gate_value` and `calibration_gate`, read on the window named
    by `baseline_model.calibration_gate_window` and echoed as
    `fidelity.gate_window` — it must stay disjoint from
@@ -83,7 +84,7 @@ module directly. Agents: read `AGENTS.md` before touching the pipeline.)
 
    and record the fidelity ratio before and after — the comparison is valid
    only if `baseline_model_version` matches across the two reports.
-2. **Prior acceptance gate (blocking, human, §9.5)** — there is no reject flag
+2. **Prior acceptance gate (blocking, human, design 9.3)** — there is no reject flag
    in the artifact; the gate is a reading of `artifacts/prior.json`:
    `design_comparison` (which rows × hour-control combination this extract
    supports), `wrong_sign_categories` (own density discarded for the pooled
@@ -99,7 +100,7 @@ module directly. Agents: read `AGENTS.md` before touching the pipeline.)
    start otherwise, and `pipeline.status` reports a stale paste as FAIL
    rather than passing it for being non-null.
 
-Then initialise the posterior and run the shadow phase (§19 — decisions
+Then initialise the posterior and run the shadow phase (design 5.13 — decisions
 logged, no prices applied):
 
 ```bash
@@ -107,7 +108,7 @@ python3 -m bootstrap.init_posterior
 python3 -m pipeline.shadow --input data/prepared.parquet --out reports/shadow.json
 ```
 
-The shadow report carries the §19 exit gate (event completeness, matched
+The shadow report carries the shadow exit gate (event completeness, matched
 rate, zero cost-floor violations) plus would-be exploration spend,
 recommended-vs-legacy discount deltas, and the frozen-baseline drift ratio.
 Architecture and rationale live in [`docs/design.md`](docs/design.md).
@@ -163,7 +164,7 @@ the fixture after any change to the inventory conventions.
 ## Design invariants worth knowing
 
 - The planner minimises **absolute IL**; the business reads **IL%** with an
-  endogenous denominator. They can diverge by design (§3.3); both are always
+  endogenous denominator. They can diverge by design (design 2.3); both are always
   reported together and per-episode IL% is never computed.
 - Exploration is a **currency budget**, not a probability: `tau` is compared
   against `Q(p*) − Q(p)` in won, and the forced price is drawn uniformly from

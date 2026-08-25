@@ -1,6 +1,6 @@
 """backtest -- offline replay through the production decision path.
 
-PRD section 17. Three jobs, none of which is deciding whether to launch:
+Design section 5.14. Three jobs, none of which is deciding whether to launch:
 
   1. Baseline fidelity -- the section 9.3 calibration gate (most important).
   2. tau_initial derivation -- the Q(p_star) - Q(p) distribution of section 12.3.
@@ -356,7 +356,7 @@ def fidelity(d, cfg, model, prior, r_lookup):
     block["calibration_gate_metric"] = gate_metric
     block["calibration_gate_value"] = gate_value
     block["calibration_gate"] = ("PASS" if band[0] <= gate_value <= band[1]
-                                 else "FAIL -- blocking (PRD section 9.3)")
+                                 else "FAIL -- blocking (design 9.2)")
     return block, d_full
 
 
@@ -441,7 +441,7 @@ def _replay_one(e, cfg):
 
     # PER-HOUR TRACE, off by default and read by nothing in the report.
     # `tools.export_backtest` turns it on to show the three arms hour by hour;
-    # it exists here rather than in that tool because PRD 17.2 forbids a
+    # it exists here rather than in that tool because the replay protocol (design 5.14) forbids a
     # parallel implementation, and an exporter that re-ran these loops itself
     # would be one -- it would drift the moment either arm changed.
     tr = {} if e.get("trace") else None
@@ -808,7 +808,7 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None,
                  "(same demand generator both arms). actual_* figures are the "
                  "observed world and belong to fidelity, not policy. Replay "
                  "output is never evidence the policy works; the A/B is that "
-                 "evidence (PRD 17.1)."),
+                 "evidence (design 5.14)."),
     }
     block["q_spread_distribution"] = ledger.distribution()
     if trace:

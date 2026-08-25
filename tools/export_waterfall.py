@@ -44,12 +44,12 @@ import pandas as pd
 
 from common.config import load_config
 from bootstrap.prepare_data import (
-    load_and_filter, waterfall_rows, SOURCE_TO_PRD, assign_episode_ids,
+    load_and_filter, waterfall_rows, SOURCE_TO_CANONICAL, assign_episode_ids,
     WATERFALL_STEPS, DP_INELIGIBLE, BELOW_COST_HOURS)
 
 # What a reader needs to see to judge a removal, in the order they read it:
 # which episode and when, then the inventory chain, then the price.
-# PRD names, because the frame is renamed on load -- `flc_window` is
+# canonical names, because the frame is renamed on load -- `flc_window` is
 # `hours_remaining` here, which is also what every rule in the definitions
 # sheet calls it, so the two sheets use one vocabulary.
 RAW_COLS = ["episode_id", "removed_at_step", "why", "date", "hour_of_day",
@@ -63,7 +63,7 @@ def _raw(path):
     """The feed as it arrived, with episode ids assigned the same way the
     pipeline assigns them -- otherwise the ids recorded during the drop would
     not match anything here."""
-    df = pd.read_parquet(path).rename(columns=SOURCE_TO_PRD)
+    df = pd.read_parquet(path).rename(columns=SOURCE_TO_CANONICAL)
     # returns a Series, same as the pipeline's own use of it at load time
     df["episode_id"] = assign_episode_ids(df)
     return df

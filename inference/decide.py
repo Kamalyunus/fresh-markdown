@@ -1,6 +1,6 @@
 """inference -- validate state, decide, emit decision event.
 
-PRD sections 11.4 and 16.1. Validation rejects the state rather than returning
+Design section 5.10. Validation rejects the state rather than returning
 an unsafe price. The decision path is: feasible tiers -> DP over Q(p) ->
 exploit or explore -> price -> decision event.
 """

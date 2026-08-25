@@ -1,9 +1,9 @@
 # Agent operating guide — Perishable Markdown MVP
 
 This file is for any coding agent (Claude Code, Devin, Cursor, …) working in
-this repo. The authoritative specification is
-`docs/perishable_markdown_mvp_prd.md` (PRD); section numbers below refer to it.
-When this guide and the PRD disagree, the PRD wins.
+this repo. The authoritative specification is `docs/design.md`; section
+numbers below refer to it. When this guide and the design doc disagree, the
+design doc wins. (The original PRD is retired — see `docs/learnings.md`.)
 
 ## Setup and tests
 
@@ -101,7 +101,7 @@ you then run `--fit-calibration` (step 7), **re-run `bootstrap.seal`**:
 `calibration.json` is a seventh artifact that did not exist when the set was
 sealed, so the seal taken during the script no longer describes it.
 
-Shadow phase (§19 — after gates clear, before any price is applied):
+Shadow phase (design 5.13 — after gates clear, before any price is applied):
 
 ```bash
 python3 -m bootstrap.init_posterior
@@ -253,7 +253,7 @@ different things move in it on two different kinds of evidence**:
 | --- | --- | --- |
 | `mean`, `std`, `version`, `accumulated_information`, `n_obs` | INFORMATION | only when a cell's effective information crosses `learning.information_increment` |
 | `processed_outcome_ids` | — | with the revision that consumed them, in the same atomic write |
-| `tau`, `tau_calibrated_through` | SPEND (§12.3) | every run, whether or not any cell triggered |
+| `tau`, `tau_calibrated_through` | SPEND (design 5.8) | every run, whether or not any cell triggered |
 
 **`tau` moves on spend, not on evidence.** A day that explored and learned
 nothing still cost money, and that is exactly what `tau` prices — so it is
@@ -283,8 +283,8 @@ does not move during the MVP window) and `prior_source` (provenance).
 **There is no `information_since_update` counter, and adding one back would be
 a bug.** The trigger is evaluated on the UNCONSUMED BATCH, not on a running
 total, because nothing consumes a sub-threshold batch — so incrementing a
-counter while the same outcomes are re-read next run double counts them. PRD
-§13.4 specified the counter and now records why it was replaced.
+counter while the same outcomes are re-read next run double counts them. The
+original spec carried the counter; design 5.11 records why it was replaced.
 `accumulated_information` is the running total across committed revisions.
 
 ## The frozen artifacts are one bundle
@@ -364,7 +364,7 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
 ## Hard rules — violating these has already caused wrong conclusions
 
 1. **Never retrain the baseline between two runs you intend to compare.**
-   The model is frozen by design (§9.3). Any before/after fidelity comparison
+   The model is frozen by design (design 5.4). Any before/after fidelity comparison
    is void unless `artifact_versions.baseline_model_version` is identical in
    both reports. `--fit-calibration` does NOT retrain; plain
    `train_baseline` and `run_bootstrap.sh` DO.
@@ -384,7 +384,7 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
    parameter, so it needs nothing from the dispersion step.
 
    **THE PRIOR IS THE PROFILE LIKELIHOOD, READ AS A DENSITY**
-   (`bootstrap.prior_density`, PRD 9.5). The whole deff-deflated curve becomes
+   (`bootstrap.prior_density`, design 5.6). The whole deff-deflated curve becomes
    the prior — a 50/50 mixture of the naive and controlled arms' densities,
    shrunk toward a POOLED density built from the right-signed categories.
    **There is no fallback constant**: a flat likelihood degrades to the
@@ -452,13 +452,13 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
    buys no behaviour change and slows the loop that would find the real one.
 
 2. **`posterior.epsilon_max` (−0.05) is a sign constraint, never a bound to
-   widen** (§10.4). An estimate pinned at the UPPER bound means the estimator
+   widen** (design 5.6). An estimate pinned at the UPPER bound means the estimator
    found no negative price response — an artifact of confounded data, not
    evidence that elasticity is near zero. Positive elasticity must remain
    unrepresentable. (Widening applies only to the LOWER bound, per the −1.5
-   defect described in §9.5.)
+   defect recorded in docs/learnings.md.)
 
-3. **A boundary solution is not an estimate** (§9.5). An estimate pinned at a
+3. **A boundary solution is not an estimate** (design 5.6). An estimate pinned at a
    search bound means the likelihood ran off the support, not that the truth
    sits there — the wrong-sign check searches PAST the bounds for exactly
    this reason. Let production exploration learn elasticity; that is the
@@ -502,31 +502,31 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
    fit window means the model genuinely over-predicts at the anchor —
    investigate before applying; do not apply blindly.
 
-6. **Only the level component may be corrected multiplicatively** (§9.3). A
+6. **Only the level component may be corrected multiplicatively** (design 9.2). A
    sold-ratio that degrades as `|discount − d_ref|` grows is slope error
    (prior elasticity), fixed by re-estimating the prior — never by scaling
    `mu_ref`.
 
-7. **Elasticity identification uses entry-hour rows only** (§9.5:
+7. **Elasticity identification uses entry-hour rows only** (design 5.6:
    same-hour cross-episode variation, never adjacent-hour within-episode).
    Under the legacy ramp, deep-discount rows exist because earlier hours did
    not sell; fitting on all rows biases elasticity toward zero.
 
 8. **`config.yaml` is the single source of every tunable.** No numeric
-   literals for tunables in code (§6.1 configuration rule). Adding a tunable
+   literals for tunables in code (design 5.1 configuration rule). Adding a tunable
    to code without adding it to config is a review failure.
 
 9. **IL% is always a ratio of sums, reported with its denominator, with
-   absolute IL alongside** (§3.5–3.6). Per-episode IL% is undefined for
+   absolute IL alongside** (design 2.3). Per-episode IL% is undefined for
    zero-sale episodes and must never be computed or averaged.
 
-10. **`pipeline.update --apply` is the operator gate** (§14). It refuses when
+10. **`pipeline.update --apply` is the operator gate** (design 5.11). It refuses when
     event-quality gates fail; do not work around a refusal. Updates are
     exactly-once — a second `--apply` consuming nothing is correct behaviour,
     not a bug.
 
 11. **The discount column is percent in raw data and a fraction after
-    `prepare_data`** — the conversion happens exactly once (§9.1). Never
+    `prepare_data`** — the conversion happens exactly once (design 5.2). Never
     convert again downstream; never feed raw data to modules that expect
     `data/prepared.parquet` (only `bootstrap.measure` and
     `bootstrap.prepare_data` accept raw).
@@ -613,11 +613,11 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
   legacy-under-model vs DP-under-model, same demand generator both arms, so
   model bias cancels. Never compare `actual_*` (observed world) against
   `dp_*` (model world) as a policy statement — that charges all model bias
-  to the DP; `actual_*` vs model figures are fidelity only (§17.5). Even
+  to the DP; `actual_*` vs model figures are fidelity only (design 5.14). Even
   like-for-like, replay is internal consistency, not launch evidence.
-- `tau_initial_derivation.tau_initial` is a currency amount (§12.3). Only
+- `tau_initial_derivation.tau_initial` is a currency amount (design 5.8). Only
   paste it into config from a report whose fidelity gate PASSED.
-- Replay output is never evidence the policy works (§17.1). The A/B is.
+- Replay output is never evidence the policy works (design 5.14). The A/B is.
 
 ## Gate decision tree
 
@@ -644,14 +644,14 @@ backtest fidelity gate FAIL
 │  → set apply_level_calibration: true, re-run backtest (NO retrain)
 ├─ anchor ≈ 1 but slope degrades with gap
 │  → re-run estimate_prior; a pooled/uniform prior is a valid outcome
-└─ still failing after both remedies → STOP (§8.1): the MVP does not
-   proceed to a learning pilot; escalate to the PRD owner
+└─ still failing after both remedies → STOP (design 5.3 reassessment): the
+   MVP does not proceed to a learning pilot; escalate to the product owner
 ```
 
 ## What blocks launch (strict config)
 
 `common.config.load_config(strict=True)` refuses while any of these is null:
-`baseline_model.apply_level_calibration` (decided by the §9.3 diagnostic),
+`baseline_model.apply_level_calibration` (decided by the design 9.2 diagnostic),
 `dispersion.rho`, `dispersion.mean_forced_hours_per_episode`,
 `exploration.tau_initial` (from a PASSING backtest),
 `monitoring.stop_conditions.scrap_deterioration_pct` and
@@ -659,7 +659,7 @@ backtest fidelity gate FAIL
 decisions — an agent must never invent these).
 
 MEASURED values produced by the pipeline are pasted into `config.yaml` by
-hand; SET BY OWNER values come from the PRD owner only.
+hand; SET BY OWNER values come from the product owner only.
 
 **A guardrail threshold means nothing without its basis.**
 `monitoring.stop_conditions.deterioration_basis` says, per metric, whether the

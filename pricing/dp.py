@@ -1,4 +1,4 @@
-"""pricing.dp -- monotone DP over the feasible tier set (PRD section 11).
+"""pricing.dp -- monotone DP over the feasible tier set (design section 5.7).
 
 State (price_anchor, inventory_q, hours_remaining_t). Action: a feasible tier
 at or below the anchor price (discount at or above the anchor discount) and at

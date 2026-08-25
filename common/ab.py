@@ -1,4 +1,4 @@
-"""common.ab -- A/B arm assignment (PRD section 18).
+"""common.ab -- A/B arm assignment (design section 11).
 
 One definition, because two would silently split the population. It lived as a
 private helper inside pipeline.monitor and bootstrap.derive_thresholds reached

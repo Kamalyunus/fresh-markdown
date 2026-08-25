@@ -44,7 +44,7 @@ def _row(name, verdict, detail, where=""):
 
 
 def _launch_blockers(cfg):
-    """Config values strict mode refuses to start without (PRD section 7)."""
+    """Config values strict mode refuses to start without."""
     missing = []
     for path in RUNTIME_REQUIRED:
         try:

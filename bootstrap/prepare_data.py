@@ -1,6 +1,6 @@
 """bootstrap.prepare_data -- schema mapping, filter chain, episode construction.
 
-Implements PRD sections 9.1 and 9.2. The source-to-PRD column mapping is applied
+Implements design section 5.2. The source-to-canonical column mapping is applied
 here once and nowhere else. The three load-bearing properties of section 9.1:
 
   1. `discount` is PERCENT in source (25.0 = 25%); converted to a fraction
@@ -28,7 +28,7 @@ from common.config import load_config, reference_discount
 from common import episodes
 from common.provenance import stamp
 
-SOURCE_TO_PRD = {
+SOURCE_TO_CANONICAL = {
     "hour": "hour_of_day",
     "skuseq": "sku_id",
     "inventory": "starting_inventory",
@@ -316,7 +316,7 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     cfg = cfg or load_config()
     excl = cfg["data"]["exclusion_window"]
 
-    df = pd.read_parquet(path).rename(columns=SOURCE_TO_PRD)
+    df = pd.read_parquet(path).rename(columns=SOURCE_TO_CANONICAL)
 
     # discount is PERCENT in source -> fraction, exactly once
     df["total_discount"] = df["total_discount"] / 100.0

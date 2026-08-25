@@ -1,9 +1,9 @@
 """The docs describe a filter chain. This checks it is THIS filter chain.
 
 Prose rots quietly. Over one long session the chain gained a stage, lost two,
-and reclassified four flags -- and `AGENTS.md` kept up while `design.md` and
-the PRD were left describing `restocked` as a DP gate months after it stopped
-being one. Nobody reading them would have known.
+and reclassified four flags -- and `AGENTS.md` kept up while `design.md`
+was left describing `restocked` as a DP gate months after it stopped
+being one. Nobody reading it would have known.
 
 So the names are cross-checked against the code that defines them. This cannot
 verify that the PROSE is true -- only a human can -- but it can guarantee that
@@ -27,7 +27,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # Every doc that describes the filter chain and therefore has to keep up. A
 # doc that merely mentions the pipeline is not listed -- the point is to catch
 # the ones a reader would trust for the chain itself.
-CHAIN_DOCS = ["AGENTS.md", "docs/design.md", "docs/perishable_markdown_mvp_prd.md"]
+CHAIN_DOCS = ["AGENTS.md", "docs/design.md"]
 
 # Names the chain USED to carry. Any of these appearing as a live stage or
 # flag means a doc is describing a rule that no longer exists.
@@ -84,8 +84,8 @@ def test_the_reported_only_flags_are_documented(docs):
 
 
 def test_no_doc_still_describes_a_retired_rule(stages, docs):
-    """The failure that actually happened: `design.md` and the PRD went on
-    calling `restocked` a DP gate long after it stopped being one."""
+    """The failure that actually happened: `design.md` went on calling
+    `restocked` a DP gate long after it stopped being one."""
     live = set(stages) | {n for n, _ in DP_INELIGIBLE}
     stale = [(f, name) for f in CHAIN_DOCS for name in RETIRED
              if name in docs[f] and name not in live]
@@ -93,8 +93,8 @@ def test_no_doc_still_describes_a_retired_rule(stages, docs):
     # the test allows it only next to a word that marks it as history
     unexplained = []
     for f, name in stale:
-        # skip fenced code blocks: the PRD keeps a historical `load_and_filter`
-        # listing on purpose, with a note above it saying what is superseded
+        # skip fenced code blocks: a doc may keep a historical listing on
+        # purpose, with a note above it saying what is superseded
         fenced, body = False, []
         for line in docs[f].split("\n"):
             if line.startswith("```"):

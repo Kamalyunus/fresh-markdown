@@ -105,7 +105,7 @@ def duration_table(se_by_T, cfg, mde_rel):
         "recommended_duration_days": recommended * 7 if recommended else None,
         "note": ("SE measured on actual T-week blocks, not sqrt-scaled. "
                  "If no duration meets the target, either the MDE or the MVP "
-                 "window must change (PRD section 8.1, measurement 6)."),
+                 "window must change (design 5.3 reassessment, measurement 6)."),
     }
 
 
@@ -511,7 +511,7 @@ def main():
               "-> paste into ab_test.duration_days")
     elif mde is not None:
         print("NO candidate duration meets the target MDE -- "
-              "loosen the MDE or extend the window (PRD 8.1)")
+              "loosen the MDE or extend the window (design 5.3)")
     gn = report["guardrail_noise"]
     for key in ("scrap_rate", "margin_rate"):
         block = gn[key]

@@ -1,6 +1,7 @@
 # Perishable Markdown MVP — System Design
 
 **Status:** Implemented; validated on production FLC data after the section 12a data-definition corrections; calibration and shadow gates PASSED (model `baseline-20260809120225`)
+**Standing:** The authoritative specification. The original PRD is retired (its normative content lives here; the history of what it specified and what replaced it is in `docs/learnings.md`)
 **Audience:** Technical leadership review — this document is self-contained and requires no companion reading
 
 ---
@@ -558,15 +559,55 @@ support; a wrong-signed one (unconstrained peak at or above zero, searched
 zero-width prior would freeze the posterior. The upper bound (−0.05) remains
 a *sign constraint*, never to be widened.
 
+**The full specification** (implementation `bootstrap.prior_density`, driven
+by `bootstrap.estimate_prior`):
+
+- **Estimator.** Per category and per arm, the censored Poisson log-likelihood
+  is evaluated over the ε grid with frozen `μ_ref` as the baseline and
+  censored hours entering as `P(D ≥ q)`. The Poisson quasi-MLE is consistent
+  for the mean parameters whatever the true dispersion
+  (Gourieroux–Monfort–Trognon 1984), and ε lives entirely in the mean — so no
+  dispersion parameter enters, there is no ε ↔ r cycle, and this step runs
+  before section 5.5, which reads its per-category means as the working
+  elasticity.
+- **Density.** Each curve, deflated by an ε-free design effect where more than
+  one row per episode is scored, becomes `w(ε) ∝ exp(ll/deff)`. The category's
+  own density is the 50/50 mixture of its two arms — which reproduces the old
+  midpoint-and-half-gap bracket exactly in the sharp limit and degrades to the
+  uniform on the support where the likelihood is flat. It is shrunk toward a
+  **pooled density** (log-likelihoods summed across the right-signed
+  categories) with weight `own_information_weight = min(1,
+  span/own_information_saturation)`. `prior_mean` and `prior_std` are the
+  moments of the result; a category the data says nothing about gets the
+  uniform — mean `(lo+hi)/2`, std `(hi−lo)/√12` — by construction, and the
+  only external input is `search_bounds`, a policy statement about the range
+  the DP supports.
+- **Thin time cells.** Controlled-arm cells with fewer than
+  `min_rows_per_time_cell` uncensored rows get no multiplier of their own — a
+  cell fitted from a few observations absorbs the price response it is meant
+  to control for and biases |ε| toward zero; `median_rows_per_time_cell` is
+  reported so a reader can see whether the control is actually being applied.
+- **Read the artifact in this order:** `design_comparison` (every rows ×
+  hour-control combination, scored for sign, span and cell size — which
+  combination an extract supports is a property of the extract), then
+  `wrong_sign_categories` with `unconstrained_argmax`, then
+  `holdout_comparison` — `log ∫ p(y_hold|ε)π(ε)dε` per held-out row,
+  bracketed by `oracle` and `uniform`, reading
+  `information_available_per_row` (oracle − uniform) first; candidates below
+  `uniform` are named in `worse_than_a_flat_prior`.
+- **The acceptance gate is human** (section 9.3): there is no reject path in
+  the estimator — a category that fails to identify ε widens instead of being
+  replaced — so the gate is a reading of the artifact, not a flag in it.
+  `tools.profile_epsilon` renders the curves per category, both arms, one
+  shared y-scale.
+
 **Why honesty over sharpness:** with bounded update steps (section 5.11), a
 confidently-wrong prior takes at least seven update cycles to walk back,
 across every cell at once; a weak honest prior costs only patience. A pooled
-or uniform prior is the system working, not failing. Every run scores itself
-on a held-out window (`holdout_comparison`, bracketed by `oracle` and
-`uniform`) and scores every rows × hour-control design (`design_comparison`),
-so the artifact carries the evidence for its own configuration. The full
-specification is PRD §9.5; the designs this replaced are in
-`docs/learnings.md`.
+or uniform prior is the system working, not failing — history cannot always
+identify elasticity, exploration (section 5.8) is what does, and the prior's
+whole obligation is to be *not confidently wrong* until then. The designs
+this replaced are in `docs/learnings.md`.
 
 > **Production figures quoted elsewhere in this document** (fallback in all
 > 16 categories, bracket acceptance counts, deepening-bar sigmas) are from
@@ -734,7 +775,23 @@ forecast — scaled down (never below 25%) as the posterior narrows. `tau`
 self-calibrates daily against that budget,
 `tau_next = tau × clip(budget/spend, 0.5, 1.25)`: asymmetric because halving
 is the safety direction (a badly oversized `tau` must walk inside the 2×
-stop condition in days) while raising is never urgent. The
+stop condition in days) while raising is never urgent.
+
+**The daily loop, stated exactly.** At midnight, before any of today's
+episodes open: (1) a day's realised IL is the IL — discount *and* scrap — of
+the episodes that **closed** that day, since only at close is an episode's IL
+a settled number; (2) today's budget = `budget_share_of_il` × the mean of
+that series over the trailing `budget_il_window_days` (7) calendar days
+ending yesterday — a moving window that adds yesterday and drops the eighth
+day back — × the posterior-std scale; (3) today's τ =
+`tau_next(yesterday's τ, yesterday's budget, yesterday's realised spend)`.
+Nothing about today — episode count, demand, IL — needs to be known when τ is
+set, by construction. The calibration commits inside `pipeline.update
+--apply`, behind the same operator gate as the posterior, and on every run —
+τ moves on **spend**, not on evidence, and `tau_calibrated_through` makes it
+exactly-once per day. τ persists in the posterior artifact, not in config:
+`exploration.tau_initial` is only the launch value, and a production caller
+reads the artifact or τ stays pinned at launch forever. The
 theory that makes budget-only rationing sound: information about ε and the
 IL cost of a perturbation both scale as `mu × (log price ratio)²`, so
 **information per won is approximately constant** — there is no clever
@@ -774,7 +831,7 @@ reasons, in order of force.
 
 > **⚠ The prior figures in this document are from superseded bracket-era
 > runs** (the method history is in `docs/learnings.md`; the current method is
-> section 5.6 / PRD §9.5). In particular, the "enter-and-hold at the launch
+> section 5.6). In particular, the "enter-and-hold at the launch
 > prior" conclusion in risk 6 below, and the 0%-deepened backtest behind it,
 > were measured under the old constant prior and **must be re-measured on the
 > next full production run before being quoted** — the current per-category
@@ -1245,7 +1302,7 @@ in-window recalibration adopted in response to the measured August trend.
 
 ### 9.3 Prior-acceptance gate (blocking) — is the prior honest?
 
-A human reading of `prior.json`, not a flag in it (PRD §9.5): the
+A human reading of `prior.json`, not a flag in it (section 5.6): the
 `design_comparison` (which rows × time-control combination this extract
 supports), `wrong_sign_categories` (likelihoods peaking at positive ε —
 discarded for the pooled density), `std_basis` per category (which measured
@@ -1288,7 +1345,7 @@ flowchart LR
 | 0b. Calibration | fidelity diagnostic, prior estimation | section 9.2 + 9.3 | **Done** — `level_bias_at_anchor` 1.0389, inside [0.90, 1.10] |
 | 1. Shadow | decisions logged, no prices applied | section 9.4 | **Done** — completeness 0.9974, matched 0.9974, 0 cost-floor violations |
 | 2. Exploit-only pilot | small SKU set, exploration off | price mismatch <1%, finalization SLA | pending |
-| 3. Learning pilot | exploration at half budget on pilot set | posterior std falling; spend within budget | pending |
+| 3. Learning pilot | exploration on at the configured budget (`budget_share_of_il`, 1%) on the pilot set | posterior std falling; spend within budget | pending |
 | 4. A/B | full design below | powered duration; no guardrail breach | blocked on owner MDE (evidence says 7.5% at 2 weeks is comfortable) |
 | 5. Scale | rollout | positive A/B on IL% | — |
 

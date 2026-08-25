@@ -14,7 +14,7 @@ import pyarrow as pa
 import pytest
 
 from bootstrap import download_flc
-from bootstrap.prepare_data import SOURCE_TO_PRD
+from bootstrap.prepare_data import SOURCE_TO_CANONICAL
 from tools.make_dummy_flc import SCHEMA
 
 
@@ -39,7 +39,7 @@ def test_query_emits_exactly_the_declared_columns():
 
 
 def test_declared_columns_cover_the_step_1_rename():
-    assert set(SOURCE_TO_PRD) <= set(download_flc.REQUIRED_COLUMNS)
+    assert set(SOURCE_TO_CANONICAL) <= set(download_flc.REQUIRED_COLUMNS)
 
 
 def test_declared_columns_match_the_source_schema():

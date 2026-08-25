@@ -55,7 +55,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 # --------------------------------------------------------------------------
-# Catalog definition. Reference discounts mirror PRD section 7.1.
+# Catalog definition. Reference discounts mirror config.yaml's reference_discount.
 # --------------------------------------------------------------------------
 
 CATALOG = {

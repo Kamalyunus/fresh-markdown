@@ -1,6 +1,6 @@
 """bootstrap.train_baseline -- fit and freeze the reference-demand model.
 
-PRD section 9.3. LightGBM, Tweedie objective, target units_sold. The model
+Design section 5.4. LightGBM, Tweedie objective, target units_sold. The model
 predicts demand ONLY at the category reference discount: at inference the price
 features are overwritten to d_ref, so the model's price gradient is never
 queried and the legacy confound stays out of the decision path.
@@ -414,7 +414,7 @@ def main():
         print(f"wrote {cfg['baseline_model']['calibration_factor_path']}")
         print("next: set baseline_model.apply_level_calibration: true in "
               "config.yaml, re-run backtest WITHOUT retraining the baseline, "
-              "and record the fidelity ratio before and after (PRD 9.3)")
+              "and record the fidelity ratio before and after (design 9.2)")
         return
 
     schema = train(d, cfg)

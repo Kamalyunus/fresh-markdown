@@ -1,4 +1,4 @@
-"""pipeline.monitor -- learning, business, and safety series (PRD section 15).
+"""pipeline.monitor -- learning, business, and safety series (design section 5.12).
 
 Reads the event store and the posterior and emits one JSON snapshot of the
 three metric families, plus stop-condition evaluation (15.4). All IL% figures

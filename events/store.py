@@ -1,4 +1,4 @@
-"""events.store -- decision and outcome event log (PRD section 16).
+"""events.store -- decision and outcome event log (design 5.10; the field-level contract is docs/event_contract.html).
 
 Append-only JSONL with duplicate detection, durable writes, and replay. The
 logger never silently discards a malformed event: invalid events are

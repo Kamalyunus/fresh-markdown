@@ -734,7 +734,7 @@ def test_the_backtest_grades_on_known_outcomes_only(cfg):
 
 
 def test_the_hourly_export_reads_the_replay_rather_than_reimplementing_it():
-    """PRD 17.2: "No parallel implementation."
+    """Design 5.14: "No parallel implementation."
 
     An exporter that re-ran the DP and legacy arms to produce its own hourly
     rows would be exactly that, and it would drift the first time either arm

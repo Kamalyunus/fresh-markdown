@@ -3,7 +3,7 @@
     mu(d) = mu_ref * ((1 - d) / (1 - d_ref)) ^ epsilon,  floored at demand_floor
 
 D ~ NegBin(r, mu) with Var[D] = mu + mu^2 / r. The pmf is truncated at
-negbin_max_k with the tail mass assigned to the final bucket (PRD section 11.3);
+negbin_max_k with the tail mass assigned to the final bucket (design 5.7);
 tail-mass diagnostics are returned so callers can emit them.
 """
 

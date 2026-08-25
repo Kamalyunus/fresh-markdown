@@ -1,12 +1,12 @@
-# Perishable Markdown MVP -- single tuning surface (PRD section 7).
+# Perishable Markdown MVP -- single tuning surface (design section 5.1).
 #
 # Every threshold, constant, window, and rate in the system lives here.
 # Code reads config; code contains no numeric literals for anything tunable.
 #
-# MEASURED      produced by phase 0 (section 8); the system refuses to start
+# MEASURED      produced by the bootstrap pipeline; the system refuses to start
 #               while any runtime-required MEASURED value is null.
 # SET           business or design choice.
-# SET BY OWNER  blocking decision; null until the PRD owner supplies it.
+# SET BY OWNER  blocking decision; null until the product owner supplies it.
 
 meta:
   config_version: "1.0.0"
@@ -86,13 +86,13 @@ data:
     # hours_remaining: the counter is nominal and still positive on ~99.5% of
     # final rows.
 
-reassessment_gates:                    # SET  section 8.1 phase-0 review gates
+reassessment_gates:                    # SET  phase-0 review gates (design 5.3)
   max_share_non_explorable: 0.30       # above this, narrow the MVP to the
     # explorable subset -- too many episodes have a cost floor so tight that
     # fewer than min_feasible_tiers discounts exist, so exploration cannot buy
     # evidence there at any price
   max_share_cells_low_variation: 0.50  # above this, expect the prior's
-    # densities to degrade toward pooled/uniform (section 9.5's human gate):
+    # densities to degrade toward pooled/uniform (design 9.3's human gate):
     # too few (category, hour) cells carry same-hour price variation
 
 baseline_model:
@@ -219,7 +219,7 @@ baseline_model:
     # calib week measured 1.06 against a five-month mean of 1.30). A long fit
     # window targets the persistent component only.
   calibration_factor_path: "artifacts/calibration.json"   # per-category level correction
-  apply_level_calibration: null        # DECIDE after section 9.3 diagnostic; null blocks start
+  apply_level_calibration: null        # DECIDE after the design 9.2 diagnostic; null blocks start
 
 reference_discount:                    # SET  category anchors
   MEAT: 0.25
@@ -244,7 +244,7 @@ dispersion:
 posterior:
     # The cell map is frozen into artifacts/posterior.json by
     # bootstrap.init_posterior and read from there at runtime; changing this
-    # string alone has no effect. Subcategory cells are phase 2 (section 14).
+    # string alone has no effect. Subcategory cells are phase 2 (design 14).
   min_episodes_per_week_for_cell: 250  # SET  below this -> read the global cell
   epsilon_min: -4.00                   # SET  grid bound
   epsilon_max: -0.05                   # SET  sign constraint
@@ -252,7 +252,7 @@ posterior:
   min_std: 0.05                        # SET  floor on posterior std
   path: "artifacts/posterior.json"
   prior:
-    # THE PRIOR IS THE PROFILE LIKELIHOOD, read as a density (PRD 9.5,
+    # THE PRIOR IS THE PROFILE LIKELIHOOD, read as a density (design 5.6,
     # bootstrap.prior_density). A censored POISSON profile per category and
     # arm, deff-deflated, 50/50 arm mixture, shrunk toward a POOLED density
     # built from the right-signed categories. No fallback constant anywhere:
@@ -273,7 +273,7 @@ posterior:
     hour_control: "date_hour"          # SET  "date_hour" | "hour_of_day"
       # What the controlled arm profiles out. "date_hour" compares the same
       # clock hour of the SAME DAY across sku x fc -- absorbs every shock
-      # common to that moment (PRD 9.5's "same-hour cross-episode").
+      # common to that moment (design 5.6's "same-hour cross-episode").
       # "hour_of_day" pools across dates and removes only the average evening
       # lift. Finer cells absorb more, so less variation survives to identify
       # epsilon; thin cells fall back (below).
@@ -333,7 +333,7 @@ pricing:
 
 exploration:
   budget_share_of_il: 0.01             # SET  1% of markdown IL
-  tau_initial: null                    # MEASURED  section 12.3. Paste ONLY
+  tau_initial: null                    # MEASURED  design 5.8. Paste ONLY
     # from `reports/backtest.json` -> tau_initial_derivation.tau_initial, and
     # only from a report written AFTER the entry-only scoping fix (its block
     # carries `spread_decisions`). Earlier derivations solved tau on ENTRY
@@ -414,7 +414,7 @@ assurance:                             # pipeline.assurance -- live-data checks
 
 monitoring:
   guardrail_noise_window_days: 28      # SET  trailing baseline for threshold calibration
-  shadow_gate:                         # SET  section 19 phase-1 exit gate
+  shadow_gate:                         # SET  the phase-1 exit gate (design 5.13)
     min_event_completeness: 0.99
     min_matched_decision_rate: 0.99
     sample_episodes: 3000              # SET  0 = every episode. The gate reads
@@ -489,7 +489,7 @@ monitoring:
       # false-firing: one day past a 3-sigma floor happens about once a year
       # per guardrail, two in a row essentially never. Load-bearing, not
       # decoration -- the scrap threshold clears its floor by ~6%.
-    scrap_deterioration_pct: null      # SET BY OWNER -- blocks section 15.4.
+    scrap_deterioration_pct: null      # SET BY OWNER -- blocks the stop conditions (design 5.12).
       # Raw measured 3-sigma floor: 9.1386 -- these are RELATIVE deviations,
       # so that is 914%, not 9.14%. A few low-volume days dominate the daily
       # ratio series; no usable threshold sits above a floor larger than the
@@ -502,7 +502,7 @@ monitoring:
       # control-arm basis (same-day, cancels the day effect) is what the
       # monitor actually uses once the A/B is live, and is measured
       # separately as scrap_rate_control_arm_basis.
-    margin_deterioration_pct: null     # SET BY OWNER -- blocks section 15.4.
+    margin_deterioration_pct: null     # SET BY OWNER -- blocks the stop conditions (design 5.12).
       # Measured 3-sigma daily noise floor: 0.1363 (13.63%), robust 0.1494,
       # NOT outlier-dominated -- this one is well behaved. Recommended 0.15,
       # which clears the raw floor by ~10% but sits just UNDER the robust

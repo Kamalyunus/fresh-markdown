@@ -1,4 +1,4 @@
-"""bootstrap.estimate_prior -- the elasticity prior (PRD section 9.5).
+"""bootstrap.estimate_prior -- the elasticity prior (design section 5.6).
 
 The prior IS the profile likelihood, read as a density -- see
 `bootstrap.prior_density` for the estimator itself. This module is the

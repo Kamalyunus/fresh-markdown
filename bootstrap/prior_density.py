@@ -1,6 +1,6 @@
 """bootstrap.prior_density -- the elasticity prior AS the profile likelihood.
 
-PRD section 9.5. Two ideas, separable:
+Design section 5.6. Two ideas, separable:
 
   HOW THE CURVE IS COMPUTED.  A censored POISSON profile. The Poisson
         quasi-MLE is consistent for the MEAN parameters even when the truth is
@@ -69,7 +69,7 @@ from bootstrap.prepare_data import population, split_frames
 def scored_rows(frame, cfg, which):
     """The rows a profile is built on.
 
-    ENTRY ROWS ARE THE DEFAULT, and PRD 9.5 said so from the start: under the
+    ENTRY ROWS ARE THE DEFAULT, and the spec said so from the start: under the
     legacy ramp a row at a deep discount exists PRECISELY BECAUSE earlier hours
     did not sell, so within-episode rows carry a survivorship confound. Moving
     to every stocked hour to buy price variation was a mistake -- it bought the
@@ -139,7 +139,7 @@ def hour_multipliers(mu, cell, k, censored, min_rows=1):
       date_hour     the hour OF THAT DAY -- same clock hour, compared across
                     sku x fc. Absorbs every shock common to that moment:
                     weather, footfall, a holiday, a rival's promotion. This is
-                    what PRD 9.5 means by "same-hour cross-episode", and the
+                    what design 5.6 means by "same-hour cross-episode", and the
                     pooled hour control was only ever an approximation to it.
 
     A CELL WITH TOO FEW ROWS FITS ITS OWN NOISE. Each cell gets its own
@@ -386,7 +386,7 @@ def design_comparison(d, cfg, model, lo, hi, n):
                     evening lift; `date_hour` compares the same clock hour of
                     the SAME DAY across sku x fc, which absorbs the weather,
                     the footfall, a rival's promotion -- everything shared by
-                    that moment. This is PRD 9.5's "same-hour cross-episode".
+                    that moment. This is design 5.6's "same-hour cross-episode".
 
     Neither substitutes for the other, and which combination an extract can
     support is a property of the extract. Measured on the fixture:

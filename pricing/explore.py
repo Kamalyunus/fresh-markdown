@@ -1,4 +1,4 @@
-"""pricing.explore -- IL-budgeted exploration (PRD section 12).
+"""pricing.explore -- IL-budgeted exploration (design section 5.8).
 
 The DP already computes Q(p) for every feasible price; exploration is a
 constrained selection over those same values:

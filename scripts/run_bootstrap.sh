@@ -79,7 +79,7 @@ python3 -m pipeline.status || true
 
 cat <<'EOF'
 
-Bootstrap complete. Before any price is applied (PRD sections 1a, 19):
+Bootstrap complete. Before any price is applied (design sections 9-10):
   1. Review reports/backtest.json: the calibration gate (fidelity, read on
      the window named by baseline_model.calibration_gate_window) is BLOCKING;
      resolve baseline_model.apply_level_calibration from the level/slope

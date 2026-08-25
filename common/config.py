@@ -1,6 +1,6 @@
 """Config loader and validation.
 
-config.yaml is the single tuning surface (PRD section 7). Everything tunable is
+config.yaml is the single tuning surface (design section 5.1). Everything tunable is
 read from here; modules never carry their own numeric literals.
 
 Two loading modes:
@@ -9,7 +9,7 @@ Two loading modes:
                                 bootstrap is what produces the MEASURED values.
   load_config(strict=True)      runtime mode -- refuses to start while any
                                 runtime-required MEASURED / SET BY OWNER value
-                                is null (PRD section 7).
+                                is null.
 """
 
 import json
@@ -84,7 +84,7 @@ def load_config(path="config.yaml", strict=False):
     if [sb[0], sb[1]] != [cfg["posterior"]["epsilon_min"], cfg["posterior"]["epsilon_max"]]:
         raise ConfigError(
             "posterior.prior.search_bounds must equal [epsilon_min, epsilon_max] "
-            "(PRD section 9.5: a bound tighter than epsilon_min is a defect)")
+            "(design 5.6: a bound tighter than epsilon_min is a defect)")
 
     if strict:
         missing = [".".join(p) for p in RUNTIME_REQUIRED
@@ -114,7 +114,7 @@ def reference_discount(cfg, category):
 
 
 def design_effect(rho, forced_hours):
-    """Cluster design effect: 1 + (m - 1) * rho, floored at 1 (PRD 13.3).
+    """Cluster design effect: 1 + (m - 1) * rho, floored at 1 (design 5.11).
 
     The single definition. It was written out by hand in three other places --
     fit_dispersion, measure and assurance -- and only this one carried the

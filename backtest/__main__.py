@@ -73,7 +73,7 @@ def main():
             "prior_source": prior["source"],
             "config_version": cfg["meta"]["config_version"],
         },
-        # two blocks, reported separately and never summed (PRD 17.3)
+        # two blocks, reported separately and never summed (design 5.14)
         "fidelity": fid,
         "policy_deltas": pol,
         "tau_initial_derivation": tau,

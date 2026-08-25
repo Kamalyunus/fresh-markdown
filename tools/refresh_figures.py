@@ -56,8 +56,7 @@ SOURCES = {
     "eda": "reports/eda.json",
 }
 
-DOCS = ("AGENTS.md", "README.md", "docs/design.md",
-        "docs/perishable_markdown_mvp_prd.md")
+DOCS = ("AGENTS.md", "README.md", "docs/design.md")
 
 FORMATTERS = {
     "raw": lambda x: str(x),

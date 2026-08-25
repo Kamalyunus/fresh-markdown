@@ -1,6 +1,6 @@
 """pipeline.update -- censored NB posterior update, operator-gated.
 
-PRD sections 13 and 14. Runs as a daily batch:
+Design section 5.11. Runs as a daily batch:
 
     python3 -m pipeline.update             # monitor only
     python3 -m pipeline.update --apply     # apply bounded posterior updates

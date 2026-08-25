@@ -1,5 +1,5 @@
 """End-to-end smoke over the synthetic generator: bootstrap chain, decision
-loop, learning update. Exercises the PRD section 1a order on a small
+loop, learning update. Exercises the bootstrap pipeline order on a small
 randomized-policy dataset."""
 
 import json
@@ -429,7 +429,7 @@ def test_backtest_blocks_reported_separately(workspace):
     assert "fidelity" in bt and "policy_deltas" in bt
     assert bt["fidelity"]["fidelity_episode_sold_ratio"] > 0
     pol = bt["policy_deltas"]
-    # absolute IL reported alongside every IL% figure (PRD 3.6 / 17.4)
+    # absolute IL reported alongside every IL% figure (design 2.3)
     assert "actual_il" in pol and "actual_il_pct" in pol
     assert "dp_il" in pol and "dp_il_pct" in pol
     # policy comparison must be apples-to-apples: both arms under the model

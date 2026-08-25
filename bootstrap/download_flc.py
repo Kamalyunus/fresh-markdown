@@ -5,7 +5,7 @@ this writes. One SELECT against `sb_scm.fresh_flc_detail`, aliased into the
 column names `bootstrap.prepare_data` expects, saved to
 `data/flc_raw.parquet`.
 
-The alias list is a contract, not a convenience. `prepare_data.SOURCE_TO_PRD`
+The alias list is a contract, not a convenience. `prepare_data.SOURCE_TO_CANONICAL`
 renames these columns and nothing renames them a second time, so a column
 missing or misspelled here fails at load in step 1, several minutes and one
 network round-trip later. `tests/test_download_flc.py` asserts the query
@@ -49,7 +49,7 @@ DEFAULT_OUT_PARQUET = os.path.join(DATA_DIR, "flc_raw.parquet")
 SOURCE_TABLE = "sb_scm.fresh_flc_detail"
 
 # Every column steps 1 and 2 read, under the names they read them by:
-# the keys of prepare_data.SOURCE_TO_PRD plus the ones used unrenamed.
+# the keys of prepare_data.SOURCE_TO_CANONICAL plus the ones used unrenamed.
 # Kept here as data so the test can compare the two lists directly.
 REQUIRED_COLUMNS = (
     "date", "hour", "skuseq", "fc", "inventory", "units_sold",

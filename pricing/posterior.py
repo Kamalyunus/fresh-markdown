@@ -1,6 +1,6 @@
 """pricing.posterior -- posterior read/write and the bounded-step projection.
 
-One record per cell (PRD section 10). The persisted posterior is a Normal
+One record per cell (design section 5.9). The persisted posterior is a Normal
 summary, never a stored grid -- the grid exists only inside the update
 computation, which keeps storage trivial and makes the bounded step of
 section 13.4 well-defined.
@@ -118,7 +118,7 @@ class PosteriorStore:
         rec = self.state["cells"][cell]
         if not applied:
             return                       # nothing consumed, nothing persisted
-        # No `information_since_update` counter. PRD 13.4 specified one and it
+        # No `information_since_update` counter. The original spec carried one and it
         # was carried here for a while, always reset and never incremented,
         # because the trigger is evaluated on the UNCONSUMED BATCH rather than
         # on a running total -- see `pipeline.update.run`. A field that is

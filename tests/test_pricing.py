@@ -995,7 +995,7 @@ def test_a_likelihood_peaking_at_positive_elasticity_is_rejected():
 
 
 def test_the_hour_control_can_be_keyed_on_the_day_not_just_the_clock():
-    """PRD 9.5 says "same-hour CROSS-EPISODE", and a control pooled across
+    """Design 5.6 says "same-hour CROSS-EPISODE", and a control pooled across
     dates is only an approximation to it: it removes the average evening lift
     and leaves a Tuesday storm or a rival's promotion in the residual, still
     correlated with how far the legacy ramp has run.

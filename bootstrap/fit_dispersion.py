@@ -1,4 +1,4 @@
-"""bootstrap.fit_dispersion -- fit and freeze r_lookup and rho (PRD section 9.4).
+"""bootstrap.fit_dispersion -- fit and freeze r_lookup and rho (design section 5.5).
 
     D ~ NegBin(r, mu),  Var[D] = mu + mu^2 / r
 
@@ -204,7 +204,7 @@ def fit_dispersion(d, cfg):
                 "working_elasticity_by_category": {
                     k: round(v, 4) for k, v in sorted(eps_by_cat.items())}}
 
-    # rho against fitted residuals -- the authoritative value (PRD section 8 m3)
+    # rho against fitted residuals -- the authoritative value (phase 0's m3 is a proxy)
     full = d.copy()
     mu_ref_full = model.predict_mu_ref(full)
     ratio_full = (1 - full.total_discount.to_numpy()) / (1 - full.d_ref.to_numpy())

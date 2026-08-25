@@ -1,6 +1,6 @@
 """bootstrap.measure -- phase 0 historical measurement suite.
 
-Implements section 8 of the Perishable Markdown MVP PRD (Appendix A). Produces
+The phase-0 measurement suite (design section 5.3). Produces
 every value marked MEASURED in config.yaml, plus the three reassessment gates
 in section 8.1.
 
@@ -17,7 +17,7 @@ bootstrap.train_baseline exists. Measurement 10 runs here when a
 `predicted_units` column is supplied (backtest attaches it), and is skipped
 otherwise.
 
-The two corrections from review of the first run (PRD section 8) are in place:
+The two corrections from review of the first run are in place:
 deff uses mean FORCED hours, and episodes_reaching_zero_inventory checks the
 last hour only.
 """
@@ -180,7 +180,7 @@ def m5_censoring(d):
 
 
 def m6_il_pct(d):
-    """IL% under legacy policy. Sets A/B power. PRD sections 3.2, 3.5, 3.6.
+    """IL% under legacy policy. Sets A/B power. Design sections 2.2-2.3.
 
     Denominator is original_price x units_sold -- ENDOGENOUS. Zero-sale
     episodes have an undefined per-episode ratio and are handled only by the

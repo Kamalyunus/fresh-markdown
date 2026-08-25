@@ -12,7 +12,7 @@ Dates are decision dates (owner sign-off), 2026-08.
 ## Elasticity prior
 
 ### The bracket method → the profile-density method
-**Was:** PRD §9.5's original procedure. Two argmax estimates per category —
+**Was:** the original PRD's §9.5 procedure. Two argmax estimates per category —
 `epsilon_naive` (no hour control, biased too elastic) and `epsilon_controlled`
 (hour fixed effects, biased toward zero) — with
 `prior_mean = midpoint`, `prior_std = max(half-gap, std_floor)`, and a
@@ -78,7 +78,7 @@ zero once the prior went Poisson.
 `pipeline.assurance` shares the same basis for its live ρ check.
 
 ### Rows scored: entry → all stocked hours → entry again
-**Was (original):** entry rows only, per PRD §9.5. **Tried:** every stocked
+**Was (original):** entry rows only, as originally specified. **Tried:** every stocked
 hour, deff-deflated, because entry rows carry almost no price variation (the
 entry hour predates the ramp, so it sits at `d_ref`; two fixture categories
 had literally constant likelihoods).
@@ -92,7 +92,7 @@ selection on the unobserved demand shock. Wrong-signed categories went from
 until the peak was searched *past* the search bound: a positive optimum was
 being clipped to −0.05 and reported as measured.
 
-**Now:** `rows: entry` (the PRD was right), with `design_comparison` in the
+**Now:** `rows: entry` (the original spec was right), with `design_comparison` in the
 artifact scoring all four rows × hour-control combinations every run, so the
 choice is re-evidenced on each extract rather than fixed forever.
 

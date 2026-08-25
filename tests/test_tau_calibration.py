@@ -1,4 +1,4 @@
-"""tau moves on spend, at the operator gate (PRD 12.3).
+"""tau moves on spend, at the operator gate (design 5.8).
 
 `explore.tau_next` existed, was unit-tested, and had no caller: tau was pasted
 from config at launch and never moved again. The proportional controller the
@@ -182,7 +182,7 @@ def test_tau_moves_even_when_no_cell_reaches_the_information_threshold(cfg, tmp_
 
 
 def test_the_posterior_carries_no_information_since_update_counter(cfg, tmp_path):
-    """PRD 13.4 originally specified a running counter and it was carried in
+    """The original spec carried a running information counter and it was carried in
     the artifact for a while, always reset and never incremented.
 
     Adding it back would be a bug, not a schema restoration: the trigger reads

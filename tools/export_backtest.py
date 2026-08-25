@@ -8,7 +8,7 @@ episode and see where the DP would have priced differently and what the model
 thought would happen.
 
 It does NOT re-run the pricing logic. `backtest.replay._replay_one` grew an
-opt-in per-hour trace and this reads it, because PRD 17.2 forbids a parallel
+opt-in per-hour trace and this reads it, because the replay protocol (design 5.14) forbids a parallel
 implementation and an exporter with its own copy of the arms would drift the
 first time either one changed.
 
@@ -23,7 +23,7 @@ READ THE ARMS CORRECTLY, or the sheets will mislead:
 
 So the policy comparison is legacy vs dp -- both simulated, so model bias hits
 them identically. Comparing dp against ACTUAL mixes policy difference with
-model error and flatters whichever arm the model happens to favour; PRD 17.1
+model error and flatters whichever arm the model happens to favour; design 5.14
 is explicit that a replay under-predicting demand always flatters a
 price-holding policy.
 

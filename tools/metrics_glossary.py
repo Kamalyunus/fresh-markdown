@@ -92,8 +92,8 @@ CATALOGUE = [
  ]),
 
 ("Phase 0 — is this problem tractable?", "bootstrap.measure → reports/phase0.json",
- "Measured once on raw history, before anything is modelled. Each `m` is a PRD "
- "deliverable, so none can be dropped.", [
+ "Measured once on raw history, before anything is modelled. Each `m` is a "
+ "specified deliverable (design 5.3), so none can be dropped.", [
   ("m1 · cost_ratio_pct", "pct",
    "Unit cost as a share of full price. Sets how much discounting room exists at all.", ""),
   ("m1 · d_max_pct", "pct",
@@ -204,7 +204,7 @@ CATALOGUE = [
  ]),
 
 ("Elasticity prior", "bootstrap.estimate_prior → artifacts/prior.json",
- "The profile likelihood read as a density (PRD 9.5). No fallback constant: "
+ "The profile likelihood read as a density (design 5.6). No fallback constant: "
  "a flat likelihood degrades to the uniform on the support, a wrong-signed one "
  "takes the measured pooled density.", [
   ("mean / std", "exp",

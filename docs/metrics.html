@@ -126,7 +126,7 @@ footer code{font-family:var(--data)}
 <section data-sec id="s1">
 <h2>Phase 0 — is this problem tractable?</h2>
 <p class="src">bootstrap.measure → reports/phase0.json</p>
-<p class="intro">Measured once on raw history, before anything is modelled. Each <code>m</code> is a PRD deliverable, so none can be dropped.</p>
+<p class="intro">Measured once on raw history, before anything is modelled. Each <code>m</code> is a specified deliverable (design 5.3), so none can be dropped.</p>
 <div class="rows">
 <div class="row" data-gate="0"><div class="nm">m1 · cost_ratio_pct<span class="u">%</span></div><div class="mn">Unit cost as a share of full price. Sets how much discounting room exists at all.</div></div>
 <div class="row" data-gate="0"><div class="nm">m1 · d_max_pct<span class="u">%</span></div><div class="mn">The feasible discount ceiling, <code>1 − cost/price</code>, in percent. The cost floor expressed in discount space.<span class="rd">the action set is built from it</span></div></div>
@@ -173,7 +173,7 @@ footer code{font-family:var(--data)}
 <section data-sec id="s4">
 <h2>Elasticity prior</h2>
 <p class="src">bootstrap.estimate_prior → artifacts/prior.json</p>
-<p class="intro">The profile likelihood read as a density (PRD 9.5). No fallback constant: a flat likelihood degrades to the uniform on the support, a wrong-signed one takes the measured pooled density.</p>
+<p class="intro">The profile likelihood read as a density (design 5.6). No fallback constant: a flat likelihood degrades to the uniform on the support, a wrong-signed one takes the measured pooled density.</p>
 <div class="rows">
 <div class="row" data-gate="0"><div class="nm">mean / std<span class="u">ε</span></div><div class="mn">Moments of each category&#x27;s density. <code>std_basis</code> names which measured floor bound the width (density / grid_resolution / fold_spread) — a zero-width prior would freeze the posterior, so the std can never be zero. ε is always negative; <code>epsilon_max</code> (−0.05) is a sign constraint, never a bound to widen.<span class="rd">the DP until production learns better</span></div></div>
 <div class="row" data-gate="0"><div class="nm">own_information_weight<span class="u">0–1</span></div><div class="mn">How much of the category&#x27;s prior is its own data vs the pooled density — min(1, likelihood span / own_information_saturation).</div></div>
