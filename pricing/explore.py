@@ -280,7 +280,13 @@ def budget_today(trailing_il, posterior_std, cfg):
 
 
 def tau_next(tau, budget, realised_cost, cfg):
-    """Daily multiplicative calibration of tau from realised spend."""
+    """Daily multiplicative calibration of tau from realised spend.
+
+    The clip is asymmetric (see config `tau_adjust_clip`): raising tau is
+    never urgent, so the up side is tight; cutting tau is the safety
+    direction and must be able to walk a mis-sized launch tau inside the
+    stop condition in days, so the down side stays loose.
+    """
     ec = cfg["exploration"]
     lo, hi = ec["tau_adjust_clip"]
     ratio = budget / max(realised_cost, ec["tau_spend_guard"])

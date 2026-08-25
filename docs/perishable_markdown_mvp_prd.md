@@ -324,7 +324,9 @@ pricing:
 exploration:
   budget_share_of_il: 0.01             # SET  1% of markdown IL
   tau_initial: null                    # MEASURED  re-derive as currency, see §12.3
-  tau_adjust_clip: [0.5, 2.0]          # SET  max daily multiplicative change
+  tau_adjust_clip: [0.5, 1.25]         # SET  asymmetric: cutting tau is the
+                                       # safety direction and stays fast;
+                                       # raising it is never urgent
   budget_scale_ref_std: 0.40           # SET  budget scales with std / this
   budget_scale_floor: 0.25             # SET  never below 25% of budget
   min_feasible_tiers: 2                # SET  below this: non-explorable

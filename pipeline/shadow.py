@@ -92,7 +92,7 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
     Answers the question a single spend-over-budget multiple cannot: does the
     pilot survive its own first week. The controller only sees yesterday --
 
-        tau <- tau * clip(budget / realised_cost, 0.5, 2.0)
+        tau <- tau * clip(budget / realised_cost, *tau_adjust_clip)
 
     -- so a tau that starts 8x too generous cannot be corrected before the
     first day's spend is on the books, and the stop condition is evaluated on
