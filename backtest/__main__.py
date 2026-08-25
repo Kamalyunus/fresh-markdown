@@ -26,17 +26,13 @@ def main():
 
     cfg = load_config(args.config)
     d = pd.read_parquet(args.input)
-    # The backtest is a PRE-LAUNCH artifact and must see nothing past the gate
-    # window. Without this, policy_replay and derive_tau_initial ran over the
-    # hold-out too -- so tau_initial, a MEASURED launch value, was being fitted
-    # on the one window reserved for grading it.
+    # PRE-LAUNCH artifact: must see nothing past the gate window, or
+    # tau_initial gets fitted on the window reserved for grading it
     before = d.episode_id.nunique()
     d = pre_launch(d, cfg)
     excluded = before - d.episode_id.nunique()
-    # The DP cannot price an ineligible episode, and extend_to_window
-    # refuses a counter above the cap -- so this filter is a
-    # precondition, not a population choice. It must precede fidelity(),
-    # which is where the extension happens.
+    # dp_eligible is a precondition, not a population choice, and must
+    # precede fidelity() -- that is where extend_to_window happens
     on_dp = d.episode_id.nunique()
     d = population(d, cfg, "dp_eligible")
     dp_excluded = on_dp - d.episode_id.nunique()

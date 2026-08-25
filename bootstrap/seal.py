@@ -1,17 +1,10 @@
 """bootstrap.seal -- declare the frozen artifacts a bundle, and hash them.
 
-Provenance stamps say which model each artifact was fitted against, which
-catches a MIXED bundle. They cannot catch an artifact that was edited after the
-fact -- an editor leaves the stamp intact. So sealing records a hash of every
-file alongside the agreed bundle id, and from then on both failures are
-detectable and distinguishable.
-
-Run once, when a set of artifacts becomes the one production will use:
-
-    python3 -m bootstrap.seal
-
-It refuses to seal a set that is not internally consistent, because a sealed
-mixed bundle is worse than an unsealed one: it looks decided.
+Stamps catch a MIXED bundle but not a post-hoc edit (an editor leaves the
+stamp intact); sealing records per-file hashes beside the agreed bundle id so
+both failures are detectable and distinguishable. Refuses an inconsistent set
+-- a sealed mixed bundle looks decided. Run once per production bundle:
+python3 -m bootstrap.seal
 """
 
 import argparse

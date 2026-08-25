@@ -1,38 +1,11 @@
-"""bootstrap.download_flc -- pull the raw hourly FLC extract from Redshift.
+"""bootstrap.download_flc -- pull the raw hourly FLC extract from Redshift (step 0).
 
-Step 0 of the pipeline: everything else in `AGENTS.md` starts from the parquet
-this writes. One SELECT against `sb_scm.fresh_flc_detail`, aliased into the
-column names `bootstrap.prepare_data` expects, saved to
-`data/flc_raw.parquet`.
-
-The alias list is a contract, not a convenience. `prepare_data.SOURCE_TO_CANONICAL`
-renames these columns and nothing renames them a second time, so a column
-missing or misspelled here fails at load in step 1, several minutes and one
-network round-trip later. `tests/test_download_flc.py` asserts the query
-covers every column steps 1 and 2 read.
-
-Credentials are read from the environment, never from this file and never
-from config.yaml:
-
-    REDSHIFT_HOST  REDSHIFT_PORT  REDSHIFT_DATABASE
-    REDSHIFT_USERNAME  REDSHIFT_PASSWORD
-
-`--env-file` (default `~/.env`) is loaded with python-dotenv first, so the
-usual setup is a `.env` outside the repo. `.env` is gitignored; no hostname,
-credential or connection string belongs in version control.
-
-The known-bad demand period is excluded in SQL from
-`data.exclusion_window` in config.yaml -- the same window
-`prepare_data` removes, read from the same place rather than restated here.
-The SQL filter is row-scoped and so severs an episode that straddles either
-edge; step 1's removal is episode-scoped and is the one that counts. The
-SQL copy exists only to avoid pulling 40 days of rows that get dropped.
-
-Usage:
-    python3 -m bootstrap.download_flc                       # last 120 days
-    python3 -m bootstrap.download_flc --days 180
-    python3 -m bootstrap.download_flc --start-date 2026-03-01 \
-        --end-date 2026-08-03 --out data/flc_raw.parquet
+One SELECT against sb_scm.fresh_flc_detail, aliased to the names
+bootstrap.prepare_data expects (the alias list is a contract --
+tests/test_download_flc.py). REDSHIFT_* credentials come from the environment
+/ --env-file only, never config or this file. The SQL exclusion window is
+row-scoped and only saves transfer; step 1's episode-scoped removal counts.
+Run: python3 -m bootstrap.download_flc [--days N | --start-date A --end-date B]
 """
 
 import argparse
@@ -48,9 +21,8 @@ DATA_DIR = "data"
 DEFAULT_OUT_PARQUET = os.path.join(DATA_DIR, "flc_raw.parquet")
 SOURCE_TABLE = "sb_scm.fresh_flc_detail"
 
-# Every column steps 1 and 2 read, under the names they read them by:
-# the keys of prepare_data.SOURCE_TO_CANONICAL plus the ones used unrenamed.
-# Kept here as data so the test can compare the two lists directly.
+# Every column steps 1 and 2 read, under the names they read them by; kept as
+# data so the test can compare the two lists directly.
 REQUIRED_COLUMNS = (
     "date", "hour", "skuseq", "fc", "inventory", "units_sold",
     "ending_inventory", "discount", "normal_asp", "final_price",
@@ -59,12 +31,8 @@ REQUIRED_COLUMNS = (
 
 
 def get_conn(env_file=None):
-    """Connect using REDSHIFT_* from the environment.
-
-    psycopg2 and python-dotenv are imported here rather than at module scope
-    so `build_query` stays importable -- and testable -- on a machine with no
-    database driver installed.
-    """
+    """Connect using REDSHIFT_* from the environment. psycopg2/dotenv are
+    imported here so build_query stays importable with no driver installed."""
     from dotenv import load_dotenv
     import psycopg2
 
@@ -98,12 +66,9 @@ def _iso(value, label):
 
 
 def build_query(start_date, end_date, exclude_start=None, exclude_end=None):
-    """The extract, with source columns aliased to their step-1 names.
-
-    Dates are validated as ISO dates and interpolated -- Redshift does not
-    accept a bound parameter everywhere a literal is legal, and a value that
-    has survived `date.fromisoformat` cannot carry SQL.
-    """
+    """The extract, source columns aliased to their step-1 names. Dates are
+    validated as ISO and interpolated -- a value that survived
+    date.fromisoformat cannot carry SQL."""
     start_date = _iso(start_date, "--start-date")
     end_date = _iso(end_date, "--end-date")
 
@@ -146,10 +111,8 @@ def summarise(df):
         f"units_sold  mean {df.units_sold.mean():.3f}, "
         f"nonzero {(df.units_sold > 0).mean():.1%} of rows",
     ]
-    # A null here is not a nuisance -- prepare_data drops the whole episode
-    # for a null category or a zero base price, so a high share means the
-    # population is about to shrink for a reason that has nothing to do with
-    # the economics.
+    # prepare_data drops whole episodes on null category / zero base price --
+    # a high share here means the population is about to shrink
     for col in ("normal_asp", "cogs_wo_vat", "category", "subcategory"):
         lines.append(f"null {col:<11} {df[col].isna().mean():.2%}")
     return "\n".join("  " + line for line in lines)

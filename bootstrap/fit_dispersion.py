@@ -1,30 +1,11 @@
-"""bootstrap.fit_dispersion -- fit and freeze r_lookup and rho (design section 5.5).
+"""bootstrap.fit_dispersion -- fit and freeze r_lookup and rho (design 5.5).
 
-    D ~ NegBin(r, mu),  Var[D] = mu + mu^2 / r
-
-r is fit by subcategory on calibration-period residuals via censored maximum
-likelihood, with fallback per config (subcategory -> category -> global), low
-values preserved, and high converged values clamped at clamp_percentile.
-
-rho is a single global scalar, re-fit here against FITTED mu residuals -- this
-value supersedes the phase-0 proxy (which used category-hour means). It
-measures correlation structure, not price response, so the policy confound
-does not affect it.
-
-RUNS AFTER `bootstrap.estimate_prior`, and scales mu_ref to the actual price
-using each category's OWN prior mean. Fitting at a constant working
-elasticity measures correlation against a demand curve nothing uses, and the
-direction is strong: moving the working elasticity -1.0 -> -1.5 moved rho
-0.3103 -> 0.4236 and deff 3.347 -> 4.204, 26% of the learning rate. There is
-no cycle in the other direction: the prior is a censored POISSON profile with
-no dispersion parameter, so it needs nothing from this module.
-
-Run standalone with no prior artifact, this falls back to the -1.0 constant
-and says so in `working_elasticity_basis`. History of the orderings tried:
-docs/learnings.md.
-
-Usage:
-    python3 -m bootstrap.fit_dispersion --input data/prepared.parquet
+r per subcategory via censored MLE on calibration residuals (config fallback
+chain; low values preserved, high converged values clamped). rho is one global
+scalar on FITTED mu residuals -- supersedes the phase-0 proxy. RUNS AFTER
+estimate_prior: residuals use each category's own prior-mean elasticity
+(standalone falls back to -1.0 and says so). History: docs/learnings.md.
+Run: python3 -m bootstrap.fit_dispersion --input data/prepared.parquet
 """
 
 import argparse
@@ -52,14 +33,10 @@ def _censored_nll(r, k, mu, censored):
 
 
 def pearson_dispersion(k, mu, floor=1e-9):
-    """mean((k - mu)^2 / mu). One under Poisson, above one when overdispersed,
-    BELOW ONE when the data is steadier than Poisson -- which no negative
-    binomial can represent, since Var = mu + mu^2/r >= mu for every finite r.
-
-    Used to tell a genuinely tight group apart from a thin one whose MLE
-    wandered to the search ceiling. The two produce the same r and want
-    opposite treatment from the clamp.
-    """
+    """mean((k - mu)^2 / mu): 1 under Poisson, BELOW 1 when steadier than
+    Poisson -- which no NB can represent (Var = mu + mu^2/r >= mu). Tells a
+    genuinely tight group from a thin one whose MLE hit the search ceiling;
+    the two produce the same r and want opposite treatment from the clamp."""
     mu = np.maximum(np.asarray(mu, dtype=float), floor)
     return float(np.mean((np.asarray(k, dtype=float) - mu) ** 2 / mu))
 
@@ -72,17 +49,11 @@ def fit_r(k, mu, censored, bounds):
 
 
 def _working_elasticity(cfg):
-    """(per-category means, fallback) from the prior in force.
-
-    Returns the fallback alone when no prior artifact exists yet -- a first
-    bootstrap, or the old ordering -- so this module still runs standalone.
-    Both are reported in `r_lookup.json`, because `working_elasticity` is what
-    someone reads to check that r and rho were fitted against the demand curve
-    the system actually uses.
-    """
+    """(per-category means, fallback) from the prior in force. Returns the
+    fallback alone when no prior artifact exists yet, so the module still
+    runs standalone; both are reported in r_lookup.json."""
     pc = cfg["posterior"]["prior"]
-    # the standalone fallback: a working constant for a first run with no
-    # prior artifact on disk. NOT a prior -- the prior has no constant in it.
+    # standalone working constant -- NOT a prior; the prior has no constant
     fallback = -1.0
     path = pc["path"]
     if not os.path.exists(path):
@@ -103,9 +74,8 @@ def fit_dispersion(d, cfg):
         raise RuntimeError("calibration window contains no rows")
 
     model = BaselineModel(cfg)
-    # THE WORKING ELASTICITY, per category, from the prior actually in force
-    # (see module docstring: residuals formed at a constant measure the wrong
-    # curve, and the cost is ~26% of the learning rate)
+    # working elasticity per category from the prior in force -- residuals
+    # formed at a constant measure the wrong demand curve
     eps_by_cat, eps0 = _working_elasticity(cfg)
     mu_ref = model.predict_mu_ref(calib)
     ratio = (1 - calib.total_discount.to_numpy()) / (1 - calib.d_ref.to_numpy())
@@ -138,30 +108,10 @@ def fit_dispersion(d, cfg):
     pearson_global = pearson_dispersion(calib.units_sold.to_numpy(),
                                         calib.mu_hat.to_numpy())
 
-    # CLAMP HIGH CONVERGED VALUES, PRESERVE LOW ONES -- AND EXEMPT THE GROUPS
-    # THAT ARE GENUINELY UNDER-DISPERSED (owner, 2026-08-24).
-    #
-    # The clamp exists to hold down a SPURIOUSLY high r: a thin group whose MLE
-    # wanders to the search ceiling because it has too few rows to pin down.
-    # But an r at the ceiling has a second, entirely different cause -- the data
-    # really is Poisson or tighter, and an NB cannot represent that at all,
-    # since Var = mu + mu^2/r >= mu for every finite r. The MLE runs to the
-    # ceiling because the ceiling is the closest the family can get.
-    #
-    # Clamping THOSE groups is wrong in a specific and harmful direction: it
-    # makes the model claim MORE variance than the data has, for the groups
-    # that have least. Everything reading `r` inherits it -- the censored
-    # demand expectation the DP maximises, the posterior's likelihood, the
-    # exploration cost of a tier -- all of them then over-weight tail outcomes
-    # for the steadiest sellers in the extract. Measured on the fixture's entry
-    # rows, SIDE DISH came back at Pearson 0.597 with its r at the 50.0 bound
-    # and was being clamped to the 90th percentile of OTHER groups' values.
-    #
-    # Pearson dispersion is what tells the two cases apart, and it is cheap:
-    # mean((k - mu)^2 / mu), which is 1 under Poisson. Below 1 the group is
-    # under-dispersed and its high r is a fact rather than an artifact, so it
-    # is exempt and REPORTED, because "this category is steadier than Poisson"
-    # is a finding about the business worth someone's attention.
+    # Clamp high CONVERGED r (a thin group's MLE at the ceiling), preserve low
+    # -- but EXEMPT groups with Pearson < 1: genuinely under-dispersed data no
+    # NB can represent, whose high r is a fact, not an artifact (owner,
+    # 2026-08-24; docs/learnings.md).
     converged = list(by_sub.values()) + list(by_cat.values()) + [r_global]
     cap = float(np.percentile(converged, dc["clamp_percentile"] * 100))
 
@@ -176,11 +126,8 @@ def fit_dispersion(d, cfg):
 
     r_lookup = {"subcategory": by_sub, "category": by_cat,
                 "global": r_global, "clamp_at": cap,
-                # WHERE THE NB FAMILY DOES NOT FIT. Var = mu + mu^2/r is never
-                # below mu, so a group under Pearson 1.0 cannot be represented
-                # at any r and its fit sits at the search ceiling by necessity.
-                # Exempt from the clamp for that reason, and listed so the
-                # misfit is visible rather than absorbed into a percentile.
+                # where the NB family does not fit (Pearson < 1): exempt from
+                # the clamp, and listed so the misfit stays visible
                 "under_dispersed_groups": dict(sorted(under.items())),
                 "pearson_global": round(float(pearson_global), 4),
                 "under_dispersion_note": (
@@ -193,10 +140,8 @@ def fit_dispersion(d, cfg):
                     "extract. If this list is long, the NB is the wrong family "
                     "for this extract and not just for these cells."),
                 "fallback_order": dc["fallback_order"],
-                # what the residuals were ACTUALLY formed at. Per category
-                # now, from the prior in force -- `working_elasticity` alone
-                # was the constant -1.0 and said nothing about whether r and
-                # rho matched the demand curve in use.
+                # what the residuals were ACTUALLY formed at -- per category,
+                # from the prior in force
                 "working_elasticity": eps0,
                 "working_elasticity_basis": (
                     "per-category prior means" if eps_by_cat

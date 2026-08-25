@@ -1,16 +1,10 @@
 """bootstrap.init_posterior -- create posterior.json from the prior artifact.
 
-One-time launch step (design section 5.9): initialises every learning cell from
-the section 9.5 prior, assigns categories to cells from phase-0 weekly
-volumes, and creates the global cell. Assignment does not move during the MVP
-window.
-
-Refuses to overwrite an existing posterior without --force: the posterior is
-production learning state, and re-initialising discards every update and the
-processed-outcome ledger with it.
-
-Usage:
-    python3 -m bootstrap.init_posterior [--force]
+One-time launch step (design 5.9): initialises every learning cell from the
+9.5 prior, assigns categories to cells from phase-0 weekly volumes; assignment
+does not move during the MVP window. Refuses to overwrite without --force --
+the posterior is production learning state.
+Run: python3 -m bootstrap.init_posterior [--force]
 """
 
 import argparse

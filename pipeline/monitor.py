@@ -1,12 +1,9 @@
-"""pipeline.monitor -- learning, business, and safety series (design section 5.12).
+"""pipeline.monitor -- learning, business, and safety series (design 5.12).
 
-Reads the event store and the posterior and emits one JSON snapshot of the
-three metric families, plus stop-condition evaluation (15.4). All IL% figures
-are ratios of sums reported WITH their denominators, and absolute IL is
-reported alongside every IL% (section 3.6).
-
-Usage:
-    python3 -m pipeline.monitor --out reports/monitor.json
+Reads the event store and posterior; emits one JSON snapshot of the three
+metric families plus stop-condition evaluation (15.4). IL% is a ratio of sums
+reported WITH its denominator, absolute IL alongside every IL% (3.6).
+Run: python3 -m pipeline.monitor --out reports/monitor.json
 """
 
 import argparse
@@ -23,22 +20,14 @@ from pricing.posterior import PosteriorStore
 from pipeline import assurance as assurance_mod
 from pricing import explore
 from common import episodes
-# aliased: `stop_conditions` below takes a parameter called `guardrail`, and a
-# module shadowed by an argument is a trap worth not setting
+# aliased: stop_conditions() takes a parameter named `guardrail`
 from common import guardrail as guard
 
 
 def _still_running(ep):
     """Episodes with stock on hand and no closure sentinel -- still open.
-
-    This is the ONLY reason common.episodes has a third state: offline every
-    episode has finished, so scrap is just "leftover on the last row". Live,
-    an in-flight episode's latest row is not a final row and its leftover is
-    stock on the shelf, not scrap in the bin -- booking it would count it today
-    and count something different tomorrow. Same function in both worlds, which
-    is also what keeps this series on the population the noise floors were
-    measured on.
-    """
+    Their leftover is stock on the shelf, not scrap; excluding them keeps the
+    series on the population the noise floors were measured on."""
     kind = episodes.classify_last(ep)
     return set(kind.index[kind == episodes.NOT_CLOSED])
 
@@ -76,13 +65,11 @@ def business_metrics(decisions, outcomes, cfg):
         starting_inventory=("starting_inventory", "last"),
         end_sold=("units_sold", "last"),
         ending_inventory=("ending_inventory", "last"))
-    # leftover, not the reported ending_inventory (written off to zero at the
-    # window close). Reading the field directly zeroes IL's scrap term.
+    # leftover, never the reported ending_inventory (written off to zero at
+    # window close -- reading it directly zeroes IL's scrap term)
     ep["end_inv"] = episodes.leftover_units(ep.starting_inventory, ep.end_sold)
-    # ...but an episode with no closure sentinel has not ended, so its leftover
-    # is not yet scrap. Excluding it keeps this metric on the same population
-    # bootstrap.measure and derive_thresholds measure on; a population mismatch
-    # between floor and trigger is the same defect class as a smoothing one.
+    # still-open episodes excluded: same population as bootstrap.measure and
+    # derive_thresholds, so floor and trigger measure the same thing
     running = _still_running(ep.assign(units_sold=ep.end_sold))
     ep = ep[~ep.index.isin(running)]
     ep["il"] = ep.discount_cost + ep.cost * ep.end_inv
@@ -103,25 +90,16 @@ def business_metrics(decisions, outcomes, cfg):
                                     / (ep.units_sold.sum() + ep.end_inv.sum())), 4)
             if (ep.units_sold.sum() + ep.end_inv.sum()) > 0 else None,
         "waste_units": int(ep.end_inv.clip(lower=0).sum()),
-        # visible, because a rising count means episodes are being reported
-        # before they finish rather than that waste fell
+        # visible: a rising count means early reporting, not falling waste
         "episodes_excluded_still_running": len(running),
     }
 
 
 def guardrail_series(decisions, outcomes, cfg):
-    """Daily scrap and realised-margin rates, and the relative deterioration
-    the section 15.4 stop conditions are written against.
-
-    Metric definitions match bootstrap.derive_thresholds._daily_series exactly
-    -- the noise floors the owner sets thresholds from are measured on those
-    definitions, so a monitor computing anything else would be grading against
-    the wrong yardstick.
-
-    Comparison basis is the control arm when both arms carry a day's data
-    (the A/B design), and the trailing guardrail_noise_window_days mean of the
-    same series otherwise (before the A/B, and for any day one arm is empty).
-    """
+    """Daily scrap and realised-margin rates plus the 15.4 deterioration
+    series. Definitions match bootstrap.derive_thresholds._daily_series
+    exactly -- the noise floors are measured on them. Basis: control arm when
+    both arms carry a day's data, else the trailing-window mean."""
     dec = {d["decision_id"]: d for d in decisions}
     rows = []
     for o in outcomes:
@@ -145,8 +123,8 @@ def guardrail_series(decisions, outcomes, cfg):
         return {"note": "no finalized outcomes with timestamps yet"}
     df = pd.DataFrame(rows)
 
-    # episode grain first: scrap is an end-of-episode quantity, so summing
-    # hourly ending_inventory would count the same unsold unit every hour
+    # episode grain first: scrap is an end-of-episode quantity; summing hourly
+    # ending_inventory would count the same unsold unit every hour
     ep = df.sort_values("hours_remaining", ascending=False).groupby(
         "episode_id").agg(date=("date", "first"), arm=("arm", "first"),
                           start_inv=("start_inv", "first"),
@@ -155,13 +133,11 @@ def guardrail_series(decisions, outcomes, cfg):
                           ending_inventory=("ending_inventory", "last"),
                           revenue=("revenue", "sum"),
                           margin=("margin", "sum"))
-    # scrap is max(0, inventory - sold) on the last hour, never the reported
-    # ending_inventory: the source writes the remainder off to zero when the
-    # window closes, so reading it directly reports zero scrap for every
-    # episode and silently deletes the scrap term from IL.
+    # scrap = max(0, inventory - sold) on the last hour, never the reported
+    # ending_inventory (source writes it off to zero at window close)
     ep["end_inv"] = episodes.leftover_units(ep.starting_inventory, ep.units_sold)
     # same population rule as business_metrics and the threshold derivation:
-    # an episode with no closure sentinel is still open -- leftover, not scrap
+    # no closure sentinel = still open -- leftover, not scrap
     ep = ep[~ep.index.isin(_still_running(ep))]
 
     def daily(frame):
@@ -180,18 +156,10 @@ def guardrail_series(decisions, outcomes, cfg):
     smoothing = cfg["monitoring"]["stop_conditions"]["deterioration_smoothing_days"]
 
     def deterioration(metric, worse_when_higher, smooth, dev_basis):
-        """Deterioration against baseline, positive = worse.
-
-        Both series are averaged over `smooth` days before comparing, and the
-        comparison itself comes from `common.guardrail.deviation`, exactly as
-        bootstrap.derive_thresholds measures the noise floor. A low-base series
-        like daily scrap swings by more than its own level day to day;
-        smoothing is what makes the floor smaller than the failure the
-        condition exists to catch. Floor and trigger MUST use the same
-        smoothing AND the same basis, or the threshold is set against a
-        yardstick nothing computes -- which is why the comparison lives in one
-        shared function rather than in two that resemble each other.
-        """
+        """Deterioration against baseline, positive = worse. Both series are
+        averaged over `smooth` days first, then compared via the shared
+        common.guardrail.deviation -- floor and trigger MUST use the same
+        smoothing AND basis, so the comparison lives in one function."""
         treat = by_arm.get("treatment")
         ctrl = by_arm.get("control")
         if treat is not None and ctrl is not None:
@@ -218,9 +186,7 @@ def guardrail_series(decisions, outcomes, cfg):
         out[f"{key}_deterioration"] = {
             "basis": basis,
             "deterioration_basis": dev_basis,
-            # say what the numbers ARE. A reader cannot tell 0.15 relative from
-            # 0.15 percentage points by looking, and the two differ by an order
-            # of magnitude for margin.
+            # a reader cannot tell 0.15 relative from 0.15 pp by looking
             "units": guard.units_of(dev_basis),
             "smoothing_days": smoothing[key],
             "by_day": {str(k): round(float(v), 4) for k, v in dev.items()},
@@ -230,15 +196,9 @@ def guardrail_series(decisions, outcomes, cfg):
 
 
 def evaluate_guardrail(block, threshold, persistence_days):
-    """A stop condition fires only after `persistence_days` CONSECUTIVE days
-    over threshold.
-
-    Persistence is how the design buys sensitivity without dipping below the
-    measured noise floor: a single day above a 3-sigma floor is expected
-    roughly once a year per guardrail, two in a row essentially never. It is
-    load-bearing, not decoration -- the scrap threshold sits ~6% above its
-    floor, so without this rule it would be a coin flip on the tail.
-    """
+    """Fires only after `persistence_days` CONSECUTIVE days over threshold.
+    Persistence is load-bearing, not decoration: it buys sensitivity for
+    thresholds sitting just above the measured noise floor (design 15.4)."""
     base = {"fired": False, "threshold": threshold,
             "persistence_days": persistence_days,
             "basis": block.get("basis"), "latest": block.get("latest")}
@@ -404,10 +364,8 @@ def main():
 
     business = business_metrics(decisions, outcomes, cfg)
     guardrail = guardrail_series(decisions, outcomes, cfg)
-    # Section 15 answers "is the business ok". Assurance answers the prior
-    # question nothing else asks: are the frozen artifacts still a description
-    # of the world we are pricing in. Same cadence, same report, separate
-    # verdict -- it informs the operator gate, it does not suspend pricing.
+    # assurance asks whether the frozen artifacts still describe the world;
+    # it informs the operator gate, it does not suspend pricing
     assurance = assurance_mod.run(decisions, outcomes, cfg)
     report = {
         "business": business,

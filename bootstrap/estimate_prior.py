@@ -1,37 +1,11 @@
-"""bootstrap.estimate_prior -- the elasticity prior (design section 5.6).
+"""bootstrap.estimate_prior -- the elasticity prior (design 5.6).
 
-The prior IS the profile likelihood, read as a density -- see
-`bootstrap.prior_density` for the estimator itself. This module is the
-runner: it builds the artifact, attaches the population volume the posterior
-needs for cell structure, scores the result on a held-out window, and writes
-`artifacts/prior.json`.
-
-What the artifact carries, and the order to read it in:
-
-  design_comparison       all four rows x hour-control combinations, scored
-                          for sign. Fewer wrong-signed categories first, then
-                          median span.
-  wrong_sign_categories   likelihoods whose unconstrained peak sits at or
-                          above zero -- demand rising with price. Their own
-                          densities are discarded; they take the pooled one.
-  per_category            mean/std with `std_basis` naming which measured
-                          floor bound the width, `own_information_weight`
-                          for how much is the category's own data.
-  holdout_comparison      log marginal predictive on a window the fit never
-                          saw, bracketed by `oracle` (best epsilon with
-                          hindsight) and `uniform` (flat prior). Read
-                          `information_available_per_row` first: a method gap
-                          that is a large share of a tiny number is still
-                          tiny.
-
-There is no fallback constant and no reject path: a category the data says
-nothing about degrades to the uniform on the support and borrows the
-measured pooled density. The prior-acceptance gate is still a human reading
-this artifact. Superseded designs (the bracket procedure, reference
-dispersions, fallback constants) are documented in docs/learnings.md.
-
-Usage:
-    python3 -m bootstrap.estimate_prior --input data/prepared.parquet
+The prior IS the profile likelihood read as a density (estimator:
+bootstrap.prior_density); this runner builds the artifact, attaches per-
+category volume, scores a held-out window, writes artifacts/prior.json.
+No fallback constant, no reject path: an unidentified or wrong-signed
+category takes the pooled density. Superseded designs: docs/learnings.md.
+Run: python3 -m bootstrap.estimate_prior --input data/prepared.parquet
 """
 
 import argparse
@@ -95,9 +69,8 @@ def estimate_prior(d, cfg, seed=0):
             "is its own data."),
         "per_category": per_category,
         "episodes_per_week": _episodes_per_week(d, cfg),
-        # SURFACED AT THE TOP. A category whose likelihood peaks at positive
-        # elasticity is not weakly measured, it is measured backwards, and the
-        # reader must not have to find that per category.
+        # surfaced at the top: a positive-elasticity peak is measured
+        # backwards, not weakly, and must not hide per category
         "wrong_sign_categories": sorted(
             c for c, v in per_category.items() if v.get("wrong_sign")),
         "no_price_variation_categories": sorted(

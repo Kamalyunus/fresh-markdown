@@ -1,26 +1,11 @@
-"""bootstrap.derive_thresholds -- data-driven values for the owner decisions.
+"""bootstrap.derive_thresholds -- evidence for the SET BY OWNER config keys.
 
-Three SET BY OWNER config keys block strict start-up. This tool does not set
-them -- it derives the evidence the owner should set them from:
-
-1. A/B duration vs MDE (ab_test.min_detectable_effect_pct, duration_days).
-   The clustered SE of the IL% ratio estimator is measured EMPIRICALLY on
-   candidate-duration windows sliced from filtered history -- not scaled by
-   sqrt(T), which is optimistic under SKU x FC clustering. For each candidate
-   duration T: MDE_abs(T) = (z_{1-alpha/2} + z_power) x 2 x SE_pooled(T)
-   (the factor 2 converts the pooled all-units SE to the between-arm
-   difference SE at 50/50 allocation).
-
-2. Guardrail noise floors (monitoring.stop_conditions.scrap_deterioration_pct
-   and margin_deterioration_pct). The daily scrap-rate and realised-margin
-   series are computed from history, expressed as relative deviation from a
-   trailing baseline, and summarised as 3-sigma noise levels. A stop-condition
-   threshold below the 3-sigma level will false-fire on noise and silently
-   suspend exploration; a sound threshold sits at or above it.
-
-Usage:
-    python3 -m bootstrap.derive_thresholds --input data/prepared.parquet \
-        [--mde 0.075] [--out reports/thresholds.json]
+Derives (1) A/B duration vs MDE: the clustered SE of the IL% ratio estimator,
+measured EMPIRICALLY on candidate-duration blocks (never sqrt(T)-scaled), with
+MDE_abs(T) = (z_{1-a/2} + z_pow) x 2 x SE_pooled(T) at 50/50; and (2) guardrail
+noise floors: a threshold below 3-sigma false-fires and silently suspends
+exploration (design 15.4).
+Run: python3 -m bootstrap.derive_thresholds --input data/prepared.parquet [--mde 0.075]
 """
 
 import argparse
@@ -116,11 +101,9 @@ def _daily_series(d):
         date=("date", "first"),
         start_inv=("starting_inventory", "first"),
         sold=("units_sold", "sum"))
-    # An episode that ended with stock on hand disposed of it. Only the ones
-    # sitting at the extract boundary have an unknown outcome, and the noise
-    # floor must not be measured on an invented number -- but it must not be
-    # measured on a sliver of the population either, which is what keying
-    # scrap to the nominal counter did.
+    # ending with stock on hand IS disposal; only extract-boundary episodes
+    # are unknown -- the floor is measured on neither invented numbers nor a
+    # sliver of the population
     ep["end_inv"] = episodes.scrap_units(d)
     ep = ep[ep.end_inv.notna()]
     rev = ((d.offered_price * d.units_sold).groupby(d.episode_id).sum()
@@ -139,13 +122,10 @@ def _daily_series(d):
 
 
 def _sigma_summary(rel):
-    """3-sigma and robust 3-sigma of a relative-deviation series.
-
-    Shared by both bases so the two floors are computed identically and cannot
-    drift apart. `outlier_dominated` marks a raw sigma inflated by a handful of
-    low-denominator days; where it is set, the robust figure is the one to set
-    a threshold against.
-    """
+    """3-sigma and robust 3-sigma of a deviation series; shared by both bases
+    so the two floors cannot drift apart. `outlier_dominated` marks a raw
+    sigma inflated by low-denominator days -- set thresholds from the robust
+    figure there."""
     sigma = float(rel.std(ddof=1))
     mad = float(np.median(np.abs(rel - np.median(rel))))
     sigma_robust = 1.4826 * mad
@@ -172,28 +152,12 @@ _smooth = guardrail.smooth   # one definition, shared with pipeline.monitor
 
 
 def control_arm_noise(d, cfg):
-    """Same-day treatment-vs-control noise -- the basis the monitor actually
-    uses once the A/B is live.
-
-    guardrail_noise measures each day against a TRAILING MEAN, which carries
-    the full day-to-day swing of the series. `pipeline.monitor` compares the
-    two arms on the SAME day whenever both are populated, which cancels the
-    common day effect entirely. On a series as volatile as daily scrap the two
-    floors are not comparable, and setting an A/B threshold from the trailing
-    figure grades against the wrong yardstick.
-
-    Both arms are SMOOTHED over deterioration_smoothing_days BEFORE they are
-    differenced, in that order, because that is exactly what
-    pipeline.monitor.deterioration does on this basis. Measuring the floor on
-    an unsmoothed daily difference and then evaluating the threshold against a
-    7-day-smoothed one overstates the floor by up to ~sqrt(7): a scrap
-    threshold set that way sits several times above its true operating noise
-    and, with the persistence rule on top, cannot fire at all. Smoothing must
-    be applied on BOTH sides or the guardrail is inert.
-
-    Arm assignment uses common.ab.arm -- the same function the monitor uses, so
-    split measured here is the split that will run.
-    """
+    """Same-day treatment-vs-control noise -- the basis the monitor uses once
+    the A/B is live (cancels the common day effect the trailing basis keeps).
+    Both arms are smoothed over deterioration_smoothing_days BEFORE
+    differencing, exactly as pipeline.monitor.deterioration does -- an
+    unsmoothed floor overstates by up to ~sqrt(smooth) and leaves the
+    guardrail inert. Arm assignment is the monitor's own common.ab.arm."""
 
     ep = d.sort_values(["date", "hour_of_day"]).groupby("episode_id").agg(
         date=("date", "first"), sku_id=("sku_id", "first"), fc=("fc", "first"),
@@ -230,9 +194,8 @@ def control_arm_noise(d, cfg):
                                     ("margin_rate", False, "margin")):
         smooth = sm[key]
         basis = guardrail.basis_for(cfg, key)
-        # smooth each arm FIRST, then intersect and difference -- the order
-        # pipeline.monitor.deterioration uses. Reversing it, or skipping the
-        # smoothing, measures a floor the live comparison never sees.
+        # smooth each arm FIRST, then intersect and difference -- monitor's
+        # order; anything else measures a floor the live comparison never sees
         t = _smooth(arms["treatment"][metric], smooth)
         c = _smooth(arms["control"][metric], smooth)
         common = t.index.intersection(c.index)
@@ -263,13 +226,9 @@ def control_arm_noise(d, cfg):
 
 def recommend_thresholds(trailing, control_arm, cfg):
     """Per metric: the floor from each basis, which one binds, and whether the
-    configured threshold clears it.
-
-    A single config value is evaluated against the trailing basis before the
-    A/B and the control-arm basis during it, so it must sit above BOTH. Grading
-    it against only one is how a threshold ends up either false-firing in the
-    pilot or sitting inert through the A/B.
-    """
+    configured threshold clears it. One config value is graded against the
+    trailing basis before the A/B and the control-arm basis during it, so it
+    must sit above BOTH."""
     sc = cfg["monitoring"]["stop_conditions"]
     out = {}
     for metric, key in (("scrap_rate", "scrap_deterioration_pct"),
@@ -296,10 +255,8 @@ def recommend_thresholds(trailing, control_arm, cfg):
         binding, label, basis = max(known, key=lambda x: x[0])
         rec.update(binding_floor=binding, binding_basis=basis,
                    binding_label=label)
-        # A floor no threshold can clear is a BLOCKED guardrail, not a large
-        # number. Said out loud here as well as in the noise block, because
-        # this is the block an owner reads to pick a value -- and the failure
-        # it names looked for one run like "margin is just volatile".
+        # a floor no threshold can clear is a BLOCKED guardrail, not a large
+        # number -- said here too, the block an owner reads to pick a value
         if guardrail.floor_is_unusable(binding, dev_basis):
             rec["verdict"] = (
                 f"BLOCKED -- the binding {label} floor is {binding} on the "
@@ -323,9 +280,8 @@ def recommend_thresholds(trailing, control_arm, cfg):
                               f"{basis} floor {binding}; it will false-fire "
                               "and silently suspend exploration")
         elif binding > 0 and threshold > 3 * binding:
-            # clearing the floor is necessary, not sufficient: a threshold far
-            # above it cannot fire either, and the persistence rule raises the
-            # bar further. Say so rather than printing OK.
+            # clearing the floor is necessary, not sufficient: a threshold
+            # far above it cannot fire either
             rec["verdict"] = (
                 f"CLEARS THE FLOOR BUT LIKELY INERT -- {threshold} is "
                 f"{round(threshold / binding, 1)}x the {label} {basis} floor "
@@ -348,34 +304,21 @@ def guardrail_noise(d, cfg):
     day = _daily_series(d)
 
     def noise(series, smooth=1, basis=guardrail.RELATIVE):
-        # average `smooth` days BEFORE comparing. On a low-base series the
-        # daily relative swing can exceed the failure it must detect; sigma
-        # falls ~1/sqrt(smooth), and the trailing baseline is shifted by the
-        # same amount so the two windows never overlap.
+        # average `smooth` days BEFORE comparing; the trailing baseline is
+        # shifted by the same amount so the two windows never overlap
         s = _smooth(series, smooth)
         if len(s) < window + 7:
             return {"days": int(len(s)),
                     "note": f"needs at least {window + 7} days"}
-        # a FULL trailing window only: with min_periods below `window` the
-        # warm-up days divide by a mean built from a handful of observations,
-        # which manufactures enormous relative deviations that are an artifact
-        # of the estimator rather than a property of the series
+        # FULL trailing window only: min_periods below `window` manufactures
+        # huge deviations that are an estimator artifact, not the series
         trailing = s.rolling(window, min_periods=window).mean().shift(smooth)
-        # `worse_when_higher=True` here for BOTH metrics on purpose: this
-        # measures the SIZE of ordinary daily swing, not its direction, and a
-        # noise floor is two-sided. The direction convention belongs to the
-        # trigger, which applies it in pipeline.monitor.
+        # worse_when_higher=True for BOTH metrics: a noise floor is two-sided
+        # (size of swing, not direction); the trigger applies the sign
         rel_dev = guardrail.deviation(s, trailing, True, basis).dropna()
-        # a plain std over a ratio series is dominated by any day whose
-        # denominator is small -- a single low-volume day can move it by an
-        # order of magnitude. The MAD-based estimate is the one to set a
-        # threshold against when the two disagree.
-        #
-        # units depend on the basis and the report says which. On RELATIVE,
-        # 0.1336 means 13.36% and 9.1386 means 914% -- a value above 1.0 is
-        # not a percentage point, it is a series whose daily swing exceeds its
-        # own level, and `unusable_floor` below calls that out. On ABSOLUTE_PP
-        # the numbers are percentage points of the rate itself.
+        # plain std of a ratio series is dominated by low-denominator days --
+        # set thresholds from the MAD figure when the two disagree. Units
+        # depend on the basis; the report says which (RELATIVE: 0.1336 = 13.36%)
         out = {
             "days": int(len(s)),
             "days_scored": int(len(rel_dev)),
@@ -425,11 +368,9 @@ def guardrail_noise(d, cfg):
                    guardrail.basis_for(cfg, "margin"))
 
     def verdict(block, key):
-        """Grades against the TRAILING floor only -- the basis that applies
-        before an A/B is running. Clearing it is necessary, not sufficient:
-        the same config value is graded against the control arm once the A/B
-        starts, so the sign-off number is the one in
-        guardrail_threshold_recommendation, not this line."""
+        """Grades against the TRAILING floor only (pre-A/B basis). Necessary,
+        not sufficient -- the sign-off number lives in
+        guardrail_threshold_recommendation."""
         threshold = sc[key]
         floor, basis = _floor_of(block)
         if floor is None:

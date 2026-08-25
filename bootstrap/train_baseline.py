@@ -1,26 +1,10 @@
-"""bootstrap.train_baseline -- fit and freeze the reference-demand model.
+"""bootstrap.train_baseline -- fit and freeze the reference-demand model (design 5.4).
 
-Design section 5.4. LightGBM, Tweedie objective, target units_sold. The model
-predicts demand ONLY at the category reference discount: at inference the price
-features are overwritten to d_ref, so the model's price gradient is never
-queried and the legacy confound stays out of the decision path.
-
-Inventory, cost, and stockout indicators are never features -- inventory
-belongs in the DP state and the censoring logic.
-
-Frozen at launch; no retraining during the MVP window. The model version is
-recorded on every decision event.
-
-Also fits the per-subcategory multiplicative level-calibration factor
-(the remedy for LEVEL bias). Calibration is ALWAYS fitted and applied
-(owner, 2026-08-25) -- run as step 3b of every bootstrap; the anchor-level
-band is a reported diagnostic, decided after the
-level/slope diagnostic -- fitting it is unconditional, applying it is not.
-
-Usage:
-    python3 -m bootstrap.train_baseline --input data/prepared.parquet
-    python3 -m bootstrap.train_baseline --input data/prepared.parquet \
-        --fit-calibration        # fit level factors from an existing baseline
+LightGBM/Tweedie on units_sold, predicting ONLY at the reference discount:
+price features are overwritten to d_ref at inference, so the price gradient is
+never queried. Frozen at launch; version recorded on every decision. Also fits
+the level-calibration factors -- ALWAYS fitted and applied (owner, 2026-08-25).
+Run: python3 -m bootstrap.train_baseline --input data/prepared.parquet [--fit-calibration]
 """
 
 import argparse
@@ -36,18 +20,10 @@ from common.provenance import stamp
 from bootstrap.prepare_data import population, pre_launch, split_frames
 from pricing.demand import expected_min_demand_inventory_vec
 
-# Feature order is authoritative in feature_schema.json; this list only seeds
-# the first fit. `total_discount` is the SINGLE price feature and is the one
-# overwritten to d_ref at inference -- one overwrite point is auditable,
-# several are a standing leak risk.
-#
-# Deliberately absent (see docs/design.md for the full argument):
-#   hours_remaining        planner state, not customer-visible demand context
-#   last-hour lag sales    mediators of the episode's own price path -- they
-#                          absorb price response and corrupt the learned
-#                          elasticity, and at median inventory ~2 they are
-#                          mostly a censoring indicator
-#   inventory / stockout   belong to the DP state and the censoring logic
+# Feature order is authoritative in feature_schema.json; this list seeds the
+# first fit. `total_discount` is the SINGLE price feature overwritten to d_ref
+# at inference. Deliberately absent: hours_remaining, lag sales, inventory /
+# stockout -- they leak price response or belong to the DP state (design.md).
 FEATURES = ["category", "subcategory", "fc", "hour_of_day", "dow",
             "day_of_month", "original_price",
             "sku_ref_sales_rate_30d", "prior_episode_ref_sales_rate",
@@ -116,9 +92,8 @@ class BaselineModel:
 def train(d, cfg):
     bm = cfg["baseline_model"]
     splits = split_frames(d, cfg)
-    # baseline_model.train_population: "integrity" keeps the episodes the
-    # DP cannot price -- FEATURES carries neither cost nor hours_remaining,
-    # so the model cannot see what makes them ineligible.
+    # train_population "integrity" keeps DP-ineligible episodes -- FEATURES
+    # carries neither cost nor hours_remaining, so the model cannot see why
     train_d = add_derived(population(splits["train"], cfg))
 
     levels = {c: sorted(train_d[c].astype(str).unique().tolist()) for c in CATEGORICAL}
@@ -162,26 +137,11 @@ def train(d, cfg):
 
 
 def fit_level_calibration(d, cfg):
-    """Per-category multiplicative level factor, fit at the reference anchor.
-
-    Fit ONLY at the anchor, where the elasticity multiplier is ~1, so the
-    factor captures LEVEL error in mu_ref alone. A category without enough
-    anchor rows is left uncorrected (factor 1.0) rather than fit through an
-    elasticity-dependent basis: any basis that scales predictions by the
-    prior elasticity lets slope error leak into the level factor.
-
-    The fit window is configurable (calibration_fit_window) and must be
-    DISJOINT from calibration_gate_window, or the fit grades itself. The
-    factor is solved on the CENSORED basis -- sales cannot exceed inventory,
-    so predictions are compared as E[min(D, q)], the same quantity the gate
-    measures. Fitting against raw mu instead reads systematically low (raw mu
-    >= censored expectation) and produces a factor that cannot move the gate;
-    and because the factor scales mu BEFORE censoring, the censored total
-    moves by less than the factor, so f is solved for rather than divided out.
-
-    A factor below 1 means the model OVER-predicts at the anchor on the fit
-    window -- worth a manual look before applying.
-    """
+    """Per-category multiplicative level factor, fit on ANCHOR ROWS ONLY
+    (elasticity ~1 there, so slope error cannot leak in; thin cells stay 1.0).
+    Fit window must stay DISJOINT from calibration_gate_window, or the fit
+    grades itself. Solved on the censored basis E[min(D,q)] -- the gate's
+    quantity; f scales mu before censoring, so solved for, not divided out."""
     from bootstrap.fit_dispersion import lookup_r   # local: avoids a cycle
 
     model = BaselineModel(cfg)
@@ -193,19 +153,14 @@ def fit_level_calibration(d, cfg):
     elif fit_window == "train+calib":
         calib = pd.concat([splits["train"], splits["calib"]])
     elif fit_window == "all":
-        # "all" means all PRE-LAUNCH data, never the hold-out. Without the
-        # bound this one branch quietly fits the level factors on the window
-        # reserved for grading them.
+        # "all" means all PRE-LAUNCH data, never the hold-out
         calib = population(pre_launch(d, cfg), cfg).copy()
     elif fit_window == "trailing":
-        # the last N weeks ENDING WHERE THE GATE WINDOW BEGINS: recent enough
-        # to track a moving level, and disjoint from what the gate evaluates
-        # so a fit can never grade itself
+        # last N weeks ENDING WHERE THE GATE WINDOW BEGINS: recent, and
+        # disjoint from what the gate evaluates
         weeks = cfg["baseline_model"]["calibration_fit_trailing_weeks"]
-        # the gate window's own start -- test_start when the gate reads test,
-        # calib_start when it reads calib+test. Hardcoding calib_start pushed
-        # the trailing window entirely inside the training period whenever the
-        # gate was on test.
+        # the gate window's own start, not hardcoded calib_start -- test_start
+        # when the gate reads test, calib_start when it reads calib+test
         split = cfg["data"]["split"]
         gate_start = pd.Timestamp(
             split["test_start"]
@@ -219,9 +174,8 @@ def fit_level_calibration(d, cfg):
     if not len(calib):
         raise RuntimeError("calibration fit window contains no rows")
 
-    # a trailing window can land inside the training period, where the model
-    # fits by construction and the factor understates the correction the
-    # launch-adjacent weeks need -- surface it rather than hide it
+    # a trailing window inside the training period understates the needed
+    # correction (the model fits there by construction) -- surfaced below
     fit_dates = pd.to_datetime(calib.date)
     train_end = pd.Timestamp(cfg["data"]["split"]["train_end"])
     in_sample_share = float((fit_dates <= train_end).mean())
@@ -233,12 +187,8 @@ def fit_level_calibration(d, cfg):
     calib["mu_ref_hat"] = model.predict_mu_ref(calib)
     cfg["baseline_model"]["apply_level_calibration"] = saved
 
-    # censoring basis: sales are capped at inventory, so the factor must be
-    # solved against E[min(D, q)] -- the same quantity the gate measures.
-    # Fitting against raw mu makes the factor read systematically low and it
-    # can never move a gate read on censored predictions. Scaling mu by f
-    # also moves the censored total by LESS than f, so f is solved for, not
-    # divided out.
+    # censoring basis: solve against E[min(D, q)], the gate's quantity -- a
+    # factor fit on raw mu reads low and cannot move a censored gate
     max_k = cfg["pricing"]["negbin_max_k"]
     r_path = cfg["dispersion"]["r_lookup_path"]
     censored_basis = os.path.exists(r_path)
@@ -331,10 +281,8 @@ def fit_level_calibration(d, cfg):
 
     path = cfg["baseline_model"]["calibration_factor_path"]
     with open(path, "w") as f:
-        # is calibration needed at all? factors clustered on 1.0 mean the
-        # frozen model is already level-correct and the remedy should stay
-        # off; wide dispersion is evidence of systematic per-cell model bias
-        # -- a training signal, not something to paper over indefinitely
+        # factors clustered on 1.0 = model already level-correct; wide
+        # dispersion = systematic per-cell bias, a training signal
         fv = np.array(list(factors.values()), dtype=float)
         payload = {"grain": grain,
                    "factor_summary": {

@@ -1,34 +1,11 @@
-"""pipeline.shadow -- section 19 phase-1 harness: decisions logged, NO prices
-applied.
+"""Shadow-mode harness (docs/design.md section 5.13).
 
-Runs the full production decision path (validate -> DP -> explore -> decision
-event) against observed FLC data while the legacy policy keeps pricing.
-Outcomes are built from what actually happened under legacy prices and are
-stamped execution_status="shadow_not_applied", which makes them ineligible for
-pipeline.update (the recommended price was never in force, so they are not
-evidence about it).
-
-Exit gate (section 19): event completeness above min_event_completeness,
-matched decision rate above min_matched_decision_rate, and ZERO cost-floor
-violations, before any price is applied.
-
-State construction: inventory and the monotonicity anchor come from reality --
-the anchor entering hour t is the legacy discount applied at t-1 (entry has no
-anchor). The recommendation answers "what would we have done from the real
-state", not "what would our price path have been".
-
-Runs on `data.holdout` BY DEFAULT. Every frozen artifact is fit on data up to
-`split.test_end`, so a shadow run that includes that data grades the pipeline
-on rows it already saw -- the drift ratio, the tau derivation and the learning
-yield all read better than they are. `--all` runs the whole extract instead
-and the report carries an in-sample caveat saying which numbers to distrust.
-
-Usage:
-    python3 -m pipeline.shadow --input data/prepared.parquet \
-        --out reports/shadow.json [--max-episodes N] [--seed N]
-    python3 -m pipeline.shadow ... --all          # partly in-sample
-    python3 -m pipeline.shadow ... --date-start D --date-end D
-"""
+Runs the full production decision path against observed data; NO prices are
+applied. Outcomes are stamped execution_status="shadow_not_applied" and are
+ineligible for pipeline.update. Runs on `data.holdout` BY DEFAULT -- frozen
+artifacts are fit up to split.test_end, so `--all` is partly in-sample and
+the report says so. Exit gate: event completeness, matched decision rate,
+and ZERO cost-floor violations."""
 
 import argparse
 import hashlib
@@ -52,12 +29,8 @@ from pricing.posterior import PosteriorStore
 
 SHADOW_STATUS = "shadow_not_applied"
 
-# The window shadow runs on unless told otherwise. Every frozen artifact is
-# fit on data up to split.test_end, so a run that includes that data is
-# grading the pipeline on rows it already saw -- the drift ratio, the tau
-# derivation and the learning yield all read better than they are. The
-# hold-out is the only window where they mean what they say, so it is the
-# DEFAULT rather than a flag someone has to remember.
+# Default window: the hold-out is the only span no frozen artifact was fit
+# on, so honesty is the default rather than a flag someone must remember.
 HOLDOUT_BASIS = "holdout"
 
 
@@ -70,9 +43,8 @@ def _require_shadow_config(cfg, backtest_path="reports/backtest.json"):
     if missing:
         raise ConfigError("shadow phase blocked by null config: " + "; ".join(missing))
 
-    # Non-null is not enough. tau_initial is pasted by hand and decides how
-    # much exploration day one buys -- the day the stop condition is
-    # evaluated on, before the controller has any spend to correct from.
+    # Non-null is not enough: tau_initial is hand-pasted and decides day-one
+    # spend, before the controller has any spend to correct from.
     report = None
     if os.path.exists(backtest_path):
         with open(backtest_path) as f:
@@ -85,21 +57,10 @@ def _require_shadow_config(cfg, backtest_path="reports/backtest.json"):
 def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None,
                       sampled_episodes=None, population_episodes=None,
                       max_days=60):
-    """Day-by-day simulation of the tau controller over the shadow window.
-
-    Answers the question a single spend-over-budget multiple cannot: does the
-    pilot survive its own first week. The controller only sees yesterday --
-
-        tau <- tau * clip(budget / realised_cost, *tau_adjust_clip)
-
-    -- so a tau that starts 8x too generous cannot be corrected before the
-    first day's spend is on the books, and the stop condition is evaluated on
-    that same spend. Three days of halving is three days above a 2.0x stop.
-
-    Spend per day is EXPECTED spend at the tau in force that day, not the
-    draws on record: the draws were made once, at tau_initial, and this walks
-    a counterfactual tau path.
-    """
+    """Day-by-day tau-controller walk: does the pilot survive its first week?
+    The controller reads only the day just closed, so a too-generous launch
+    tau cannot be corrected before day one's spend is on the books. Spend per
+    day is EXPECTED spend at the tau in force (a counterfactual tau path)."""
     stop_at = cfg["monitoring"]["stop_conditions"]["exploration_cost_vs_budget"]
     days = ledger.days
     order = sorted(range(len(days)), key=lambda i: days[i])
@@ -107,9 +68,8 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
     for rank, i in enumerate(order[:max_days]):
         day = days[i]
         spend = float(ledger.spend_by_day(tau)[i])
-        # the budget production would apply on this day: a share of the
-        # TRAILING realised IL, observable at the start of the day -- never
-        # the same day's own IL, which is unknown until its episodes close
+        # production's budget for the day: a share of TRAILING realised IL,
+        # never the same day's own (unknown until its episodes close)
         budget = explore.budget_today(
             explore.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
         over = (spend / budget) if budget > 0 else None
@@ -127,11 +87,8 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
         "tau_start": round(float(tau0), 2),
         "tau_end": round(tau, 2),
         "by_day": rows,
-        # THREE different day counts, all of them real, none interchangeable:
-        # the calendar span the budget is divided by, the days that actually
-        # produced a decision to spend on, and the days walked here. On a
-        # sampled run the middle one is far below the first, and a
-        # "3 of N days" read against the wrong N is off by the gap.
+        # three distinct day counts -- calendar span, days with decisions,
+        # days walked -- none interchangeable, especially on a sample
         "window_days": int(window_days) if window_days else len(ledger.days),
         "days_with_decisions": len(ledger.days),
         "days_simulated": len(rows),
@@ -139,12 +96,8 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
         "days_stop_condition_fires": suspend_days,
         "first_day_within_budget": first_within,
         "clip": cfg["exploration"]["tau_adjust_clip"],
-        # THE ONE FIGURE IN THIS REPORT A SAMPLE DEGRADES. Everything else
-        # scales: the gate reads rates, and tau_recommended equates two
-        # quantities that both scale linearly with the sample, so the tau
-        # solving them is invariant. This series does not -- it divides the
-        # sample across the window's days, so a 3,000-episode sample over 18
-        # days leaves ~167 episodes behind each day's budget and spend.
+        # the ONE figure a sample degrades: this series divides the sample
+        # across the window's days (everything else reads rates or is invariant)
         "episodes_per_day_sampled": round(
             sampled_episodes / max(len(rows), 1), 1) if sampled_episodes else None,
         "episodes_per_day_population": round(
@@ -178,14 +131,9 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
 
 
 class _BufferStore:
-    """Collects decision events instead of writing them.
-
-    Workers must not touch the event store: the shadow gate MEASURES that
-    store -- completeness, matched rate, dedup, quarantine -- so per-worker
-    stores merged afterwards would mean the gate no longer tests the path
-    production runs. Workers buffer; the parent commits every event through
-    the real store, in episode order, exactly as the serial loop did.
-    """
+    """Buffers decision events instead of writing them: workers must not
+    touch the event store the gate measures. The parent commits every event
+    through the real store, in episode order."""
 
     def __init__(self):
         self.decisions = []
@@ -196,13 +144,9 @@ class _BufferStore:
 
 
 class _FrozenCells:
-    """The posterior as the decision path sees it: read-only, and small.
-
-    Nothing updates the posterior during a shadow run, so a worker needs one
-    (mean, std) per category and not the store. Pre-resolved in the parent so
-    the cell map -- including the min_episodes_per_week_for_cell fallback to
-    the global cell -- is applied exactly once, by the real store.
-    """
+    """Read-only posterior cells, pre-resolved in the parent so the cell map
+    (including the fallback to the global cell) is applied exactly once, by
+    the real store. Nothing updates the posterior during a shadow run."""
 
     def __init__(self, by_category):
         self._by_category = by_category
@@ -212,27 +156,17 @@ class _FrozenCells:
 
 
 def _episode_seed(seed, episode_id):
-    """A generator per episode, reproducible and independent of order.
-
-    The serial loop drew every exploration from one generator, so the draw an
-    episode got depended on how many episodes preceded it. That is fine until
-    the loop is reordered or split across processes, at which point the run
-    stops reproducing. Seeding from the episode's own id fixes the draw to the
-    episode: parallel and serial agree, and so do two runs that visit the
-    episodes in different orders.
-    """
+    """A generator per episode, seeded from its id: draws are reproducible
+    and independent of visit order, so serial and parallel runs agree."""
     h = hashlib.blake2b(str(episode_id).encode(), digest_size=8).digest()
     return np.random.default_rng([int(seed), int.from_bytes(h, "big")])
 
 
 def _shadow_one(ep, ctx):
     """Price one episode's hours. Pure: no store, no shared generator.
-
-    Returns everything the parent needs to fold in, including the events to
-    commit. `ep` carries the episode's rows as arrays rather than a DataFrame
-    -- `.iloc[t]` per hour was the second-largest cost in this loop after the
-    DP itself, and arrays remove it whether or not workers are in play.
-    """
+    Returns everything the parent folds in, including events to commit.
+    `ep` carries rows as arrays, not a DataFrame (per-hour .iloc was the
+    second-largest cost after the DP)."""
     cfg, tau = ctx["cfg"], ctx["tau"]
     posterior = _FrozenCells(ctx["cells"])
     store = _BufferStore()
@@ -263,20 +197,9 @@ def _shadow_one(ep, ctx):
         sold = int(ep["units_sold"][t])
         ending = int(ep["ending_inventory"][t])
 
-        # WHAT THE BUSINESS DID, recorded before we ask what the agent would
-        # have done -- and deliberately NOT conditioned on the answer. A
-        # rejected hour still carried its discount and still ended holding
-        # what it ended holding. Gating these on decision success
-        # under-counted the IL the exploration budget is a share of, and
-        # pointed the scrap classifier at the last DECIDED row instead of the
-        # last OBSERVED one. Both were latent; including below-cost episodes,
-        # whose later hours the cost floor correctly refuses, is what would
-        # have made them bite.
-        # accumulated on the EPISODE and attributed to its close day below:
-        # a day's realised IL is the IL of the episodes that CLOSED that day,
-        # discount included -- an open episode's discount-so-far is not
-        # settled IL yet, and the trailing budget base must be a number the
-        # accounting can stand behind at midnight
+        # What the business did, recorded UNconditioned on decision success
+        # (gating on it under-counted IL and mispointed the scrap classifier);
+        # accumulated on the episode and attributed to its close day.
         out["ep_discount_cost"] = out.get("ep_discount_cost", 0.0) + \
             float(ep["original_price"][t]) * legacy_d * sold
         last_obs = (q, sold, float(ep["cost"][t]), ending, row_day)
@@ -310,13 +233,8 @@ def _shadow_one(ep, ctx):
         if evt["is_exploration"]:
             out["n_forced"] += 1
             out["would_be_cost"] += evt["exploration_cost"]
-            # would-be learning yield. pipeline.update accumulates the NB
-            # Fisher information mu * L^2 * r/(r+mu) with the ratio taken
-            # against the REFERENCE discount, not against the DP optimum --
-            # so what drives information is how far the applied price sits
-            # from the anchor, not how large the perturbation was. Same
-            # formula here or the shadow-predicted cadence misprices the
-            # increment.
+            # would-be learning yield: MUST match pipeline.update's NB Fisher
+            # information mu * L^2 * r/(r+mu), ratio vs the REFERENCE discount
             lr = np.log((1 - evt["applied_discount"])
                         / (1 - evt["reference_discount"]))
             mu_rec = max(ep["mu_ref_hat"][t] * np.exp(
@@ -341,9 +259,8 @@ def _shadow_one(ep, ctx):
             "is_stockout": sold >= q,
             "execution_status": SHADOW_STATUS,
         }
-        # The store quarantines any outcome whose inventory does not
-        # reconcile and carries no documented reason, so all three legitimate
-        # breaks must be named -- restock, write-off, shrink -- and only those.
+        # unreconciled inventory without a documented reason is quarantined,
+        # so the legitimate breaks (restock, write-off, shrink) must be named
         reason = adjustment_reason(q, sold, ending)
         if reason:
             outcome["adjustment_reason"] = reason
@@ -360,11 +277,8 @@ def _shadow_one(ep, ctx):
 
         anchor = legacy_d                 # reality's price is the next anchor
 
-    # Scrap is an end-of-episode quantity, so the final row is kept and
-    # classified after the loop, all episodes together -- one frame, so
-    # `write_off_convention` can report whether the sentinel is present at
-    # all. Shadow runs on `dp_eligible`, which requires `closed`, so it
-    # should always be: a false there means the population gate is broken.
+    # scrap is end-of-episode: keep the final row and classify after the
+    # loop, all episodes together in one frame
     if last_obs is not None:
         start, sold_last, unit_cost, ending_last, close_day = last_obs
         out["last_row"] = {"episode_id": ep["episode_id"],
@@ -379,9 +293,7 @@ def _shadow_one(ep, ctx):
 def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
                window_basis=HOLDOUT_BASIS, workers=None):
     _require_shadow_config(cfg)
-    # Precondition, not a choice: the DP cannot price these, and
-    # extend_to_window below refuses a counter above the cap. Inside
-    # run_shadow rather than main so a programmatic caller cannot skip it.
+    # precondition, inside run_shadow so a programmatic caller cannot skip it
     from bootstrap.prepare_data import population
     d = population(d, cfg, "dp_eligible")
     if d.empty:
@@ -397,21 +309,16 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     if max_episodes is None:
         max_episodes = cfg["monitoring"]["shadow_gate"]["sample_episodes"]
 
-    # SAMPLE FIRST. The gate reads rates (completeness, matched, drift) plus a
-    # violation count, and a uniform episode sample estimates all of them --
-    # but only if the sample is drawn before the work, not after. Predicting
-    # mu_ref over every row and then discarding most of them costs the full
-    # run for a sample's worth of evidence.
+    # SAMPLE FIRST: the gate reads rates a uniform episode sample estimates,
+    # and sampling after the predict step costs a full run for sample evidence
     population = d.episode_id.unique()
     sampled = bool(max_episodes) and len(population) > max_episodes
     if sampled:
         keep = rng.choice(population, max_episodes, replace=False)
         d = d[d.episode_id.isin(keep)]
 
-    # extend each episode to its full window BEFORE predicting: rows stop at
-    # zero inventory, so an episode that sold out early would hand the DP a
-    # horizon shortened by its own realised outcome. Sorting must include the
-    # date -- hour_of_day alone scrambles a window that runs past midnight.
+    # extend to the full window BEFORE predicting (early sell-out must not
+    # shorten the DP horizon); sort must include date for cross-midnight runs
     carry = [c for c in d.columns if c not in
              ("episode_id", "date", "hour_of_day", "hours_remaining",
               "starting_inventory", "ending_inventory", "units_sold")]
@@ -428,30 +335,20 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     rec_disc = leg_disc = would_be_cost = 0.0
     n_forced = empty_affordable = 0
     raw_information = 0.0
-    # Markdown IL on the SAME episodes over the SAME window, so the budget
-    # projection and the realised exploration spend share a population --
-    # comparing a total from here against one from the backtest is comparing
-    # two different samples of two different sizes. Accumulated per episode
-    # rather than collected into rows: at --max-episodes 0 the row list would
-    # be millions of dicts and the answer is two scalars.
+    # markdown IL on the SAME episodes/window as the spend, so budget and
+    # spend share a population; accumulated as scalars, not rows
     il_discount = 0.0
-    # Q-spreads for every decision on THIS path, so tau can be re-derived on
-    # the population that will actually run rather than inherited from the
-    # replay's entry-only one.
+    # Q-spreads for every decision on THIS path, so tau is re-derived on the
+    # population that will actually run (not the replay's entry-only one)
     ledger = explore.SpreadLedger()
-    # one FINAL row per episode -- bounded by episode count, not row count --
-    # so scrap can be classified by `common.episodes.classify_last` rather
-    # than by a copy of it. The row carries the SOURCE's `ending_inventory`,
-    # not a simulated one, because closure is the source's fact and the
-    # classifier reads it directly: `ending == 0` and nothing else.
+    # one FINAL row per episode (source ending_inventory, not simulated) so
+    # scrap is classified by common.episodes.classify_last, not a copy of it
     last_rows = []
     latencies = []
     drift = {"mu": [], "r": [], "q": [], "sold": []}
 
-    # Episodes are independent -- nothing reads another episode, and nothing
-    # reads another DAY either: tau is fixed for the whole run and the
-    # controller walk below is post-processing over aggregates. So the unit of
-    # work is one episode and the whole window parallelises.
+    # episodes are independent (tau is fixed; the controller walk is
+    # post-processing), so the unit of work is one episode and all parallelise
     EP_COLS = ("hour_of_day", "sku_id", "fc", "category", "subcategory",
                "starting_inventory", "ending_inventory", "units_sold",
                "total_discount", "original_price", "cost", "r_val",
@@ -481,9 +378,8 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             ledger.add(day, costs)
         if out["last_row"] is not None:
             last_rows.append(out["last_row"])
-        # THE PARENT COMMITS. Every event goes through the real store, in
-        # episode order, so dedup and quarantine -- which the gate measures --
-        # run exactly where they ran before.
+        # the parent commits through the real store, in episode order, so
+        # dedup and quarantine (which the gate measures) run where they ran
         for decision, outcome in out["events"]:
             store.emit_decision(decision)
             n_dec += 1
@@ -502,25 +398,14 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     drift_ratio = (float(np.sum(drift["sold"]) / predicted.sum())
                    if predicted.sum() > 0 else None)
 
-    # weeks-to-convergence input (section 19 / risk 1): how much evidence the
-    # recommendations would have bought, and therefore how many BOUNDED
-    # posterior steps it supports. The step cap and the daily human gate put a
-    # calendar floor under this that no amount of evidence removes.
+    # weeks-to-convergence input: evidence bought -> bounded posterior steps;
+    # the step cap and daily human gate keep a calendar floor regardless
     eff_information = raw_information / deff(cfg)
     inc = cfg["learning"]["information_increment"]
     n_ep = len(groups)
-    # Would-be exploration spend against the budget, on SHADOW'S OWN basis.
-    #
-    # `backtest.tau_initial_derivation` already reports implied_daily_spend
-    # against daily_budget, and the two match there BY CONSTRUCTION -- the
-    # bisection solves tau until they do. But it solves on the EXPLOIT-ONLY
-    # replay path, where each hour is scored independently. Shadow runs the
-    # ANCHORED path, where the action set is constrained by the price already
-    # in force, so the affordable sets differ and the same tau buys a
-    # different amount of exploration. That gap had nowhere to be seen: the
-    # operator had to divide one report's total by another report's episode
-    # count, on two different samples of two different sizes.
-    #
+    # Would-be spend vs budget on SHADOW'S OWN basis: the backtest bisection
+    # solves on the exploit-only path, but shadow's anchored path has
+    # different affordable sets, so the same tau buys different exploration.
     # Both sides here cover the same episodes over the same days.
     n_days = max((pd.Timestamp(d.date.max()) - pd.Timestamp(d.date.min())).days + 1, 1)
     last = pd.DataFrame(last_rows)
@@ -531,14 +416,9 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     il_scrap = float(scrap_per_ep.sum())
     il_unknown_scrap = int((kind == episodes.NOT_CLOSED).sum())
     markdown_il = il_discount + il_scrap
-    # A DAY'S REALISED IL IS THE IL OF THE EPISODES THAT CLOSED THAT DAY --
-    # the whole episode, discount AND scrap, attributed at close. Only at
-    # close is an episode's IL a settled number; an open episode's
-    # discount-so-far is an estimate of a loss still in motion, and the
-    # trailing budget base has to be something the accounting can stand
-    # behind at midnight. Unclosed episodes therefore contribute NOTHING to
-    # the base until they close (their eventual IL lands on that day), and
-    # the base is knowable at the start of each day by construction.
+    # a day's realised IL = IL (discount AND scrap) of episodes that CLOSED
+    # that day; unclosed episodes contribute nothing until close, so the
+    # trailing budget base is knowable at the start of each day
     closed = (kind != episodes.NOT_CLOSED).to_numpy()
     ep_il = last.discount_cost.to_numpy() + scrap_per_ep
     il_by_day = {}
@@ -546,17 +426,13 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         if ok:
             il_by_day[day] = il_by_day.get(day, 0.0) + float(amount)
 
-    # The budget production applies, not a simplified one: budget_today
-    # scales the share down as the posterior narrows. Nothing moves the
-    # posterior in shadow, so the scale is constant here -- but it is the
-    # same quantity the stop condition is evaluated against, and once the
-    # widest cell std drops under budget_scale_ref_std the same spend is a
-    # larger multiple of a smaller budget.
+    # production's budget_today, not a simplified one: it scales the share
+    # down as the posterior narrows (constant here, but the same quantity
+    # the stop condition is evaluated against)
     cells = posterior.state["cells"]
     widest_std = max(rec["std"] for rec in cells.values())
-    # the aggregate gate grades mean spend against the MEAN of the daily
-    # budgets production would have applied -- same trailing basis as the
-    # controller trace, so the two cannot disagree about what the budget was
+    # aggregate gate grades mean spend against the MEAN daily budget on the
+    # same trailing basis as the controller trace, so the two cannot disagree
     daily_budgets = [explore.budget_today(
         explore.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
         for day in sorted(il_by_day)]
@@ -567,10 +443,8 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     over = (implied_daily_spend / daily_budget) if daily_budget > 0 else None
     stop_at = cfg["monitoring"]["stop_conditions"]["exploration_cost_vs_budget"]
 
-    # Re-derive tau on THIS path -- same bisection the replay runs, on the
-    # decisions that actually happen. See SpreadLedger: the replay solved on
-    # entry decisions only, so its tau funds roughly one exploration per
-    # episode against a system that explores every hour.
+    # re-derive tau on THIS path: same bisection as the replay, but on the
+    # decisions that actually happen (the replay solved on entry only)
     tau_rec = ledger.solve_tau(daily_budget, n_days=n_days)
     budget_check = {
         "basis": "shadow's own anchored decision path, same episodes and days "
@@ -597,8 +471,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         "tau_recommended": round(tau_rec, 2) if tau_rec else None,
         "tau_recommended_ratio": round(tau_rec / tau, 4)
             if tau_rec and tau else None,
-        # so the derivation can be checked rather than taken on trust: this
-        # must sit just under daily_budget
+        # checkable derivation: must sit just under daily_budget
         "tau_recommended_implied_spend": round(
             ledger.implied_daily_spend(tau_rec, n_days), 1) if tau_rec else None,
         "spread_decisions": ledger.decisions,
@@ -666,9 +539,8 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             "pass": cost_floor_violations == 0},
     }
     if sampled:
-        # the rate gates are estimates and a sample supports them; a zero
-        # COUNT is only zero over what was sampled. Say so in the artifact
-        # rather than letting "0 violations" read as a proof over the window.
+        # a zero COUNT is only zero over what was sampled; say so rather
+        # than letting "0 violations" read as a proof over the window
         gate["sampling_caveat"] = (
             f"gate measured on {len(groups):,} of {len(population):,} episodes "
             f"({len(groups) / max(len(population), 1):.1%}, seed {seed}). The "
@@ -681,10 +553,8 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             "below-cost price) and separately unit-tested -- this gate "
             "confirms it end-to-end, it does not establish it.")
     if window_basis != HOLDOUT_BASIS:
-        # Every artifact was fit on data up to test_end, so a run that
-        # includes that data grades the pipeline on rows it already saw. The
-        # plumbing checks survive that; the drift ratio, tau and the learning
-        # yield do not.
+        # in-sample rows flatter the drift ratio, tau and learning yield;
+        # the plumbing checks survive
         gate["in_sample_caveat"] = (
             f"run on '{window_basis}', NOT the hold-out. Every artifact was "
             "fit on data up to split.test_end, so any of that window included "
@@ -795,9 +665,8 @@ def main():
         start, end = h["start"], h["end"]
         print(f"== holdout window {start} -> {end} "
               "(no artifact was fit on it) ==")
-    # Episode-scoped, never row-scoped. A window that opened before `start`
-    # and ran past midnight would otherwise survive as its own tail: no entry
-    # decision, wrong opening inventory, a countdown starting mid-window.
+    # episode-scoped date cut, never row-scoped: window_slice keeps a
+    # cross-midnight episode whole instead of leaving an orphan tail
     d = episodes.window_slice(d, start, end)
     if d.empty:
         raise SystemExit(f"no episodes opened in [{start}, {end}]")

@@ -1,71 +1,11 @@
-"""What an episode was given, where it went, and what that means for scrap.
+"""Episode identification, closure/scrap/censoring conventions, window extension.
 
-THE IDENTITY. Every unit an episode ever had has exactly one fate:
-
-    opening + restocked  ==  sold + scrap        scrap = leftover + shrink
-
-There is no third fate, so this is not a heuristic with a tolerance -- it
-balances or the arithmetic is wrong. `episode_flow` computes it,
-`flow_identity_violations` enforces it, and it has caught two bugs in this
-module already.
-
-THE SOURCE'S CONVENTION, which everything above rests on. `ending_inventory`
-is the FINAL quantity on hand at the close of the hour, AFTER anything that
-arrived during it. It is not `starting - sold`; it is what the source counted.
-`hour_status` is the only place the four cases are written down, and the one
-that surprises people is `units_sold > starting_inventory`: that is not an
-impossible quantity, it is a RESTOCK, because `starting - sold` goes negative
-and any ending at all exceeds it.
-
-Across hours the chain is continuous -- `starting[t+1] == ending[t]` -- with
-no exception, because `ending` already carries the restock forward. That is
-the one hour-level rule that still drops an episode, and it is also why a
-restock needs no special handling downstream: the DP simply sees a bigger `q`
-when it re-solves at the next hour, exactly as it does in production.
-
-TWO ENDINGS, AND ONE THAT IS NOT AN ENDING.
-
-  sold_out_early   leftover is zero. Nothing left to scrap, by fact.
-  completed        leftover > 0 on a closed episode. Those units were
-                   disposed of; this is where essentially all scrap lives.
-  not_closed       leftover > 0 and NO closure sentinel. NOT an ending -- the
-                   episode is still running (or the feed cut it), so scrap is
-                   unknown and excluded rather than counted as zero.
-
-DATA QUIRK -- `ending_inventory` IS ZEROED ON AN EPISODE'S LAST ROW. The
-source writes off whatever remains when a listing closes, so the last hour
-breaks the chain by design. On the production extract 356,228 of 356,228 final
-rows carry the zero and 48,280 (13.55%) still had stock on hand. Reading that
-zero as scrap reports ZERO SCRAP EVERYWHERE -- IL collapses to discount cost
-and nothing looks broken. So leftover is COMPUTED, never read. The exemption
-applies to the LAST ROW ONLY: mid-episode a zero ending with stock still owed
-is shrink, and exempting it there lost those units (282 of 4,000 random
-continuous episodes failed the identity until this was scoped correctly).
-
-DO NOT KEY ANY OF THIS TO `hours_remaining`. The counter is NOMINAL and still
-positive on ~99.9% of final rows. An earlier version treated "counter reached
-zero" as the end-of-window signal; it fired on ~0.1% of episodes and pushed
-~99% of all real leftover into the unknown bucket. Confirmed with the
-business: when a listing ends with stock on hand, those units are DISPOSED.
-
-CENSORING is decided at the LAST ROW only, where `starting == sold` means the
-shelf emptied. It cannot happen anywhere else -- the source stops emitting
-rows once inventory reaches zero -- and `censoring_off_last_row` checks that
-the feed keeps holding to it.
-
-CLOSURE IS ONE CONDITION: `ending_inventory == 0` on the last row. That is the
-source zeroing the field when a listing ends, and its absence means the window
-was still running when the extract stopped. `write_off_convention` reports whether the
-sentinel appears anywhere in a frame -- a DIAGNOSTIC only, never a fallback: a
-feed with no sentinel is a broken feed, and every episode reads not_closed
-until the feed says otherwise (docs/learnings.md).
-
-Closure and OUTCOME are separate axes. Once closed, the sign of the UNCLIPPED
-`starting - sold` on the last row says which close it was: positive is scrap,
-zero is censored, negative means stock arrived during the final hour. Clipping
-folds the third into the second, so a restocked close reads as a clean sell-out
--- see `net_leftover`.
-"""
+Identity: opening + restocked == sold + scrap (scrap = leftover + shrink).
+`ending_inventory` is the counted end-of-hour quantity, restocks included, and
+`starting[t+1] == ending[t]` has no exception. The source zeroes
+`ending_inventory` on an episode's LAST ROW at close: leftover is COMPUTED,
+never read; closure is that zero, never `hours_remaining`; censoring is
+`starting == sold`, last row only. design.md sections 5.2/12a for the rationale."""
 
 import numpy as np
 import pandas as pd
@@ -86,16 +26,8 @@ CLOSE_RESTOCK = "final_hour_restock"     # leftover < 0 -- same name as the DP g
 def window_slice(d, start=None, end=None):
     """Episodes whose WINDOW STARTED in [start, end] -- whole, never sliced.
 
-    The one rule for cutting this data by date, because a row-level cut is
-    wrong in exactly the way the episode definition exists to prevent. FLC
-    windows routinely run past midnight, so `d[d.date >= start]` keeps the
-    tail of a window that opened the day before: the entry decision that set
-    the whole price path is gone, the opening inventory is gone, and
-    `hours_remaining` starts mid-countdown. The episode survives as a short
-    one that never existed.
-
-    Assignment is by the window's FIRST date, so every episode lands in
-    exactly one slice and no boundary runs through the middle of one.
+    Assignment is by the window's FIRST date, so every episode lands in exactly
+    one slice; a row-level date cut truncates windows that cross midnight.
     """
     if start is None and end is None:
         return d
@@ -113,35 +45,8 @@ def last_rows(d, order=("date", "hour_of_day")):
     return d.sort_values(list(order)).groupby("episode_id").tail(1)
 
 
-# --------------------------------------------------------------------------
-# THE SOURCE'S INVENTORY CONVENTION, stated once.
-#
-#   `ending_inventory` is the FINAL quantity on hand at the close of the hour,
-#   AFTER any restock that arrived during it. It is not `starting - sold`; it
-#   is what the source counted at the end.
-#
-# Everything about hour-level data quality follows from that one sentence:
-#
-#   ending == starting - sold     the ordinary hour. Nothing arrived.
-#   ending >  starting - sold     STOCK ARRIVED. Note this holds whenever a
-#                                 restock happened, including the case where
-#                                 the hour sold MORE than it opened with --
-#                                 `starting - sold` goes negative and any
-#                                 ending at all exceeds it.
-#   ending == 0 and net > 0       the source wrote the remainder off, which is
-#                                 how a listing closes.
-#   0 < ending < starting - sold  stock left without being sold and without
-#                                 being written off. Nothing explains this.
-#
-# And ACROSS hours, with no exceptions inside an episode:
-#
-#   starting[t+1] == ending[t]    the chain is continuous, because ending
-#                                 already carries the restock forward.
-#
-# `units_sold > starting_inventory` is therefore NOT an impossible quantity.
-# It is the restock signal in its plainest form, and a filter that deletes it
-# is deleting the restocks it is meant to detect.
-# --------------------------------------------------------------------------
+# Hour statuses vs the source convention (`ending` is the counted end-of-hour
+# quantity, restocks included; `units_sold > starting` is a restock, not junk).
 
 RECONCILES = "reconciles"
 RESTOCK = "intraday_restock"
@@ -152,18 +57,9 @@ SHORTFALL = "unexplained_shortfall"
 def net_leftover(starting_inventory, units_sold):
     """`starting_inventory - units_sold`, UNCLIPPED. Its SIGN is the answer.
 
-    On a last row the three cases are exhaustive and mutually exclusive, and
-    together they are the whole of what a close can be:
-
-        > 0   stock was left. It is scrap.
-        == 0  the shelf emptied through sales. CENSORED -- true demand is only
-              known to be `>= sold`.
-        < 0   the hour sold more than it opened with, so stock ARRIVED during
-              it. How much arrived and how much was left are two unknowns with
-              one equation once the ending has been zeroed.
-
-    Clipping destroys the third case by folding it into the second, making a
-    restocked close read as a clean sell-out -- hence UNCLIPPED.
+    On a last row: > 0 scrap; == 0 censored (true demand only known `>= sold`);
+    < 0 stock ARRIVED during the final hour. Clipping folds the third case into
+    the second, making a restocked close read as a clean sell-out.
     """
     start = np.asarray(starting_inventory, dtype=float)
     sold = np.asarray(units_sold, dtype=float)
@@ -171,16 +67,11 @@ def net_leftover(starting_inventory, units_sold):
 
 
 def leftover_units(starting_inventory, units_sold):
-    """Stock still on hand at the close of the last hour.
+    """Stock still on hand at the close: `max(0, net_leftover)`.
 
-    `max(0, net_leftover)`. NOT `ending_inventory`, which the source zeroes on
-    the last row when it writes the remainder off.
-
-    EXACT except on a last hour that also took a restock, where the arriving
-    quantity is not recoverable once the ending has been zeroed. Those
-    episodes fail `final_hour_clean` and are gated out of `eligible`, so no
-    figure rests on the ambiguity -- but read the sign from `net_leftover`,
-    never from this, or the ambiguous case is invisible.
+    NOT `ending_inventory`, which the source zeroes on the last row. Exact
+    except on a final hour that also restocked (those fail `final_hour_clean`
+    and are gated out); read the sign from `net_leftover`, never from this.
     """
     return net_leftover(starting_inventory, units_sold).clip(lower=0)
 
@@ -188,11 +79,9 @@ def leftover_units(starting_inventory, units_sold):
 def hour_status(starting_inventory, units_sold, ending_inventory):
     """Classify every hour against the source's convention. Vectorised.
 
-    The single source of truth for hour-level DQ: `adjustment_reason` is the
-    scalar form of the same four rules, and `bootstrap.prepare_data` filters
-    on this. Test ORDER is load-bearing -- restock must be asked before
-    write-off, or an hour that restocked and then sold out to exactly zero
-    reads as an unexplained zero instead of the restock it was.
+    Single source of truth for hour-level DQ (`adjustment_reason` is its scalar
+    form). Test ORDER is load-bearing: restock must be asked before write-off,
+    or a restock that sold out to exactly zero misreads as an unexplained zero.
     """
     start = np.asarray(starting_inventory, dtype="int64")
     sold = np.asarray(units_sold, dtype="int64")
@@ -207,43 +96,18 @@ def hour_status(starting_inventory, units_sold, ending_inventory):
 def episode_flow(d):
     """Per-episode supply accounting: what came in, what went missing.
 
-    `starting_inventory` on the opening row is NOT an episode's supply once a
-    restock is possible, and every ratio built on it breaks in the same
-    direction. A window that opened with 3, took 10 mid-flight and sold 9
-    reads as 300% cleared AND "fully cleared" while it scrapped 4 units. That
-    is not a rounding problem, it is a nonsense number reaching a chart.
-
-    The hour discrepancy is `(starting - ending) - sold`: what the inventory
-    says left, minus what sales claim. Summed over the episode it NETS, and
-    the netting is the point --
-
-      net <  0   stock genuinely ARRIVED. supply = opening + |net|.
-      net >  0   stock genuinely VANISHED, unsold and unwritten-off.
-      net == 0   internally consistent. Any hour-level wobble is the sales
-                 feed bucketing a sale an hour off the inventory snapshot:
-                 a +1 at one hour and a -1 at the next cancel exactly, and
-                 the episode neither gained nor lost anything.
-
-    The write-off row is excluded because the source zeroes its ending, which
-    would otherwise read as the whole remainder vanishing.
-
     Returns a frame indexed by episode_id with `opening`, `arrived`,
-    `vanished`, `supply`, `sold` and `clearance`. `clearance` cannot exceed 1
-    by construction, because supply counts everything that arrived.
+    `vanished`, `supply`, `sold`, `clearance`, `leftover`, `scrap` and the
+    eligibility flags. `clearance` cannot exceed 1 by construction, because
+    supply (= opening + arrived) counts everything that arrived (design 12a).
     """
     d = d.sort_values(["date", "hour_of_day"])
     status = hour_status(d.starting_inventory, d.units_sold, d.ending_inventory)
     disc = ((d.starting_inventory.to_numpy() - d.ending_inventory.to_numpy())
             - d.units_sold.to_numpy())
-    # The write-off exemption applies to the LAST ROW ONLY. The source zeroes
-    # `ending` when a listing closes, so that row's arithmetic must not be
-    # read as stock vanishing -- but mid-episode a zero ending with stock
-    # still owed is not a close, it is shrink, and exempting it loses those
-    # units. Found by brute force: 282 of 4,000 randomly generated CONTINUOUS
-    # episodes failed the identity, all of them because a mid-episode row was
-    # being waved through as a write-off.
-    # `d` is already in time order, so the last occurrence of each id is its
-    # final hour.
+    # The write-off exemption applies to the LAST ROW ONLY: mid-episode a zero
+    # ending with stock still owed is shrink, not a close (learnings.md).
+    # `d` is in time order, so the last occurrence of each id is its final hour.
     is_last_row = ~d.episode_id.duplicated(keep="last").to_numpy()
     disc = np.where((status == WRITE_OFF) & is_last_row, 0, disc)
 
@@ -252,16 +116,8 @@ def episode_flow(d):
                       "start": d.starting_inventory.to_numpy()})
     agg = g.groupby("episode_id", sort=False).agg(
         net=("disc", "sum"), sold=("sold", "sum"), opening=("start", "first"))
-    # GROSS, never netted. An hour where `ending` exceeds `starting - sold`
-    # is a restock; an hour where it falls short is stock gone missing. Both
-    # are real events the source is reporting, and they are counted as they
-    # happen.
-    #
-    # GROSS, NEVER NETTED. Netting a shortfall against a same-size restock is
-    # an inference dressed as arithmetic -- it reads a window with 2 restocked
-    # and 2 shrunk as having neither, letting a restocked episode into the
-    # DP-side population with its clearance priced against the wrong supply.
-    # The gross figures are what the data says.
+    # `arrived`/`vanished` are GROSS, never netted: netting a shortfall against
+    # a same-size restock would hide both real events (design 12a).
     agg["arrived"] = (-g[g.disc < 0].groupby("episode_id", sort=False).disc.sum()
                       ).reindex(agg.index).fillna(0).astype("int64")
     agg["vanished"] = g[g.disc > 0].groupby("episode_id", sort=False).disc.sum(
@@ -271,13 +127,9 @@ def episode_flow(d):
         agg.sold.to_numpy(), agg.supply.to_numpy(),
         out=np.zeros(len(agg)), where=agg.supply.to_numpy() > 0)
 
-    # THE STOCK LEFT AT THE CLOSE. `ending_inventory` is the authoritative
-    # final count -- that is the whole convention -- so it is the answer
-    # except on a write-off row, where the source zeroed it and
-    # `starting - sold` is what was written off. Reading `starting - sold`
-    # unconditionally was wrong on a last hour that RESTOCKED: one episode
-    # opened its final hour with 27, sold 30 and ended holding 26, and the
-    # subtraction gave 0.
+    # Leftover at the close: `ending_inventory` (the authoritative count),
+    # except on a write-off row, where the source zeroed it and clipped
+    # `starting - sold` is what was written off.
     last = d.groupby("episode_id", sort=False).tail(1)
     last_status = hour_status(last.starting_inventory, last.units_sold,
                               last.ending_inventory)
@@ -288,64 +140,28 @@ def episode_flow(d):
                  last.ending_inventory.to_numpy()),
         index=last.episode_id.to_numpy()).reindex(agg.index).to_numpy()
 
-    # SCRAP IS THE LEFTOVER PLUS THE SHRINK. Both are units the business paid
-    # cost for and got no revenue from, which is the only thing scrap means.
-    # Keeping shrink out of it left an episode's economics with a hole in the
-    # middle -- units neither sold nor scrapped nor on the shelf -- and no way
-    # to close the books on it.
+    # Scrap = leftover + shrink: both are units paid for with no revenue.
     agg["scrap"] = agg.leftover + agg.vanished
 
-    #
-    #   THE EPISODE IDENTITY
-    #
-    #       opening + restocked  ==  sold + scrap
-    #
-    # equivalently  supply == sold + leftover + shrink. Every unit an episode
-    # ever had has exactly one fate: it sold, or it is scrap. There is no
-    # third, so this is not a heuristic with a tolerance -- it balances or the
-    # arithmetic is wrong. `flow_identity_violations` enforces it.
+    # THE EPISODE IDENTITY: opening + restocked == sold + scrap (equivalently
+    # supply == sold + leftover + shrink). It balances or the arithmetic is
+    # wrong; `flow_identity_violations` enforces it.
     agg["accounting_closes"] = agg.supply == agg.sold + agg.scrap
 
-    # THE FINAL HOUR MUST BE CLEAN: `starting >= sold` on the last row, so the
-    # episode ends in exactly one of two states and nothing else --
-    #
-    #     sold == starting   the shelf emptied. CENSORED, no leftover.
-    #     sold <  starting   `starting - sold` is left, and that is scrap.
-    #
-    # `sold > starting` on the last row proves stock arrived during it, and
-    # then the close is ambiguous: if the source also zeroed `ending` to write
-    # the remainder off, how much arrived and how much was scrapped are two
-    # unknowns with one equation. The identity still balances -- it infers the
-    # arrival from the ending -- but on an assumption rather than on evidence,
-    # and a scrap figure resting on that should not reach IL.
+    # Final hour clean: `starting >= sold` on the last row. `sold > starting`
+    # proves a final-hour restock, making the scrap quantity unknowable.
     agg["final_hour_clean"] = pd.Series(
         (last.starting_inventory.to_numpy() >= last.units_sold.to_numpy()),
         index=last.episode_id.to_numpy()).reindex(agg.index).to_numpy()
 
-    # AND THE EPISODE MUST HAVE CLOSED: `ending_inventory == 0` on the last
-    # row. Without it the window was still running when the extract stopped,
-    # so `sold` is sold-SO-FAR and `leftover` is stock still on the shelf that
-    # may yet sell. The identity balances either way -- it is arithmetic on
-    # what was observed -- which is exactly why closure has to be asked
-    # separately.
+    # Closed: `ending_inventory == 0` on the last row. Without it the window
+    # was still running when the extract stopped, so `leftover` may yet sell.
     agg["closed"] = pd.Series(
         (last.ending_inventory.to_numpy() == 0),
         index=last.episode_id.to_numpy()).reindex(agg.index).to_numpy()
 
-    # ELIGIBLE: three conditions, stated ONCE, here.
-    #
-    #   1. the episode reconciles      opening + restocked == sold + scrap
-    #   2. the final hour is clean     starting - sold >= 0 on the last row
-    #   3. the episode closed          ending_inventory == 0 on the last row
-    #
-    # All three were live before this; the third was assembled independently
-    # at each consumer (`prepare_data` ANDed `outcome_known` in, `eda` and
-    # `scrap_units` each re-derived it), which is three chances to forget it
-    # and no single place to read the definition. It is one flag now.
-    #
-    # NOT the same as dp_eligible -- the DP has further requirements of its
-    # own (a feasible tier, a horizon it can read, one inventory pool) that
-    # say nothing about whether the demand observations are sound.
+    # ELIGIBLE, stated once: reconciles AND final-hour clean AND closed.
+    # NOT dp_eligible -- the DP has further requirements of its own.
     agg["eligible"] = agg.accounting_closes & agg.final_hour_clean & agg.closed
     return agg.drop(columns=["net"])
 
@@ -353,18 +169,9 @@ def episode_flow(d):
 def hour_adjustment(d):
     """Per-hour EXOGENOUS inventory change: `+n` arrived, `-n` went missing.
 
-    The quantity that closes `q_next = q - sold + adjustment` into the
-    source's own `ending_inventory`, and the reason a restocked episode needs
-    no special handling anywhere. A replay does not have to MODEL a delivery;
-    it applies what happened and re-solves, which is exactly what production
-    does. The DP is never asked to anticipate stock arriving -- live it finds
-    out at the next hour, because `ending[t]` is `starting[t+1]`, and in
-    replay it finds out the same way.
-
-    Zero on a write-off row: the source zeroing `ending` at the close is a
-    disposal, not stock leaving during the window.
-
-    `d` must be in window order.
+    Closes `q_next = q - sold + adjustment` into the source's own
+    `ending_inventory`. Zero on a write-off row: the zeroed ending is a
+    disposal, not stock leaving during the window. `d` must be in window order.
     """
     d = d.sort_values(["date", "hour_of_day"])
     status = hour_status(d.starting_inventory, d.units_sold,
@@ -379,24 +186,9 @@ def hour_adjustment(d):
 def flow_identity_violations(d):
     """Episodes failing `opening + restocked == sold + shrink + leftover`.
 
-    Every unit an episode ever had -- what it opened with, plus anything that
-    arrived -- ends up in exactly one of three places: sold, shrunk, or still
-    on the shelf at the last hour. There is no fourth option, so the identity
-    is not a heuristic with a tolerance; it either balances or the arithmetic
-    is wrong.
-
-    And it IS the arithmetic that would be wrong, not the feed. Once the chain
-    is continuous -- `starting[t+1] == ending[t]`, which `episode_universe`
-    guarantees -- the two sides are provably equal, because the per-hour
-    discrepancies telescope to exactly the last row's leftover. A violation
-    therefore means `episode_flow` has a bug.
-
-    That is worth checking rather than assuming: it caught one. Reading the
-    last row's leftover as `starting - sold` is wrong on a final hour that
-    restocked, and an episode that opened its last hour with 27, sold 30 and
-    ended holding 26 came out as an anomaly it had no business being.
-
-    Returns the offending rows of `episode_flow`, empty when all is well.
+    Not a tolerance check: on a continuous chain the identity is provable, so
+    a violation means `episode_flow` has a bug. Returns the offending rows of
+    `episode_flow`, empty when all is well.
     """
     flow = episode_flow(d)
     lhs = flow.opening + flow.arrived
@@ -407,28 +199,9 @@ def flow_identity_violations(d):
 def censored_hours(d):
     """Hours where demand was only observed as a LOWER bound. Frame in.
 
-    Decided at the LAST ROW ONLY, and `starting == sold` there is the whole
-    test. It cannot happen anywhere else: the source stops emitting rows once
-    inventory reaches zero -- which is why `extend_to_window` exists at all --
-    so a shelf that empties ends the episode. Measured on the extract, 259 of
-    259 rows with `starting == sold` are final rows, and no row anywhere has
-    `starting_inventory == 0`. The last-row restriction is therefore a safety
-    net over an invariant the feed already keeps, not a change of definition;
-    `censoring_off_last_row` reports any row that breaks it.
-
-    An eligible episode has `starting >= sold` on its last row, so the close
-    is exactly one of two states and nothing else:
-
-        sold == starting   the shelf emptied through sales. Whoever came next
-                           bought nothing and left no trace, so true demand is
-                           `>= sold`. CENSORED.
-        sold <  starting   stock was left. Demand was observed exactly, and
-                           the leftover is scrap. NOT censored.
-
-    Four call sites carried `units_sold >= starting_inventory` independently
-    -- m5, the dispersion fit, the prior fit and the live posterior update.
-    All four marked every restock hour censored, which inflates demand on
-    exactly the hours that had the most stock to sell.
+    Decided at the LAST ROW ONLY, where `starting == sold` is the whole test
+    (true demand is `>= sold`). It cannot happen elsewhere -- the source stops
+    emitting rows once inventory reaches zero; `censoring_off_last_row` checks.
     """
     order = ["date", "hour_of_day"]
     idx = d.sort_values(order).groupby("episode_id").tail(1).index
@@ -441,10 +214,8 @@ def censored_hours(d):
 def is_censored_hour(starting_inventory, units_sold, ending_inventory):
     """Row-level censoring, for the LIVE path where there is no episode frame.
 
-    `pipeline.update` sees one outcome per decision hour and cannot know
-    whether it is an episode's last. It does not need to: rows stop at zero
-    inventory, so `starting == sold` with no restock IS the close. Offline the
-    two definitions coincide -- `censored_hours` asserts the stronger form.
+    Rows stop at zero inventory, so `starting == sold` with no restock IS the
+    close; offline this coincides with `censored_hours`'s stronger form.
     """
     start = np.asarray(starting_inventory, dtype="int64")
     sold = np.asarray(units_sold, dtype="int64")
@@ -455,9 +226,8 @@ def is_censored_hour(starting_inventory, units_sold, ending_inventory):
 def censoring_off_last_row(d):
     """Rows where the shelf emptied but the episode carried on. Should be 0.
 
-    If this is ever non-zero the feed has started emitting rows after
-    inventory reached zero, and `censored_hours` is then deciding on the wrong
-    row -- so it is counted rather than assumed away.
+    Non-zero means the feed emits rows after inventory reached zero, and
+    `censored_hours` is then deciding on the wrong row.
     """
     order = ["date", "hour_of_day"]
     idx = d.sort_values(order).groupby("episode_id").tail(1).index
@@ -479,50 +249,20 @@ def continuity_breaks(d):
     """Hours whose ending is not the next hour's starting, inside an episode.
 
     `ending` already carries any restock forward, so the chain has NO
-    legitimate exception here -- unlike the within-hour test, which has three.
-    A violation means the two fields disagree about the same instant, which no
-    business event explains.
-
-    Returns a boolean Series aligned to `d`, False on each episode's last hour
-    (there is no next hour to disagree with). `d` must be in window order.
+    legitimate exception here. Returns a boolean mask aligned to `d`, False on
+    each episode's last hour. `d` must be in window order.
     """
     nxt = d.groupby("episode_id")["starting_inventory"].shift(-1)
     return (nxt.notna() & (nxt != d.ending_inventory)).to_numpy()
 
 
 def adjustment_reason(starting_inventory, units_sold, ending_inventory):
-    """Why an outcome's inventory does not reconcile, or None.
+    """Why an outcome's inventory does not reconcile, or None. Scalar `hour_status`.
 
-    Scalar form of `hour_status`, and the rule `events.store` enforces on
-    every live outcome. The event store quarantines any non-reconciling
-    outcome that carries no reason, and a quarantined outcome never lands --
-    so an unnamed but legitimate break sinks event completeness and fails the
-    shadow gate.
-
-      restock     ending EXCEEDS what was left over. `starting - sold` is
-                  used UNCLIPPED here: an hour that sold more than it opened
-                  with has a negative net, and clipping it to zero hid the
-                  most obvious restock there is -- one that arrived and then
-                  sold out to exactly zero, which read as an unexplained zero
-                  and quarantined in bulk.
-      write-off   ending is exactly ZERO while stock remained. That is the
-                  source's own convention -- it writes the remainder off and
-                  reports 0 -- and it is recognised BY THE ZERO ITSELF, not
-                  by position in the episode.
-      shrink      ending is ABOVE zero but below the leftover. Stock left
-                  without being sold and without being written off.
-
-    Keying the write-off to "our last observed hour" was wrong and quarantined
-    real outcomes in bulk: the source zeroes at ITS episode boundary, and once
-    a window is merged across midnight that row sits in the MIDDLE of ours.
-    Position is our bookkeeping; the zero is the source's fact.
-
-    SHRINK IS NAMED, NOT QUARANTINED. The live path treats shrink exactly as
-    the offline chain does: an ordinary event, counted gross, booked into
-    scrap, gating nothing. The reason is on the event, `units_shrink` and
-    `episode_scrap` carry the quantity, and the rate is monitorable.
-    Quarantine is for what the system CANNOT interpret, and a shrink is
-    interpreted (docs/learnings.md on the shadow gate this consistency fixed).
+    restock: ending exceeds UNCLIPPED `starting - sold`. write-off: ending
+    exactly zero with stock remaining -- recognised BY THE ZERO ITSELF, never
+    by position in the episode (learnings.md). shrink: 0 < ending < net --
+    named, NOT quarantined; it is an interpreted, monitorable event.
     """
     net = starting_inventory - units_sold
     if ending_inventory > net:
@@ -537,13 +277,9 @@ def adjustment_reason(starting_inventory, units_sold, ending_inventory):
 def write_off_convention(last):
     """Is the source's closure sentinel present in this frame? DIAGNOSTIC ONLY.
 
-    A final row reporting `ending_inventory == 0` while stock remained can only
-    be a write-off, so a single such row proves the convention is in force.
-
-    A DIAGNOSTIC, never a fallback into `classify_last`: closure is read from
-    the zero and nothing else, so a feed without the sentinel reports every
-    episode unclosed -- loudly, which is the point. Read this before believing
-    that number.
+    Never a fallback into `classify_last`: closure is read from the zero and
+    nothing else, so a feed without the sentinel reports every episode
+    unclosed -- loudly, which is the point (learnings.md).
     """
     left = leftover_units(last.starting_inventory, last.units_sold).to_numpy()
     return bool(((last.ending_inventory.to_numpy() == 0) & (left > 0)).any())
@@ -554,11 +290,10 @@ def _last_index(last):
 
 
 def close_outcome(last):
-    """What the close WAS, from the sign of the unclipped leftover.
+    """What the close WAS, from the sign of the unclipped last-row leftover.
 
-    Orthogonal to `classify_last`, which answers whether the episode closed at
-    all -- the two facts are independent axes, so, say, a censored close on a
-    window still running is expressible.
+    Orthogonal to `classify_last` (whether it closed at all) -- independent
+    axes, so a censored close on a still-running window is expressible.
     """
     net = net_leftover(last.starting_inventory, last.units_sold).to_numpy()
     return pd.Series(np.where(net > 0, CLOSE_SCRAP,
@@ -570,27 +305,11 @@ def close_outcome(last):
 def classify_last(last):
     """Did the episode CLOSE, and with what, from a frame of FINAL rows.
 
-    ONE condition decides closure: `ending_inventory == 0` on the last row.
-    The source zeroes that field when a listing ends, whatever remained, so the
-    zero IS the closure and its absence means the window is still running at
-    the edge of this extract. Nothing else is consulted -- not
-    `hours_remaining` (nominal, still positive on ~99.9% of final rows), not
-    proximity to the extract's last timestamp, and never a frame-wide fallback
-    for feeds missing the sentinel.
-
-    The leftover then says which kind of close it was, and it is read UNCLIPPED
-    because the sign carries the whole answer:
-
-        NOT_CLOSED       ending != 0. Still running; scrap unknown.
-        SOLD_OUT_EARLY   closed, leftover == 0. The shelf emptied. CENSORED.
-        COMPLETED        closed, leftover != 0. The remainder was written off.
-
-    COMPLETED covers the `leftover < 0` close too -- stock arrived during the
-    final hour -- because it did close, and refusing to say so would be a
-    second lie on top of the unknown quantity. What is NOT knowable there is
-    HOW MUCH was scrapped, and that is gated separately and everywhere it
-    matters: `final_hour_clean` is False, so `eligible`, `scrap_units` and the
-    DP population all exclude it. `close_outcome` names it CLOSE_RESTOCK.
+    Closure is `ending_inventory == 0` on the last row, alone -- never
+    `hours_remaining` (nominal), never a frame-wide fallback. NOT_CLOSED:
+    ending != 0, scrap unknown. SOLD_OUT_EARLY: leftover == 0, censored.
+    COMPLETED: leftover != 0, including the leftover < 0 final-hour-restock
+    close, whose scrap quantity is unknowable and gated via `final_hour_clean`.
     """
     net = net_leftover(last.starting_inventory, last.units_sold).to_numpy()
     closed = last.ending_inventory.to_numpy() == 0
@@ -608,32 +327,9 @@ def classify(d):
 def scrap_units(d):
     """Units scrapped per episode: the leftover at the close PLUS the shrink.
 
-    Both are units the business paid cost for and got no revenue from, which
-    is the only thing scrap means. Keeping shrink out left an episode's
-    economics with a hole in the middle -- units neither sold, nor scrapped,
-    nor on the shelf -- and no way to close the books. With it in, the
-    identity holds: `supply == sold + scrap`.
-
-    NaN where the number cannot be trusted, which is exactly `~eligible` --
-    the same three conditions, not a second list that has to be kept in step:
-
-      NOT CLOSED         `ending != 0` on the last row. The episode did not
-                         finish inside this data, so the stock is on the shelf
-                         rather than in the bin.
-      DIRTY FINAL HOUR   the last row sold more than it opened with, proving
-                         stock arrived during it. If the source also zeroed
-                         `ending` to write the remainder off, how much arrived
-                         and how much was scrapped are two unknowns with one
-                         equation, and any answer is a guess.
-      DOES NOT RECONCILE the identity does not balance, so `scrap` would be
-                         the residue of arithmetic already known to be wrong
-                         -- an unbalanced episode never yields a
-                         confident-looking figure.
-
-    NaN propagates: a sum over a frame containing such episodes must be taken
-    with those dropped, not silently treated as zero. Callers that report an
-    excluded count -- `bootstrap.measure.m6_il_pct` does -- keep the exclusion
-    visible instead of quietly shrinking the population.
+    NaN exactly where `~eligible` (not closed, dirty final hour, or identity
+    does not balance) -- the figure cannot be trusted there. NaN propagates:
+    sum with those dropped, never silently treated as zero.
     """
     flow = episode_flow(d)
     return flow.scrap.astype(float).where(flow.eligible, np.nan)
@@ -642,10 +338,8 @@ def scrap_units(d):
 def _unknown_by(last, kind, left, by, top=8):
     """Unclosed episodes and the units they hold, grouped by month or category.
 
-    Answers the question a single share cannot: is the unknown scrap one
-    incident, a standing property of the feed, or one corner of the
-    catalogue. Months are returned in order; categories by units descending,
-    capped, with the remainder folded into `other` rather than dropped.
+    Months in order; categories by units descending, capped at `top`, with the
+    remainder folded into `other` rather than dropped.
     """
     ids = last.episode_id.to_numpy() if "episode_id" in last else last.index
     key = (pd.Series(pd.to_datetime(last.date).dt.strftime("%Y-%m").to_numpy(),
@@ -682,10 +376,8 @@ def ending_summary(d):
     n = max(len(last), 1)
     return {
         "episodes": int(len(last)),
-        # if this is FALSE the source is not marking closure at all, and every
-        # episode below will read not_closed -- deliberately, with no
-        # fallback. Read this FIRST: false here means the feed changed or the
-        # extract is wrong, not that nothing ever closed.
+        # Read FIRST: FALSE means the feed is not marking closure at all, and
+        # every episode below reads not_closed -- deliberately, no fallback.
         "write_off_convention_in_force": write_off_convention(last),
         # the outcome axis, independent of closure: scrap / censored /
         # final_hour_restock by the SIGN of the unclipped last-row leftover
@@ -696,16 +388,9 @@ def ending_summary(d):
                    for k in (SOLD_OUT_EARLY, COMPLETED, NOT_CLOSED)},
         "scrap_units_completed": int(left[kind == COMPLETED].sum()),
         "scrap_units_unknown_not_closed": int(left[kind == NOT_CLOSED].sum()),
-        # WHERE the unknowns sit in time and in the catalogue. The extract
-        # boundary explains some of them and nothing can be done about those;
-        # the rest are unclosed for a reason a longer extract will NOT fix --
-        # a gap in the hourly feed, or a subset whose feed never writes off.
-        # The split is `share_of_unclosed_explained_by_edge` in the
-        # dp_eligible waterfall row. Here: concentrated in the LAST month
-        # reads as the boundary; concentrated in one earlier month reads as
-        # an incident; spread evenly across every month reads as a standing
-        # property of the feed; concentrated in a few categories names the
-        # subset.
+        # WHERE the unknowns sit: last month = extract boundary; one earlier
+        # month = incident; every month = standing feed property; few
+        # categories = a subset whose feed never writes off.
         "not_closed_by_month": _unknown_by(last, kind, left, "month"),
         "not_closed_by_category": _unknown_by(last, kind, left, "category"),
         "share_episodes_ending_by_write_off": round(float(
@@ -742,19 +427,11 @@ def ending_summary(d):
 def extend_to_window(d, feature_cols=(), max_tail_hours=None):
     """Append the rows a window has but the data does not.
 
-    Rows stop at zero inventory, so an episode's row count understates its
-    window whenever it sold out. A planner handed the row count as its horizon
-    is being told the future: the horizon is short *because* the item sold
-    out. Every episode is therefore extended to its full window --
-    hours_remaining running down to 0 -- with synthetic rows marked
-    `is_observed = False`.
-
-    The extension is exact, not an approximation: every baseline feature is
-    either episode-constant (category, fc, price, the velocity features, which
-    are keyed to the episode's first date) or a function of the advancing
-    timestamp (hour_of_day, dow, day_of_month). Synthetic rows carry no sales
-    and must be filtered out of fidelity, likelihood and IL -- they exist only
-    so `mu_ref` can be predicted for the hours the DP must plan over.
+    Rows stop at zero inventory, so sold-out episodes are extended to their
+    full window (`hours_remaining` down to 0) with synthetic rows marked
+    `is_observed = False`. Exact: carried features are episode-constant or
+    functions of the advancing timestamp. Synthetic rows carry no sales and
+    must be filtered out of fidelity, likelihood and IL.
     """
     d = d.copy()
     d["is_observed"] = True

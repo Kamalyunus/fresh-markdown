@@ -1,41 +1,10 @@
 """pipeline.assurance -- does live production still match what we froze?
 
-The unit suite checks logic against fixtures. It cannot check the thing that
-has actually broken this system every time: an ASSUMPTION about real data. The
-censoring basis, the horizon taken from a row count, scrap read as zero, a
-stale `rho` paste -- none of those were logic bugs, and none would have been
-caught by a test that supplies its own inputs.
-
-So this module tests the frozen artifacts against the live world instead, and
-every check is built to fail LOUDLY on the failure mode that would otherwise be
-silent:
-
-  reproduction   Re-solve logged decisions from their own event payload. The DP
-                 is deterministic, so a mismatch means something moved
-                 underneath it -- config edit, artifact swap, bad deploy,
-                 library upgrade. One check, four causes.
-
-  dispersion     Is live demand as lumpy as the frozen `r` claims? Every
-                 learning bound is derived assuming it is. Two statistics are
-                 exact under censoring and so can be tested directly: the
-                 chance of selling nothing, and the chance of selling out.
-
-  correlation    Re-measure `rho` on live residuals. It divides ALL accumulated
-                 evidence through deff, and drift here has no symptom -- the
-                 loop looks healthy while being wrong about how much it knows.
-
-  exploration    Is the applied price really a uniform draw from the affordable
-                 set? The causal claim rests entirely on that. A biased draw
-                 breaks nothing visible: prices stay legal, IL stays reported,
-                 and the evidence quietly stops being evidence.
-
-None of these suspend pricing on their own. They are reported beside the
-section 15 families and read at the operator gate, because the right response
-to "the world stopped matching the model" is a human decision, not an
-automatic one.
-
-Usage:
-    python3 -m pipeline.assurance --out reports/assurance.json
+Tests the frozen artifacts against the live world (design section 16): four
+checks -- reproduction, dispersion, correlation, exploration -- each built to
+fail LOUDLY on an assumption break that would otherwise be silent. None
+suspends pricing on its own; verdicts are read at the operator gate.
+Run: python3 -m pipeline.assurance --out reports/assurance.json
 """
 
 import argparse
@@ -79,12 +48,9 @@ def _replayable(decisions):
 
 # --------------------------------------------------------------- 1 · reproduce
 def reproduction(decisions, cfg):
-    """Re-solve recent decisions and assert they come out the same.
-
-    The most RECENT decisions, not a random sample: if a deploy or a config
-    edit broke something, that is where it shows, and a uniform sample over the
-    whole history would dilute it.
-    """
+    """Re-solve recent decisions and assert they come out the same. The most
+    RECENT decisions, not a random sample: a deploy or config break shows
+    there, and a uniform sample would dilute it."""
     ac = cfg["assurance"]
     step = cfg["pricing"]["tier_step"]
     pool = _replayable(decisions)
@@ -97,9 +63,9 @@ def reproduction(decisions, cfg):
     for evt in sample:
         try:
             res = _resolve(evt, cfg)
-        except Exception as exc:                      # a decision that no
-            failures.append({"decision_id": evt.get("decision_id"),   # longer
-                             "error": f"{type(exc).__name__}: {exc}"})  # solves
+        except Exception as exc:  # a decision that no longer solves
+            failures.append({"decision_id": evt.get("decision_id"),
+                             "error": f"{type(exc).__name__}: {exc}"})
             mismatches += 1
             continue
         checked += 1
@@ -136,8 +102,7 @@ def reproduction(decisions, cfg):
         "mismatch_rate": round(mismatches / checked, 6) if checked else None,
         "worst_expected_il_delta": round(worst_il, 6),
         "failures": failures,
-        # A deterministic solver that does not reproduce is the one failure
-        # here that is never benign.
+        # a deterministic solver that does not reproduce is never benign
         "verdict": ("PASS" if checked and not mismatches
                     else "INSUFFICIENT" if not checked else "FAIL"),
     }
@@ -156,19 +121,10 @@ def _pairs(decisions, outcomes):
 
 
 def dispersion_fit(decisions, outcomes, cfg):
-    """Is live demand as lumpy as the frozen r says?
-
-    Two statistics survive censoring exactly, which is why these two and not a
-    variance comparison. With at least one unit on the shelf,
-
-        P(sold = 0)  =  P(D = 0)          -- selling nothing is never censored
-        P(sold >= q) =  P(D >= q)         -- selling out is exactly the tail
-
-    so both can be compared against the negative binomial directly, with no
-    correction and no bias. Binned by predicted demand, because miscalibration
-    that is flat in mu is a level problem and miscalibration that grows with mu
-    is a shape problem -- and only the second one indicts r.
-    """
+    """Is live demand as lumpy as the frozen r says? Two statistics are EXACT
+    under censoring (with stock on hand): P(sold=0) = P(D=0) and
+    P(sold>=q) = P(D>=q), so both compare against the NB with no correction.
+    Binned by mu: only miscalibration that grows with mu indicts r."""
     ac = cfg["assurance"]
     pcfg = cfg["pricing"]
     pairs = _pairs(decisions, outcomes)
@@ -204,9 +160,8 @@ def dispersion_fit(decisions, outcomes, cfg):
             if n < ac["dispersion_min_bin"]:
                 continue
             e, a = float(pred[m].mean()), float(obs[m].mean())
-            # binomial standard error on the EXPECTED rate: the null is "the
-            # frozen r is right", so the variance under the null is the one
-            # that belongs in the denominator
+            # binomial SE on the EXPECTED rate: the null is "the frozen r is
+            # right", so the null's variance belongs in the denominator
             se = float(np.sqrt(max(e * (1 - e), 1e-12) / n))
             z = (a - e) / se
             flagged += abs(z) > ac["dispersion_alert_z"]
@@ -224,30 +179,17 @@ def dispersion_fit(decisions, outcomes, cfg):
         "zero_sale": zero,
         "stockout": out,
         "bins_flagged": flagged,
-        # Demand lumpier than r says makes every bounded update overconfident,
-        # which is the direction that costs correctness rather than speed.
+        # demand lumpier than r says makes every bounded update overconfident
         "verdict": "PASS" if not flagged else "FAIL",
     }
 
 
 # ------------------------------------------------------------- 3 · correlation
 def correlation_drift(decisions, outcomes, cfg):
-    """Re-measure rho on live residuals, against the frozen artifact.
-
-    Measured on the SAME basis bootstrap.fit_dispersion used -- residuals
-    against raw mu at the WORKING elasticity, not against the posterior mean.
-    Using the moved posterior would make rho drift for a reason that has
-    nothing to do with the world, and the number would no longer be comparable
-    to the one deff was frozen from.
-
-    "The working elasticity" is now each category's PRIOR MEAN, not the
-    fallback constant -- `fit_dispersion` runs after `estimate_prior` and fits
-    against the prior in force. This function has to move with it: measuring
-    live residuals at -1.0 while the frozen rho was fitted at -1.6 to -2.3
-    would report drift that is purely a basis mismatch, and `rho_drift_alert`
-    (0.10 absolute) is tight enough that it would fire on it. Same helper, so
-    the two cannot diverge again.
-    """
+    """Re-measure rho on live residuals, against the frozen artifact. Same
+    basis as bootstrap.fit_dispersion: residuals against raw mu at the working
+    elasticity (per-category prior means via the shared helper), never the
+    moved posterior -- a basis mismatch would read as drift and fire the alert."""
     from bootstrap.fit_dispersion import _working_elasticity
 
     ac = cfg["assurance"]
@@ -287,9 +229,8 @@ def correlation_drift(decisions, outcomes, cfg):
         "mean_forced_hours_live": round(hours, 3),
         "deff_live": round(deff_live, 3),
         "deff_frozen": round(float(deff(cfg)), 3),
-        # deff divides accumulated information, so a drift here silently
-        # rescales every update in the window -- in whichever direction nobody
-        # is watching.
+        # deff divides accumulated information -- drift here silently
+        # rescales every update in the window
         "verdict": "PASS" if drift <= ac["rho_drift_alert"] else "FAIL",
     }
 
@@ -297,16 +238,9 @@ def correlation_drift(decisions, outcomes, cfg):
 # ------------------------------------------------------------- 4 · exploration
 def exploration_uniformity(decisions, cfg):
     """Is the applied price a uniform draw from the affordable set?
-
-    Reconstructs the affordable set by re-solving, finds where the applied tier
-    sits inside it, and maps that rank onto [0, 1). Under a uniform draw the
-    mapped value is uniform whatever the set size, so sets of two and sets of
-    nine can be pooled into one test instead of needing one test each.
-
-    Also checks the invariant that makes the rate meaningful: a non-empty
-    affordable set MUST produce an exploration, since select() draws whenever
-    one exists.
-    """
+    Reconstructs the set by re-solving and maps the applied tier's rank onto
+    [0, 1) -- uniform whatever the set size, so all sets pool into one test.
+    Invariant also checked: a non-empty affordable set MUST explore."""
     ac = cfg["assurance"]
     step = cfg["pricing"]["tier_step"]
     u, contradictions, unreconstructed = [], 0, 0
@@ -325,8 +259,7 @@ def exploration_uniformity(decisions, cfg):
         affordable, _ = affordable_set(res, evt["tau_current"])
         j_applied = _tier_index(res.tiers, evt["applied_discount"], step)
         if j_applied is None or j_applied not in affordable or len(affordable) < 2:
-            # size-1 sets carry no information about uniformity: the draw was
-            # forced. Not a failure, just not evidence.
+            # size-1 sets say nothing about uniformity -- not evidence
             if j_applied is not None and j_applied not in affordable:
                 unreconstructed += 1
             continue
@@ -351,8 +284,8 @@ def exploration_uniformity(decisions, cfg):
         "expected_per_bin": round(expected, 1),
         "chi_square": round(stat, 3),
         "p_value": round(pval, 4),
-        # A biased draw is the one failure that leaves no trace in prices, IL,
-        # or any business metric -- it only corrupts the causal claim.
+        # a biased draw leaves no trace in any business metric -- it only
+        # corrupts the causal claim
         "verdict": ("FAIL" if pval < ac["uniformity_alert_p"] or contradictions
                     else "PASS"),
     }

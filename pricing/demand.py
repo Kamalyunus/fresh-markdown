@@ -40,16 +40,10 @@ def expected_min_demand_inventory(mu, r, q, max_k):
 
 
 def expected_min_demand_inventory_vec(mu, r, q, max_k, chunk=100000):
-    """Vectorised E[min(D, q)].
-
-    This is the CENSORED expectation -- what can actually be observed as
-    sales, since an hour cannot sell more than its inventory. Any comparison
-    of predictions against realised sales (fidelity, the calibration gate,
-    the level factors) must use this, never raw mu: E[min(D,q)] <= E[D], so
-    mixing the two makes the model look better on one basis than the other
-    and a factor fit on raw mu can never move a gate read on censored
-    predictions.
-    """
+    """Vectorised E[min(D, q)] -- the CENSORED expectation, what can actually
+    be observed as sales. Every comparison of predictions against realised
+    sales (fidelity, calibration gate, level factors) must use this, never
+    raw mu: E[min(D,q)] <= E[D], so mixing the two bases misleads."""
     mu = np.asarray(mu, dtype=float)
     r = np.asarray(r, dtype=float)
     q = np.asarray(q, dtype=float)

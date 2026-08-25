@@ -29,10 +29,8 @@ DECISION_REQUIRED = [
 ]
 
 def _json_scalar(v):
-    """numpy scalars serialise as their native values; anything else raises.
-    `default=str` used to stringify silently, which corrupted the one log the
-    reproduction check replays decisions from -- a cost written as "4000.0"
-    no longer round-trips into arithmetic."""
+    """numpy scalars serialise as their native values; anything else raises --
+    silent stringification corrupts the log the reproduction check replays."""
     if isinstance(v, np.bool_):
         return bool(v)
     if isinstance(v, np.integer):
@@ -54,9 +52,8 @@ def _validate_outcome(evt):
     problems = []
     for f in ("units_sold", "starting_inventory", "ending_inventory"):
         v = evt.get(f)
-        # np.integer counts -- a producer reading quantities off a pandas
-        # frame without int() casts must not have every outcome quarantined
-        # in bulk. bool does NOT count: True is not a quantity of 1.
+        # np.integer counts (pandas producers must not quarantine in bulk);
+        # bool does NOT -- True is not a quantity of 1
         if (isinstance(v, bool) or not isinstance(v, (int, np.integer))
                 or v < 0):
             problems.append(f"{f} must be a non-negative integer")
@@ -64,16 +61,9 @@ def _validate_outcome(evt):
         reconciles = (evt["ending_inventory"]
                       == evt["starting_inventory"] - evt["units_sold"])
         if not reconciles and not evt.get("adjustment_reason"):
-            # THREE breaks are legitimate and MUST be named by the producer:
-            # "intraday_restock" (stock added), "episode_close_write_off" (the
-            # source zeroes ending_inventory on an episode's FINAL row, writing
-            # off whatever remains), and
-            # "unexplained_shortfall" (shrink: stock left without a sale and
-            # without a write-off). An integration that omits any of them
-            # quarantines real outcomes in bulk and fails the
-            # event-completeness gate for what looks like a pipeline defect --
-            # the write-off reason costs roughly half the final-hour outcomes,
-            # and shrink costs the feed's whole shrink rate.
+            # three breaks are legitimate and MUST be named by the producer
+            # (restock, final-row write-off, shrink) -- an integration that
+            # omits any of them quarantines real outcomes in bulk
             problems.append("ending_inventory does not reconcile and no "
                             "adjustment_reason documented (expected "
                             "'intraday_restock', 'episode_close_write_off' "
@@ -85,12 +75,9 @@ def _validate_outcome(evt):
 
 
 def _quarantine_key(evt):
-    """Identity of a quarantined event, or None if it carries no id.
-
-    Outcomes and decisions live in one quarantine file, so the kind is part
-    of the key -- an outcome and a decision could otherwise collide on a
-    shared id and the second would be silently swallowed.
-    """
+    """Identity of a quarantined event, or None if it carries no id. Both
+    kinds share one quarantine file, so the kind is part of the key --
+    otherwise an id collision silently swallows the second event."""
     for kind in ("outcome", "decision"):
         ident = evt.get(f"{kind}_id")
         if ident is not None:
@@ -105,18 +92,9 @@ class EventStore:
         self.paths = {k: os.path.join(self.root, f"{k}.jsonl")
                       for k in ("decisions", "outcomes", "quarantine")}
         self.duplicate_counts = {"decision": 0, "outcome": 0}
-        # QUARANTINED BY THIS STORE INSTANCE, i.e. by this run. `load_quarantine`
-        # returns the whole FILE, which is every run ever made against this
-        # directory -- and `pipeline.shadow` was reporting that as
-        # `quarantined_event_count`, the one field in its report taken from
-        # cumulative state instead of from the run. Two shadow runs over
-        # identical input therefore disagreed, and the shadow GATE reads this.
-        #
-        # It stayed hidden because the synthetic fixture had no shrink: nothing
-        # quarantined, and 0 does not accumulate. Adding shrink to the
-        # generator made the serial and parallel harnesses report 26 and 19 on
-        # the same input, which is what exposed it. Parallelism was never
-        # involved -- with a clean store the two agree exactly.
+        # quarantined by THIS run; load_quarantine returns the whole FILE
+        # (every run ever). The shadow gate must read the per-run figure,
+        # never cumulative state (docs/learnings.md).
         self.quarantined_this_run = 0
         self._ids = {"decision": set(), "outcome": set()}
         for kind, path in (("decision", self.paths["decisions"]),
@@ -125,16 +103,9 @@ class EventStore:
                 with open(path) as f:
                     for line in f:
                         self._ids[kind].add(json.loads(line)[f"{kind}_id"])
-        # QUARANTINE DEDUPS TOO, and by the same rule. It did not, and the
-        # consequence was that `quarantined_event_count` was not a property of
-        # a run at all: re-emitting the same bad event appended it again, so
-        # the figure grew every time shadow was run against the same store.
-        # `pipeline.shadow` reports that number and the gate reads it.
-        #
-        # Invisible for as long as it was, because the synthetic fixture had
-        # no shrink in it -- the count was 0, and 0 does not grow. Adding
-        # shrink to the generator made two shadow runs over identical input
-        # disagree, which is what surfaced this.
+        # quarantine dedups too, by the same rule -- otherwise
+        # quarantined_event_count grows on every re-run over the same store,
+        # and the shadow gate reads it
         self._quarantined_ids = set()
         if os.path.exists(self.paths["quarantine"]):
             with open(self.paths["quarantine"]) as f:
@@ -150,14 +121,9 @@ class EventStore:
             os.fsync(f.fileno())
 
     def _quarantine(self, evt, problems):
-        # Idempotent, like the two good streams. An event with no usable id --
-        # the "missing fields" case can be missing the id itself -- cannot be
-        # deduped, so it is always appended: better a double count on a
+        # idempotent like the good streams. An event with no usable id cannot
+        # be deduped and is always appended -- better a double count on a
         # malformed event than a dropped record of one.
-        #
-        # This is CONSISTENCY, not the fix for the run-count bug below: ids are
-        # minted fresh per run (`decision_id` is a uuid4), so a re-run never
-        # re-emits the same id and this branch does not fire on it.
         key = _quarantine_key(evt)
         if key is not None:
             if key in self._quarantined_ids:

@@ -1,57 +1,10 @@
 """bootstrap.prior_density -- the elasticity prior AS the profile likelihood.
 
-Design section 5.6. Two ideas, separable:
-
-  HOW THE CURVE IS COMPUTED.  A censored POISSON profile. The Poisson
-        quasi-MLE is consistent for the MEAN parameters even when the truth is
-        negative binomial -- dispersion moves the standard errors, not the
-        point estimate (Gourieroux, Monfort & Trognon 1984). Epsilon lives
-        entirely in the mean, so no dispersion parameter enters this step and
-        there is no epsilon <-> r cycle: the prior runs FIRST and
-        `fit_dispersion` reads its per-category means.
-
-  WHAT THE CURVE BECOMES.  The whole curve, read as a density, instead of its
-        argmax -- so a sharp peak and a flat line stop producing the same kind
-        of answer. A 50/50 mixture of the naive and controlled arms' densities
-        reproduces the classic midpoint-and-half-gap bracket exactly in the
-        sharp limit, and degrades to the uniform on the support where the data
-        says nothing.
-
-NO FALLBACK CONSTANT. A category the data says nothing about gets its own
-density (the uniform, by construction) shrunk toward the POOLED density
-fitted across the right-signed categories of this extract -- measured, never
-chosen. `own_information_weight` says how much of each was used. The only
-external input is `search_bounds`, a policy statement about the range the DP
-supports.
-
-TWO CONFOUNDS, TWO CONTROLS -- `rows` and `hour_control`, both measured per
-run by `design_comparison`:
-
-  rows          within-episode SURVIVORSHIP: a deep-discount row exists
-                because earlier hours did not sell. Only `entry` (one row per
-                episode, before any selection) avoids it.
-  hour_control  the COMMON TIME SHOCK: `date_hour` compares the same clock
-                hour of the same day across sku x fc, absorbing everything
-                shared by that moment; `hour_of_day` only removes the average
-                evening lift. Thin time cells fall back to 1.0
-                (`min_rows_per_time_cell`) -- a cell fitted from a few rows
-                absorbs the price response it is meant to control for.
-
-GUARDS, all measured:
-
-  wrong sign    the peak is searched PAST the search bounds; at or above zero
-                the category's own density is discarded (demand rising with
-                price is backwards, not weak) and it is excluded from the pool
-                it falls back to.
-  zero width    the reported std is the widest of the density's own width,
-                the grid resolution, and `fold_spread` (movement across
-                disjoint train slices) -- curvature alone is sampling
-                precision and collapses to zero at production scale.
-  deff          where multiple rows per episode are scored, the
-                log-likelihood is deflated by an eps-FREE design effect
-                (residuals against raw mu_ref) before any interval is read.
-
-Superseded designs and why they died: docs/learnings.md.
+Censored Poisson profile (QMLE consistent for the mean, so no dispersion
+parameter and no epsilon <-> r cycle), read whole-curve as a density; a 50/50
+naive/controlled mixture generalises the old midpoint bracket. No fallback
+constant: uninformative categories shrink to a pooled density measured on the
+right-signed categories. Spec: docs/design.md 5.6; history: docs/learnings.md.
 """
 
 import copy
@@ -67,89 +20,26 @@ from bootstrap.prepare_data import population, split_frames
 
 
 def scored_rows(frame, cfg, which):
-    """The rows a profile is built on.
-
-    ENTRY ROWS ARE THE DEFAULT, and the spec said so from the start: under the
-    legacy ramp a row at a deep discount exists PRECISELY BECAUSE earlier hours
-    did not sell, so within-episode rows carry a survivorship confound. Moving
-    to every stocked hour to buy price variation was a mistake -- it bought the
-    variation and the confound together, and the confound is the larger effect.
-
-    Both directions of the within-episode confound push the same way:
-
-      the legacy ramp deepens the discount as the hours pass, and demand rises
-      into the evening, so discount and demand climb together;
-      and the episodes that SURVIVE to the deep-discount hours are the ones
-      that were not selling, so conditional on a price-neutral mu_ref a deeper
-      price reads as lower demand.
-
-    `hour_of_day` is already a mu_ref feature and the controlled arm profiles
-    hour effects out on top, so the first is handled twice -- and the sign
-    still came out positive on 4 of 5 fixture categories, because the second is
-    selection on the unobserved demand shock and no hour control touches it.
-    Entry rows have neither: one row per episode, at hour one, before any
-    selection has happened.
-
-    Measured on the fixture, unconstrained peaks searched past the bound:
-
-      rows              wrong-signed categories
-      entry             2 of 5
-      all_stocked_hours 4 of 5
-
-    THE COST IS REAL AND IT IS THE OTHER HORN. Entry rows carry far less price
-    variation -- the entry hour is before the ramp starts, so it sits at or
-    near d_ref. On the fixture SIDE DISH drops from sd 0.024 to 0.0014 and
-    VEGETABLE has none at either. So the choice is between an estimate that is
-    weakly identified and one that is confidently backwards, and a weak
-    right-signed estimate degrades to the uniform on the support while a
-    confident wrong-signed one has to be thrown away entirely.
-
-    `rows_comparison` in the artifact reports the sign outcome for BOTH sets on
-    every run, so the choice is evidenced on the extract in hand rather than
-    inherited from this comment.
-
-    ONE THING GOT CHEAPER. The old bracket had to DROP censored entry rows,
-    because its NB likelihood needed an `r` in exactly the term censoring
-    fires. The Poisson profile carries no dispersion parameter, so censored
-    entry rows are kept and the selection bias that drop introduced is gone.
-    """
+    """The rows a profile is built on. Default `entry` (one row per episode,
+    before any selection) avoids the within-episode survivorship confound at
+    the cost of price variation; `design_comparison` evidences the choice per
+    extract. Trade-off history: design 5.6 and learnings.md."""
     f = frame.copy()
     f["censored"] = episodes.censored_hours(f)
     f = f[f.starting_inventory >= 1]
     if which == "entry":
         f = f.sort_values(["episode_id", "hour_of_day"]) \
              .groupby("episode_id").head(1)
-        # a censored entry row is a one-hour episode; kept here because the
-        # Poisson likelihood handles censoring without a dispersion parameter,
-        # so there is nothing to drop them FOR any more
+        # censored entry rows kept: the Poisson likelihood handles censoring
+        # without a dispersion parameter, so there is nothing to drop them for
     return f.copy()
 
 
 def hour_multipliers(mu, cell, k, censored, min_rows=1):
-    """Multiplicative fixed effects on a time cell, profiled out by moment
-    matching on uncensored rows. Family-agnostic -- it matches first moments,
-    so the same construction serves the Poisson and the NB profile.
-
-    `cell` is whatever grouping the control is keyed on:
-
-      hour_of_day   the hour, POOLED ACROSS DATES. Removes the average
-                    evening lift and nothing else, so a Tuesday storm or a
-                    competitor promotion is still in the residual and still
-                    correlated with how far the ramp has run.
-      date_hour     the hour OF THAT DAY -- same clock hour, compared across
-                    sku x fc. Absorbs every shock common to that moment:
-                    weather, footfall, a holiday, a rival's promotion. This is
-                    what design 5.6 means by "same-hour cross-episode", and the
-                    pooled hour control was only ever an approximation to it.
-
-    A CELL WITH TOO FEW ROWS FITS ITS OWN NOISE. Each cell gets its own
-    multiplier from its own rows, so as cells shrink the multipliers start
-    absorbing the very price response being measured -- the incidental
-    parameters problem, and it biases |epsilon| TOWARD ZERO, which is the same
-    direction the controlled arm is already biased. Cells under `min_rows` fall
-    back to 1.0 rather than fitting a multiplier from three observations, and
-    the share that had to fall back is reported.
-    """
+    """Multiplicative time-cell fixed effects profiled out by first-moment
+    matching on uncensored rows -- family-agnostic (Poisson and NB alike).
+    Thin cells (under `min_rows`) fall back to 1.0 -- a small cell absorbs the
+    price response itself; returns (multipliers, fallback share)."""
     frame = pd.DataFrame({"cell": cell, "k": k, "mu": mu, "cen": censored})
     unc = frame[~frame.cen]
     if not len(unc):
@@ -173,9 +63,8 @@ def time_cell(g, control):
 
 def loglik(eps, base, log_ratio, k, censored, floor, controlled, cell, const,
            min_cell=1):
-    """Censored POISSON log-likelihood at one elasticity. No dispersion
-    parameter -- which is the whole point: epsilon lives in the mean, so the
-    dispersion chain never enters this step."""
+    """Censored Poisson log-likelihood at one elasticity -- QMLE consistent
+    for the mean, so no dispersion parameter (no r) enters this step."""
     mu = np.clip(base * np.exp(eps * log_ratio), floor, None)
     if controlled:
         mult, _ = hour_multipliers(mu, cell, k, censored, min_cell)
@@ -203,16 +92,10 @@ def curve(g, mu_ref, grid, controlled, cfg):
 
 
 def deflation_deff(rows, model, cfg):
-    """How much a repeated hour counts, computed WITHOUT an elasticity.
-
-    rho here is the within-episode correlation of `units_sold - mu_ref`
-    residuals. No price response is applied, which is what keeps the epsilon
-    step free of the dispersion chain: `fit_dispersion`'s rho is fitted at the
-    estimated elasticity and is the authoritative one for the posterior update,
-    but reading it here would reintroduce the cycle this method exists to cut.
-
-    Returns (deff, rho, mean rows per episode).
-    """
+    """Design effect from within-episode correlation of `units_sold - mu_ref`
+    residuals -- eps-FREE, keeping the epsilon step out of the dispersion
+    chain (`fit_dispersion` owns the fitted rho). Returns (deff, rho, mean
+    rows per episode)."""
     resid = rows.units_sold.to_numpy() - model.predict_mu_ref(rows)
     f = pd.DataFrame({"episode_id": rows.episode_id.to_numpy(), "resid": resid})
     sizes = f.groupby("episode_id").resid.size()
@@ -226,12 +109,9 @@ def deflation_deff(rows, model, cfg):
 
 
 def density(ll, deff):
-    """log-likelihood -> a normalised density on the grid.
-
-    Deflated by deff first: without it a curve built from six correlated hours
-    per episode claims six times the information it has, and every interval
-    read off it is too tight by roughly sqrt(deff).
-    """
+    """Log-likelihood -> normalised density on the grid. deff deflates the
+    log-likelihood BEFORE densification -- correlated hours are not
+    independent rows, and skipping it tightens intervals by ~sqrt(deff)."""
     z = np.asarray(ll, dtype=float) / deff
     w = np.exp(z - z.max())
     return w / w.sum()
@@ -247,16 +127,9 @@ def mixture(a, b, wa=0.5):
 
 
 def marginal_score(ll_hold, w):
-    """log integral p(y_holdout | eps) pi(eps) deps, on the grid.
-
-    THE COMPARISON METRIC, and it is the right one: it asks how well a prior
-    predicts data it never saw, marginalising over the elasticity rather than
-    committing to a point. A prior that is narrow and wrong is punished hard, a
-    prior that is too wide is punished mildly, and one centred where the
-    held-out data likes epsilon with a width that matches its own uncertainty
-    wins. Nothing about the shape of the prior is assumed -- only that it is a
-    density on this grid.
-    """
+    """log integral p(y_holdout | eps) pi(eps) deps on the grid -- the
+    comparison metric: predictive fit on unseen data, marginalised over
+    epsilon, assuming only that `w` is a density on this grid."""
     ll = np.asarray(ll_hold, dtype=float)
     logw = np.log(np.maximum(np.asarray(w, dtype=float), 1e-300))
     return float(logsumexp(ll + logw) - logsumexp(logw))
@@ -298,22 +171,10 @@ def build_curves(d, cfg, model, grid, window):
 
 
 def unconstrained_argmax(d, cfg, model, lo, hi, n):
-    """Where the likelihood's peak REALLY is, searched past the policy bounds.
-
-    `search_bounds` is a statement about the elasticities the DP supports, not
-    a belief about demand, so a peak outside it is clipped to the nearest bound
-    and reported as if measured. That is how a category whose likelihood
-    prefers POSITIVE elasticity -- demand rising with price, which is
-    nonsensical -- comes back as a confident -0.05.
-
-    It is not a rare pathology on this data. Measured on the fixture, three of
-    five categories had their unconstrained optimum above zero, and the legacy
-    ramp is the reason: deep discounts land on stock that is not selling, so
-    conditional on a price-neutral `mu_ref` the deeper price reads as LOWER
-    demand. The old bracket method rejected exactly this as `wrong_sign` -- its
-    single unconditional reject -- and the density method dropped the check
-    when it dropped the reject path. This puts it back.
-    """
+    """Each arm's unconstrained peak, searched PAST the policy bounds --
+    `search_bounds` is policy, not belief, so a wrong-signed likelihood must
+    be caught here rather than clipped to a bound and reported as measured.
+    Why this check exists: design 5.6 and learnings.md."""
     wide = np.linspace(lo, max(1.0, hi), n)
     out = {}
     for cat, c in build_curves(d, cfg, model, wide, "train").items():
@@ -325,26 +186,10 @@ def unconstrained_argmax(d, cfg, model, lo, hi, n):
 
 
 def fold_spread(d, cfg, model, grid, folds=3):
-    """How far the estimate moves between disjoint slices of the train window.
-
-    THE WIDTH A 125,000-ROW LIKELIHOOD CANNOT GIVE YOU. Curvature measures
-    SAMPLING precision, and at production scale that is enormous -- a span of
-    9,402 log-likelihood units across the grid collapses `exp(ll)` onto a
-    single grid point and returns a prior std of ZERO. A prior of zero width is
-    not a confident belief, it is a broken one: `bounded_step` can never move
-    it, and the posterior is frozen before the first outcome arrives.
-
-    What is actually uncertain here is not the sample, it is the MODEL. The
-    history is confounded, `mu_ref` is imperfect, and demand is not stationary
-    -- none of which the within-sample curvature can see, and all of which the
-    bracket procedure existed to express. Re-fitting on disjoint time slices
-    measures it directly: if the estimate moves 0.4 between the first half of
-    the window and the second, then 0.4 is what is known, whatever the
-    curvature claims.
-
-    Measured, not configured, which is the whole point -- this is the width the
-    data supports, not one somebody chose.
-    """
+    """How far the estimate moves between disjoint slices of the train window
+    -- MODEL uncertainty (confounding, imperfect mu_ref, non-stationarity)
+    that within-sample curvature cannot see. Measured, not configured; feeds
+    the std floor in `estimate`. Rationale: design 5.6."""
     frames = split_frames(d, cfg)
     train = population(frames["train"], cfg)
     if train.empty:
@@ -374,39 +219,10 @@ def fold_spread(d, cfg, model, grid, folds=3):
 
 
 def design_comparison(d, cfg, model, lo, hi, n):
-    """Every row set x hour control, scored for sign, every run.
-
-    TWO CONFOUNDS, TWO CONTROLS, AND THEY ARE NOT THE SAME PROBLEM.
-
-      rows          the WITHIN-EPISODE survivorship confound. A row at a deep
-                    discount exists because earlier hours did not sell, so a
-                    deeper price reads as lower demand. Only `entry` avoids
-                    it -- one row per episode, before any selection.
-      hour_control  the COMMON TIME SHOCK. `hour_of_day` removes the average
-                    evening lift; `date_hour` compares the same clock hour of
-                    the SAME DAY across sku x fc, which absorbs the weather,
-                    the footfall, a rival's promotion -- everything shared by
-                    that moment. This is design 5.6's "same-hour cross-episode".
-
-    Neither substitutes for the other, and which combination an extract can
-    support is a property of the extract. Measured on the fixture:
-
-      rows              control       wrong-signed  ident  rows/cell   span
-      entry             hour_of_day        2 of 5   0.000       90.0   0.22
-      entry             date_hour          2 of 5   0.000        1.0   0.22
-      all_stocked_hours hour_of_day        4 of 5   0.246      211.0  11.42
-      all_stocked_hours date_hour          2 of 5   0.172        2.0  11.42
-
-    `date_hour` cut the all-hours sign failures from four to two while keeping
-    fifty times the identifying power of entry rows, which is the case for it.
-    Read the caveat with it: at a median of 1-2 rows per cell the fixture
-    cannot support day-level cells at all, `min_rows_per_time_cell` falls the
-    thin ones back to 1.0, and part of the fixture's improvement is its own
-    structure -- its episodes all start in the morning, so clock hour proxies
-    elapsed hours there in a way production will not repeat. Production has far
-    more sku x fc per hour and should support the cells properly, which is why
-    this table is computed on the extract instead of being decided here.
-    """
+    """Every rows set x hour control, scored for sign on the extract in hand
+    each run -- rows addresses within-episode survivorship, hour_control the
+    common time shock, and neither substitutes for the other. Fixture numbers
+    and caveats: design 5.6 and learnings.md."""
     out, wide = {}, np.linspace(lo, max(1.0, hi), n)
     step = float(wide[1] - wide[0])
     for which in ("entry", "all_stocked_hours"):
@@ -478,22 +294,16 @@ def estimate(d, cfg, model):
     if not fit:
         raise SystemExit("no rows to profile epsilon on in the train window")
 
-    # THE SIGN IS DECIDED BEFORE THE POOL IS BUILT, because a pool that
-    # includes the categories it is meant to rescue inherits exactly the
-    # confound they were rejected for. Summing a backwards likelihood into the
-    # fallback makes the fallback backwards too, quietly, and it still reads as
-    # a measurement.
+    # sign decided BEFORE the pool is built: the pool excludes wrong-signed
+    # categories, or the fallback inherits the confound they were rejected for
     signs = {}
     for cat in fit:
         u = unconstrained.get(cat, {})
         peak = max(u.get("naive", lo), u.get("controlled", lo))
         signs[cat] = (peak >= -step, peak)
 
-    # POOLED ACROSS CATEGORIES, by summing log-likelihoods -- categories are
-    # independent samples of the same question, so this is one likelihood over
-    # all of them, not an average of summaries. It is what a category with no
-    # usable variation of its own borrows, and it is MEASURED, which is the
-    # whole difference from a fallback constant.
+    # pooled by SUMMING log-likelihoods across usable categories: one measured
+    # likelihood, not an average of summaries -- the anti-fallback-constant
     usable = [c for cat, c in fit.items()
               if not signs[cat][0] and c["log_ratio_sd"] > 1e-9]
     if usable:
@@ -505,11 +315,8 @@ def estimate(d, cfg, model):
         pooled_basis = (f"{len(usable)} of {len(fit)} categories -- those with "
                         "a right-signed likelihood and some price variation")
     else:
-        # NOTHING LEFT TO POOL. Every category is either backwards or flat, so
-        # there is no measured fallback to fall back TO, and inventing one
-        # would be the constant this method exists to remove. The uniform on
-        # the support is what the data supports: it says, correctly, that this
-        # extract does not identify elasticity at all.
+        # nothing usable to pool: the uniform on the support is the measured
+        # answer -- inventing a fallback constant is what this method removes
         pooled_deff = 1.0
         pooled = np.full(len(grid), 1.0 / len(grid))
         pooled_basis = (
@@ -521,53 +328,29 @@ def estimate(d, cfg, model):
 
     per_category, densities = {}, {}
     for cat, c in fit.items():
-        # THE 50/50 ARM MIXTURE IS THE BRACKET, GENERALISED. The old procedure
-        # took the midpoint of two argmaxes and half their gap; a 50/50 mixture
-        # of two POINT MASSES at a and b has exactly mean (a+b)/2 and std
-        # |a-b|/2. So where both arms are sharp this reproduces the old answer,
-        # and where they are not it widens instead of reporting false
-        # precision. The directional argument -- naive too elastic, controlled
-        # toward zero, truth between -- is unchanged and still what justifies
-        # weighting them equally.
+        # 50/50 arm mixture = the bracket generalised: sharp arms reproduce
+        # midpoint +- half-gap, flat ones widen honestly (design 5.6)
         own = mixture(density(c["naive"], c["deff"]),
                       density(c["controlled"], c["deff"]))
         own_mean, own_std = moments(grid, own)
 
-        # HOW MUCH OWN INFORMATION THERE IS, in the units the cutoff is in:
-        # log-likelihood units across the whole support. `sat` is the
-        # saturation point, 2.0 by default, which is the chi-square 95% cutoff
-        # -- a category that discriminates at least as much as its own
-        # significance threshold stands on its own data.
+        # own-information weight: deflated likelihood span over the support,
+        # saturating at `sat` (2.0 default -- the chi-square 95% cutoff)
         span = float(max(np.ptp(c["naive"]) / c["deff"],
                          np.ptp(c["controlled"]) / c["deff"]))
         w_own = float(min(1.0, span / sat)) if sat > 0 else 1.0
 
-        # WRONG SIGN REJECTS, and it is the only thing that does. The peak is
-        # searched PAST the policy bounds, so a likelihood that prefers
-        # positive elasticity -- demand rising with price -- is caught instead
-        # of being clipped to the nearest bound and reported as measured. Its
-        # own density is not used at all: the number is not weak, it is
-        # nonsensical, and no part of a curve peaked in the wrong direction
-        # belongs in a prior. The category takes the POOLED density, which is
-        # still measured, and is listed at the top of the artifact.
+        # wrong sign rejects (the only reject): the peak was searched PAST the
+        # bounds; the own density is discarded and the pooled one taken
         u = unconstrained.get(cat, {})
         wrong_sign, peak = signs[cat]
 
         w = pooled if wrong_sign else mixture(own, pooled, w_own)
         mean, std = moments(grid, w)
 
-        # THE WIDTH A SHARP LIKELIHOOD CANNOT GIVE. Curvature is SAMPLING
-        # precision; at 125,000 rows a span of 9,402 log-likelihood units puts
-        # every grid point but one at exp(-59) and returns a std of ZERO. A
-        # zero-width prior is not confidence, it is a frozen posterior --
-        # `bounded_step` cannot move it and no outcome ever will.
-        #
-        # What is uncertain is the MODEL, not the sample: confounded history, an
-        # imperfect mu_ref, non-stationary demand. `fold_spread` measures that
-        # by re-fitting on disjoint slices of the train window, and the grid
-        # step bounds it from below because nothing finer than one grid cell was
-        # ever resolved. Both are MEASURED -- neither is a floor someone chose,
-        # which is what the fallback constant was.
+        # std is the WIDEST of three measured floors (density width, grid
+        # step, fold_spread): curvature alone is sampling precision and
+        # collapses to zero at production scale (design 5.6)
         fold = folds.get(cat, {})
         floor_reasons = {"density": std, "grid_resolution": step}
         if fold.get("spread") is not None:
@@ -577,12 +360,7 @@ def estimate(d, cfg, model):
         densities[cat] = w
         per_category[cat] = {
             "mean": round(mean, 4), "std": round(std, 4),
-            # WHICH FLOOR IS DOING THE WORK. `density` means the curve's own
-            # width is the widest of the three and nothing was imposed;
-            # `fold_spread` means the estimate is unstable across the window
-            # and that instability is the honest width; `grid_resolution` means
-            # the likelihood is sharper than the grid can express and the prior
-            # is as tight as this machinery can defend.
+            # which floor bound the std (semantics: design 5.6)
             "std_basis": binding,
             "std_candidates": {k: round(float(v), 4)
                                for k, v in floor_reasons.items()},
@@ -602,9 +380,7 @@ def estimate(d, cfg, model):
             "distinct_discounts": c["distinct_discounts"],
             "identifying_variation_share": round(
                 c["identifying_variation_share"], 4),
-            # a density is a curve, and a reader checking a suspicious prior
-            # should be able to see the curve rather than infer it from two
-            # moments
+            # the full curve, so a suspicious prior can be inspected
             "density": [round(float(x), 8) for x in w],
         }
         if fold:
@@ -641,35 +417,10 @@ def estimate(d, cfg, model):
 
 
 def holdout_comparison(d, cfg, model, grid, candidates):
-    """Score every candidate prior on data it never saw.
-
-    THE ONLY QUESTION THAT SETTLES "IS THIS BETTER". Neither prior can be
-    judged from the inside -- "is -1.61 +- 1.09 better than -1.00 +- 0.60" has
-    no answer by inspection, and that argument ran for a long time. This one
-    does: fit on train, then ask how well each prior predicts the HELD-OUT
-    window, marginalising over epsilon rather than committing to a point.
-
-        score = log integral p(y_hold | eps) pi(eps) deps
-
-    A prior that is narrow and wrong loses badly, one that is too wide loses a
-    little, and one centred where the held-out data likes epsilon with a width
-    matching its own uncertainty wins. Reported per row so the number is
-    comparable across categories of different size.
-
-    TWO REFERENCE POINTS bracket the result and stop it being read as better
-    than it is:
-
-      oracle    the single best epsilon chosen WITH hindsight on the held-out
-                data. Unreachable, and the gap to it is what remains on the
-                table.
-      uniform   a flat prior over the whole support. Anything that cannot beat
-                this has added nothing at all.
-
-    The held-out curves are deflated by the held-out window's own deff, for the
-    same reason the fit is: repeated hours from one episode are not
-    independent observations, and scoring as if they were would reward a prior
-    for matching correlated noise.
-    """
+    """Score every candidate prior on held-out data: log marginal predictive
+    likelihood per row, deff-deflated -- narrow-and-wrong loses badly,
+    too-wide loses mildly. `oracle` (hindsight-best eps, unreachable) and
+    `uniform` (flat, the floor) bracket the result. Rationale: design 5.6."""
     window = cfg["posterior"]["prior"]["holdout_window"]
     hold = build_curves(d, cfg, model, grid, window)
     if not hold:
@@ -717,13 +468,8 @@ def holdout_comparison(d, cfg, model, grid, candidates):
         "ranking": ranked,
         "per_category": per_cat,
     }
-    # HOW MUCH IS ON THE TABLE AT ALL, read before who won. The oracle picks
-    # the best single epsilon with hindsight and the uniform knows nothing, so
-    # the gap between them is the ENTIRE value of knowing this extract's
-    # elasticity on this window. Any method comparison is a fight over a share
-    # of that gap, and if the gap is tiny the fight does not matter however it
-    # comes out -- which is the thing an argument about prior methods will not
-    # tell you from the inside.
+    # oracle minus uniform = the ENTIRE value of knowing epsilon on this
+    # window; any method gap is a share of it, so read this first
     available = (totals["oracle"] - totals["uniform"]) / max(rows_total, 1)
     out["information_available_per_row"] = round(available, 6)
     out["information_available_note"] = (
@@ -731,13 +477,8 @@ def holdout_comparison(d, cfg, model, grid, candidates):
         "window, in nats per row. Every method's score lies between those two. "
         "Read this FIRST -- a method gap that is a large share of a tiny "
         "number is still a tiny number.")
-    # WHICH CANDIDATES CLEAR THE FLOOR AT ALL. A prior that scores BELOW the
-    # uniform is not merely weaker than its rival -- it is worse than knowing
-    # nothing, which is a stronger statement than any pairwise gap and has to
-    # be said in those words. It also breaks the share arithmetic: measured
-    # against a range that runs from uniform to oracle, a gap involving a
-    # sub-uniform candidate can exceed 100% and read as decisive when what it
-    # actually shows is one candidate falling off the bottom.
+    # a sub-uniform candidate is worse than knowing nothing, and would let a
+    # pairwise share exceed 100% -- flag it in its own words
     below_floor = sorted(k for k in names if totals[k] < totals["uniform"])
     out["worse_than_a_flat_prior"] = below_floor
     if below_floor:

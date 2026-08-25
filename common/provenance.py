@@ -1,33 +1,10 @@
 """common.provenance -- the frozen artifacts, versioned as one bundle.
 
-Six files are fitted in sequence and then frozen together. They are only
-meaningful TOGETHER: `rho` deflates evidence measured against a particular
-model's residuals, the level factors correct that same model, and the prior was
-estimated using that model's predictions and that `r_lookup`. Mix vintages and
-nothing errors -- the numbers simply stop describing the same world, silently
-and for the whole window.
-
-Until now only `feature_schema.json` recorded which model it came from, so a
-mismatch between config and an artifact told you the two disagreed but not
-which one was stale. That is not a question anyone should have to answer from
-memory.
-
-**The bundle id is the baseline model version.** Not a fresh timestamp: every
-downstream artifact is fitted AGAINST a model, so keying on the model answers
-"which model was this fitted against" directly, and an artifact that names a
-different model is by definition not part of this bundle.
-
-    artifacts/                       bundle
-      baseline_model.txt      ─┐
-      feature_schema.json      │     baseline-20260811043259
-      calibration.json         ├──   created_at per file
-      r_lookup.json            │     config_version per file
-      rho.json                 │
-      prior.json              ─┘
-
-`bootstrap.seal` writes `artifacts/bundle.json`: the agreed id plus a hash of
-every file. After that, a hand-edited artifact is detectable too -- which the
-provenance stamps alone cannot catch, since an editor would leave them intact.
+The artifacts are fitted in sequence and only meaningful TOGETHER: mix
+vintages and nothing errors, the numbers just silently stop describing one
+world. The bundle id IS the baseline model version -- every downstream
+artifact is fitted AGAINST a model. bootstrap.seal adds per-file hashes so a
+hand-edited artifact is detectable too, which stamps alone cannot catch.
 """
 
 import hashlib
@@ -57,11 +34,8 @@ def _path(cfg, key):
 
 def stamp(payload, cfg, bundle, tool):
     """Attach provenance to an artifact payload, in place, and return it.
-
-    `bundle` is the baseline model version this artifact was fitted against --
-    None only for artifacts that precede the model (the split manifest), where
-    there is nothing to be fitted against yet.
-    """
+    `bundle` is the baseline model version fitted against -- None only for
+    artifacts that precede the model (the split manifest)."""
     payload["provenance"] = {
         "bundle": bundle,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -107,20 +81,15 @@ def collect(cfg):
 
 
 def verify(cfg, sealed=None):
-    """Do the artifacts on disk form ONE bundle, and match the seal?
-
-    Two separate failures, deliberately not merged: artifacts naming different
-    models is a mixed bundle, while a hash that moved since sealing is an
-    edited artifact. The first is a process mistake, the second is closer to
-    tampering, and the remedy differs.
-    """
+    """Do the artifacts on disk form ONE bundle, and match the seal? Two
+    failures, deliberately not merged: a mixed bundle (process mistake) vs a
+    hash moved since sealing (edited artifact) -- the remedy differs."""
     rows = collect(cfg)
     present = [r for r in rows if r["present"]]
     missing = [r["artifact"] for r in rows if not r["present"]]
 
-    # Two artifacts legitimately carry no stamp: the split manifest precedes
-    # the model, and the model file IS the bundle id (recorded in
-    # feature_schema, since a LightGBM dump has nowhere to put one).
+    # legitimately unstamped: the split manifest precedes the model, and the
+    # model file IS the bundle id (a LightGBM dump has nowhere to put a stamp)
     UNSTAMPABLE = ("split_manifest", "baseline_model")
     stamped = [r for r in present
                if r["artifact"] not in UNSTAMPABLE and r.get("bundle")]

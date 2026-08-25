@@ -1,23 +1,10 @@
 """pipeline.status -- the dozen numbers that decide something.
 
-The four reports this pipeline writes carry roughly two hundred fields between
-them, and that is the right number to WRITE: when a gate goes red, the
-diagnostics beside it are how the cause gets found, and this project's history
-is a list of times that paid for itself.
-
-It is the wrong number to READ. So this prints only the checks that gate a
-decision, each with the figure behind it, and says where to look when one is
-red. Everything else stays exactly where it is.
-
-Nothing here computes: every line is read from a report or an artifact that
-some other step already wrote. A missing report is reported as "not run", never
-as a pass -- an unrun check and a passing check must never look the same.
-
-Usage:
-    python3 -m pipeline.status
-    python3 -m pipeline.status --json        # same content, machine-readable
-
-Exit code is 1 if anything is FAIL, so it can gate a script.
+Prints only the checks that gate a decision, each with the figure behind it
+and where to look when red. Nothing here computes: every line is read from a
+report or artifact some other step wrote, and a missing report reads "not
+run", never as a pass. Exit code 1 on any FAIL, so it can gate a script.
+Run: python3 -m pipeline.status [--json]
 """
 
 import argparse
@@ -80,13 +67,9 @@ def _bundle(cfg):
 
 
 def _mirrors(cfg):
-    """A stale paste mis-weights every posterior step, silently.
-
-    The remedy is NOT automatically "re-paste": the check says the two
-    disagree, not which is right. Read the bundle line first -- if the
-    artifacts are from an older model than the one in force, pasting their
-    numbers into config walks the system backwards.
-    """
+    """A stale paste mis-weights every posterior step, silently. The remedy
+    is NOT automatically "re-paste": the check says the two disagree, not
+    which is right -- read the bundle line first."""
     drift = artifact_mirror_drift(cfg)
     if drift:
         return _row("artifact mirrors", FAIL, "; ".join(drift),
@@ -96,8 +79,7 @@ def _mirrors(cfg):
 
 def _calibration(cfg, backtest):
     # DIAGNOSTIC, not a gate: calibration is always applied (owner,
-    # 2026-08-25). Out of band -> WARN, never FAIL -- it is a drift or
-    # staleness reading to investigate, not a launch blocker.
+    # 2026-08-25). Out of band -> WARN, never FAIL.
     if not backtest:
         return _row("calibration level", NONE, "no backtest report",
                     "python3 -m backtest")
@@ -124,9 +106,7 @@ def _prior(cfg):
               if v.get("own_information_weight", 0) >= 0.999
               and not v.get("wrong_sign"))
     wrong = len(prior.get("wrong_sign_categories", []))
-    # A pooled or uniform prior is the DESIGNED outcome, not a failure --
-    # history cannot always identify elasticity, and saying so is the honest
-    # answer (9.3/9.5).
+    # a pooled or uniform prior is the DESIGNED outcome, not a failure (9.3/9.5)
     return _row("elasticity prior", PASS,
                 f"profile_density · {own}/{len(per)} categories on own data"
                 + (f" · {wrong} wrong-signed (pooled)" if wrong else ""))
@@ -137,8 +117,7 @@ def _shadow(shadow):
         return _row("shadow gate", NONE, "no shadow report",
                     "python3 -m pipeline.shadow")
     g = shadow.get("shadow_gate", {})
-    # the report's verdict carries a trailing note ("PASS -- proceed to ..."),
-    # and each sub-check is {value, threshold, pass} rather than a scalar
+    # verdict carries a trailing note; sub-checks are {value, threshold, pass}
     ok = str(g.get("verdict", "")).upper().startswith(PASS)
 
     def val(key):
@@ -160,8 +139,8 @@ def _tau(cfg, backtest):
                     f"config null; backtest derived {derived}"
                     if derived else "config null and no derivation",
                     "paste from a GATE-PASSING backtest only")
-    # a pasted value is not a good one: it has to still match its source, and
-    # its source has to postdate the entry-only scoping fix
+    # a paste must still match its source, and the source must postdate the
+    # entry-only scoping fix
     stale = explore.tau_provenance_error(cfg, backtest)
     if stale:
         return _row("exploration tau", FAIL, stale.split(". ")[0],
@@ -171,18 +150,12 @@ def _tau(cfg, backtest):
 
 
 def _walkthrough(root):
-    """Do the figures printed on docs/system_walkthrough.html still hold?
-
-    The page is prose with numbers typed in, so a re-run silently invalidates
-    every measured figure on it. This is the one place that gets read after a
-    run, so it is the one place that can catch it. A report from a DIFFERENT
-    model version is not proof the page is wrong -- it cannot be compared at
-    all (hard rule 1) -- so that is WARN. A disagreement within the same run
-    is a real contradiction, and FAIL.
-    """
+    """Do the figures on docs/system_walkthrough.html still hold? A report
+    from a DIFFERENT model version cannot be compared at all (hard rule 1) ->
+    WARN; a disagreement within the same run is a contradiction -> FAIL."""
     from tools.walkthrough import figures
-    # figures.check resolves paths like "reports/backtest.json", so it
-    # wants the directory ABOVE the reports root status was given
+    # figures.check resolves "reports/..." paths, so it wants the directory
+    # ABOVE the reports root status was given
     base = os.path.dirname(os.path.abspath(root))
     rows = []
     for tab in figures.SOURCES:
@@ -202,8 +175,7 @@ def _guardrails(thresholds):
                     "python3 -m bootstrap.derive_thresholds")
     rec = thresholds.get("guardrail_threshold_recommendation")
     if not rec:
-        # the file exists but predates the block -- a stale report, which is a
-        # different thing from a step that never ran, and reads differently
+        # file exists but predates the block: stale, not never-ran
         return _row("guardrail floors", NONE,
                     "report predates the recommendation block",
                     "re-run python3 -m bootstrap.derive_thresholds")

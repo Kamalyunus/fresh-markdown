@@ -1,25 +1,10 @@
-"""bootstrap.measure -- phase 0 historical measurement suite.
+"""bootstrap.measure -- phase-0 historical measurement suite (design 5.3).
 
-The phase-0 measurement suite (design section 5.3). Produces
-every value marked MEASURED in config.yaml, plus the three reassessment gates
-in section 8.1.
-
-Run against real filtered FLC data. Outputs a JSON report and a human-readable
-summary. No causal assumption about price response is made anywhere here.
-
-Usage:
-    python3 -m bootstrap.measure --input data/flc_filtered.parquet \
-        --out reports/phase0.json
-
-Measurements 1-8 run standalone. Measurement 9 (controller replay) requires the
-fitted baseline model and runs through the backtest module once
-bootstrap.train_baseline exists. Measurement 10 runs here when a
-`predicted_units` column is supplied (backtest attaches it), and is skipped
-otherwise.
-
-The two corrections from review of the first run are in place:
-deff uses mean FORCED hours, and episodes_reaching_zero_inventory checks the
-last hour only.
+Produces every value marked MEASURED in config.yaml plus the section 8.1
+reassessment gates. No causal assumption about price response anywhere.
+Measurements 1-8 run standalone; 9 runs via backtest; 10 needs a
+`predicted_units` column (backtest attaches it) and is skipped otherwise.
+Run: python3 -m bootstrap.measure --input data/flc_filtered.parquet --out reports/phase0.json
 """
 
 import argparse
@@ -39,14 +24,9 @@ PCTS = [10, 25, 50, 75, 90]
 
 def m1_cost_ratio(d, cfg):
     """Cost ratio and feasible ceiling. Decides exploration viability.
-
-    MUST be measured on the INTEGRITY population, never on the DP-eligible
-    subset. `share_non_explorable` counts episodes whose cost floor leaves
-    too few tiers to experiment on -- and those are precisely the episodes
-    the old chain deleted before this ran, so gate 1 read 0.0 and could not
-    fail. A gate answered by the filter that removes its subject is not a
-    gate.
-    """
+    MUST be measured on the INTEGRITY population, never the DP-eligible
+    subset: measured there, share_non_explorable reads 0.0 by construction --
+    a gate answered by the filter that removes its subject is not a gate."""
     tier_step = cfg["pricing"]["tier_step"]
     min_tiers = cfg["exploration"]["min_feasible_tiers"]
     agg = dict(category=("category", "first"), cost=("cost", "first"),
@@ -104,12 +84,9 @@ def m2_same_hour_variation(d):
 
 
 def m3_intra_episode_correlation(d):
-    """rho and mean hours per episode. Sets deff.
-
-    Baseline here is a within-(category, hour) mean, which is a proxy for the
-    fitted model. Re-run against fitted mu_ref residuals once the baseline
-    model exists (bootstrap.fit_dispersion does) -- that value is authoritative.
-    """
+    """rho and mean hours per episode. Sets deff. The within-(category, hour)
+    mean baseline is a PROXY; the fit against fitted mu_ref residuals in
+    bootstrap.fit_dispersion is authoritative -- never paste from m3."""
     d = d.copy()
     d["base"] = d.groupby(["category", "hour_of_day"])["units_sold"].transform("mean")
     d["resid"] = d.units_sold - d.base
@@ -133,8 +110,8 @@ def m3_intra_episode_correlation(d):
         "rho_method": "variance_decomposition_on_category_hour_residuals",
         "mean_hours_per_episode": round(float(hours.mean()), 3),
         "mean_forced_hours_per_episode": round(h_forced, 3),
-        # deff uses FORCED hours -- these are the correlated observations that
-        # actually enter the likelihood. Using all-episode hours understates it.
+        # deff uses FORCED hours -- the correlated observations that enter the
+        # likelihood; all-episode hours understates it
         "implied_deff": round(design_effect(rho, h_forced), 3),
         "note": "re-run against fitted mu_ref residuals; that value is authoritative",
     }
@@ -163,10 +140,8 @@ def m4_demand_density(d):
 def m5_censoring(d):
     d = d.copy()
     d["censored"] = episodes.censored_hours(d)
-    # end-of-episode inventory only. Checking .any() across all hours returns a
-    # spurious 1.0 because inventory dips to zero transiently before restock.
-    # Ordered by (date, hour): hour_of_day alone puts a 36-hour window's
-    # day-one evening AFTER its day-two morning and picks the wrong last row.
+    # last row only (transient zero-inventory dips make .any() read 1.0),
+    # ordered by (date, hour) -- hour_of_day alone picks the wrong last row
     last = episodes.last_rows(d)
     # true leftover: ending_inventory is written off to zero on the last row
     ep_zero = episodes.leftover_units(last.starting_inventory,
@@ -180,12 +155,10 @@ def m5_censoring(d):
 
 
 def m6_il_pct(d):
-    """IL% under legacy policy. Sets A/B power. Design sections 2.2-2.3.
-
-    Denominator is original_price x units_sold -- ENDOGENOUS. Zero-sale
-    episodes have an undefined per-episode ratio and are handled only by the
-    ratio-of-sums aggregation, never by averaging per-episode ratios.
-    """
+    """IL% under legacy policy. Sets A/B power (design 2.2-2.3). Denominator
+    is original_price x units_sold -- ENDOGENOUS. Zero-sale episodes are
+    handled only by ratio-of-sums aggregation, never by averaging
+    per-episode ratios (undefined there)."""
     d = d.copy()
     d["discount_cost"] = (d.original_price - d.offered_price) * d.units_sold
 
@@ -203,14 +176,11 @@ def m6_il_pct(d):
         units_sold=("units_sold", "sum"),
         **({"dp_eligible": ("dp_eligible", "first")} if "dp_eligible" in d else {}),
     )
-    # A missing cost makes scrap read zero, which deflates IL rather than
-    # widening the population. Out of both baselines, counted separately.
+    # a missing cost makes scrap read zero, deflating IL -- excluded, counted
     cost_missing = int((~(ep.cost > 0)).sum())   # NaN counts as missing
     ep = ep[ep.cost > 0]
-    # An episode that sold out early scrapped nothing. One that ended with
-    # stock on hand disposed of it -- the listing ending IS the disposal,
-    # whatever the nominal counter says. Only an episode sitting at the
-    # extract boundary has an outcome we genuinely do not have.
+    # the listing ending IS the disposal, whatever the nominal counter says;
+    # only episodes at the extract boundary have a genuinely unknown outcome
     ep["scrap_units"] = episodes.scrap_units(d)
     dropped = int(ep.scrap_units.isna().sum())
     ep = ep[ep.scrap_units.notna()]
@@ -239,14 +209,8 @@ def m6_il_pct(d):
     resid = unit.il - R * unit.denom
     var_ratio = (float(resid.var(ddof=1)) / (n * dbar ** 2)) if n > 1 and dbar > 0 else np.nan
 
-    # TWO baselines, both real, and they answer different questions. The
-    # integrity figure is what the business loses. The dp_eligible figure is
-    # what this MVP can address -- it is the arm the A/B measures and the only
-    # one a policy claim may be compared against. Reporting one alone was how
-    # a sub-population figure came to be quoted as the business baseline.
-    # Episodes with a missing cost are excluded from BOTH: scrap is
-    # `cost x leftover`, so a zero cost silently deflates IL rather than
-    # widening the population.
+    # TWO baselines: "integrity" is what the business loses; "dp_eligible" is
+    # what the MVP can address and the only valid policy/A-B comparison
     dp = ep[ep.dp_eligible] if "dp_eligible" in ep else ep
     by_population = {
         "integrity": {"episodes": int(len(ep)), "il_pct": ratio_of_sums(ep),
@@ -313,17 +277,10 @@ def m8_entry_hour(d):
 
 
 def m11_episode_endings(d):
-    """How episodes end, and how much scrap that leaves genuinely unknown.
-
-    Two endings and one non-ending. Scrap is the leftover on the last row:
-    zero if the episode sold out, the leftover itself if it ended holding
-    stock. `not_closed` is not a third way to end -- it is an episode that has
-    not finished, which offline is empty and live is the in-flight ones.
-
-    Watch `share_last_row_counter_at_zero`. If it is near zero -- it was
-    ~0.001 on production -- any rule written against `hours_remaining` is
-    measuring a rounding error, which is exactly the bug this replaced.
-    """
+    """How episodes end. Scrap is the leftover on the last row; `not_closed`
+    is not a third ending, it is an unfinished episode. Watch
+    `share_last_row_counter_at_zero`: near zero (~0.001 on production), any
+    rule written against `hours_remaining` measures a rounding error."""
     if not d.episode_id.nunique():
         return "NOT RUN -- no episodes"
     out = episodes.ending_summary(d)
@@ -336,15 +293,10 @@ def m11_episode_endings(d):
 
 
 def m10_fidelity_decomposition(d, cfg, pred_col="predicted_units"):
-    """Measurement 10 -- separates LEVEL bias from SLOPE bias in the baseline.
-
-    Requires a fitted baseline: `d` must carry a column of predicted units at
-    the ACTUAL historical price (i.e. mu_ref scaled by the prior elasticity).
-    Run this after bootstrap.train_baseline; it is skipped otherwise.
-
-    Level bias  -> ratio at the reference anchor, where elasticity scaling ~1
-    Slope bias  -> how the ratio changes as discount moves away from d_ref
-    """
+    """Measurement 10 -- separates LEVEL bias (sold ratio at the reference
+    anchor, where elasticity scaling ~1) from SLOPE bias (how the ratio moves
+    with distance from d_ref). Requires predicted units at the ACTUAL
+    historical price; skipped when the column is absent."""
     if pred_col not in d.columns:
         return "NOT RUN -- requires fitted baseline predictions"
 

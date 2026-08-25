@@ -1,15 +1,9 @@
-"""Config loader and validation.
+"""Config loader and validation. config.yaml is the single tuning surface
+(design 5.1); modules never carry their own numeric literals.
 
-config.yaml is the single tuning surface (design section 5.1). Everything tunable is
-read from here; modules never carry their own numeric literals.
-
-Two loading modes:
-
-  load_config()                 bootstrap mode -- nulls permitted, because
-                                bootstrap is what produces the MEASURED values.
-  load_config(strict=True)      runtime mode -- refuses to start while any
-                                runtime-required MEASURED / SET BY OWNER value
-                                is null.
+load_config() permits nulls (bootstrap produces the MEASURED values);
+load_config(strict=True) refuses to start while any runtime-required
+MEASURED / SET BY OWNER value is null.
 """
 
 import json
@@ -33,12 +27,9 @@ RUNTIME_REQUIRED = [
 ]
 
 
-# Values that exist in TWO places: written by bootstrap into a frozen
-# artifact, then hand-pasted into config. A stale paste is silent and
-# consequential -- rho and forced-hours set deff, which divides accumulated
-# information in pipeline.update, so a config left over from a previous model
-# version mis-weights every posterior step for the whole MVP window. Strict
-# mode refuses to start on divergence rather than trusting the paste.
+# Values living in TWO places: a frozen artifact and a hand-paste in config.
+# A stale paste silently mis-weights every posterior step (rho/forced-hours
+# set deff); strict mode refuses to start on divergence.
 ARTIFACT_MIRRORS = [
     (("dispersion", "rho_path"), "rho", ("dispersion", "rho")),
     (("dispersion", "rho_path"), "mean_forced_hours_per_episode",
@@ -114,12 +105,8 @@ def reference_discount(cfg, category):
 
 def design_effect(rho, forced_hours):
     """Cluster design effect: 1 + (m - 1) * rho, floored at 1 (design 5.11).
-
-    The single definition. It was written out by hand in three other places --
-    fit_dispersion, measure and assurance -- and only this one carried the
-    floor, so a negative rho would have DIVIDED information rather than
-    deflating it. Import it; do not retype it.
-    """
+    The single definition -- the floor keeps a negative rho from DIVIDING
+    information instead of deflating it. Import it; do not retype it."""
     return max(1.0, 1.0 + (forced_hours - 1.0) * rho)
 
 
