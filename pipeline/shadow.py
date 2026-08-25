@@ -54,6 +54,41 @@ def _require_shadow_config(cfg, backtest_path="reports/backtest.json"):
         raise ConfigError("shadow phase blocked by a stale tau: " + stale)
 
 
+
+def pre_window_il_history(d, cfg, before):
+    """Realised legacy IL by close day for episodes that CLOSED before the
+    window -- the trailing budget base production holds at launch. Without it
+    the window's first day reads budget 0 (empty history), which is an
+    ABSENCE OF SIGNAL, not an overspend. Only the budget_il_window_days
+    before `before` matter."""
+    if before is None or d.empty:
+        return {}
+    start = pd.Timestamp(str(before))
+    window = int(cfg["exploration"]["budget_il_window_days"])
+    lo = (start - pd.Timedelta(days=window)).strftime("%Y-%m-%d")
+    hi = start.strftime("%Y-%m-%d")
+    g = d.sort_values(["episode_id", "date", "hour_of_day"])
+    last = g.groupby("episode_id").tail(1)
+    close = last.date.astype(str)
+    last = last[(close >= lo) & (close < hi)]
+    if last.empty:
+        return {}
+    rows = g[g.episode_id.isin(set(last.episode_id))]
+    disc = ((rows.original_price * rows.total_discount * rows.units_sold)
+            .groupby(rows.episode_id).sum())
+    kind = episodes.classify_last(last)
+    leftover = episodes.leftover_units(last.starting_inventory, last.units_sold)
+    scrap = (last.cost.to_numpy() * leftover.to_numpy()
+             * (kind == episodes.COMPLETED).to_numpy())
+    closed = (kind != episodes.NOT_CLOSED).to_numpy()
+    out = {}
+    for eid, day, ok, sc in zip(last.episode_id.to_numpy(),
+                                last.date.astype(str).to_numpy(), closed, scrap):
+        if ok:
+            out[day] = out.get(day, 0.0) + float(disc.get(eid, 0.0)) + float(sc)
+    return out
+
+
 def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None,
                       sampled_episodes=None, population_episodes=None,
                       max_days=60):
@@ -81,8 +116,11 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
                      "spend": round(spend, 1), "budget": round(budget, 1),
                      "over_budget": round(over, 2) if over is not None else None,
                      "stop_condition_fires": fired})
-        # the controller runs at the operator gate, on the day just closed
-        tau = explore.tau_next(tau, budget, spend, cfg)
+        # the controller runs at the operator gate, on the day just closed.
+        # A ZERO budget (no trailing IL history yet) is an absence of signal,
+        # not an overspend -- calibrating on it would halve tau for nothing
+        if budget > 0:
+            tau = explore.tau_next(tau, budget, spend, cfg)
     return {
         "tau_start": round(float(tau0), 2),
         "tau_end": round(tau, 2),
@@ -291,6 +329,7 @@ def _shadow_one(ep, ctx):
 
 
 def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
+               prior_il_by_day=None,
                window_basis=HOLDOUT_BASIS, workers=None):
     _require_shadow_config(cfg)
     # precondition, inside run_shadow so a programmatic caller cannot skip it
@@ -421,7 +460,9 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     # trailing budget base is knowable at the start of each day
     closed = (kind != episodes.NOT_CLOSED).to_numpy()
     ep_il = last.discount_cost.to_numpy() + scrap_per_ep
-    il_by_day = {}
+    # seeded with pre-window closed-episode IL, so the window's first days
+    # carry the trailing base production would actually hold at launch
+    il_by_day = dict(prior_il_by_day or {})
     for day, amount, ok in zip(last.close_day.to_numpy(), ep_il, closed):
         if ok:
             il_by_day[day] = il_by_day.get(day, 0.0) + float(amount)
@@ -452,6 +493,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         "days": int(n_days),
         "implied_daily_spend": round(implied_daily_spend, 1),
         "daily_budget": round(daily_budget, 1),
+        "trailing_basis_seeded_days": len(prior_il_by_day or {}),
         "budget_basis": (f"mean of per-day budgets on the trailing "
                          f"{cfg['exploration']['budget_il_window_days']}-day "
                          "realised-IL base (explore.trailing_daily_il) -- the "
@@ -665,6 +707,9 @@ def main():
         start, end = h["start"], h["end"]
         print(f"== holdout window {start} -> {end} "
               "(no artifact was fit on it) ==")
+    # trailing IL history from BEFORE the window, computed on the full frame
+    # before it is sliced away -- production's day-one budget base
+    history = pre_window_il_history(d, cfg, start)
     # episode-scoped date cut, never row-scoped: window_slice keeps a
     # cross-midnight episode whole instead of leaving an orphan tail
     d = episodes.window_slice(d, start, end)
@@ -673,7 +718,8 @@ def main():
 
     report = run_shadow(d, cfg, events_root=args.events_dir,
                         seed=args.seed, max_episodes=args.max_episodes,
-                        window_basis=basis, workers=args.workers)
+                        window_basis=basis, workers=args.workers,
+                        prior_il_by_day=history)
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as f:

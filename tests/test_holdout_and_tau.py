@@ -465,3 +465,60 @@ def test_the_budget_base_is_the_trailing_realised_il():
     assert src.count("trailing_daily_il(") >= 2, \
         "both the controller trace and the aggregate gate must budget on " \
         "the trailing basis, or they grade different quantities"
+
+
+def test_the_first_shadow_day_carries_the_pre_window_trailing_base():
+    """Day one of the hold-out must not read budget 0: production's launch
+    day holds the trailing legacy IL of the days before it. The history is
+    computed from the full frame BEFORE the window slice, keyed by close day
+    -- discount plus scrap, closed episodes only."""
+    import pandas as pd
+    from pipeline.shadow import pre_window_il_history
+
+    cfg = load_config()
+
+    def episode(eid, day, sold, start, end_last):
+        return pd.DataFrame({
+            "episode_id": [eid] * 2, "date": [day] * 2, "hour_of_day": [9, 10],
+            "total_discount": [0.30] * 2, "original_price": [10_000.0] * 2,
+            "cost": [4000.0] * 2, "starting_inventory": [start, start - sold],
+            "units_sold": [sold, 0], "ending_inventory": [start - sold, end_last],
+        })
+
+    d = pd.concat([
+        # closes 08-01 with 2 left (write-off): IL = 3000*1... discount 0.3*10000*1 + scrap 2*4000
+        episode("pre", "2026-08-01", 1, 3, 0),
+        # unclosed pre-window episode: contributes NOTHING
+        episode("open", "2026-08-02", 1, 3, 2),
+        # closes INSIDE the window: not part of the seed
+        episode("in", "2026-08-05", 1, 2, 0),
+    ])
+    h = pre_window_il_history(d, cfg, "2026-08-04")
+    assert set(h) == {"2026-08-01"}
+    assert h["2026-08-01"] == pytest.approx(0.30 * 10_000 * 1 + 2 * 4000)
+    # outside the trailing window -> empty; no `before` -> empty
+    assert pre_window_il_history(d, cfg, "2026-08-20") == {}
+    assert pre_window_il_history(d, cfg, None) == {}
+
+
+def test_the_controller_holds_tau_on_a_zero_budget():
+    """A zero budget from an EMPTY trailing history is an absence of signal,
+    not an overspend: the controller must hold tau, not halve it. The moment
+    history exists, calibration resumes."""
+    from pipeline.shadow import _controller_trace
+    from pricing.explore import SpreadLedger
+
+    cfg = load_config()
+
+    led = SpreadLedger()
+    led.add("2026-08-04", [50.0, 80.0])          # spend exists on day 1
+    led.add("2026-08-05", [50.0, 80.0])
+    # no IL history at all for day 1; day 2 sees day 1's realised IL
+    il_by_day = {"2026-08-04": 1_000_000.0}
+    trace = _controller_trace(led, il_by_day, tau0=100.0, widest_std=1.0,
+                              cfg=cfg)
+    d1, d2 = trace["by_day"][0], trace["by_day"][1]
+    assert d1["budget"] == 0.0 and d1["over_budget"] is None
+    assert d2["tau"] == pytest.approx(100.0), \
+        "tau moved on a day whose budget was 0 -- empty history is not signal"
+    assert d2["budget"] > 0

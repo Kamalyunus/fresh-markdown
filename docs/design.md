@@ -994,6 +994,13 @@ row-scoped slicing would keep the tail of an episode that opened the evening
 before as its own short episode — no entry decision, wrong opening
 inventory, a countdown starting mid-window.
 
+The controller trace seeds its trailing-IL base with the legacy IL of
+episodes that closed in the `budget_il_window_days` *before* the window
+(computed from the full frame before the hold-out slice), because that is
+the base production holds at launch — without it the first day reads budget
+0, which is empty history, not an overspend, and the controller holds τ on
+a zero budget rather than calibrating on it.
+
 **Re-deriving `tau` where it will actually run.** The replay's bisection
 reports 1.00× *by construction* — it solves until it does — so it is
 evidence that a `tau` exists at this budget, never that the launch value is
