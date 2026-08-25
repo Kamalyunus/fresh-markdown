@@ -429,12 +429,12 @@ costs drift risk, which is accepted, monitored daily (section 5.11), and
 bounded by the window end date. Freezing is a phase, not a posture: once the
 experiment has read out there is nothing left to attribute, and the baseline
 returns to an ordinary retraining cadence with the level factors tracking
-drift between retrains. A per-category multiplicative correction
-factor is *fitted* unconditionally on the calibration weeks but *applied*
-only behind an explicit config decision, because the diagnostic in section
-9.2 shows the correction is right for level errors and actively harmful for
-slope errors — fitting and applying are different decisions with different
-owners.
+drift between retrains. A per-subcategory multiplicative correction
+factor is fitted and **always applied** (owner, 2026-08-25). It cannot mask
+a slope error: factors are fit on anchor rows only, where the price term is
+1 by construction, and the slope stays visible through
+`slope_ratio_by_discount_gap` — a slope deficit is fixed by re-estimating
+the prior or by learning, never by the level multiplier (section 9.2).
 
 **The SKU demand-rate features.** The model's largest historical error was
 level bias, and its most plausible cause is that category/subcategory/FC
@@ -1270,9 +1270,17 @@ Certain results must *block the build* rather than parameterise it, and the
 blocking conditions were fixed before the numbers were seen. Every gate that
 has fired so far fired correctly.
 
-### 9.2 Calibration gate (blocking) — is the demand model usable at all?
+### 9.2 Calibration — always applied, with the level as a diagnostic
 
-The gate judges the frozen model on its **only production responsibility:
+**Owner, 2026-08-25: calibration is no longer a gate.** The level factors
+are always fitted and always applied — factors are fit on anchor rows only,
+so a slope error cannot contaminate them, and with no calibration artifact
+on disk every factor reads 1.0, a no-op. The anchor-level band below is a
+reported **diagnostic**: out of band means drift or staleness to
+investigate (`fidelity.by_week` separates wobble from trend), surfaced as
+WARN in `pipeline.status`, never a launch blocker.
+
+The diagnostic judges the frozen model on its **only production responsibility:
 the demand level at the reference discount.** Inference always overwrites
 price to the reference anchor; every other price is produced by the
 parametric layer (`mu_ref × ratio^ε`). The gate metric is therefore
@@ -1287,7 +1295,7 @@ launch forever on the prior rather than the model. The pooled ratio and
 `slope_ratio_by_discount_gap` remain reported as diagnostics; the slope
 itself is validated where it can be — by posterior movement and the A/B —
 and the continuous production guard is the daily
-`realised_vs_predicted_sold_ratio`. Why the gate matters at all: every
+`realised_vs_predicted_sold_ratio`. Why the diagnostic matters: every
 economic quantity is denominated in the demand prediction, and an early
 25%-light model priced to under-clear (replay clearance 91% → 50%, scrap
 +70%). Level factors are fit on anchor rows over a fit window disjoint from
@@ -1347,9 +1355,8 @@ condition, not permission to apply prices in phase 1.
 flowchart LR
   A["phase 0<br/>measure"] --> B{"reassessment<br/>gates"}
   B --> C["train + freeze<br/>artifacts"]
-  C --> D{"calibration gate<br/>level at anchor"}
-  D -- fail --> C2["fit level factors<br/>re-gate, no retrain"] --> D
-  D -- pass --> E{"prior acceptance<br/>gate"}
+  C --> D["fit + apply level factors<br/>anchor-level diagnostic"]
+  D --> E{"prior acceptance<br/>gate"}
   E --> F["shadow<br/>no prices applied"]
   F --> G{"shadow gate<br/>completeness, cost floor"}
   G -- pass --> H["exploit-only pilot"]
@@ -1361,7 +1368,7 @@ flowchart LR
 | Phase | What happens | Exit gate | Status |
 | --- | --- | --- | --- |
 | 0. Measurement | historical measurement, config populated | gates reviewed | **Done** |
-| 0b. Calibration | fidelity diagnostic, prior estimation | section 9.2 + 9.3 | **Done** — `level_bias_at_anchor` 1.0389, inside [0.90, 1.10] |
+| 0b. Calibration | level factors fitted + applied (always); prior estimation | level diagnostic reviewed (9.2); prior gate (9.3) | **Done** — `level_bias_at_anchor` 1.0389, inside [0.90, 1.10] |
 | 1. Shadow | decisions logged, no prices applied | section 9.4 | **Done** — completeness 0.9974, matched 0.9974, 0 cost-floor violations |
 | 2. Exploit-only pilot | small SKU set, exploration off | price mismatch <1%, finalization SLA | pending |
 | 3. Learning pilot | exploration on at the configured budget (`budget_share_of_il`, 1%) on the pilot set | posterior std falling; spend within budget | pending |

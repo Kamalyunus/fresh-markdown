@@ -24,7 +24,6 @@ class ConfigError(RuntimeError):
 
 # Keys that must be non-null before any price is applied in production.
 RUNTIME_REQUIRED = [
-    ("baseline_model", "apply_level_calibration"),
     ("dispersion", "rho"),
     ("dispersion", "mean_forced_hours_per_episode"),
     ("exploration", "tau_initial"),

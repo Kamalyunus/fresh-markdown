@@ -36,7 +36,8 @@ step                                          writes                            
                                               artifacts/rho.json
 6. backtest --input prepared --out <json>     reports/backtest*.json                  prepared + baseline + prior + r_lookup
 7. bootstrap.train_baseline --fit-calibration artifacts/calibration.json              prepared + baseline
-   (only when the calibration gate fails on a level error)
+   (ALWAYS run -- calibration is fitted and applied unconditionally;
+   run_bootstrap.sh does it as step 3b)
 7b. bootstrap.derive_thresholds --input prep. reports/thresholds.json                 prepared
    (evidence for the three SET BY OWNER values: empirical A/B duration vs
    MDE, and 3-sigma noise floors for the scrap/margin guardrails)
@@ -328,7 +329,7 @@ every future update. Establish the live bundle, then align the stale side.
 **Start with `python3 -m pipeline.status`.** The four reports carry ~200 fields
 between them, which is the right number to write and the wrong number to read.
 `status` prints only the checks that gate a decision — launch blockers, artifact
-mirrors, calibration gate, prior, tau, shadow gate, guardrail floors, stop
+mirrors, calibration level (diagnostic), prior, tau, shadow gate, guardrail floors, stop
 conditions, assurance — each with the figure behind it and, when red, which
 diagnostic block to open next. It computes nothing; every line is read from a
 report some other step wrote. Exit code 1 on any FAIL, so it can gate a script.
@@ -639,7 +640,8 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
 ## Gate decision tree
 
 ```
-backtest fidelity gate FAIL
+level diagnostic OUT OF BAND (calibration is always applied -- this is a
+drift/staleness reading, not a launch blocker)
 ├─ FIRST check fidelity.by_week, and distinguish WOBBLE from TREND:
 │  · wobble (swings around a level wider than the band) = week-scale
 │    demand volatility — no retrain or calibration can pass it; owner
@@ -657,18 +659,17 @@ backtest fidelity gate FAIL
 ├─ by_window shows train ≉ calib/test  → regime drift: consider later
 │  train_start, retrain, re-run (new comparison baseline)
 ├─ level_bias_at_anchor far from 1, flat slope
-│  → train_baseline --fit-calibration (factors ≥ 1 expected)
-│  → set apply_level_calibration: true, re-run backtest (NO retrain)
+│  → re-fit the factors on a trailing window (--fit-calibration) and
+│    re-run the backtest (NO retrain) -- the factors are stale, not absent
 ├─ anchor ≈ 1 but slope degrades with gap
 │  → re-run estimate_prior; a pooled/uniform prior is a valid outcome
-└─ still failing after both remedies → STOP (design 5.3 reassessment): the
-   MVP does not proceed to a learning pilot; escalate to the product owner
+└─ far out of band after a re-fit → the model itself is stale: escalate to
+   the product owner (retrain decision -- design 5.3 reassessment)
 ```
 
 ## What blocks launch (strict config)
 
 `common.config.load_config(strict=True)` refuses while any of these is null:
-`baseline_model.apply_level_calibration` (decided by the design 9.2 diagnostic),
 `dispersion.rho`, `dispersion.mean_forced_hours_per_episode`,
 `exploration.tau_initial` (from a PASSING backtest),
 `monitoring.stop_conditions.scrap_deterioration_pct` and

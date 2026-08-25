@@ -15,27 +15,28 @@ All commands run from the repo root. `data/`, `reports/`, `artifacts/`,
 ## Lane A — Train & freeze (at launch; on each retrain)
 
 Produces the sealed artifact bundle every price stands on. Runs offline; no
-price is touched until Lane B. Two steps are HUMAN GATES that route to the
-product owner — an engineer runs the commands, the owner reads the verdicts.
+price is touched until Lane B. One step is a HUMAN GATE (the prior) and one
+is an owner review (the level diagnostic) — an engineer runs the commands,
+the owner reads the verdicts.
 
 ```bash
 pip install -r requirements.txt
 python3 -m bootstrap.download_flc --days 120          # -> data/flc_raw.parquet
 scripts/run_bootstrap.sh data/flc_raw.parquet         # prepare -> eda -> measure
-                                                      # -> train -> prior ->
+                                                      # -> train -> calibrate
+                                                      # (always) -> prior ->
                                                       # dispersion -> backtest
                                                       # -> charts -> seal
 ```
 
 Then, in order:
 
-1. **GATE — calibration (owner).** Read `reports/backtest.json` →
-   `calibration_gate` / `calibration_gate_value` (metric `level_at_anchor`,
-   band `[0.90, 1.10]`). FAIL → follow the decision tree in `AGENTS.md`
-   ("Gate decision tree"); the level remedy is
-   `train_baseline --fit-calibration` + `apply_level_calibration: true` +
-   re-run the backtest **without retraining**, then **re-run
-   `bootstrap.seal`**.
+1. **Level diagnostic (review, not a gate).** Calibration is always
+   fitted and applied (the script's step 3b). Read `reports/backtest.json`
+   → `calibration_gate_value` against the band `[0.90, 1.10]`: out of band
+   is a drift/staleness reading — follow the decision tree in `AGENTS.md`
+   to separate wobble from trend — surfaced as WARN in `status`, never a
+   launch blocker.
 2. **GATE — prior (owner).** Read `artifacts/prior.json` in this order:
    `design_comparison` → `wrong_sign_categories` → per-category
    `mean/std/std_basis` → `holdout_comparison` (read
@@ -142,7 +143,7 @@ outcomes stay visible.
 | Decision / step | Engineering | Product owner |
 | --- | --- | --- |
 | Run Lane A commands, CI, deploys | **R/A** | — |
-| Calibration + prior gate verdicts | run & present | **A** |
+| Prior gate verdict; level-diagnostic review | run & present | **A** |
 | MEASURED pastes into config | **R** (from named report fields only) | informed |
 | `SET BY OWNER` thresholds, MDE, gate band | — | **A** |
 | Lane B service, outcome producer, SLA | **R/A** | — |

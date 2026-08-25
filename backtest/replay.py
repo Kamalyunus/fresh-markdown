@@ -355,8 +355,12 @@ def fidelity(d, cfg, model, prior, r_lookup):
     block["calibration_gate_band"] = band
     block["calibration_gate_metric"] = gate_metric
     block["calibration_gate_value"] = gate_value
+    # DIAGNOSTIC, not a gate (owner, 2026-08-25): calibration is always
+    # applied, so an out-of-band level is a drift/staleness reading to
+    # investigate -- fidelity.by_week distinguishes wobble from trend
     block["calibration_gate"] = ("PASS" if band[0] <= gate_value <= band[1]
-                                 else "FAIL -- blocking (design 9.2)")
+                                 else "OUT OF BAND -- level diagnostic; "
+                                      "investigate drift (design 9.2)")
     return block, d_full
 
 

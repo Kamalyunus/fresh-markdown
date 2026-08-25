@@ -88,7 +88,7 @@ CATALOGUE = [
    "production must derive identical boundaries"),
   ("split.train / calib / test", "text",
    "Date windows, fixed before any model was fit. An episode belongs wholly to "
-   "the split its window STARTED in.", "the calibration gate, which must not grade its own fit"),
+   "the split its window STARTED in.", "the level diagnostic, which must not grade its own fit"),
  ]),
 
 ("Phase 0 — is this problem tractable?", "bootstrap.measure → reports/phase0.json",
@@ -165,7 +165,8 @@ CATALOGUE = [
   ("level factor", "ratio",
    "One multiplicative correction per subcategory, blended toward its parent "
    "category with a pseudo-count of 100 anchor units. SOLVED on the censored "
-   "basis, not divided out.", "μ_ref at inference, when apply_level_calibration is true"),
+   "basis, not divided out. ALWAYS applied -- with no calibration artifact "
+   "on disk every factor reads 1.0.", "μ_ref at inference, every call"),
   ("anchor row", "text",
    "A row priced within ±1.25pp (half a tier step) of the category reference "
    "discount, so the price-response term is exactly 1. **The velocity features "
@@ -241,10 +242,12 @@ CATALOGUE = [
    "a diagnostic rather than used as the verdict.", ""),
   ("level_bias_at_anchor", "ratio",
    "The same ratio restricted to anchor rows, where the price term is 1. This is "
-   "the model's only production job.", "GATE — the calibration gate metric"),
+   "the model's only production job.", "the level diagnostic metric — WARN out of band, not a gate"),
   ("calibration_gate_band", "ratio",
    "**[0.90, 1.10]** — roughly 2σ of measured week-to-week demand volatility. Wide "
-   "enough not to fire on noise, tight enough to catch a stale model.", "GATE"),
+   "enough not to fire on noise, tight enough to catch a stale model. A "
+   "DIAGNOSTIC band: calibration is always applied, and out of band reads as "
+   "drift to investigate, never a launch blocker.", ""),
   ("gate_window", "text",
    "Which split the gate is read on. Must be DISJOINT from the calibration fit "
    "window, or the gate grades its own fit. Read the field; do not assume.", "GATE"),
@@ -597,7 +600,7 @@ CATALOGUE = [
   ("artifact mirrors", "verdict",
    "Do the config pastes still match the artifacts they came from? Read the bundle "
    "line FIRST — the check says they disagree, not which is stale.", "GATE"),
-  ("calibration gate", "verdict", "The level at the anchor, in band.", "GATE"),
+  ("calibration level", "verdict", "The level at the anchor, in band. Diagnostic — WARN out of band, since calibration is always applied.", ""),
   ("elasticity prior", "verdict", "How many categories stand on their own data, and how many are wrong-signed.", ""),
   ("exploration tau", "verdict", "What is in force, and the latest derivation.", "GATE"),
   ("shadow gate", "verdict", "Completeness, matched rate, cost-floor violations.", "GATE"),

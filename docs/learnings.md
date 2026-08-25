@@ -196,6 +196,26 @@ had already made the same correction.
 
 ---
 
+## Calibration
+
+### A blocking gate → always applied, level as a diagnostic
+**Was:** `apply_level_calibration` was a null-until-decided owner switch and
+the anchor-level band a BLOCKING launch gate, on the theory that applying a
+multiplicative factor to a slope error would mask it.
+
+**Learned:** the mask cannot happen — factors are fit on anchor rows only,
+where the price term is 1 by construction, so a slope error never enters the
+factor; the slope stays visible in `slope_ratio_by_discount_gap` either way.
+Meanwhile the gate added a decision point and a conditional pipeline step
+whose failure remedy was… fitting and applying the calibration.
+
+**Now (owner, 2026-08-25):** calibration is always fitted (bootstrap step
+3b) and always applied; with no artifact on disk every factor reads 1.0.
+The band stays as a reported DIAGNOSTIC — out of band is drift or staleness
+(`fidelity.by_week` separates wobble from trend), WARN in `pipeline.status`,
+never a blocker. The daily `realised_vs_predicted_sold_ratio` remains the
+continuous production guard.
+
 ## Exploration budget and tau
 
 ### Budget base: same-day / window-mean IL → trailing close-day IL

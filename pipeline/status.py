@@ -95,8 +95,11 @@ def _mirrors(cfg):
 
 
 def _calibration(cfg, backtest):
+    # DIAGNOSTIC, not a gate: calibration is always applied (owner,
+    # 2026-08-25). Out of band -> WARN, never FAIL -- it is a drift or
+    # staleness reading to investigate, not a launch blocker.
     if not backtest:
-        return _row("calibration gate", NONE, "no backtest report",
+        return _row("calibration level", NONE, "no backtest report",
                     "python3 -m backtest")
     fid = backtest.get("fidelity", {})
     metric = fid.get("calibration_gate_metric", "level_bias_at_anchor")
@@ -104,9 +107,9 @@ def _calibration(cfg, backtest):
                     fid.get("measurement_10", {}).get("level_bias_at_anchor"))
     lo, hi = cfg["baseline_model"]["calibration_gate_band"]
     if value is None:
-        return _row("calibration gate", NONE, "gate value absent")
+        return _row("calibration level", NONE, "diagnostic value absent")
     ok = lo <= value <= hi
-    return _row("calibration gate", PASS if ok else FAIL,
+    return _row("calibration level", PASS if ok else WARN,
                 f"{metric} {value:.4f} in band [{lo}, {hi}]"
                 f" · window {fid.get('gate_window', '?')}",
                 "" if ok else "fidelity.by_week, by_window, measurement_10")

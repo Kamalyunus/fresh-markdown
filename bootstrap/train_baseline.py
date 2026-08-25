@@ -11,9 +11,10 @@ belongs in the DP state and the censoring logic.
 Frozen at launch; no retraining during the MVP window. The model version is
 recorded on every decision event.
 
-Also fits the per-category multiplicative level-calibration factor on the
-calibration window (the section 9.3 remedy for LEVEL bias). Whether it is
-applied is decided by `baseline_model.apply_level_calibration` after the
+Also fits the per-subcategory multiplicative level-calibration factor
+(the remedy for LEVEL bias). Calibration is ALWAYS fitted and applied
+(owner, 2026-08-25) -- run as step 3b of every bootstrap; the anchor-level
+band is a reported diagnostic, decided after the
 level/slope diagnostic -- fitting it is unconditional, applying it is not.
 
 Usage:
@@ -342,8 +343,8 @@ def fit_level_calibration(d, cfg):
                        "p90": round(float(np.percentile(fv, 90)), 4),
                        "share_within_5pct_of_1": round(
                            float((np.abs(fv - 1.0) <= 0.05).mean()), 4),
-                       "note": "clustered on 1.0 -> model is level-correct, "
-                               "leave apply_level_calibration false; wide -> "
+                       "note": "clustered on 1.0 -> model is level-correct "
+                               "and the factors are a near no-op; wide -> "
                                "systematic per-cell bias worth fixing in "
                                "training, not only in the multiplier",
                    },
@@ -409,12 +410,12 @@ def main():
         below = [k for k, v in factors.items() if v < 1.0]
         if below:
             print(f"{len(below)}/{len(factors)} cells below 1.0 (model "
-                  "over-predicts there) -- investigate before applying "
-                  "(AGENTS rule 5)")
+                  "over-predicts there) -- investigate (AGENTS rule 5); "
+                  "factors are always applied")
         print(f"wrote {cfg['baseline_model']['calibration_factor_path']}")
-        print("next: set baseline_model.apply_level_calibration: true in "
-              "config.yaml, re-run backtest WITHOUT retraining the baseline, "
-              "and record the fidelity ratio before and after (design 9.2)")
+        print("factors are applied automatically (apply_level_calibration "
+              "is always true); re-run the backtest WITHOUT retraining to "
+              "see the level diagnostic move (design 9.2)")
         return
 
     schema = train(d, cfg)

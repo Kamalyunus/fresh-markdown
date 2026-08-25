@@ -202,16 +202,18 @@ f  =  f_cell ^ w  ×  f_parent ^ (1 − w)    blended in log space, since factor
 
 <figure style="margin-top:30px">
   <div class="scroller"><table class="tl">
-    <caption>Where the gate stands</caption>
-    <thead><tr><th>Check</th><th>Value</th><th>Verdict</th></tr></thead>
+    <caption>Where the level stands</caption>
+    <thead><tr><th>Check</th><th>Value</th><th>Reading</th></tr></thead>
     <tbody>
-      <tr><td>level at the reference price</td><td>1.0389</td><td class="good">PASS — band [0.90, 1.10]</td></tr>
+      <tr><td>level at the reference price</td><td>1.0389</td><td class="good">in band [0.90, 1.10]</td></tr>
     </tbody>
   </table></div>
   <figcaption>
-    The band is roughly two standard deviations of measured week-to-week demand volatility
-    — wide enough not to fire on ordinary noise, tight enough to catch a model that has
-    genuinely gone stale. The factors are fit on train and calibration weeks and graded on
-    test, so the gate never grades its own fit.
+    Calibration is <strong>always fitted and applied</strong> — no gate decides it. The
+    band is a diagnostic: roughly two standard deviations of measured week-to-week demand
+    volatility, wide enough not to fire on ordinary noise, tight enough to catch a model
+    that has genuinely gone stale — out of band reads as drift to investigate, not a
+    launch blocker. The factors are fit on train and calibration weeks and graded on
+    test, so the diagnostic never grades its own fit.
   </figcaption>
 </figure>

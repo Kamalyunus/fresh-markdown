@@ -6,9 +6,10 @@
 # ones in the AGENTS.md pipeline table -- the single numbering anyone reading
 # both is meant to follow.
 #
-# The two blocking gates are NOT decided here: the calibration gate (step 6's
-# report) and the prior-acceptance gate (step 5's artifact) are human reviews.
-# This script produces their evidence and stops.
+# The prior-acceptance gate (step 4's artifact) is a human review; this
+# script produces its evidence and stops. Calibration is ALWAYS fitted and
+# applied (owner, 2026-08-25) -- the anchor-level band is a reported
+# diagnostic, not a gate.
 set -euo pipefail
 INPUT="${1:?usage: scripts/run_bootstrap.sh <flc_parquet>}"
 
@@ -27,21 +28,24 @@ python3 -m bootstrap.measure --input "$INPUT" --out reports/phase0.json
 echo "== step 3: bootstrap.train_baseline ============================="
 python3 -m bootstrap.train_baseline --input data/prepared.parquet
 
+echo "== step 3b: level calibration (always fitted and applied) ======="
+# Factors are fit on anchor rows only, so a slope error cannot contaminate
+# them, and every downstream fit and replay reads the calibrated mu_ref.
+# The anchor-level band stays a DIAGNOSTIC in the backtest report.
+python3 -m bootstrap.train_baseline --input data/prepared.parquet --fit-calibration
+
 # ORDER: the prior comes FIRST, and it is not arbitrary. `fit_dispersion`
-# forms residuals at a working elasticity, so running it first meant fitting r
-# and rho at the fallback constant -- fine while the bracket was rejected for
-# every category, wrong once brackets are accepted per category. The two steps
-# are circular (the bracket's likelihood needs r), and the loop is cut on the
-# prior's side because it is far weaker there: the bracket uses a reference r
-# and drops its censored entry rows, costing ~0.099 against stds of 0.4-1.7,
-# where dispersion at the wrong elasticity costs 26% of the learning rate.
+# forms residuals at a working elasticity -- each category's prior mean -- so
+# the prior must exist before r and rho are fitted (the epsilon -> r
+# direction costs 26% of the learning rate; the r -> epsilon direction is
+# zero, since the prior's profile is censored Poisson and needs no r).
 echo "== step 4: bootstrap.estimate_prior ============================="
 python3 -m bootstrap.estimate_prior --input data/prepared.parquet
 
 echo "== step 5: bootstrap.fit_dispersion ============================="
 python3 -m bootstrap.fit_dispersion --input data/prepared.parquet
 
-echo "== step 6: backtest -- calibration gate + tau_initial ==========="
+echo "== step 6: backtest -- level diagnostic + tau_initial ==========="
 python3 -m backtest --input data/prepared.parquet --out reports/backtest.json
 
 echo "== step 10: tools.make_charts ==================================="
@@ -80,17 +84,12 @@ python3 -m pipeline.status || true
 cat <<'EOF'
 
 Bootstrap complete. Before any price is applied (design sections 9-10):
-  1. Review reports/backtest.json: the calibration gate (fidelity, read on
-     the window named by baseline_model.calibration_gate_window) is BLOCKING;
-     resolve baseline_model.apply_level_calibration from the level/slope
-     decomposition. The remedy, if needed:
-       python3 -m bootstrap.train_baseline --input data/prepared.parquet --fit-calibration
-       python3 -m bootstrap.seal      # calibration.json is new -- RE-SEAL
-     --fit-calibration writes a seventh artifact into the bundle, so the seal
-     taken above no longer describes the set. Re-run it or the bundle line
-     stays stale.
-  2. Review artifacts/prior.json: the prior-acceptance gate is BLOCKING;
-     a fallback source is an acceptable outcome and is already recorded.
+  1. Review reports/backtest.json: the level DIAGNOSTIC (calibration is
+     always applied; fidelity read on baseline_model.calibration_gate_window).
+     Out of band is a drift/staleness reading -- fidelity.by_week separates
+     wobble from trend -- not a launch blocker.
+  2. Review artifacts/prior.json: the prior-acceptance gate is BLOCKING and
+     HUMAN; a pooled or uniform prior is a designed outcome.
   3. Paste MEASURED values into config.yaml (rho, forced hours, tau_initial,
      il_pct_ratio_se_clustered). For the SET BY OWNER keys, produce the
      evidence with:

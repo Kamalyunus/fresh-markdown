@@ -65,8 +65,6 @@ HOLDOUT_BASIS = "holdout"
 
 def _require_shadow_config(cfg, backtest_path="reports/backtest.json"):
     missing = []
-    if cfg["baseline_model"]["apply_level_calibration"] is None:
-        missing.append("baseline_model.apply_level_calibration (section 9.3 decision)")
     if cfg["exploration"]["tau_initial"] is None:
         missing.append("exploration.tau_initial (from a PASSING backtest)")
     if missing:

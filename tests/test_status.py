@@ -27,9 +27,9 @@ def _verdicts(report):
 
 def test_missing_reports_read_as_not_run_never_as_pass(cfg, tmp_path):
     v = _verdicts(status.collect(cfg, str(tmp_path)))
-    for check in ("calibration gate", "shadow gate", "stop conditions", "assurance"):
+    for check in ("calibration level", "shadow gate", "stop conditions", "assurance"):
         assert v[check] == status.NONE
-    assert status.PASS not in {v[c] for c in ("calibration gate", "shadow gate")}
+    assert status.PASS not in {v[c] for c in ("calibration level", "shadow gate")}
 
 
 def test_a_report_that_exists_but_predates_a_block_is_not_a_pass(cfg, tmp_path):
@@ -43,11 +43,13 @@ def test_calibration_gate_reads_the_band_from_config(cfg, tmp_path):
     _write(tmp_path, "backtest", {"fidelity": {
         "calibration_gate_metric": "level_bias_at_anchor",
         "calibration_gate_value": (lo + hi) / 2, "gate_window": "test"}})
-    assert _verdicts(status.collect(cfg, str(tmp_path)))["calibration gate"] == status.PASS
+    assert _verdicts(status.collect(cfg, str(tmp_path)))["calibration level"] == status.PASS
 
     _write(tmp_path, "backtest", {"fidelity": {
         "calibration_gate_value": hi + 0.5, "gate_window": "test"}})
-    assert _verdicts(status.collect(cfg, str(tmp_path)))["calibration gate"] == status.FAIL
+    # out of band is a DIAGNOSTIC warning, never a launch-blocking FAIL:
+    # calibration is always applied
+    assert _verdicts(status.collect(cfg, str(tmp_path)))["calibration level"] == status.WARN
 
 
 def test_shadow_verdict_carries_a_trailing_note(cfg, tmp_path):
