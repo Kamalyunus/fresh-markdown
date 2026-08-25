@@ -40,13 +40,18 @@ own `prior_mean` and `prior_std` formula. So this is a strict generalisation:
 identical where the old procedure was justified, honestly wider where it was
 not, and it needs no floor because the density's own width is the floor.
 
-ROWS: every stocked hour, not just entry rows. The entry hour is BEFORE the
-legacy ramp starts discounting, so entry rows sit at the opening discount --
-which is the reference -- and carry almost no price variation. Measured on the
-fixture, `log_ratio` sd went 0.00267 -> 0.02352 for MEAT and 0.0 -> 0.02448 for
-SIDE DISH by scoring every hour. The extra rows are not free: they repeat the
-same episode, so the log-likelihood is deflated by the design effect before any
-interval is read from it.
+ROWS: ENTRY ROWS, one per episode, which is what PRD 9.5 specified from the
+start. Scoring every stocked hour was tried, to buy price variation, and it
+bought the within-episode survivorship confound with it -- 4 of 5 fixture
+categories came back with a POSITIVE unconstrained peak against 2 of 5 on entry
+rows. See `scored_rows` for the mechanism and the trade. `rows_comparison` in
+the artifact reports the sign outcome for both sets on every run, so the choice
+is made on the extract in hand.
+
+Where more than one row per episode IS scored, the log-likelihood is deflated
+by the design effect first: repeated hours of one episode are not independent
+observations and an interval read off them would be too tight by about
+sqrt(deff).
 
 WHY THE DEFLATION deff IS eps-FREE. It is computed from `units_sold - mu_ref`
 residuals, with no elasticity applied, which is what keeps this acyclic --
@@ -59,6 +64,8 @@ Usage is via `bootstrap.estimate_prior`, which dispatches on
 `posterior.prior.method`.
 """
 
+import copy
+
 import numpy as np
 import pandas as pd
 from scipy.special import gammaln, logsumexp
@@ -70,8 +77,52 @@ from bootstrap.prepare_data import population, split_frames
 
 
 def scored_rows(frame, cfg, which):
-    """The rows a profile is built on. `all_stocked_hours` is the default and
-    the reason is measured -- see the module docstring."""
+    """The rows a profile is built on.
+
+    ENTRY ROWS ARE THE DEFAULT, and PRD 9.5 said so from the start: under the
+    legacy ramp a row at a deep discount exists PRECISELY BECAUSE earlier hours
+    did not sell, so within-episode rows carry a survivorship confound. Moving
+    to every stocked hour to buy price variation was a mistake -- it bought the
+    variation and the confound together, and the confound is the larger effect.
+
+    Both directions of the within-episode confound push the same way:
+
+      the legacy ramp deepens the discount as the hours pass, and demand rises
+      into the evening, so discount and demand climb together;
+      and the episodes that SURVIVE to the deep-discount hours are the ones
+      that were not selling, so conditional on a price-neutral mu_ref a deeper
+      price reads as lower demand.
+
+    `hour_of_day` is already a mu_ref feature and the controlled arm profiles
+    hour effects out on top, so the first is handled twice -- and the sign
+    still came out positive on 4 of 5 fixture categories, because the second is
+    selection on the unobserved demand shock and no hour control touches it.
+    Entry rows have neither: one row per episode, at hour one, before any
+    selection has happened.
+
+    Measured on the fixture, unconstrained peaks searched past the bound:
+
+      rows              wrong-signed categories
+      entry             2 of 5
+      all_stocked_hours 4 of 5
+
+    THE COST IS REAL AND IT IS THE OTHER HORN. Entry rows carry far less price
+    variation -- the entry hour is before the ramp starts, so it sits at or
+    near d_ref. On the fixture SIDE DISH drops from sd 0.024 to 0.0014 and
+    VEGETABLE has none at either. So the choice is between an estimate that is
+    weakly identified and one that is confidently backwards, and a weak
+    right-signed estimate degrades to the uniform on the support while a
+    confident wrong-signed one has to be thrown away entirely.
+
+    `rows_comparison` in the artifact reports the sign outcome for BOTH sets on
+    every run, so the choice is evidenced on the extract in hand rather than
+    inherited from this comment.
+
+    ONE THING GOT CHEAPER. The old bracket had to DROP censored entry rows,
+    because its NB likelihood needed an `r` in exactly the term censoring
+    fires. The Poisson profile carries no dispersion parameter, so censored
+    entry rows are kept and the selection bias that drop introduced is gone.
+    """
     f = frame.copy()
     f["censored"] = episodes.censored_hours(f)
     f = f[f.starting_inventory >= 1]
@@ -310,6 +361,58 @@ def fold_spread(d, cfg, model, grid, folds=3):
     return out
 
 
+def rows_comparison(d, cfg, model, lo, hi, n):
+    """The sign outcome for BOTH row sets, every run.
+
+    `rows` is the one genuinely contested choice left in this method, and it
+    trades two bad things against each other: entry rows are unconfounded but
+    carry little price variation, every stocked hour has the variation and the
+    within-episode survivorship confound. Which one wins is a property of the
+    EXTRACT, not of the method, so it must be measured on the extract rather
+    than settled in a comment. A run where entry rows come back mostly
+    wrong-signed too says the history cannot identify elasticity at all, which
+    is worth knowing before anyone tunes anything else.
+    """
+    out = {}
+    for which in ("entry", "all_stocked_hours"):
+        alt = copy.deepcopy(cfg)
+        alt["posterior"]["prior"]["rows"] = which
+        wide = np.linspace(lo, max(1.0, hi), n)
+        try:
+            fit = build_curves(d, alt, model, wide, "train")
+        except Exception as exc:                        # noqa: BLE001
+            out[which] = {"error": str(exc)}
+            continue
+        bad, spans, sds = [], [], []
+        for cat, c in fit.items():
+            peak = max(wide[int(np.argmax(c["naive"]))],
+                       wide[int(np.argmax(c["controlled"]))])
+            step = float(wide[1] - wide[0])
+            if peak >= -step:
+                bad.append(cat)
+            spans.append(max(np.ptp(c["naive"]), np.ptp(c["controlled"]))
+                         / c["deff"])
+            sds.append(c["log_ratio_sd"])
+        out[which] = {
+            "categories": len(fit),
+            "wrong_signed": sorted(bad),
+            "wrong_signed_count": len(bad),
+            "median_span": round(float(np.median(spans)), 2) if spans else None,
+            "median_log_ratio_sd": (round(float(np.median(sds)), 6)
+                                    if sds else None),
+            "rows": int(sum(c["rows"] for c in fit.values())),
+        }
+    out["in_use"] = cfg["posterior"]["prior"].get("rows", "entry")
+    out["note"] = (
+        "entry rows are one per episode, taken before the legacy ramp starts, "
+        "so they carry no within-episode survivorship confound and little "
+        "price variation. all_stocked_hours has the variation and the "
+        "confound. Fewer wrong-signed categories is the thing to read: a "
+        "weakly identified right-signed estimate degrades to the uniform on "
+        "the support, a confident wrong-signed one is discarded entirely.")
+    return out
+
+
 def estimate(d, cfg, model):
     """The prior, as a density per category. No constant anywhere in it."""
     pc = cfg["posterior"]["prior"]
@@ -321,6 +424,7 @@ def estimate(d, cfg, model):
     fit = build_curves(d, cfg, model, grid, "train")
     unconstrained = unconstrained_argmax(d, cfg, model, lo, hi,
                                          pc["search_grid_size"])
+    rows_cmp = rows_comparison(d, cfg, model, lo, hi, pc["search_grid_size"])
     folds = fold_spread(d, cfg, model, grid,
                         int(pc.get("stability_folds", 3)))
     if not fit:
@@ -481,6 +585,7 @@ def estimate(d, cfg, model):
         "pooled_std": round(pooled_std, 4),
         "pooled_deff": round(pooled_deff, 3),
         "pooled_basis": pooled_basis,
+        "rows_comparison": rows_cmp,
         "pooled_categories": sorted(
             c for c in fit if not signs[c][0] and fit[c]["log_ratio_sd"] > 1e-9),
         "pooled_density": [round(float(x), 8) for x in pooled],

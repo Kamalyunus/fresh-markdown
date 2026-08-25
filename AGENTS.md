@@ -420,6 +420,19 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
       answer costing more than an honest wide one, in nats.
    3. `ranking` and `verdict` last, and only once 1 and 2 are read.
 
+   **ROWS ARE ENTRY ROWS** (owner, 2026-08-25), one per episode, which is what
+   PRD 9.5 specified from the start. Scoring every stocked hour buys price
+   variation and the within-episode SURVIVORSHIP confound together: a row at a
+   deep discount exists precisely because earlier hours did not sell, so
+   conditional on a price-neutral `mu_ref` the deeper price reads as LOWER
+   demand. `hour_of_day` is already a `mu_ref` feature and the controlled arm
+   profiles hour effects out on top, so the evening-lift half is handled twice
+   — and the sign STILL came out positive on 4 of 5 fixture categories against
+   2 of 5 on entry rows, because selection on the unobserved demand shock is
+   not something an hour control can reach. **`rows_comparison` reports the
+   sign outcome for BOTH sets every run** — read it before changing
+   `posterior.prior.rows`.
+
    **READ `wrong_sign_categories` AND `std_basis` FIRST.** Two failures the
    method could not see until production data hit it, both now caught:
 

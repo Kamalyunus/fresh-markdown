@@ -279,14 +279,42 @@ posterior:
       #
       # Every run writes `holdout_comparison` scoring BOTH methods on data
       # neither saw. Read it before changing this key.
-    rows: "all_stocked_hours"          # SET  "all_stocked_hours" | "entry"
-      # WHERE THE PRICE VARIATION IS. The entry hour is BEFORE the legacy ramp
-      # starts discounting, so entry rows sit at the opening discount -- which
-      # IS d_ref -- and carry almost none. Measured on the fixture, scoring
-      # every stocked hour moved log_ratio sd from 0.00267 to 0.02352 for MEAT
-      # and from 0.0 to 0.02448 for SIDE DISH, whose entry-row likelihood was
-      # CONSTANT. The extra rows repeat the same episode, so the curve is
-      # deflated by the design effect before any interval is read from it.
+    rows: "entry"                      # SET  "entry" | "all_stocked_hours"
+      # ENTRY ROWS, and PRD 9.5 said so from the start (owner, 2026-08-25).
+      # Under the legacy ramp a row at a deep discount exists PRECISELY because
+      # earlier hours did not sell, so within-episode rows carry a survivorship
+      # confound. `all_stocked_hours` was tried to buy price variation and it
+      # bought the confound with it, which is the larger effect.
+      #
+      # Both within-episode mechanisms push the same way. The ramp deepens the
+      # discount as hours pass while demand rises into the evening, so discount
+      # and demand climb together; and the episodes that SURVIVE to the deep
+      # hours are the ones that were not selling, so conditional on a
+      # price-neutral mu_ref a deeper price reads as lower demand.
+      # `hour_of_day` is already a mu_ref feature and the controlled arm
+      # profiles hour effects out on top -- so the first is handled twice, and
+      # the sign STILL came out positive on 4 of 5 fixture categories, because
+      # the second is selection on the unobserved demand shock and no hour
+      # control reaches it. Entry rows have neither.
+      #
+      # Fixture, unconstrained peaks searched past the bound:
+      #   entry              2 of 5 categories wrong-signed
+      #   all_stocked_hours  4 of 5
+      #
+      # THE COST IS REAL AND IT IS THE OTHER HORN: entry rows carry far less
+      # price variation, since the entry hour is before the ramp starts and
+      # sits at or near d_ref. SIDE DISH goes from sd 0.024 to 0.0014. So the
+      # choice is between weakly identified and confidently backwards -- and a
+      # weak right-signed estimate degrades to the uniform on the support,
+      # while a confident wrong-signed one is discarded entirely.
+      #
+      # `rows_comparison` in prior.json reports the sign outcome for BOTH sets
+      # on every run. Read it before changing this key.
+      #
+      # Censored entry rows are KEPT now. The old bracket had to drop them --
+      # its NB likelihood needed an `r` in exactly the term censoring fires --
+      # and the Poisson profile has no dispersion parameter, so that selection
+      # bias is gone.
     own_information_saturation: 2.0    # SET  log-likelihood units, across the
       # whole support, at which a category stops borrowing from the pool and
       # stands on its own data. 2.0 is the chi-square 95% cutoff: a category
