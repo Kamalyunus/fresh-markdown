@@ -85,11 +85,8 @@ class PosteriorStore:
     def _atomic_write(path, state):
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
                                    prefix=".posterior-")
-        # fsync the file AND the directory: os.replace is atomic against
-        # crashes of this process, but without the fsyncs a power failure can
-        # leave the one file production writes -- the learning state and its
-        # exactly-once ledger -- truncated or lost, which events.store already
-        # guards against for its own appends.
+        # fsync file AND directory: without them a power failure can lose the
+        # learning state and its exactly-once ledger
         with os.fdopen(fd, "w") as f:
             json.dump(state, f, indent=2)
             f.flush()
@@ -118,29 +115,16 @@ class PosteriorStore:
 
     def commit_update(self, cell, new_mean, new_std, n_new_obs,
                       effective_information, outcome_ids, applied):
-        """Atomically persist a posterior revision together with the outcome
-        IDs it consumed (section 13.5: both commit or neither).
-
-        An outcome is marked processed ONLY when a revision actually consumes
-        it. A sub-threshold batch is left entirely unconsumed so tomorrow's
-        run re-collects it and evaluates the likelihood over the whole
-        accumulated batch. Marking it processed while declining to update
-        would bank a scalar and throw the data away -- the posterior would
-        later step on the strength of an information count it no longer had
-        the observations to justify, and on a pilot small enough that no
-        single day clears the threshold it would discard every outcome
-        forever while the mean never moved.
+        """Atomically persist a revision with the outcome IDs it consumed
+        (both commit or neither). An outcome is marked processed ONLY when a
+        revision consumes it -- a sub-threshold batch stays whole and is
+        re-read tomorrow (design 5.11).
         """
         rec = self.state["cells"][cell]
         if not applied:
             return                       # nothing consumed, nothing persisted
-        # No `information_since_update` counter. The original spec carried one and it
-        # was carried here for a while, always reset and never incremented,
-        # because the trigger is evaluated on the UNCONSUMED BATCH rather than
-        # on a running total -- see `pipeline.update.run`. A field that is
-        # permanently zero reads as "no evidence has accrued", which is the
-        # opposite of what a growing batch means, so it is gone rather than
-        # kept for the schema's sake. `accumulated_information` is the total.
+        # no information_since_update counter -- the trigger reads the
+        # unconsumed batch, never a running total (design 5.11)
         rec["mean"], rec["std"] = float(new_mean), float(new_std)
         rec["version"] += 1
         rec["accumulated_information"] += effective_information
@@ -151,13 +135,8 @@ class PosteriorStore:
             self._processed.update(outcome_ids)
         self._atomic_write(self.path, self.state)
 
-    # ------------------------------------------------------------------ tau
-    # tau is production learning state in exactly the sense the posterior is:
-    # it is set from config ONCE at launch and moves thereafter from realised
-    # spend (12.3). It therefore lives here, in the file that already commits
-    # atomically and is already the one thing production writes -- not back
-    # into config.yaml, which is hand-maintained and would make a running
-    # system edit its own source of truth.
+    # tau is production learning state: it lives here, not in hand-
+    # maintained config.yaml (design 5.8).
 
     def tau(self, cfg):
         """The exploration budget in force, in currency.
@@ -174,12 +153,8 @@ class PosteriorStore:
         return self.state.get("tau_calibrated_through")
 
     def commit_tau(self, tau, through_date):
-        """Persist a recalibrated tau, stamped with the date it consumed.
-
-        The stamp is the exactly-once guard: two `--apply` runs on the same
-        day would otherwise apply the same budget-vs-spend ratio twice and
-        move tau by its square.
-        """
+        """Persist a recalibrated tau, stamped with the date it consumed --
+        the exactly-once-per-day guard."""
         self.state["tau"] = float(tau)
         self.state["tau_calibrated_through"] = str(through_date)
         self.state["tau_updated_at"] = pd.Timestamp.now("UTC").isoformat()

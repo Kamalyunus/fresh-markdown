@@ -25,22 +25,10 @@ from pricing.demand import mu_at, nb_pmf_vector
 def feasible_tiers(original_price, cost, tier_step):
     """{k * tier_step : 0 <= k * tier_step <= d_max}, ascending discounts.
 
-    A 100% discount is EXCLUDED: a zero price is not a price, and the demand
-    model is undefined there. mu(d) = mu_ref * ((1 - d)/(1 - d_ref))^eps
-    diverges as d -> 1 and raises outright at d = 1, since epsilon is negative
-    by construction and 0 ** negative is a ZeroDivisionError.
-
-    That tier is reachable whenever `cost` is 0, which nothing upstream
-    rejects: `non_priceable_dropped` tests `cost >= original_price`, so a zero
-    cost reads as maximally priceable (d_max = 1.0), and
-    `negative_quantities_dropped` drops negative costs, not zero ones. A
-    zero-cost row is almost certainly a missing cost rather than a free good,
-    but the action set must not depend on that being caught upstream -- this
-    is the layer that owns "which prices are legal", and a price of zero is
-    not one of them.
-
-    `d_max` is still returned as the true cost floor, so the decision event
-    records the economics rather than this correction.
+    A 100% discount is EXCLUDED even when a zero cost makes d_max = 1.0:
+    this layer owns "which prices are legal" and must not rely on upstream
+    filters, and mu(d) is undefined at d = 1. `d_max` is still returned as
+    the true cost floor so the decision event records the economics.
     """
     d_max = 1.0 - cost / original_price
     if d_max < 0:
@@ -51,60 +39,24 @@ def feasible_tiers(original_price, cost, tier_step):
 
 
 def deepening_threshold_epsilon(original_price, cost, d):
-    """|epsilon| above which deepening the discount below `d` reduces IL.
+    """|epsilon| above which deepening below `d` reduces IL:
+    (1-d)/(gamma-d), gamma = cost/price (design 5.7 for the derivation).
 
-    The hourly action set already contains EVERY tier deeper than the anchor
-    -- 2.5pp, 5pp, or a jump straight to the cost floor. Whether the DP uses
-    them is an economics question, not an action-set question, and it has a
-    closed form. Ignoring inventory censoring, one hour of IL is
-
-        IL(d) = P0*d*mu(d) + c*(q - mu(d)),   mu(d) = mu_ref*((1-d)/(1-d_ref))^eps
-
-    so with a = |epsilon|, dmu/dd = mu*a/(1-d) and
-
-        dIL/dd = mu * [ P0 + (P0*d - c) * a/(1-d) ]
-
-    which is negative -- deepening pays -- only when a > (1-d)/(gamma-d),
-    gamma = cost/price. The first term is the cost of discounting the units
-    that would have sold anyway; it dominates until demand responds hard
-    enough to outrun it.
-
-    Returns inf when gamma <= d (price already at or under cost: no deepening
-    can pay). The bound is OPTIMISTIC: censoring at small inventory blunts the
-    demand gain, so the true switch point sits above this value -- with median
-    starting inventory ~2, materially so.
+    inf when gamma <= d. OPTIMISTIC: censoring at small inventory pushes the
+    true switch point above this value.
     """
     gamma = cost / original_price
     return float("inf") if gamma - d <= 1e-9 else (1.0 - d) / (gamma - d)
 
 
 def entry_action_set(tiers, d_ref, d_max, pcfg):
-    """Tier indices allowed for the ENTRY decision.
+    """Tier indices allowed at ENTRY: `pricing.entry_offsets` relative to
+    d_ref, snapped to the grid and filtered by the cost floor (rationale for
+    the coarse one-sided arm set: design 5.7 / config comment).
 
-    Entry is a genuinely different decision from the hourly one and gets its
-    own, coarser action set: `pricing.entry_offsets` in percentage points of
-    discount RELATIVE TO the category reference, e.g. [-0.15, -0.10, -0.05, 0]
-    means "enter up to 15pp shallower than reference, or at reference".
-
-    Two reasons the entry grid is coarse and one-sided rather than the hourly
-    2.5pp grid:
-
-    - Monotonicity makes entry irreversible in one direction. Price may only
-      hold or deepen afterwards, so the entry choice sets the ceiling on
-      every later price in the episode. Entering deeper than reference spends
-      margin in hour one AND forfeits the room to deepen later; entering
-      shallower is the lever that saves IL, and the whole episode's path
-      hangs off it.
-    - Coarse arms concentrate exploration evidence. Entry is where
-      identification lives (section 3.2 -- the confound-free variation is
-      entry-hour variation across episodes), so four well-separated arms
-      produce a far sharper elasticity read than sixteen 2.5pp arms whose
-      demand differences are inside the noise.
-
-    Offsets are snapped to the tier grid and filtered by the cost floor. If
-    the floor forbids every requested arm, the deepest feasible tier is the
-    only action -- a single-action decision, correctly non-explorable, rather
-    than a silent fallback to the full grid.
+    If the floor forbids every requested arm, the deepest feasible tier is
+    the only action -- correctly non-explorable, never a silent fallback to
+    the full grid.
     """
     step = pcfg["tier_step"]
     allowed = []

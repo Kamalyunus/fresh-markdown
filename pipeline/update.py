@@ -5,33 +5,15 @@ Design section 5.11. Runs as a daily batch:
     python3 -m pipeline.update             # monitor only
     python3 -m pipeline.update --apply     # apply bounded posterior updates
 
-Eligibility (13.1): only finalized outcomes whose decision has
-is_exploration = true. Exploitation outcomes are never used -- prices chosen
-by the DP depend on the current posterior, so learning from them feeds the
-model's own beliefs back into itself. reference_mu comes from the decision
-event, never recomputed.
+Eligibility: exploration outcomes only, finalized, reference_mu from the
+decision event (never recomputed). Censored NB likelihood on the grid; NB
+Fisher information deflated by deff; bounded step; exactly-once commit.
 
-The likelihood (13.2) retains zero sales through the exact P(D = 0) term and
-treats stockout hours as censored (P(D >= inventory)), never as exact counts.
-Accumulated information is deflated by deff (13.3). Each update is bounded
-(13.4) and updates are exactly-once (13.5): the posterior store commits the
-revision and the consumed outcome IDs in a single atomic write.
-
-Two things move here, and they move on different evidence:
-
-  posterior mean/std   on INFORMATION -- only when a cell's effective
-                       information crosses `learning.information_increment`
-  tau                  on SPEND (12.3) -- every run, because a day that
-                       explored and learned nothing still cost money
-
-Both are persisted to `artifacts/posterior.json`, which is production learning
-state and the only file this command writes. `tau` lives there rather than in
-`config.yaml` so that a running system does not edit its own hand-maintained
-source of truth; `PosteriorStore.tau(cfg)` falls back to
-`exploration.tau_initial` until the first calibration, and is what a
-production caller should pass to `inference.decide`.
-
-The command refuses to apply while any hard event-quality gate fails (14.1).
+Two things move, on different evidence: posterior mean/std on INFORMATION
+(when the unconsumed batch crosses `information_increment`); tau on SPEND,
+every run. Both persist to artifacts/posterior.json -- the only file this
+command writes; production callers read tau via `PosteriorStore.tau(cfg)`.
+Refuses to apply while any hard event-quality gate fails.
 """
 
 import argparse
@@ -136,19 +118,11 @@ def grid_update(pairs, cell_record, cfg):
     raw_mean = float(np.sum(w * grid))
     raw_std = float(np.sqrt(np.sum(w * (grid - raw_mean) ** 2)))
 
-    # SEQUENTIAL PREDICTIVE CHECK -- tomorrow's real outcomes grade today's
-    # belief. Every outcome in this batch arrived AFTER the current posterior
-    # was set, so the log marginal predictive of the batch under the
-    # PRE-UPDATE posterior is an honest out-of-sample score of the belief --
-    # the production continuation of the prior's holdout_comparison, rolling
-    # forward. Bracketed the same way: `oracle` (the best single epsilon for
-    # this batch, with hindsight) and `uniform` (a flat belief on the
-    # support). A posterior scoring BELOW uniform predicted these outcomes
-    # worse than no opinion would have -- the signature of a belief that
-    # tightened too far or in the wrong place, which is exactly what
-    # max_std_shrink / min_std exist to prevent and nothing offline can test.
-    # Correlated hours inflate all three scores alike (no deff here), so read
-    # the DIFFERENCES, never the absolute values.
+    # SEQUENTIAL PREDICTIVE CHECK: the batch arrived after the current
+    # posterior was set, so its log marginal predictive under the PRE-update
+    # posterior is an out-of-sample grade of the belief, bracketed by oracle
+    # and uniform (design 5.11). Correlated hours inflate all three scores
+    # alike -- read differences, never absolutes.
     n = len(pairs)
     log_w_prior = log_prior - logsumexp(log_prior)
     pred_posterior = float((logsumexp(loglik + log_w_prior)) / n)
@@ -169,11 +143,8 @@ def grid_update(pairs, cell_record, cfg):
                  "tightened faster than the evidence justified."),
     }
 
-    # information at the pre-update posterior mean, in NB units: with
-    # Var[D] = mu + mu^2/r the per-hour Fisher information for epsilon is
-    # (dmu/deps)^2 / Var = mu * L^2 * r/(r+mu) -- NOT the Poisson mu * L^2,
-    # which at production mu and r overstates evidence ~1.6-1.9x on top of
-    # what deff corrects, so the increment fired earlier than its face value.
+    # NB Fisher information at the pre-update mean: mu * L^2 * r/(r+mu),
+    # never the Poisson mu * L^2 (overstates ~1.6-1.9x; learnings.md)
     mu_at_mean = np.clip(mu0 * np.exp(cell_record["mean"] * log_ratio),
                          cfg["pricing"]["demand_floor"], None)
     information = float(np.sum(
@@ -189,23 +160,10 @@ def grid_update(pairs, cell_record, cfg):
 
 
 def tau_calibration(decisions, outcomes, posterior, cfg):
-    """Section 12.3: move tau toward the budget from what exploration spent.
-
-    Deliberately on the SAME two numbers `pipeline.monitor` compares for its
-    `exploration_cost_vs_budget` stop condition -- realised exploration cost
-    against `budget_today` on realised markdown IL, both over the whole event
-    window. One definition, so the proportional correction and the suspension
-    backstop cannot disagree about what "over budget" means: tau starts
-    shrinking well before the 2x stop condition fires, which is the ordering
-    that keeps exploration running.
-
-    Both sides cover the same window, so the RATIO is scale-free -- a batch
-    that carries forward does not double-count itself, because it grows on
-    both sides at once.
-
-    Returns a report block, always. `commit` is False when there is nothing
-    to calibrate from, which is a different thing from a ratio of 1.
-    """
+    """Move tau toward the budget from realised spend (design 5.8) -- on
+    the SAME two numbers the monitor's stop condition compares, so the
+    correction and the backstop cannot disagree. Always returns a block;
+    `commit` False means nothing to calibrate from."""
     from pipeline.monitor import business_metrics      # sibling; no cycle
 
     tau_now = posterior.tau(cfg)
@@ -228,15 +186,8 @@ def tau_calibration(decisions, outcomes, posterior, cfg):
 
     forced = [d for d in decisions if d["is_exploration"]]
     if not forced:
-        # NOT the same as "explored and spent almost nothing", and the
-        # difference is a positive feedback loop. With no forced decisions
-        # realised cost is 0, the guard floors the denominator at
-        # `tau_spend_guard`, and `budget / 1` clips to the 2x ceiling -- so
-        # tau DOUBLES. The window where that happens is precisely the one
-        # where exploration was suspended by the stop condition for
-        # overspending, so tau would grow every day it was switched off and
-        # come back further over budget than it went away: 448 -> 896 ->
-        # 1792. An absence of spend is an absence of signal; hold tau still.
+        # zero spend is an ABSENCE OF SIGNAL, not underspend: calibrating on
+        # it clips tau upward every day exploration is suspended. Hold still.
         block["skipped"] = "no exploration in the window -- nothing to calibrate from"
         block["through_date"] = through
         return block

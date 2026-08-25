@@ -23,11 +23,8 @@ import pandas as pd
 
 def affordable_set(dp_result, tau):
     """Tier indices a perturbation may legally land on, and their costs.
-
-    Public because `pipeline.assurance` has to reconstruct EXACTLY what this
-    chose in order to test that the draw was uniform. Two copies of this rule
-    that drift apart would leave the check quietly testing the wrong set, and
-    the failure it exists to catch is already silent.
+    Public: `pipeline.assurance` reconstructs this exact set to test that the
+    draw was uniform -- one definition, never two.
     """
     q = dp_result.q_by_tier
     star = dp_result.optimal_index
@@ -65,20 +62,10 @@ def select(dp_result, tau, rng, explorable=True):
 class SpreadLedger:
     """Q(p_star) - Q(p) spreads, bucketed by day, and the tau they imply.
 
-    ONE definition of "what would tau spend", shared by the backtest replay
-    and the shadow harness, because two copies drifted apart once already:
-    the replay collected spreads at the ENTRY decision only (`if t == 0`)
-    while `select` is called at every decision hour, so tau_initial was
-    solved to fund roughly one exploration per episode against a system that
-    explores ~8 times per episode. That is most of the 8.7x the shadow report
-    measured, and it was invisible because the replay's own bisection reports
-    1.00x by construction.
-
-    Costs are recorded for EVERY decision the caller sees, independently of
-    the tau in force -- the spread is a property of the state, not of what
-    was drawn from it. Stored flat and chunked rather than as one array per
-    decision: at full population this holds ~30M costs, and 3M small numpy
-    arrays cost more in object overhead than the numbers do.
+    The ONE definition of "what would tau spend", shared by replay and
+    shadow -- costs recorded for EVERY decision, independent of the tau in
+    force (the entry-only version of this is in docs/learnings.md). Stored
+    flat and chunked: ~30M costs at full population.
     """
 
     _FLUSH = 1 << 20
@@ -110,11 +97,9 @@ class SpreadLedger:
             self._chunks.append(np.asarray(self._buf, dtype=np.float64))
             self._buf = []
         if getattr(self, "_costs", None) is None or self._chunks:
-            # keep what earlier builds materialised: _lens/_day_of span the
-            # FULL history, so _costs must too -- rebuilding from only the
-            # new chunks after an add()-query-add() sequence mis-aligns every
-            # boolean index against _dec_of (IndexError at best, silently
-            # mis-attributed spend at worst)
+            # _lens/_day_of span the FULL history, so _costs must too --
+            # dropping prior chunks after add()-query-add() mis-aligns every
+            # index against _dec_of
             prior = ([self._costs] if getattr(self, "_costs", None) is not None
                      and len(self._costs) else [])
             self._costs = (np.concatenate(prior + self._chunks)
@@ -134,14 +119,9 @@ class SpreadLedger:
         return [d for d, _ in sorted(self._day_index.items(), key=lambda kv: kv[1])]
 
     def spend_by_day(self, tau):
-        """Expected exploration spend per day at `tau`.
-
-        Uniform selection over the affordable set, so the expected cost of a
-        forced decision is the MEAN affordable cost; a decision with an empty
-        affordable set contributes nothing. Expected, not realised: the trace
-        asks what a counterfactual tau would have spent, and the draws on
-        record were made at a different one.
-        """
+        """EXPECTED spend per day at `tau`: mean affordable cost per
+        decision (uniform draw), empty sets contribute nothing. Expected,
+        not realised -- the trace walks counterfactual taus."""
         self._build()
         n_dec, n_day = len(self._lens), len(self._day_index)
         if not n_dec:
@@ -157,19 +137,9 @@ class SpreadLedger:
         return float(by_day.sum()) / max(n_days or len(by_day), 1)
 
     def solve_tau(self, budget_per_day, n_days=None, steps=60):
-        """The tau whose implied daily spend equals `budget_per_day`.
-
-        Bisection rather than a quantile: spend is a non-linear function of
-        tau (it moves both the size of the affordable set and the mean cost
-        within it), so no fixed quantile of the cost distribution is the
-        answer on a population it was not measured on.
-
-        Returns the low end of the bracket, so the answer is always a tau
-        whose implied spend is UNDER budget. Spend steps rather than sliding
-        -- it jumps as each cost crosses tau -- so no tau lands exactly on
-        the budget, and on a thin window the last step can be a percent wide.
-        Under is the right side of a budget to miss on.
-        """
+        """Bisect for the tau whose implied daily spend equals the budget.
+        Returns the LOW end of the bracket: spend steps as costs cross tau,
+        and under-budget is the right side to miss on."""
         self._build()
         if not len(self._costs) or budget_per_day <= 0:
             return None
@@ -201,24 +171,10 @@ class SpreadLedger:
 def tau_provenance_error(cfg, backtest):
     """Why the pasted `exploration.tau_initial` cannot be trusted, or None.
 
-    tau_initial is MEASURED: it is pasted by hand from a backtest derivation,
-    and nothing until now checked that the paste still matched its source. A
-    stale one is silent and expensive -- it sets how much exploration the
-    pilot buys on day one, and the stop condition is evaluated on that day's
-    spend before the controller has seen anything to correct from.
-
-    Three ways a paste goes bad, all checked here:
-
-      * no derivation to source it from at all;
-      * a derivation that PREDATES the entry-only scoping fix. Those solved
-        tau on entry decisions only, funding roughly one exploration per
-        episode against a system that explores every hour, so the value is
-        wrong by about that factor. `spread_decisions` is the marker: the old
-        block did not emit it;
-      * a value that simply disagrees with the derivation -- a hand-typed
-        number, or a backtest re-run since the paste.
-
-    `backtest` is the loaded reports/backtest.json, or None.
+    Three failure modes: no backtest derivation on disk; a derivation
+    predating the entry-only scoping fix (marker: no `spread_decisions`
+    field); a value that disagrees with the derivation. `backtest` is the
+    loaded reports/backtest.json, or None.
     """
     tau = cfg["exploration"]["tau_initial"]
     if tau is None:
@@ -243,24 +199,10 @@ def tau_provenance_error(cfg, backtest):
 
 
 def trailing_daily_il(il_by_day, day, cfg):
-    """The IL base for a day's budget: the mean of REALISED daily markdown IL
-    over the trailing `budget_il_window_days` calendar days, ending yesterday.
-
-    TRAILING AND REALISED, not same-day and not a forecast (section 12.3).
-    Same-day IL is not observable when the day's budget is needed -- scrap
-    lands only when an episode closes -- and it funds exploration hardest on
-    exactly the days already losing most, since IL is discount plus scrap.
-    A trailing mean is observable at the start of the day, smooths the
-    weekday cycle once at 7 days, and follows real drift in markdown volume,
-    which a whole-history mean would not. The fast dynamics belong to the
-    posterior-std scale in `budget_today` and the daily `tau_next` controller,
-    not to the base.
-
-    Calendar days, not data days: a day with no closed IL counts as zero in
-    the mean, because the budget is a share of the actual run-rate. Days with
-    no history at all (the window's first day) fall back to whatever trailing
-    days exist; with none, zero -- no IL history means no exploration budget,
-    which is the conservative side to start a pilot on.
+    """Mean REALISED daily IL over the trailing `budget_il_window_days`
+    calendar days ending yesterday -- trailing and realised, never same-day
+    or a forecast (design 5.8). Zero-IL calendar days count as zero; no
+    history at all means a zero budget, the conservative side to start on.
     """
     window = int(cfg["exploration"]["budget_il_window_days"])
     d0 = pd.Timestamp(str(day))
@@ -277,9 +219,8 @@ def trailing_daily_il(il_by_day, day, cfg):
 
 
 def budget_today(trailing_il, posterior_std, cfg):
-    """Section 12.3: a share of the trailing daily markdown IL
-    (`trailing_daily_il`), scaled down as the posterior narrows, never below
-    budget_scale_floor of the full budget."""
+    """budget_share_of_il x trailing daily IL, scaled down as the posterior
+    narrows, never below budget_scale_floor (design 5.8)."""
     ec = cfg["exploration"]
     scale = min(max(posterior_std / ec["budget_scale_ref_std"],
                     ec["budget_scale_floor"]), 1.0)
@@ -287,13 +228,8 @@ def budget_today(trailing_il, posterior_std, cfg):
 
 
 def tau_next(tau, budget, realised_cost, cfg):
-    """Daily multiplicative calibration of tau from realised spend.
-
-    The clip is asymmetric (see config `tau_adjust_clip`): raising tau is
-    never urgent, so the up side is tight; cutting tau is the safety
-    direction and must be able to walk a mis-sized launch tau inside the
-    stop condition in days, so the down side stays loose.
-    """
+    """tau * clip(budget/spend, *tau_adjust_clip) -- asymmetric on purpose:
+    cutting is the safety direction, raising is never urgent (config)."""
     ec = cfg["exploration"]
     lo, hi = ec["tau_adjust_clip"]
     ratio = budget / max(realised_cost, ec["tau_spend_guard"])
