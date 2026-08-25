@@ -341,17 +341,22 @@ pricing:
 
 exploration:
   budget_share_of_il: 0.01             # SET  1% of markdown IL
-  tau_initial: null                    # MEASURED  design 5.8. Paste ONLY
-    # from `reports/backtest.json` -> tau_initial_derivation.tau_initial, and
-    # only from a report written AFTER the entry-only scoping fix (its block
-    # carries `spread_decisions`). Earlier derivations solved tau on ENTRY
-    # decisions alone, funding roughly one exploration per episode against a
-    # system that calls explore.select every hour -- wrong by about that
-    # factor, and invisible, because the bisection reports 1.00x whatever
-    # population it is handed. Any value pasted before that fix is void.
-    # `pricing.explore.tau_provenance_error` enforces all of this: shadow
-    # refuses to start on a stale paste and `pipeline.status` reports it.
-    # It is a CURRENCY amount compared against Q(p*) - Q(p), never a rate.
+  tau_initial: null                    # MEASURED  design 5.8. The PILOT's
+    # launch value, not shadow's: shadow DERIVES its own launch tau on the
+    # anchored path over the trailing budget_il_window_days before its
+    # window (reports/shadow.json -> tau_initial_derivation) and reads this
+    # paste only when that week is missing or too thin. Paste from shadow's
+    # derivation (preferred -- same decision path production runs; the
+    # backtest bisects on the EXPLOIT-ONLY path, whose affordable sets
+    # differ, measured ~1.66x apart) or, failing that, from
+    # `reports/backtest.json` written AFTER the entry-only scoping fix (its
+    # block carries `spread_decisions`; see docs/learnings.md).
+    # `pricing.explore.tau_provenance_error` enforces the source match:
+    # shadow's fallback refuses a stale paste and `pipeline.status` reports
+    # it. A CURRENCY amount compared against Q(p*) - Q(p), never a rate.
+  tau0_derivation_min_decisions: 500   # SET  floor for shadow's launch-tau
+    # derivation: fewer spread decisions than this in the pre-window week
+    # and the bisection is noise -- fall back to the tau_initial paste.
   tau_adjust_clip: [0.5, 1.25]         # SET  max daily multiplicative change,
     # ASYMMETRIC ON PURPOSE (owner, 2026-08-25). The two directions do
     # different jobs and carry different risks.

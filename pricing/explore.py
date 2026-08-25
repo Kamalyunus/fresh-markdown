@@ -168,22 +168,34 @@ class SpreadLedger:
                 for p in percentiles}
 
 
-def tau_provenance_error(cfg, backtest):
+def tau_provenance_error(cfg, backtest, shadow=None):
     """Why the pasted `exploration.tau_initial` cannot be trusted, or None.
 
-    Three failure modes: no backtest derivation on disk; a derivation
-    predating the entry-only scoping fix (marker: no `spread_decisions`
-    field); a value that disagrees with the derivation. `backtest` is the
-    loaded reports/backtest.json, or None.
+    The trusted source is SHADOW's own derivation (anchored path over the
+    trailing pre-window week); the backtest derivation (exploit-only path)
+    is accepted only when no shadow derivation exists, with the old three
+    failure modes: none on disk; predating the entry-only scoping fix
+    (marker: no `spread_decisions`); a value that disagrees with it.
+    `backtest`/`shadow` are the loaded reports, or None.
     """
     tau = cfg["exploration"]["tau_initial"]
     if tau is None:
         return None                 # null is a separate, louder failure
+    sh = (shadow or {}).get("tau_initial_derivation") or {}
+    if sh.get("tau_initial") is not None:
+        if abs(float(sh["tau_initial"]) - float(tau)) <= 0.01:
+            return None             # sourced from the anchored-path derivation
+        return (f"exploration.tau_initial is {tau} but the shadow run derived "
+                f"{sh['tau_initial']} on its own anchored path. Re-paste from "
+                "reports/shadow.json -> tau_initial_derivation.tau_initial, "
+                "or re-run shadow if the paste is the newer of the two.")
     der = (backtest or {}).get("tau_initial_derivation") or {}
     if not der:
         return (f"exploration.tau_initial is {tau} but no backtest derivation "
-                "is on disk to source it from. Run `python3 -m backtest` and "
-                "paste tau_initial_derivation.tau_initial.")
+                "or shadow derivation is on disk to source it from. Run "
+                "`python3 -m pipeline.shadow` (preferred: it derives tau on "
+                "the anchored path) and paste "
+                "tau_initial_derivation.tau_initial.")
     if "spread_decisions" not in der:
         return (f"exploration.tau_initial ({tau}) came from a backtest that "
                 "predates the entry-only scoping fix: it solved tau on ENTRY "

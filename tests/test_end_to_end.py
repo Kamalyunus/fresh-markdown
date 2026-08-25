@@ -806,6 +806,38 @@ def test_shadow_defaults_to_the_holdout_window(workspace):
         assert w["date_min"] > json.load(f)["window"]["date_min"]
 
 
+def test_shadow_derives_tau0_when_the_week_is_thick_enough(workspace):
+    """With the floor within reach, the tau in force must be the DERIVED one
+    -- the config paste is only the fallback -- and the derivation block must
+    reconcile: implied spend at the derived tau sits at or under its target."""
+    _chdir(workspace)
+    env = {**os.environ, "PYTHONPATH": REPO}
+    with open("config.yaml") as f:
+        cfg_raw = yaml.safe_load(f)
+    cfg_raw["exploration"]["tau0_derivation_min_decisions"] = 1
+    with open("config_tau0.yaml", "w") as f:
+        f.write(yaml.safe_dump(cfg_raw))
+    subprocess.run([sys.executable, "-m", "bootstrap.init_posterior",
+                    "--force"], cwd=workspace, env=env, check=True,
+                   capture_output=True)
+    r = subprocess.run(
+        [sys.executable, "-m", "pipeline.shadow", "--input",
+         "data/prepared.parquet", "--config", "config_tau0.yaml",
+         "--out", "reports/shadow_tau0.json", "--max-episodes", "0"],
+        cwd=workspace, env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    with open("reports/shadow_tau0.json") as f:
+        report = json.load(f)
+    td = report["tau_initial_derivation"]
+    assert not td["fallback"]
+    assert td["tau_initial"] > 0 and td["decisions"] >= 1
+    assert td["day_one_budget"] > 0
+    assert td["implied_daily_spend"] <= td["budget_target"]
+    b = report["exploration_budget_would_be"]
+    assert b["tau"] == pytest.approx(td["tau_initial"])
+    assert b["tau_source"].startswith("derived")
+
+
 def test_parallel_and_serial_produce_the_same_reports(workspace):
     """The only claim parallelism is allowed to make: it is faster.
 

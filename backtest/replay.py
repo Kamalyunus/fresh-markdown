@@ -827,7 +827,8 @@ def derive_tau_initial(ledger, ep, cfg):
     """Section 12.3: tau_initial is the currency amount (never a rate) whose
     implied daily exploration spend matches budget_share_of_il of daily
     markdown IL. Reports 1.00x by construction -- evidence a tau EXISTS, not
-    that it is right; `pipeline.shadow` on an unseen window grades it."""
+    that it is right. A CROSS-CHECK on the exploit-only path: the launch
+    paste comes from shadow's own anchored-path derivation (design 5.13)."""
     if not ledger.decisions:
         return None
     # the launch constant solves against the window's MEAN daily IL;

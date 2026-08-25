@@ -388,11 +388,58 @@ def test_shadow_refuses_to_start_on_a_stale_tau(tmp_path):
                                    apply_level_calibration=False),
                exploration=dict(cfg["exploration"], tau_initial=410.74))
     path = tmp_path / "backtest.json"
+    none = str(tmp_path / "missing.json")
     path.write_text(json.dumps(_derivation(410.74, scoped=False)))
     with pytest.raises(ConfigError, match="stale tau"):
-        shadow._require_shadow_config(cfg, backtest_path=str(path))
+        shadow._require_shadow_config(cfg, backtest_path=str(path),
+                                      shadow_path=none)
     path.write_text(json.dumps(_derivation(410.74)))
-    shadow._require_shadow_config(cfg, backtest_path=str(path))   # now fine
+    shadow._require_shadow_config(cfg, backtest_path=str(path),
+                                  shadow_path=none)   # now fine
+
+
+def test_a_shadow_derivation_is_the_trusted_paste_source():
+    """The anchored-path derivation outranks the backtest's exploit-only one:
+    a paste matching shadow is clean even when the backtest disagrees, and a
+    paste matching only the backtest is refused once shadow has derived."""
+    from pricing.explore import tau_provenance_error
+    shadow = {"tau_initial_derivation": {"tau_initial": 257.48,
+                                         "fallback": False}}
+    assert tau_provenance_error(_cfg_with_tau(257.48),
+                                _derivation(410.74), shadow) is None
+    err = tau_provenance_error(_cfg_with_tau(410.74),
+                               _derivation(410.74), shadow)
+    assert "257.48" in err and "shadow" in err
+
+
+def test_a_fallback_shadow_block_defers_to_the_backtest_checks():
+    # a shadow run that itself fell back to the paste is not a paste source
+    from pricing.explore import tau_provenance_error
+    shadow = {"tau_initial_derivation": {"tau_initial": None, "fallback": True}}
+    assert tau_provenance_error(_cfg_with_tau(410.74),
+                                _derivation(410.74), shadow) is None
+
+
+def test_shadow_derives_its_launch_tau_on_the_pre_window_week():
+    """The tau in force comes from derive_tau0 over the trailing week -- the
+    same span as the day-one budget base -- on the run's own ANCHORED path.
+    The config paste is only the fallback, still behind the provenance gate."""
+    import inspect
+    from pipeline import shadow
+    cfg = load_config()
+    assert cfg["exploration"]["tau0_derivation_min_decisions"] > 0
+    src = inspect.getsource(shadow.run_shadow)
+    assert "derive_tau0(" in src
+    assert src.index("derive_tau0(") < src.index("_require_shadow_config"), \
+        "the paste (and its provenance gate) must be the FALLBACK"
+    der = inspect.getsource(shadow.derive_tau0)
+    assert "budget_il_window_days" in der       # the budget's own span
+    assert "budget_today(" in der and "solve_tau(" in der
+    # a sampled week carries only its fraction of the population's spend, so
+    # the bisection must target the budget scaled by the same fraction
+    assert "budget * frac" in der
+    # and main hands run_shadow the FULL frame, before the window slice
+    assert "pre_window_frame=full" in inspect.getsource(shadow.main)
 
 
 def test_status_fails_a_stale_tau_rather_than_passing_it():

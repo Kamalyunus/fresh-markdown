@@ -36,22 +36,29 @@ HOLDOUT_BASIS = "holdout"
 
 
 
-def _require_shadow_config(cfg, backtest_path="reports/backtest.json"):
-    missing = []
+def _require_shadow_config(cfg, backtest_path="reports/backtest.json",
+                           shadow_path="reports/shadow.json", why=None):
+    """Fallback path only: when the run cannot derive its own launch tau
+    (`why` says why), the config paste must exist and match its source."""
+    prefix = f"tau derivation unavailable ({why}); " if why else ""
     if cfg["exploration"]["tau_initial"] is None:
-        missing.append("exploration.tau_initial (from a PASSING backtest)")
-    if missing:
-        raise ConfigError("shadow phase blocked by null config: " + "; ".join(missing))
+        raise ConfigError(
+            "shadow phase blocked: " + prefix + "exploration.tau_initial is "
+            "null. Give the run a pre-window week (the default hold-out run "
+            "does) or paste a derived tau.")
 
     # Non-null is not enough: tau_initial is hand-pasted and decides day-one
     # spend, before the controller has any spend to correct from.
-    report = None
-    if os.path.exists(backtest_path):
-        with open(backtest_path) as f:
-            report = json.load(f)
-    stale = explore.tau_provenance_error(cfg, report)
+    def _read(path):
+        if os.path.exists(path):
+            with open(path) as f:
+                return json.load(f)
+        return None
+    stale = explore.tau_provenance_error(cfg, _read(backtest_path),
+                                         _read(shadow_path))
     if stale:
-        raise ConfigError("shadow phase blocked by a stale tau: " + stale)
+        raise ConfigError("shadow phase blocked by a stale tau: "
+                          + prefix + stale)
 
 
 
@@ -87,6 +94,126 @@ def pre_window_il_history(d, cfg, before):
         if ok:
             out[day] = out.get(day, 0.0) + float(disc.get(eid, 0.0)) + float(sc)
     return out
+
+
+# episodes are independent (tau is fixed; the controller walk is
+# post-processing), so the unit of work is one episode and all parallelise
+EP_COLS = ("hour_of_day", "sku_id", "fc", "category", "subcategory",
+           "starting_inventory", "ending_inventory", "units_sold",
+           "total_discount", "original_price", "cost", "r_val",
+           "mu_ref_hat", "date", "is_observed")
+
+
+def _prepare_items(d, cfg, model, r_lookup):
+    """Extend to the full window BEFORE predicting (early sell-out must not
+    shorten the DP horizon), then pack per-episode arrays for _shadow_one."""
+    carry = [c for c in d.columns if c not in
+             ("episode_id", "date", "hour_of_day", "hours_remaining",
+              "starting_inventory", "ending_inventory", "units_sold")]
+    d = episodes.extend_to_window(d, carry, cfg["data"]["max_window_hours"])
+    d = d.sort_values(["episode_id", "date", "hour_of_day"]).copy()
+    d["mu_ref_hat"] = model.predict_mu_ref(d)
+    d["r_val"] = [lookup_r(r_lookup, s, c)
+                  for s, c in zip(d.subcategory, d.category)]
+    groups = list(d.groupby("episode_id", sort=False))
+    items = [dict({c: g[c].to_numpy() for c in EP_COLS}, episode_id=eid)
+             for eid, g in groups]
+    return d, groups, items
+
+
+def derive_tau0(d_full, cfg, start, model, posterior, r_lookup, il_history,
+                seed=0, max_episodes=None, workers=None):
+    """Launch tau for THIS run: the run's own anchored decision path over the
+    trailing budget_il_window_days before the window -- the same span the
+    day-one budget base comes from. Replaces the config paste, which carried
+    two staleness modes: an old backtest's number, and the exploit-vs-anchored
+    path mismatch (different affordable sets, so the same tau buys a
+    different spend). Returns the report block; tau_initial is None when the
+    week is too thin to bisect on, and the caller falls back to the paste."""
+    from bootstrap.prepare_data import population
+    window = int(cfg["exploration"]["budget_il_window_days"])
+    floor = int(cfg["exploration"]["tau0_derivation_min_decisions"])
+    start_ts = pd.Timestamp(str(start))
+    lo = (start_ts - pd.Timedelta(days=window)).strftime("%Y-%m-%d")
+    hi = (start_ts - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    block = {
+        "basis": (f"anchored decision path over episodes opened in the "
+                  f"trailing {window} days before the window -- the same "
+                  "span as the day-one budget base"),
+        "week": [lo, hi],
+        "tau_initial": None,
+        "decisions": 0,
+        "min_decisions": floor,
+        "trailing_il_seeded_days": len(il_history),
+        "fallback": True,
+    }
+    pre = episodes.window_slice(d_full, lo, hi)
+    if not pre.empty:
+        pre = population(pre, cfg, "dp_eligible")
+    if pre.empty:
+        block["note"] = "no DP-eligible episodes opened in the pre-window week"
+        return block
+
+    # day-one budget: production's own quantity on the seeded trailing base
+    cells = posterior.state["cells"]
+    widest_std = max(rec["std"] for rec in cells.values())
+    budget = explore.budget_today(
+        explore.trailing_daily_il(il_history, start_ts.strftime("%Y-%m-%d"),
+                                  cfg), widest_std, cfg)
+    block["day_one_budget"] = round(budget, 1)
+    if budget <= 0:
+        block["note"] = ("no realised IL in the trailing window -- a zero "
+                         "budget cannot price a tau")
+        return block
+
+    pre_ids = pre.episode_id.unique()
+    n_pop = len(pre_ids)
+    # decoupled from the window's sample draw, same reproducibility contract
+    rng = np.random.default_rng([int(seed), 1])
+    if max_episodes and n_pop > max_episodes:
+        keep = rng.choice(pre_ids, max_episodes, replace=False)
+        pre = pre[pre.episode_id.isin(keep)]
+    n_days = max((pd.Timestamp(pre.date.max())
+                  - pd.Timestamp(pre.date.min())).days + 1, 1)
+    _, groups, items = _prepare_items(pre, cfg, model, r_lookup)
+    # tau None: nothing explores, and the ledger does not care -- spreads are
+    # recorded before the draw, independent of the tau in force
+    ctx = {"cfg": cfg, "tau": None, "model_version": model.version,
+           "seed": seed,
+           "cells": {str(c): posterior.get(c) for c in pre.category.unique()}}
+    ledger = explore.SpreadLedger()
+    for out in map_episodes(_shadow_one, items, ctx, workers):
+        for day, costs in out["spreads"]:
+            ledger.add(day, costs)
+
+    block.update(decisions=ledger.decisions, episodes=len(groups),
+                 episodes_population=int(n_pop),
+                 days_with_decisions=len(ledger.days), days=n_days)
+    if ledger.decisions < floor:
+        block["note"] = (f"{ledger.decisions} decisions in the pre-window "
+                         f"week, below the {floor} floor -- too thin to "
+                         "bisect a launch tau on")
+        return block
+    # a sample carries only its fraction of the population's spend, so the
+    # bisection targets the budget scaled by the same fraction
+    frac = len(groups) / n_pop
+    tau0 = ledger.solve_tau(budget * frac, n_days=n_days)
+    if not tau0:
+        block["note"] = "bisection found no positive tau at this budget"
+        return block
+    block.update(
+        tau_initial=round(float(tau0), 2), fallback=False,
+        sample_fraction=round(frac, 4),
+        budget_target=round(budget * frac, 1),
+        implied_daily_spend=round(ledger.implied_daily_spend(tau0, n_days), 1),
+        q_spread_distribution=ledger.distribution(),
+        note=("derived on this run's own anchored path over the week the "
+              "day-one budget reads, so the backtest's exploit-vs-anchored "
+              "mismatch does not apply and the day-one controller trace is "
+              "an out-of-sample test of it. For the pilot, paste this into "
+              "exploration.tau_initial; tau_provenance_error accepts this "
+              "block as the source."))
+    return block
 
 
 def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None,
@@ -329,9 +456,8 @@ def _shadow_one(ep, ctx):
 
 
 def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
-               prior_il_by_day=None,
+               prior_il_by_day=None, pre_window_frame=None, window_start=None,
                window_basis=HOLDOUT_BASIS, workers=None):
-    _require_shadow_config(cfg)
     # precondition, inside run_shadow so a programmatic caller cannot skip it
     from bootstrap.prepare_data import population
     d = population(d, cfg, "dp_eligible")
@@ -343,10 +469,27 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         r_lookup = json.load(f)
     store = EventStore(cfg, root=events_root or cfg["events"]["shadow_store_dir"])
     rng = np.random.default_rng(seed)
-    tau = float(cfg["exploration"]["tau_initial"])
 
     if max_episodes is None:
         max_episodes = cfg["monitoring"]["shadow_gate"]["sample_episodes"]
+
+    # tau in force: derived on the trailing pre-window week when one exists;
+    # the config paste (with full provenance checks) only as fallback
+    tau_deriv = None
+    if pre_window_frame is not None and window_start is not None:
+        tau_deriv = derive_tau0(pre_window_frame, cfg, window_start, model,
+                                posterior, r_lookup,
+                                dict(prior_il_by_day or {}), seed=seed,
+                                max_episodes=max_episodes, workers=workers)
+    if tau_deriv is not None and tau_deriv["tau_initial"] is not None:
+        tau = float(tau_deriv["tau_initial"])
+        tau_source = "derived from the trailing pre-window week"
+    else:
+        why = (tau_deriv.get("note") if tau_deriv
+               else "no pre-window frame or window start given")
+        _require_shadow_config(cfg, why=why)
+        tau = float(cfg["exploration"]["tau_initial"])
+        tau_source = "config paste (exploration.tau_initial)"
 
     # SAMPLE FIRST: the gate reads rates a uniform episode sample estimates,
     # and sampling after the predict step costs a full run for sample evidence
@@ -356,18 +499,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         keep = rng.choice(population, max_episodes, replace=False)
         d = d[d.episode_id.isin(keep)]
 
-    # extend to the full window BEFORE predicting (early sell-out must not
-    # shorten the DP horizon); sort must include date for cross-midnight runs
-    carry = [c for c in d.columns if c not in
-             ("episode_id", "date", "hour_of_day", "hours_remaining",
-              "starting_inventory", "ending_inventory", "units_sold")]
-    d = episodes.extend_to_window(d, carry, cfg["data"]["max_window_hours"])
-    d = d.sort_values(["episode_id", "date", "hour_of_day"]).copy()
-    d["mu_ref_hat"] = model.predict_mu_ref(d)
-    d["r_val"] = [lookup_r(r_lookup, s, c)
-                  for s, c in zip(d.subcategory, d.category)]
-
-    groups = list(d.groupby("episode_id", sort=False))
+    d, groups, items = _prepare_items(d, cfg, model, r_lookup)
 
     rejected = {}
     n_dec = n_out = cost_floor_violations = differs = 0
@@ -386,14 +518,6 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     latencies = []
     drift = {"mu": [], "r": [], "q": [], "sold": []}
 
-    # episodes are independent (tau is fixed; the controller walk is
-    # post-processing), so the unit of work is one episode and all parallelise
-    EP_COLS = ("hour_of_day", "sku_id", "fc", "category", "subcategory",
-               "starting_inventory", "ending_inventory", "units_sold",
-               "total_discount", "original_price", "cost", "r_val",
-               "mu_ref_hat", "date", "is_observed")
-    items = [dict({c: g[c].to_numpy() for c in EP_COLS}, episode_id=eid)
-             for eid, g in groups]
     ctx = {"cfg": cfg, "tau": tau, "model_version": model.version,
            "seed": seed,
            "cells": {str(c): posterior.get(c) for c in d.category.unique()}}
@@ -510,6 +634,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             widest_std / cfg["exploration"]["budget_scale_ref_std"],
             cfg["exploration"]["budget_scale_floor"]), 1.0), 4),
         "tau": tau,
+        "tau_source": tau_source,
         "tau_recommended": round(tau_rec, 2) if tau_rec else None,
         "tau_recommended_ratio": round(tau_rec / tau, 4)
             if tau_rec and tau else None,
@@ -528,15 +653,20 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             f"OVER BUDGET -- {over:.2f}x; the tau controller shrinks tau at the "
             "operator gate, capped at halving per day" if over > 1 else
             f"within budget -- {over:.2f}x"),
-        "note": ("tau_initial came from the replay's EXPLOIT-ONLY path and, "
-                 "before the SpreadLedger fix, from its ENTRY decisions only "
-                 "-- roughly one exploration per episode against a system "
-                 "that explores every hour, which is most of any large "
-                 "multiple here. tau_recommended is the same bisection run on "
-                 "this path over these decisions; paste it into "
-                 "exploration.tau_initial the way rho and "
-                 "mean_forced_hours_per_episode are pasted, after reading "
-                 "tau_controller_trace."),
+        "note": (("tau was derived at launch on this run's own trailing "
+                  "pre-window week (tau_initial_derivation), so day one of "
+                  "tau_controller_trace is an out-of-sample test of it. "
+                  "tau_recommended is the same bisection pooled over the "
+                  "WHOLE window -- a cross-check, not a correction; for the "
+                  "pilot, paste the derivation's tau_initial the way rho is "
+                  "pasted, after reading the trace.")
+                 if tau_deriv is not None and not tau_deriv["fallback"] else
+                 ("tau came from the config paste: the pre-window week was "
+                  "missing or too thin to derive on (see "
+                  "tau_initial_derivation). The paste's backtest source runs "
+                  "the EXPLOIT-ONLY path, whose affordable sets differ from "
+                  "this anchored one, so read tau_recommended and "
+                  "tau_controller_trace before trusting the launch value.")),
     }
     budget_check["tau_controller_trace"] = _controller_trace(
         ledger, il_by_day, tau, widest_std, cfg, window_days=n_days,
@@ -640,6 +770,9 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
                     "recommendations would have spent",
         },
         "exploration_budget_would_be": budget_check,
+        # the launch tau's own derivation (or why it fell back to the paste);
+        # tau_provenance_error accepts this block as a paste source
+        "tau_initial_derivation": tau_deriv,
         "learning_yield_would_be": learning_yield,
         "recommendation_vs_legacy": {
             "mean_recommended_discount": round(rec_disc / n_dec, 4),
@@ -710,6 +843,7 @@ def main():
     # trailing IL history from BEFORE the window, computed on the full frame
     # before it is sliced away -- production's day-one budget base
     history = pre_window_il_history(d, cfg, start)
+    full = d
     # episode-scoped date cut, never row-scoped: window_slice keeps a
     # cross-midnight episode whole instead of leaving an orphan tail
     d = episodes.window_slice(d, start, end)
@@ -719,7 +853,8 @@ def main():
     report = run_shadow(d, cfg, events_root=args.events_dir,
                         seed=args.seed, max_episodes=args.max_episodes,
                         window_basis=basis, workers=args.workers,
-                        prior_il_by_day=history)
+                        prior_il_by_day=history,
+                        pre_window_frame=full, window_start=start)
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as f:
@@ -752,6 +887,13 @@ def main():
           f"updates from this window "
           f"({ly['episodes_per_bounded_update']} episodes per update); "
           f"calendar floor is 1 update/day")
+    td = report.get("tau_initial_derivation")
+    if td and td.get("tau_initial") is not None:
+        print(f"tau launch         : {td['tau_initial']:,.2f} derived on the "
+              f"pre-window week [{td['week'][0]} .. {td['week'][1]}] "
+              f"({td['decisions']:,} decisions)")
+    elif td:
+        print(f"tau launch         : config paste in force -- {td['note']}")
     bc = report["exploration_budget_would_be"]
     print(f"exploration budget : spend {bc['implied_daily_spend']:,.0f}/day vs "
           f"budget {bc['daily_budget']:,.0f}/day over {bc['days']} days")

@@ -94,11 +94,12 @@ module directly. Agents: read `AGENTS.md` before touching the pipeline.)
    `mean_forced_hours_per_episode`, `tau_initial`,
    `il_pct_ratio_se_clustered`); the owner sets the SET BY OWNER keys.
    `common.config.load_config(strict=True)` refuses to start until then.
-   `tau_initial` is checked further: it must match
-   `reports/backtest.json` → `tau_initial_derivation.tau_initial` and come
-   from a report written after the entry-only scoping fix. Shadow refuses to
-   start otherwise, and `pipeline.status` reports a stale paste as FAIL
-   rather than passing it for being non-null.
+   `tau_initial` is checked further: it must match its derivation —
+   `reports/shadow.json` → `tau_initial_derivation.tau_initial` (shadow
+   derives its own launch tau on the trailing pre-window week; the backtest
+   block is accepted only while no shadow derivation exists). A stale paste
+   is refused by shadow's fallback path, and `pipeline.status` reports it as
+   FAIL rather than passing it for being non-null.
 
 Then initialise the posterior and run the shadow phase (design 5.13 — decisions
 logged, no prices applied):

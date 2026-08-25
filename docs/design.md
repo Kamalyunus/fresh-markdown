@@ -798,10 +798,13 @@ IL cost of a perturbation both scale as `mu × (log price ratio)²` (information
 carries an extra NB damping `r/(r+mu)` that varies slowly across the book), so
 **information per won is approximately constant** — there is no clever
 targeting to do, only a budget to respect. High-volume SKUs automatically
-receive small perturbations because their loss curve is steeper. Measured
-starting point on production data: `tau` = **₩447.78**, derived from the
-gate-passing calibrated backtest as the Q-spread quantile whose implied daily
-spend matches the budget.
+receive small perturbations because their loss curve is steeper. The launch
+value: the shadow run derives its own `tau_initial` by the same bisection —
+the Q-spread quantile whose implied daily spend matches the day-one budget —
+on its **anchored** decision path over the trailing `budget_il_window_days`
+before its window, the exact span the day-one budget base reads (5.13). The
+backtest's derivation runs on the exploit-only replay path, whose affordable
+sets differ (measured ~1.66× apart), and is a cross-check, not the source.
 
 ### 5.9 Posterior store — small, atomic, exactly-once
 
@@ -1001,20 +1004,34 @@ the base production holds at launch — without it the first day reads budget
 0, which is empty history, not an overspend, and the controller holds τ on
 a zero budget rather than calibrating on it.
 
-**Re-deriving `tau` where it will actually run.** The replay's bisection
-reports 1.00× *by construction* — it solves until it does — so it is
-evidence that a `tau` exists at this budget, never that the launch value is
-right. Shadow re-runs the same bisection on its own decisions
-(`tau_recommended`) and walks the controller day by day
-(`tau_controller_trace`). The trace exists because a single spend/budget
-multiple cannot answer the question that matters: `tau_next` reads only the
-day just closed, so day one is spent at whatever `tau` was launched with,
-the stop condition is evaluated on that same day's spend, and a `tau` that
-is 8× too generous suspends exploration before the controller has anything
-to correct from. Both are **reported, never applied** — `tau_initial` is
-MEASURED and goes through the paste gate, with
-`pricing.explore.tau_provenance_error` refusing a paste that has no source,
-predates the entry-only scoping fix, or no longer matches its derivation.
+**Deriving `tau` where it will actually run.** Shadow derives its own launch
+`tau` (`derive_tau0`): the same bisection, run on the run's own **anchored**
+decision path over the trailing `budget_il_window_days` before the window —
+the exact span the day-one budget base reads — against day one's budget. That
+kills the two staleness modes of a config paste at once: an old backtest's
+number, and the exploit-vs-anchored path mismatch (the replay's bisection
+funds different affordable sets, measured ~1.66× apart). The pre-window week
+is out-of-window for the run itself, so day one of the controller trace is a
+genuine out-of-sample test of the launch value. When the week is missing or
+holds fewer than `tau0_derivation_min_decisions` spread decisions, the run
+falls back to the `exploration.tau_initial` paste — behind the full
+provenance gate. A sampled run scales the bisection's budget target by the
+sample fraction, since a sample carries only its fraction of the
+population's spend.
+
+Shadow also re-runs the bisection pooled over its whole window
+(`tau_recommended` — a cross-check on the launch value, no longer its source)
+and walks the controller day by day (`tau_controller_trace`). The trace
+exists because a single spend/budget multiple cannot answer the question that
+matters: `tau_next` reads only the day just closed, so day one is spent at
+whatever `tau` was launched with, the stop condition is evaluated on that
+same day's spend, and a `tau` that is 8× too generous suspends exploration
+before the controller has anything to correct from. The pilot's launch value
+is still a paste — `tau_initial` is MEASURED — but its source is now the
+shadow report's `tau_initial_derivation`, with
+`pricing.explore.tau_provenance_error` refusing a paste that has no source
+or no longer matches its derivation (the backtest block is accepted only
+while no shadow derivation exists).
 
 ### 5.14 Replay and threshold derivation — evaluation discipline
 

@@ -161,9 +161,10 @@ is the safety direction and raising is never urgent.
 
 Two numbers in that block do the deciding:
 
-- **`tau_recommended`** — the same bisection, re-run on shadow's own
-  decisions. Report only: `tau_initial` is MEASURED and goes through the
-  paste gate like `rho`, and `artifact_mirror_drift` exists to catch the
+- **`tau_recommended`** — the same bisection, re-run pooled over shadow's
+  whole window. A cross-check on the launch value, not its source, and
+  report only: `tau_initial` is MEASURED and goes through the paste gate
+  like `rho`, and `artifact_mirror_drift` exists to catch the
   silent-rewrite case. Check `tau_recommended_implied_spend` sits just under
   `daily_budget`; it will never equal it, because spend **steps** as each
   cost crosses `tau` rather than sliding.
@@ -175,16 +176,19 @@ Two numbers in that block do the deciding:
   the budget divides by), `days_with_decisions`, and `days_simulated`
   (capped at 60; `days_truncated` says what was dropped).
 
-**`tau_initial` is null and any earlier paste is void.** The scoping fix below
-changed what the backtest derives, so a value carried over from before is
-wrong by roughly the decisions-per-episode factor. Paste only from
-`reports/backtest.json` → `tau_initial_derivation.tau_initial`, and only from
-a report whose block carries `spread_decisions` (older reports do not).
-`pricing.explore.tau_provenance_error` enforces all three failure modes — no
-derivation on disk, a derivation predating the fix, a paste that no longer
-matches its source. Shadow refuses to start on any of them and
-`pipeline.status` reports it as FAIL instead of passing a pasted number
-because it is non-null.
+**Shadow derives its own launch `tau`; the paste is the pilot's.**
+`derive_tau0` runs the bisection on shadow's own anchored path over the
+trailing `budget_il_window_days` before the window — the same span as the
+day-one budget base — so the run does not read `exploration.tau_initial`
+unless that week is missing or holds fewer than
+`tau0_derivation_min_decisions` spread decisions. The report's
+`tau_initial_derivation` block is then the paste source for the pilot's
+launch value. `pricing.explore.tau_provenance_error` enforces the source
+match: a paste must equal shadow's derivation when one exists; only in its
+absence is the backtest block accepted, and then only one carrying
+`spread_decisions` (older reports predate the entry-only scoping fix).
+Shadow's fallback refuses a stale paste and `pipeline.status` reports it as
+FAIL instead of passing a pasted number because it is non-null.
 
 **The entry-only scoping bug.** Until the `SpreadLedger` refactor,
 `policy_replay` collected spreads at `t == 0` only, so `tau_initial` was
@@ -226,7 +230,8 @@ It understated the budget 10× and flipped the verdict from "within budget" to
 budget that was never real. `tests/test_end_to_end.test_shadow_phase_harness`
 asserts scrap is present and exceeds the discount term.
 
-Shadow needs `apply_level_calibration` and `tau_initial` non-null. Its exit
+Shadow derives its launch `tau` from the trailing pre-window week and needs
+`tau_initial` non-null only when that derivation is too thin. Its exit
 gate: event completeness and matched rate above `monitoring.shadow_gate`
 thresholds and ZERO cost-floor violations. Shadow outcomes carry
 `execution_status="shadow_not_applied"` and are structurally ineligible for
@@ -625,8 +630,11 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
   `dp_*` (model world) as a policy statement — that charges all model bias
   to the DP; `actual_*` vs model figures are fidelity only (design 5.14). Even
   like-for-like, replay is internal consistency, not launch evidence.
-- `tau_initial_derivation.tau_initial` is a currency amount (design 5.8). Only
-  paste it into config from a report whose fidelity gate PASSED.
+- `tau_initial_derivation.tau_initial` is a currency amount (design 5.8) and,
+  in the backtest, a CROSS-CHECK: the paste source is shadow's own
+  anchored-path derivation (same key in `reports/shadow.json`); the backtest
+  block is accepted only while no shadow derivation exists, and only from a
+  report whose fidelity gate PASSED.
 - `policy_deltas.step_sensitivity` prices `learning.max_mean_step` on real
   episodes: the DP arm re-solved at ε ± step (belief shifts, the world does
   not), reporting the share of episodes whose prices move and the IL cost of
@@ -671,7 +679,7 @@ drift/staleness reading, not a launch blocker)
 
 `common.config.load_config(strict=True)` refuses while any of these is null:
 `dispersion.rho`, `dispersion.mean_forced_hours_per_episode`,
-`exploration.tau_initial` (from a PASSING backtest),
+`exploration.tau_initial` (from shadow's `tau_initial_derivation`),
 `monitoring.stop_conditions.scrap_deterioration_pct` and
 `margin_deterioration_pct`, `ab_test.min_detectable_effect_pct` (owner
 decisions — an agent must never invent these).

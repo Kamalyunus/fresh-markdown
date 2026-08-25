@@ -131,22 +131,28 @@ def _shadow(shadow):
                 "" if ok else "shadow.rejected_reasons, quarantined_event_count")
 
 
-def _tau(cfg, backtest):
+def _tau(cfg, backtest, shadow=None):
     pasted = cfg["exploration"]["tau_initial"]
-    derived = (backtest or {}).get("tau_initial_derivation", {}).get("tau_initial")
+    sh = (shadow or {}).get("tau_initial_derivation") or {}
+    derived = sh.get("tau_initial") if sh.get("tau_initial") is not None else \
+        (backtest or {}).get("tau_initial_derivation", {}).get("tau_initial")
+    src = "shadow" if sh.get("tau_initial") is not None else "backtest"
     if pasted is None:
+        # shadow derives its own launch tau; the paste gates the PILOT
         return _row("exploration tau", FAIL,
-                    f"config null; backtest derived {derived}"
-                    if derived else "config null and no derivation",
-                    "paste from a GATE-PASSING backtest only")
-    # a paste must still match its source, and the source must postdate the
-    # entry-only scoping fix
-    stale = explore.tau_provenance_error(cfg, backtest)
+                    f"config null; {src} derived {derived}"
+                    if derived is not None else "config null and no derivation",
+                    "paste from shadow's tau_initial_derivation (preferred) "
+                    "or a gate-passing backtest")
+    # a paste must still match its source; shadow's anchored-path derivation
+    # outranks the backtest's exploit-only one
+    stale = explore.tau_provenance_error(cfg, backtest, shadow)
     if stale:
         return _row("exploration tau", FAIL, stale.split(". ")[0],
-                    "python3 -m backtest, then re-paste tau_initial")
+                    "python3 -m pipeline.shadow, then re-paste tau_initial")
     return _row("exploration tau", PASS, f"{pasted} in force"
-                + (f" · latest derivation {derived}" if derived else ""))
+                + (f" · latest {src} derivation {derived}"
+                   if derived is not None else ""))
 
 
 def _walkthrough(root):
@@ -228,14 +234,15 @@ def collect(cfg, root="reports"):
     """`root` is injectable so the tests can point at a fixture directory --
     a status view that cannot itself be tested is not worth trusting."""
     backtest = _read(os.path.join(root, "backtest.json"))
+    shadow = _read(os.path.join(root, "shadow.json"))
     rows = [
         _launch_blockers(cfg),
         _bundle(cfg),
         _mirrors(cfg),
         _calibration(cfg, backtest),
         _prior(cfg),
-        _tau(cfg, backtest),
-        _shadow(_read(os.path.join(root, "shadow.json"))),
+        _tau(cfg, backtest, shadow),
+        _shadow(shadow),
         _guardrails(_read(os.path.join(root, "thresholds.json"))),
         _stops(_read(os.path.join(root, "monitor.json"))),
         _assurance(_read(os.path.join(root, "assurance.json"))),

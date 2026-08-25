@@ -45,7 +45,7 @@ python3 -m bootstrap.estimate_prior --input data/prepared.parquet
 echo "== step 5: bootstrap.fit_dispersion ============================="
 python3 -m bootstrap.fit_dispersion --input data/prepared.parquet
 
-echo "== step 6: backtest -- level diagnostic + tau_initial ==========="
+echo "== step 6: backtest -- level diagnostic + tau cross-check ======="
 python3 -m backtest --input data/prepared.parquet --out reports/backtest.json
 
 echo "== step 10: tools.make_charts ==================================="
@@ -90,11 +90,14 @@ Bootstrap complete. Before any price is applied (design sections 9-10):
      wobble from trend -- not a launch blocker.
   2. Review artifacts/prior.json: the prior-acceptance gate is BLOCKING and
      HUMAN; a pooled or uniform prior is a designed outcome.
-  3. Paste MEASURED values into config.yaml (rho, forced hours, tau_initial,
+  3. Paste MEASURED values into config.yaml (rho, forced hours,
      il_pct_ratio_se_clustered). For the SET BY OWNER keys, produce the
      evidence with:
        python3 -m bootstrap.derive_thresholds --input data/prepared.parquet --mde 0.075
-  4. Initialise the posterior and run the shadow phase:
+  4. Initialise the posterior and run the shadow phase (it derives its own
+     launch tau on the trailing pre-window week; paste the report's
+     tau_initial_derivation.tau_initial into exploration.tau_initial for
+     the pilot afterwards):
        python3 -m bootstrap.init_posterior
        python3 -m pipeline.shadow --input data/prepared.parquet --out reports/shadow.json
   5. Re-read the summary after each of the above:

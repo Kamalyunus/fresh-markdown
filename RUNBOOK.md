@@ -45,9 +45,11 @@ Then, in order:
 3. **Paste MEASURED values into `config.yaml`** — the only hand step:
    - `dispersion.rho`, `dispersion.mean_forced_hours_per_episode` — from
      `artifacts/rho.json`, after **every** retrain;
-   - `exploration.tau_initial` — from `reports/backtest.json` →
-     `tau_initial_derivation.tau_initial`, only from a gate-passing report
-     (a stale paste is refused at start-up, by design).
+   - `exploration.tau_initial` — from `reports/shadow.json` →
+     `tau_initial_derivation.tau_initial` (shadow derives it itself on the
+     trailing pre-window week, so this paste happens AFTER step 6 and feeds
+     the pilot, not the shadow run; a stale or mismatched paste is refused,
+     by design).
 4. **Owner sets the `SET BY OWNER` keys** (`scrap_deterioration_pct`,
    `margin_deterioration_pct`, `min_detectable_effect_pct`) from
    `reports/thresholds.json` — never invented, and never below a floor the
@@ -56,10 +58,13 @@ Then, in order:
    overwrite production learning state without `--force`).
 6. **Shadow, on the hold-out** (default window):
    `python3 -m pipeline.shadow --input data/prepared.parquet --max-episodes 0`
-   for the launch record. Exit gate: completeness ≥ 99%, matched ≥ 99%,
-   **zero** cost-floor violations. Also read
+   for the launch record. It derives its own launch tau on the trailing
+   pre-window week (`tau_initial_derivation` in the report — this is the
+   value to paste in step 3 for the pilot). Exit gate: completeness ≥ 99%,
+   matched ≥ 99%, **zero** cost-floor violations. Also read
    `exploration_budget.spend_over_budget` (over 2× → do not launch at this
-   tau; re-derive) and `tau_controller_trace`.
+   tau; re-derive) and `tau_controller_trace` — day one is an out-of-sample
+   test of the derived tau.
 7. `python3 -m pipeline.status` — **done means every line green.** Exit code
    1 on any FAIL, so it can gate a deploy.
 

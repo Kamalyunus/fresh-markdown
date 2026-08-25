@@ -308,10 +308,11 @@ CATALOGUE = [
    "makes a wrong-direction update cheap; `crossers` isolates the episodes where "
    "the cap is load-bearing.", "the evidence behind the step cap"),
   ("tau_initial", "won",
-   "The exploration budget's launch value: the currency quantile of the "
-   "`Q(p*) − Q(p)` distribution whose implied daily spend matches "
-   "`budget_share_of_il`. **A CURRENCY AMOUNT, never a rate.** Paste only from a "
-   "GATE-PASSING backtest.", "GATE — blocks launch while null"),
+   "The currency quantile of the `Q(p*) − Q(p)` distribution whose implied daily "
+   "spend matches `budget_share_of_il`, on the EXPLOIT-ONLY replay path. **A "
+   "CURRENCY AMOUNT, never a rate**, and a CROSS-CHECK: the launch paste comes "
+   "from shadow's own anchored-path `tau_initial_derivation`; this block is "
+   "accepted as a paste source only while no shadow derivation exists.", ""),
   ("cost_distribution_quantile", "rate",
    "Where `tau_initial` landed in the cost distribution. Sanity check on the solve.", ""),
  ]),
@@ -380,13 +381,21 @@ CATALOGUE = [
    "would suspend exploration on day one of the pilot; between 1× and 2× the "
    "tau controller shrinks tau at the operator gate, capped at halving a day.",
    "GATE — read before launch, not after"),
-  ("exploration_budget · tau_recommended", "won",
-   "The same bisection the backtest runs, re-solved on shadow's own decisions. "
-   "Reported, never applied: `tau_initial` is MEASURED and goes through the "
-   "paste gate. Check `tau_recommended_implied_spend` sits just UNDER "
-   "`daily_budget` — spend steps as each cost crosses tau rather than sliding, "
-   "so no tau lands exactly on the budget.",
+  ("tau_initial_derivation", "won",
+   "Shadow's own launch tau: the same bisection, run on the run's anchored path "
+   "over the trailing `budget_il_window_days` before its window — the span the "
+   "day-one budget base reads — against day one's budget. Used as the tau in "
+   "force for the run (day one of the controller trace is an out-of-sample test "
+   "of it) and the paste source for the pilot's `exploration.tau_initial`. "
+   "`fallback: true` means the week was missing or under "
+   "`tau0_derivation_min_decisions` and the config paste was used instead.",
    "GATE — the launch value for exploration.tau_initial"),
+  ("exploration_budget · tau_recommended", "won",
+   "The same bisection pooled over shadow's WHOLE window. Reported, never "
+   "applied — a cross-check on the launch derivation, not its source. Check "
+   "`tau_recommended_implied_spend` sits just UNDER `daily_budget` — spend "
+   "steps as each cost crosses tau rather than sliding, so no tau lands "
+   "exactly on the budget.", ""),
   ("exploration_budget · spread_decisions_per_episode", "count",
    "Decisions whose Q-spread funded the tau derivation, per episode. Near 1 "
    "means the entry-only scoping is back: the replay once collected spreads at "
