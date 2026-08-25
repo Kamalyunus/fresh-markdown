@@ -206,11 +206,9 @@ def edge_truncated_episodes(d):
     NEITHER is removed. Both stay `not_closed`, so m11's not_closed share and
     `scrap_units_unknown_not_closed` keep measuring the whole unknown, and the
     two reasons are told apart by `share_of_unclosed_explained_by_edge` rather
-    than by deleting one of them. Removing the edge cases used to be the
-    default and it cost more than it bought: they are the LARGEST episodes in
+    than by deleting one of them. Edge-truncated episodes are the LARGEST in
     the extract (~25 units of opening stock against ~3 for the population),
-    so the demand fit was giving up its best-observed windows to protect a
-    scrap figure that was already protected -- `common.episodes.scrap_units`
+    and their scrap figure is already protected -- `common.episodes.scrap_units`
     returns NaN for an unclosed episode, `backtest.replay` zeroes its scrap
     under `outcome_known`, and `pipeline.shadow` charges scrap only on
     COMPLETED. Their observed hours are ordinary, fully-priced demand
@@ -380,8 +378,8 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     d = step(d, "discount_out_of_range_dropped")
 
     # Negative stock or negative sales are IMPOSSIBLE, so they go. A missing
-    # cost (`cost <= 0`) used to go with them and no longer does: it is an
-    # ECONOMIC condition, not an integrity one. The demand model cannot see
+    # cost (`cost <= 0`) does NOT go with them: it is an ECONOMIC condition,
+    # not an integrity one. The demand model cannot see
     # cost -- it is not in FEATURES -- so such an episode is an ordinary
     # demand observation to every frozen artifact. It is fatal only to IL
     # (scrap is `cost x leftover`) and to the action set (`d_max = 1.0` reads
@@ -421,13 +419,10 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     #                   leftover) or stock left (not censored, and that
     #                   leftover is scrap). FLAGS `final_hour_restock`.
     #
-    # Two hour-level tests used to live here and neither was right. An hour
-    # selling more than it opened with is a RESTOCK, not an impossible
-    # quantity -- deleting it took 18.1pp of the extract's COGS. And an hour
-    # whose ending falls short is shrink, which nets into scrap at the
-    # episode level; dropping the episode for it deleted the fastest-selling
-    # windows first, since a sale is likelier to straddle a bucket boundary
-    # the more the SKU sells.
+    # No hour-level quantity tests beyond continuity: an hour selling more
+    # than it opened with is a RESTOCK, and an hour whose ending falls short
+    # is SHRINK -- both real events, settled at the episode level
+    # (docs/learnings.md on what dropping them cost).
     d = d.sort_values(["sku_id", "fc", "date", "hour_of_day"])
     discontinuous = episodes.continuity_breaks(d)
     d = d[~d.episode_id.isin(d.loc[discontinuous, "episode_id"].unique())]
@@ -490,15 +485,8 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
 
     # RE-SEGMENTATION, WHICH MUST BE A NO-OP -- and is checked, not assumed.
     #
-    # It used to do real work: `null_category` and `zero_base_price` were
-    # row-scoped, so they punched holes mid-window and left episodes that were
-    # no longer contiguous runs. Re-deriving the ids split those into
-    # fragments, which is why this is the one stage where episode count and
-    # COGS could RISE -- one opening row becoming two, the same stock counted
-    # twice.
-    #
-    # Every drop after the ids are assigned is episode-scoped now, so nothing
-    # punches a hole. That invariant is load-bearing and invisible:
+    # Every drop after the ids are assigned is episode-scoped, so nothing
+    # punches a hole mid-window. That invariant is load-bearing and invisible:
     # `episode_universe` runs BEFORE this, so if a future row-scoped drop
     # re-split anything, the continuity check would have been made against ids
     # that no longer exist -- stale, and silent. Hence the assertion rather
@@ -559,8 +547,8 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     # MUTATES the field the ids are derived from, so with the ids already
     # fixed and verified above, the rewrite can no longer move a row into a
     # different episode -- it only changes values inside a settled boundary.
-    # The other way round it merged an episode entering negative with the
-    # genuine window that happened to follow it.
+    # (Recovery before the check merged an episode entering negative with the
+    # genuine window that followed it.)
     cap = int(cfg["data"]["manufacturing_window_hours"])
     entry = d.groupby("episode_id")["hours_remaining"].transform("first")
     length = d.groupby("episode_id")["hours_remaining"].transform("size")
@@ -582,22 +570,21 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     # `negative_window` and gates dp_eligible -- same argument as
     # `window_too_long`, which it sits beside in DP_INELIGIBLE.
 
-    # Intraday restocks and extract-edge truncation used to be two more drops
-    # here. Both are now flags set in `tag_dp_eligibility` below -- the
-    # restock gates dp_eligible (it breaks the DP's state transition and
-    # nothing else), the truncation does not gate anything (only the episode's
-    # ENDING is missing, and every scrap consumer already handles that).
-    # Both tests must run AFTER re-segmentation, which is why they live at the
-    # end of the chain rather than beside the drops.
+    # Intraday restocks and extract-edge truncation are FLAGS set in
+    # `tag_dp_eligibility` below -- a final-hour restock gates dp_eligible
+    # (it breaks the DP's state transition and nothing else), truncation
+    # gates nothing (only the ENDING is missing, and every scrap consumer
+    # handles that). Both tests run AFTER re-segmentation, which is why they
+    # live at the end of the chain.
 
     d["d_ref"] = d.category.map(lambda c: reference_discount(cfg, c))
     d["d_max"] = 1.0 - d.cost / d.original_price
     d["offered_price"] = d.original_price * (1 - d.total_discount)
     d, economic = tag_dp_eligibility(d, cfg)
 
-    # THE TWO POPULATION GATES GET A ROW EACH, and the second one used to be
-    # the only one reported. Every row ABOVE this point is a hard drop: those
-    # rows leave the frame and every consumer downstream sees the same
+    # THE TWO POPULATION GATES GET A ROW EACH. Every row ABOVE this point is
+    # a hard drop: those rows leave the frame and every consumer downstream
+    # sees the same
     # population, so "who uses this" is not a question. These last two drop
     # NOTHING -- they are flags -- and they are exactly where the consumers
     # diverge. Reporting only `dp_eligible` meant the population the DEMAND
@@ -948,20 +935,13 @@ def eligible_detail(d):
 def tag_dp_eligibility(d, cfg):
     """Flag the episodes the DP cannot price. Flag, never drop.
 
-    Dropping them was costing more than it saved. It removed most of the COGS
-    in the extract from every frozen artifact, including the elasticity prior
-    -- which is starved of price variation and for which below-cost hours are
-    the WIDEST spread in the data. And it answered a gate with the filter that
-    removes the gate's subject: `reassessment_gates.max_share_non_explorable`
-    exists to say "too many episodes have a cost floor too tight to explore
-    against", and `share_non_explorable` measured 0.0 because those episodes
-    were already gone.
-
-    Two further stages that used to be drops are computed here for the same
-    reason: `negative_window` and `restocked` break the DP's horizon and its
-    state transition respectively, and break nothing at all in the demand fit.
-    A third, `edge_truncated`, is flagged and gates NOTHING -- see
-    `edge_truncated_episodes`.
+    A flag keeps the episode for every consumer that can use it and excludes
+    it only where the specific consumer cannot -- a drop removes it from all
+    of them, including the demand fit, which sees none of these conditions
+    (docs/learnings.md on what the drops cost). `negative_window` and
+    `restocked` break the DP's horizon and its state transition respectively,
+    and break nothing at all in the demand fit. `edge_truncated` is flagged
+    and gates NOTHING -- see `edge_truncated_episodes`.
 
     Episode-scoped throughout: one bad hour makes the whole window
     unpriceable, because the monotonicity anchor carries that price into every
@@ -988,17 +968,11 @@ def tag_dp_eligibility(d, cfg):
     # This is the frozen-artifact gate; `dp_eligible` is a strict subset with
     # further requirements of the SOLVER on top.
     d["final_hour_clean"] = d.episode_id.map(flow.final_hour_clean).astype(bool)
-    # An unfinished episode is not a complete observation of anything. It used
-    # to stay eligible on the grounds that its OBSERVED hours are ordinary
-    # demand and `scrap_units` already returns NaN -- true, and not enough:
-    # two consumers met one and silently mis-weighted it. The clearance panel
-    # averaged in "sold so far", and the backtest graded a truncated actual
-    # arm against two full-horizon simulated ones. A category that needs
-    # special-casing at every consumer belongs excluded at the source.
-    # `flow.eligible` now carries all three conditions -- reconciles, clean
-    # final hour, CLOSED -- so this no longer ANDs closure in on the side.
-    # `outcome_known` stays as its own column because the DP gate reports on
-    # it by name and the flag is worth reading alone.
+    # An unfinished episode is not a complete observation of anything, and a
+    # category that needs special-casing at every consumer belongs excluded
+    # at the source. `flow.eligible` carries all three conditions --
+    # reconciles, clean final hour, CLOSED. `outcome_known` stays as its own
+    # column because the DP gate reports on it by name.
     d["outcome_known"] = d.episode_id.map(flow.closed).astype(bool)
     d["episode_eligible"] = d.episode_id.map(flow.eligible).astype(bool)
 
@@ -1037,15 +1011,13 @@ def tag_dp_eligibility(d, cfg):
         "why": BELOW_COST_HOURS,
     }
     # An inventory that MOVED -- stock arrived, or went missing -- is
-    # reported and gates nothing. It used to gate, on the grounds that the
-    # DP's transition assumes one pool draining monotonically. That confused
-    # the SOLVE with the REPLAY. Within one solve the DP does assume monotone
-    # draining over the remaining horizon, and it should: production cannot
-    # see a future delivery either. But the replay re-solves every hour
-    # against the stock actually on hand, and `backtest.replay` now applies
-    # the same exogenous per-hour adjustment the real episode had. The DP
-    # finds out about an arrival at the next hour -- exactly as it does live,
-    # because `ending[t]` IS `starting[t+1]`.
+    # reported and gates nothing. Within one SOLVE the DP does assume one
+    # pool draining monotonically over the remaining horizon, and it should:
+    # production cannot see a future delivery either. But the REPLAY
+    # re-solves every hour against the stock actually on hand, applying the
+    # same exogenous per-hour adjustment the real episode had -- the DP finds
+    # out about an arrival at the next hour, exactly as it does live, because
+    # `ending[t]` IS `starting[t+1]`.
     for name, col in (("restocked", "units_restocked"),
                       ("shrink", "units_shrink")):
         hit = d[col] > 0

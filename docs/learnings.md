@@ -231,3 +231,43 @@ being honest about that rather than fixing it. The fix is exogenous price
 variation: `pricing.explore`'s uniform draw from the tau-affordable set is
 the randomisation, tau is its budget, and the posterior learns from those
 draws. The prior only needs to be *not confidently wrong* until then.
+
+---
+
+## Smaller lessons swept out of code comments (2026-08-25)
+
+- **Gross, never netted.** An early `episode_flow` netted a shortfall against
+  a same-size restock ("one sale bucketed an hour late"). Inference dressed as
+  arithmetic: it read a window with 2 restocked and 2 shrunk as having
+  neither, letting a restocked episode into the DP-side population with its
+  clearance priced against the wrong supply. Arrivals and losses are counted
+  gross ever since.
+- **Row-scoped drops manufacture chain breaks.** `null_category` and
+  `zero_base_price` were once row-scoped; they punched holes mid-window, so
+  re-segmentation split episodes into fragments and episode counts *rose* at
+  that stage. All post-id drops are episode-scoped now and re-segmentation is
+  a checked no-op — an assertion, because the invariant fails silently.
+- **Shrink was quarantined on the live path** while the offline chain counted
+  it as an ordinary event. Every shrink hour then failed the event store's
+  reconciliation, `event_completeness` fell by the feed's shrink rate, and the
+  shadow gate failed for a reason no integration work could fix. Shrink is
+  now named on the event, not quarantined, on both paths.
+- **The closure sentinel once had a fallback** — absent the sentinel, treat
+  every episode as closed. That kept a fixture that had never modelled the
+  convention looking healthy for months, and would have done the same for a
+  real feed that stopped emitting it. No fallback: a sentinel-free feed reads
+  every episode unclosed, loudly.
+- **Hour-level quantity tests were wrong twice.** "units > inventory is
+  impossible" deleted restocks (18.1pp of the extract's COGS); "ending falls
+  short is dirty" deleted shrink, fastest sellers first (sales straddle
+  bucket boundaries more the faster a SKU sells). Continuity is the only
+  hour-level rule that drops.
+- **Round only for display.** `proposed_mean` was rounded to 4dp while
+  `mean_before` was not, so the reported step could read 5e-5 over
+  `max_mean_step` — a safety bound checked downstream. The stored posterior
+  was always right; the report disagreed with itself. Artifacts carry
+  unrounded values; the printed line formats.
+- **`quarantined_event_count` was read from the cumulative file**, so a
+  serial and a parallel run of the same input reported different counts and
+  the difference was misread as a parallelism bug. Per-run counters live on
+  the store; files accumulate.

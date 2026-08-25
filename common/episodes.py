@@ -55,12 +55,10 @@ the feed keeps holding to it.
 
 CLOSURE IS ONE CONDITION: `ending_inventory == 0` on the last row. That is the
 source zeroing the field when a listing ends, and its absence means the window
-was still running when the extract stopped. `write_off_convention` still
-reports whether the sentinel appears anywhere in a frame, but it is now a
-DIAGNOSTIC and no longer a fallback -- as a fallback it declared every episode
-closed whenever the sentinel was missing, which is exactly the state a feed is
-in when something has gone wrong with it, and it kept a synthetic fixture that
-had never modelled the convention looking perfectly healthy for months.
+was still running when the extract stopped. `write_off_convention` reports whether the
+sentinel appears anywhere in a frame -- a DIAGNOSTIC only, never a fallback: a
+feed with no sentinel is a broken feed, and every episode reads not_closed
+until the feed says otherwise (docs/learnings.md).
 
 Closure and OUTCOME are separate axes. Once closed, the sign of the UNCLIPPED
 `starting - sold` on the last row says which close it was: positive is scrap,
@@ -164,8 +162,8 @@ def net_leftover(starting_inventory, units_sold):
               it. How much arrived and how much was left are two unknowns with
               one equation once the ending has been zeroed.
 
-    Clipping destroys the third case by folding it into the second, which is
-    how a restocked close spent months reading as a clean sell-out.
+    Clipping destroys the third case by folding it into the second, making a
+    restocked close read as a clean sell-out -- hence UNCLIPPED.
     """
     start = np.asarray(starting_inventory, dtype=float)
     sold = np.asarray(units_sold, dtype=float)
@@ -231,7 +229,7 @@ def episode_flow(d):
 
     Returns a frame indexed by episode_id with `opening`, `arrived`,
     `vanished`, `supply`, `sold` and `clearance`. `clearance` cannot exceed 1
-    by construction, which is the property the old ratio lacked.
+    by construction, because supply counts everything that arrived.
     """
     d = d.sort_values(["date", "hour_of_day"])
     status = hour_status(d.starting_inventory, d.units_sold, d.ending_inventory)
@@ -259,14 +257,11 @@ def episode_flow(d):
     # are real events the source is reporting, and they are counted as they
     # happen.
     #
-    # An earlier version NETTED them, on the theory that a shortfall at one
-    # hour followed by a restock of the same size at the next was one sale
-    # bucketed an hour late. That was an inference dressed as arithmetic, and
-    # it was wrong: it read a window with 2 units restocked and 2 units shrunk
-    # as having neither, which let a restocked episode into the DP-side
-    # population and priced its clearance against the wrong supply. The gross
-    # figures are what the data says; nothing here is entitled to explain them
-    # away.
+    # GROSS, NEVER NETTED. Netting a shortfall against a same-size restock is
+    # an inference dressed as arithmetic -- it reads a window with 2 restocked
+    # and 2 shrunk as having neither, letting a restocked episode into the
+    # DP-side population with its clearance priced against the wrong supply.
+    # The gross figures are what the data says.
     agg["arrived"] = (-g[g.disc < 0].groupby("episode_id", sort=False).disc.sum()
                       ).reindex(agg.index).fillna(0).astype("int64")
     agg["vanished"] = g[g.disc > 0].groupby("episode_id", sort=False).disc.sum(
@@ -522,20 +517,12 @@ def adjustment_reason(starting_inventory, units_sold, ending_inventory):
     a window is merged across midnight that row sits in the MIDDLE of ours.
     Position is our bookkeeping; the zero is the source's fact.
 
-    SHRINK IS NAMED, NOT QUARANTINED. It used to return None here on purpose,
-    so that a partial shortfall would quarantine and stay visible -- and that
-    was the one place left where the live path treated shrink as an anomaly
-    while the offline chain treated it as an ordinary event: counted gross,
-    booked into scrap, gating nothing. The inconsistency was not free. Every
-    shrink hour failed the event store's reconciliation check, so
-    `event_completeness` fell by the feed's shrink rate and the shadow gate
-    (`min_event_completeness`, 0.99) failed for a reason no integration work
-    could fix -- it was measuring the source, not the integration.
-
-    Naming it keeps the visibility that the None was for: the reason is on the
-    event, `units_shrink` and `episode_scrap` carry the quantity, and the rate
-    is monitorable. Quarantine is for what the system CANNOT interpret, and a
-    shrink is interpreted.
+    SHRINK IS NAMED, NOT QUARANTINED. The live path treats shrink exactly as
+    the offline chain does: an ordinary event, counted gross, booked into
+    scrap, gating nothing. The reason is on the event, `units_shrink` and
+    `episode_scrap` carry the quantity, and the rate is monitorable.
+    Quarantine is for what the system CANNOT interpret, and a shrink is
+    interpreted (docs/learnings.md on the shadow gate this consistency fixed).
     """
     net = starting_inventory - units_sold
     if ending_inventory > net:
@@ -553,14 +540,10 @@ def write_off_convention(last):
     A final row reporting `ending_inventory == 0` while stock remained can only
     be a write-off, so a single such row proves the convention is in force.
 
-    This used to feed `classify_last` as a fallback -- absent a sentinel, treat
-    every episode as closed. It no longer does, because the fallback was
-    load-bearing in the worst way: it silently kept a fixture that had never
-    modelled the convention looking healthy, and would have done the same for a
-    real feed that stopped emitting the sentinel. Closure is now read from the
-    zero and nothing else, so a feed without the sentinel reports every episode
-    unclosed -- loudly, which is the point. Read this before believing that
-    number.
+    A DIAGNOSTIC, never a fallback into `classify_last`: closure is read from
+    the zero and nothing else, so a feed without the sentinel reports every
+    episode unclosed -- loudly, which is the point. Read this before believing
+    that number.
     """
     left = leftover_units(last.starting_inventory, last.units_sold).to_numpy()
     return bool(((last.ending_inventory.to_numpy() == 0) & (left > 0)).any())
@@ -574,9 +557,8 @@ def close_outcome(last):
     """What the close WAS, from the sign of the unclipped leftover.
 
     Orthogonal to `classify_last`, which answers whether the episode closed at
-    all. These two facts are independent and were previously entangled in one
-    three-way test that could not express, say, a censored close on a window
-    still running.
+    all -- the two facts are independent axes, so, say, a censored close on a
+    window still running is expressible.
     """
     net = net_leftover(last.starting_inventory, last.units_sold).to_numpy()
     return pd.Series(np.where(net > 0, CLOSE_SCRAP,
@@ -593,9 +575,8 @@ def classify_last(last):
     zero IS the closure and its absence means the window is still running at
     the edge of this extract. Nothing else is consulted -- not
     `hours_remaining` (nominal, still positive on ~99.9% of final rows), not
-    proximity to the extract's last timestamp (a heuristic with a tolerance
-    constant), and no longer a frame-wide fallback for feeds missing the
-    sentinel.
+    proximity to the extract's last timestamp, and never a frame-wide fallback
+    for feeds missing the sentinel.
 
     The leftover then says which kind of close it was, and it is read UNCLIPPED
     because the sign carries the whole answer:
@@ -644,10 +625,9 @@ def scrap_units(d):
                          `ending` to write the remainder off, how much arrived
                          and how much was scrapped are two unknowns with one
                          equation, and any answer is a guess.
-      DOES NOT RECONCILE the identity does not balance, so `scrap` is the
-                         residue of arithmetic that is already known to be
-                         wrong. This one is newly excluded: the old two-way
-                         test let an unbalanced episode through with a
+      DOES NOT RECONCILE the identity does not balance, so `scrap` would be
+                         the residue of arithmetic already known to be wrong
+                         -- an unbalanced episode never yields a
                          confident-looking figure.
 
     NaN propagates: a sum over a frame containing such episodes must be taken
@@ -703,9 +683,9 @@ def ending_summary(d):
     return {
         "episodes": int(len(last)),
         # if this is FALSE the source is not marking closure at all, and every
-        # episode below will read not_closed. That is no longer papered over
-        # with a fallback, so read this FIRST: false here means the feed
-        # changed or the extract is wrong, not that nothing ever closed.
+        # episode below will read not_closed -- deliberately, with no
+        # fallback. Read this FIRST: false here means the feed changed or the
+        # extract is wrong, not that nothing ever closed.
         "write_off_convention_in_force": write_off_convention(last),
         # the outcome axis, independent of closure: scrap / censored /
         # final_hour_restock by the SIGN of the unclipped last-row leftover
