@@ -135,19 +135,54 @@ def scored_rows(frame, cfg, which):
     return f.copy()
 
 
-def hour_multipliers(mu, hour, k, censored):
-    """Multiplicative hour fixed effects, profiled out by moment matching on
-    uncensored rows. Family-agnostic: it matches first moments, so the same
-    construction serves the Poisson and the NB profile."""
-    frame = pd.DataFrame({"hour": hour, "k": k, "mu": mu, "cen": censored})
+def hour_multipliers(mu, cell, k, censored, min_rows=1):
+    """Multiplicative fixed effects on a time cell, profiled out by moment
+    matching on uncensored rows. Family-agnostic -- it matches first moments,
+    so the same construction serves the Poisson and the NB profile.
+
+    `cell` is whatever grouping the control is keyed on:
+
+      hour_of_day   the hour, POOLED ACROSS DATES. Removes the average
+                    evening lift and nothing else, so a Tuesday storm or a
+                    competitor promotion is still in the residual and still
+                    correlated with how far the ramp has run.
+      date_hour     the hour OF THAT DAY -- same clock hour, compared across
+                    sku x fc. Absorbs every shock common to that moment:
+                    weather, footfall, a holiday, a rival's promotion. This is
+                    what PRD 9.5 means by "same-hour cross-episode", and the
+                    pooled hour control was only ever an approximation to it.
+
+    A CELL WITH TOO FEW ROWS FITS ITS OWN NOISE. Each cell gets its own
+    multiplier from its own rows, so as cells shrink the multipliers start
+    absorbing the very price response being measured -- the incidental
+    parameters problem, and it biases |epsilon| TOWARD ZERO, which is the same
+    direction the controlled arm is already biased. Cells under `min_rows` fall
+    back to 1.0 rather than fitting a multiplier from three observations, and
+    the share that had to fall back is reported.
+    """
+    frame = pd.DataFrame({"cell": cell, "k": k, "mu": mu, "cen": censored})
     unc = frame[~frame.cen]
-    m = (unc.groupby("hour").k.sum()
-         / unc.groupby("hour").mu.sum()).clip(0.05, 20.0)
-    return frame.hour.map(m).fillna(1.0).to_numpy()
+    if not len(unc):
+        return np.ones(len(frame)), 0.0
+    g = unc.groupby("cell")
+    m = (g.k.sum() / g.mu.sum()).clip(0.05, 20.0)
+    if min_rows > 1:
+        m = m[g.size() >= min_rows]
+    mult = frame.cell.map(m).fillna(1.0).to_numpy()
+    thin = float(np.mean(frame.cell.map(m).isna().to_numpy()))
+    return mult, thin
 
 
-def loglik(eps, base, log_ratio, k, censored, floor, controlled, hour, const,
-           r=None):
+def time_cell(g, control):
+    """The grouping the controlled arm profiles out."""
+    if control == "date_hour":
+        return (g.date.astype(str) + "|"
+                + g.hour_of_day.astype(str)).to_numpy()
+    return g.hour_of_day.to_numpy()
+
+
+def loglik(eps, base, log_ratio, k, censored, floor, controlled, cell, const,
+           r=None, min_cell=1):
     """Censored log-likelihood at one elasticity.
 
     `r=None` gives the censored POISSON -- no dispersion parameter, which is
@@ -156,8 +191,8 @@ def loglik(eps, base, log_ratio, k, censored, floor, controlled, hour, const,
     """
     mu = np.clip(base * np.exp(eps * log_ratio), floor, None)
     if controlled:
-        mu = mu * hour_multipliers(mu, hour, k, censored)
-        mu = np.clip(mu, floor, None)
+        mult, _ = hour_multipliers(mu, cell, k, censored, min_cell)
+        mu = np.clip(mu * mult, floor, None)
     if r is None:
         exact = k * np.log(mu) - mu - const
         tail = poisson.logsf(np.maximum(k, 1) - 1, mu)
@@ -171,16 +206,19 @@ def loglik(eps, base, log_ratio, k, censored, floor, controlled, hour, const,
 def curve(g, mu_ref, grid, controlled, cfg, r=None):
     """The full log-likelihood over the grid. Everything the old `_estimate`
     computed and then discarded except one index."""
+    pc = cfg["posterior"]["prior"]
     k = g.units_sold.to_numpy()
     censored = g.censored.to_numpy()
-    hour = g.hour_of_day.to_numpy()
+    cell = time_cell(g, pc.get("hour_control", "hour_of_day"))
+    min_cell = int(pc.get("min_rows_per_time_cell", 1))
     log_ratio = np.log((1 - g.total_discount.to_numpy())
                        / (1 - g.d_ref.to_numpy()))
     floor = cfg["pricing"]["demand_floor"]
     const = (gammaln(k + 1) if r is None
              else gammaln(k + r) - gammaln(r) - gammaln(k + 1))
     return np.array([loglik(e, mu_ref, log_ratio, k, censored, floor,
-                            controlled, hour, const, r) for e in grid])
+                            controlled, cell, const, r, min_cell)
+                     for e in grid])
 
 
 def deflation_deff(rows, model, cfg):
@@ -252,7 +290,7 @@ def marginal_score(ll_hold, w):
     return float(logsumexp(ll + logw) - logsumexp(logw))
 
 
-def build_curves(d, cfg, model, grid, window, r_by_cat=None, r_pooled=None):
+def build_curves(d, cfg, model, grid, window, r_by_cat=None, r_pooled=None):  # noqa: C901
     """Per-category (naive, controlled) curves and the deff used, on one split
     window. Shared by the fit and by the held-out scoring so the two cannot
     diverge in how they build rows."""
@@ -268,9 +306,12 @@ def build_curves(d, cfg, model, grid, window, r_by_cat=None, r_pooled=None):
         mu_ref = model.predict_mu_ref(g)
         lr = np.log((1 - g.total_discount.to_numpy())
                     / (1 - g.d_ref.to_numpy()))
-        within = lr - pd.Series(lr).groupby(
-            g.hour_of_day.to_numpy()).transform("mean").to_numpy()
+        # de-meaned on the SAME cell the controlled arm profiles out, or the
+        # reported share would describe a control that is not being applied
+        cells = time_cell(g, pc.get("hour_control", "hour_of_day"))
+        within = lr - pd.Series(lr).groupby(cells).transform("mean").to_numpy()
         v = float(np.var(lr))
+        sizes = pd.Series(cells).value_counts()
         out[str(cat)] = {
             "naive": curve(g, mu_ref, grid, False, cfg, r),
             "controlled": curve(g, mu_ref, grid, True, cfg, r),
@@ -281,6 +322,8 @@ def build_curves(d, cfg, model, grid, window, r_by_cat=None, r_pooled=None):
             "distinct_discounts": int(g.total_discount.nunique()),
             "identifying_variation_share": (float(np.var(within) / v)
                                             if v > 0 else 0.0),
+            "time_cells": int(len(sizes)),
+            "median_rows_per_time_cell": float(sizes.median()),
         }
     return out
 
@@ -361,55 +404,90 @@ def fold_spread(d, cfg, model, grid, folds=3):
     return out
 
 
-def rows_comparison(d, cfg, model, lo, hi, n):
-    """The sign outcome for BOTH row sets, every run.
+def design_comparison(d, cfg, model, lo, hi, n):
+    """Every row set x hour control, scored for sign, every run.
 
-    `rows` is the one genuinely contested choice left in this method, and it
-    trades two bad things against each other: entry rows are unconfounded but
-    carry little price variation, every stocked hour has the variation and the
-    within-episode survivorship confound. Which one wins is a property of the
-    EXTRACT, not of the method, so it must be measured on the extract rather
-    than settled in a comment. A run where entry rows come back mostly
-    wrong-signed too says the history cannot identify elasticity at all, which
-    is worth knowing before anyone tunes anything else.
+    TWO CONFOUNDS, TWO CONTROLS, AND THEY ARE NOT THE SAME PROBLEM.
+
+      rows          the WITHIN-EPISODE survivorship confound. A row at a deep
+                    discount exists because earlier hours did not sell, so a
+                    deeper price reads as lower demand. Only `entry` avoids
+                    it -- one row per episode, before any selection.
+      hour_control  the COMMON TIME SHOCK. `hour_of_day` removes the average
+                    evening lift; `date_hour` compares the same clock hour of
+                    the SAME DAY across sku x fc, which absorbs the weather,
+                    the footfall, a rival's promotion -- everything shared by
+                    that moment. This is PRD 9.5's "same-hour cross-episode".
+
+    Neither substitutes for the other, and which combination an extract can
+    support is a property of the extract. Measured on the fixture:
+
+      rows              control       wrong-signed  ident  rows/cell   span
+      entry             hour_of_day        2 of 5   0.000       90.0   0.22
+      entry             date_hour          2 of 5   0.000        1.0   0.22
+      all_stocked_hours hour_of_day        4 of 5   0.246      211.0  11.42
+      all_stocked_hours date_hour          2 of 5   0.172        2.0  11.42
+
+    `date_hour` cut the all-hours sign failures from four to two while keeping
+    fifty times the identifying power of entry rows, which is the case for it.
+    Read the caveat with it: at a median of 1-2 rows per cell the fixture
+    cannot support day-level cells at all, `min_rows_per_time_cell` falls the
+    thin ones back to 1.0, and part of the fixture's improvement is its own
+    structure -- its episodes all start in the morning, so clock hour proxies
+    elapsed hours there in a way production will not repeat. Production has far
+    more sku x fc per hour and should support the cells properly, which is why
+    this table is computed on the extract instead of being decided here.
     """
-    out = {}
+    out, wide = {}, np.linspace(lo, max(1.0, hi), n)
+    step = float(wide[1] - wide[0])
     for which in ("entry", "all_stocked_hours"):
-        alt = copy.deepcopy(cfg)
-        alt["posterior"]["prior"]["rows"] = which
-        wide = np.linspace(lo, max(1.0, hi), n)
-        try:
-            fit = build_curves(d, alt, model, wide, "train")
-        except Exception as exc:                        # noqa: BLE001
-            out[which] = {"error": str(exc)}
-            continue
-        bad, spans, sds = [], [], []
-        for cat, c in fit.items():
-            peak = max(wide[int(np.argmax(c["naive"]))],
-                       wide[int(np.argmax(c["controlled"]))])
-            step = float(wide[1] - wide[0])
-            if peak >= -step:
-                bad.append(cat)
-            spans.append(max(np.ptp(c["naive"]), np.ptp(c["controlled"]))
-                         / c["deff"])
-            sds.append(c["log_ratio_sd"])
-        out[which] = {
-            "categories": len(fit),
-            "wrong_signed": sorted(bad),
-            "wrong_signed_count": len(bad),
-            "median_span": round(float(np.median(spans)), 2) if spans else None,
-            "median_log_ratio_sd": (round(float(np.median(sds)), 6)
-                                    if sds else None),
-            "rows": int(sum(c["rows"] for c in fit.values())),
-        }
-    out["in_use"] = cfg["posterior"]["prior"].get("rows", "entry")
+        for ctrl in ("hour_of_day", "date_hour"):
+            key = f"{which}+{ctrl}"
+            alt = copy.deepcopy(cfg)
+            alt["posterior"]["prior"]["rows"] = which
+            alt["posterior"]["prior"]["hour_control"] = ctrl
+            try:
+                fit = build_curves(d, alt, model, wide, "train")
+            except Exception as exc:                    # noqa: BLE001
+                out[key] = {"error": str(exc)}
+                continue
+            bad, spans, sds, idents, cells = [], [], [], [], []
+            for cat, c in fit.items():
+                peak = max(wide[int(np.argmax(c["naive"]))],
+                           wide[int(np.argmax(c["controlled"]))])
+                if peak >= -step:
+                    bad.append(cat)
+                spans.append(max(np.ptp(c["naive"]), np.ptp(c["controlled"]))
+                             / c["deff"])
+                sds.append(c["log_ratio_sd"])
+                idents.append(c["identifying_variation_share"])
+                cells.append(c["median_rows_per_time_cell"])
+
+            def med(v):
+                return round(float(np.median(v)), 4) if v else None
+
+            out[key] = {
+                "rows_set": which, "hour_control": ctrl,
+                "categories": len(fit),
+                "wrong_signed": sorted(bad),
+                "wrong_signed_count": len(bad),
+                "median_span": med(spans),
+                "median_log_ratio_sd": med(sds),
+                "median_identifying_variation_share": med(idents),
+                "median_rows_per_time_cell": med(cells),
+                "rows": int(sum(c["rows"] for c in fit.values())),
+            }
+    pc = cfg["posterior"]["prior"]
+    out["in_use"] = f"{pc.get('rows', 'entry')}+{pc.get('hour_control', 'date_hour')}"
     out["note"] = (
-        "entry rows are one per episode, taken before the legacy ramp starts, "
-        "so they carry no within-episode survivorship confound and little "
-        "price variation. all_stocked_hours has the variation and the "
-        "confound. Fewer wrong-signed categories is the thing to read: a "
-        "weakly identified right-signed estimate degrades to the uniform on "
-        "the support, a confident wrong-signed one is discarded entirely.")
+        "FEWER WRONG-SIGNED IS THE THING TO READ, then median_span. A weakly "
+        "identified right-signed estimate degrades to the uniform on the "
+        "support; a confident wrong-signed one is discarded entirely and takes "
+        "its category's information with it. Then check "
+        "median_rows_per_time_cell: below min_rows_per_time_cell the control "
+        "is not actually being applied, and just above it the multipliers are "
+        "fitted from so few rows that they absorb the price response itself "
+        "and bias |epsilon| toward zero.")
     return out
 
 
@@ -424,7 +502,8 @@ def estimate(d, cfg, model):
     fit = build_curves(d, cfg, model, grid, "train")
     unconstrained = unconstrained_argmax(d, cfg, model, lo, hi,
                                          pc["search_grid_size"])
-    rows_cmp = rows_comparison(d, cfg, model, lo, hi, pc["search_grid_size"])
+    design_cmp = design_comparison(d, cfg, model, lo, hi,
+                                   pc["search_grid_size"])
     folds = fold_spread(d, cfg, model, grid,
                         int(pc.get("stability_folds", 3)))
     if not fit:
@@ -585,7 +664,7 @@ def estimate(d, cfg, model):
         "pooled_std": round(pooled_std, 4),
         "pooled_deff": round(pooled_deff, 3),
         "pooled_basis": pooled_basis,
-        "rows_comparison": rows_cmp,
+        "design_comparison": design_cmp,
         "pooled_categories": sorted(
             c for c in fit if not signs[c][0] and fit[c]["log_ratio_sd"] > 1e-9),
         "pooled_density": [round(float(x), 8) for x in pooled],

@@ -315,6 +315,35 @@ posterior:
       # its NB likelihood needed an `r` in exactly the term censoring fires --
       # and the Poisson profile has no dispersion parameter, so that selection
       # bias is gone.
+    hour_control: "date_hour"          # SET  "date_hour" | "hour_of_day"
+      # WHAT THE CONTROLLED ARM PROFILES OUT (owner, 2026-08-25).
+      #
+      # "hour_of_day"  the hour POOLED ACROSS DATES. Removes the average
+      #                evening lift and nothing else, so a Tuesday storm or a
+      #                rival's promotion is still in the residual -- and still
+      #                correlated with how far the legacy ramp has run.
+      # "date_hour"    the same clock hour OF THAT DAY, compared across
+      #                sku x fc. Absorbs every shock common to that moment.
+      #                This is what PRD 9.5 means by "same-hour cross-episode";
+      #                the pooled hour control was only ever an approximation.
+      #
+      # It does NOT fix the within-episode survivorship confound -- two
+      # episodes at 5pm on the same day differ in discount partly because one
+      # of them has not been selling -- which is why `rows: entry` still
+      # matters. The two controls are for different confounds and both are
+      # needed.
+      #
+      # Read `identifying_variation_share` and `median_rows_per_time_cell`
+      # after switching: a finer cell absorbs more, so LESS price variation
+      # survives to identify epsilon.
+    min_rows_per_time_cell: 5          # SET  a time cell with fewer uncensored
+      # rows than this gets no multiplier of its own and falls back to 1.0.
+      #
+      # A CELL FITTED FROM THREE OBSERVATIONS ABSORBS THE PRICE RESPONSE IT IS
+      # SUPPOSED TO CONTROL FOR -- the incidental parameters problem -- and it
+      # biases |epsilon| TOWARD ZERO, the same direction the controlled arm is
+      # already biased. Matters much more under "date_hour", where cells are
+      # (day x hour) and can be thin.
     own_information_saturation: 2.0    # SET  log-likelihood units, across the
       # whole support, at which a category stops borrowing from the pool and
       # stands on its own data. 2.0 is the chi-square 95% cutoff: a category

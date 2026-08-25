@@ -1246,3 +1246,44 @@ def test_a_likelihood_peaking_at_positive_elasticity_is_rejected():
     assert "signs[cat][0]" in src, \
         "the pool must exclude wrong-sign categories -- otherwise the fallback " \
         "inherits the confound the rejection exists to remove"
+
+
+def test_the_hour_control_can_be_keyed_on_the_day_not_just_the_clock():
+    """PRD 9.5 says "same-hour CROSS-EPISODE", and a control pooled across
+    dates is only an approximation to it: it removes the average evening lift
+    and leaves a Tuesday storm or a rival's promotion in the residual, still
+    correlated with how far the legacy ramp has run.
+
+    `date_hour` compares the same clock hour of the SAME DAY across sku x fc,
+    which absorbs everything shared by that moment. On the fixture it cut the
+    all-hours sign failures from four categories to two.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from bootstrap import prior_density as pdn
+
+    g = pd.DataFrame({
+        "date": ["2026-03-01"] * 3 + ["2026-03-02"] * 3,
+        "hour_of_day": [10, 11, 10, 10, 11, 10],
+    })
+    assert list(pdn.time_cell(g, "hour_of_day")) == [10, 11, 10, 10, 11, 10]
+    cells = list(pdn.time_cell(g, "date_hour"))
+    assert len(set(cells)) == 4, cells
+    # the same clock hour on two different days must NOT share a cell -- that
+    # is the entire difference between the two controls
+    assert cells[0] != cells[3]
+
+    # A CELL FITTED FROM TOO FEW ROWS absorbs the price response it is meant to
+    # control for, and biases |eps| toward zero. Thin cells fall back to 1.0
+    # rather than fitting a multiplier from three observations.
+    mu = np.full(6, 2.0)
+    k = np.array([3, 3, 3, 1, 1, 1])
+    cen = np.zeros(6, bool)
+    mult, thin = pdn.hour_multipliers(mu, np.array(cells), k, cen, min_rows=5)
+    assert np.allclose(mult, 1.0), "every cell here has 1-2 rows; none qualify"
+    assert thin == pytest.approx(1.0)
+    # with no minimum they are all fitted, which is the behaviour the guard
+    # exists to prevent at small cell sizes
+    fitted, _ = pdn.hour_multipliers(mu, np.array(cells), k, cen, min_rows=1)
+    assert not np.allclose(fitted, 1.0)

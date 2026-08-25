@@ -672,20 +672,23 @@ def _print_density(prior):
               + ". Their own densities are discarded and they take the pooled "
                 "one. `peak` above is where the likelihood really wanted to "
                 "sit before search_bounds clipped it.")
-    rc = (prior.get("pooled") or {}).get("rows_comparison") or {}
+    rc = (prior.get("pooled") or {}).get("design_comparison") or {}
     if rc:
-        print(f"\n  row set (in use: {rc.get('in_use')}) -- wrong-signed "
-              f"categories, which is the thing to read:")
-        for which in ("entry", "all_stocked_hours"):
-            v = rc.get(which) or {}
-            if "error" in v:
-                print(f"    {which:18s} unavailable: {v['error']}")
+        print(f"\n  design (in use: {rc.get('in_use')}) -- fewer wrong-signed "
+              f"first, then span:")
+        print(f"    {'rows + control':34s} {'wrong':>7s} {'span':>8s} "
+              f"{'ident':>7s} {'rows/cell':>10s}")
+        for key, v in rc.items():
+            if not isinstance(v, dict):
                 continue
-            mark = " <- in use" if which == rc.get("in_use") else ""
-            print(f"    {which:18s} {v.get('wrong_signed_count')}/"
-                  f"{v.get('categories')} wrong-signed   "
-                  f"median span {v.get('median_span')}   "
-                  f"median sd(log ratio) {v.get('median_log_ratio_sd')}{mark}")
+            if "error" in v:
+                print(f"    {key:34s} unavailable: {v['error']}")
+                continue
+            mark = "  <- in use" if key == rc.get("in_use") else ""
+            print(f"    {key:34s} {v['wrong_signed_count']:>3}/"
+                  f"{v['categories']:<3} {v['median_span']:>8.2f} "
+                  f"{v['median_identifying_variation_share']:>7.3f} "
+                  f"{v['median_rows_per_time_cell']:>10.1f}{mark}")
     c = prior.get("holdout_comparison", {})
     if c.get("total_per_row"):
         print(f"\n  held out on '{c['window']}' ({c['rows_scored']:,} rows), "

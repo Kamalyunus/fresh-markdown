@@ -433,6 +433,30 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
    sign outcome for BOTH sets every run** — read it before changing
    `posterior.prior.rows`.
 
+   **TWO CONFOUNDS, TWO CONTROLS, NOT THE SAME PROBLEM.** `rows` handles the
+   WITHIN-EPISODE survivorship confound (only `entry` avoids it).
+   `hour_control` handles the COMMON TIME SHOCK: `hour_of_day` removes the
+   average evening lift and leaves a Tuesday storm in the residual, still
+   correlated with how far the ramp has run; **`date_hour`** compares the same
+   clock hour of the SAME DAY across sku × fc, absorbing everything shared by
+   that moment — which is what PRD 9.5's "same-hour cross-episode" always
+   meant. Neither substitutes for the other. `design_comparison` scores all
+   four combinations every run:
+
+       rows + control                 wrong-signed  span   ident  rows/cell
+       entry+hour_of_day                    2/5     0.18   0.000       90.0
+       entry+date_hour                      2/5     0.18   0.000        1.0
+       all_stocked_hours+hour_of_day        4/5    11.42   0.246      211.0
+       all_stocked_hours+date_hour          2/5    11.42   0.172        2.0
+
+   Fewer wrong-signed first, then `median_span`. **Then check
+   `median_rows_per_time_cell`**: below `min_rows_per_time_cell` the control
+   is not being applied at all, and just above it the multipliers are fitted
+   from so few rows that they absorb the price response and bias |ε| toward
+   zero. The fixture cannot support day-level cells (1–2 rows); production has
+   far more sku × fc per hour and should, which is why the table is computed
+   on the extract rather than decided here.
+
    **READ `wrong_sign_categories` AND `std_basis` FIRST.** Two failures the
    method could not see until production data hit it, both now caught:
 

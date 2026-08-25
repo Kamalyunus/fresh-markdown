@@ -679,6 +679,19 @@ Fixture run, calib window, 1,230 rows: oracle −0.591567, bracket −0.591826, 
 
 It is computed rather than borrowed, so nothing has to exist first and the cold start works on a fresh clone. It also cannot go stale: a pinned constant describes whatever extract produced it, needs re-pasting after a retrain, and says nothing about the data in front of you. Setting an explicit number still wins, for reproducing an older run, and then applies to every category.
 
+**Two confounds, two controls, and they are not the same problem** (owner, 2026-08-25). `rows` handles the *within-episode* survivorship confound — only `entry` avoids it. `hour_control` handles the *common time shock*: `hour_of_day` removes the average evening lift, leaving a Tuesday storm or a rival's promotion in the residual and still correlated with how far the ramp has run; **`date_hour`** compares the same clock hour of the *same day* across sku × fc, absorbing everything shared by that moment. That is what this section's "same-hour cross-episode" always meant, and the pooled hour control was only ever an approximation to it.
+
+`design_comparison` scores all four combinations on every run, because which one an extract can support is a property of the extract:
+
+| rows | control | wrong-signed | median span | ident share | rows/cell |
+|---|---|---|---|---|---|
+| entry | hour_of_day | 2 of 5 | 0.18 | 0.000 | 90.0 |
+| entry | date_hour | 2 of 5 | 0.18 | 0.000 | 1.0 |
+| all_stocked_hours | hour_of_day | **4 of 5** | 11.42 | 0.246 | 211.0 |
+| all_stocked_hours | date_hour | 2 of 5 | 11.42 | 0.172 | 2.0 |
+
+`date_hour` cut the all-hours sign failures from four to two while keeping **fifty times** the identifying power of entry rows. Read the caveat with it: at 1–2 rows per cell the fixture cannot support day-level cells at all — `min_rows_per_time_cell` falls the thin ones back to 1.0 — and part of the fixture's improvement is its own structure, since its episodes all start in the morning so clock hour proxies elapsed hours there in a way production will not repeat. **A cell fitted from too few rows absorbs the price response it is meant to control for** (the incidental parameters problem) and biases |ε| toward zero, the same direction the controlled arm is already biased.
+
 **The sign still rejects, and it is the only thing that does** (owner, 2026-08-25). `search_bounds` is a statement about the elasticities the DP supports, not a belief about demand, so a likelihood peaking outside it is **clipped to the nearest bound and reported as measured**. That is how a category came back as a confident `−0.05` with `std: 0.0` on 125,749 rows. The peak is therefore searched *past* the bound: if the unconstrained optimum sits at or above zero — demand rising with price — the category's own density is discarded entirely and it takes the pooled one, flagged in `wrong_sign_categories` with its `unconstrained_argmax`.
 
 This is not a rare pathology on legacy data. Three of five fixture categories had their unconstrained optimum above zero, and the mechanism is the ramp: **deep discounts land on stock that is not selling**, so conditional on a price-neutral `μ_ref` the deeper price reads as *lower* demand. The old bracket method rejected exactly this as `wrong_sign`; the density method dropped the check when it dropped the reject path, and this restores it.
