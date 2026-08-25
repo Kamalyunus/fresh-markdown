@@ -246,7 +246,7 @@ def _shadow_one(ep, ctx):
         "cost_floor_violations": 0, "n_forced": 0, "empty_affordable": 0,
         "would_be_cost": 0.0, "raw_information": 0.0,
         "rec_disc": 0.0, "leg_disc": 0.0, "differs": 0,
-        "il_by_day": {}, "latencies": [],
+        "ep_discount_cost": 0.0, "latencies": [],
         "drift": {"mu": [], "r": [], "q": [], "sold": []},
         "last_row": None,
     }
@@ -274,7 +274,12 @@ def _shadow_one(ep, ctx):
         # last OBSERVED one. Both were latent; including below-cost episodes,
         # whose later hours the cost floor correctly refuses, is what would
         # have made them bite.
-        out["il_by_day"][row_day] = out["il_by_day"].get(row_day, 0.0) + \
+        # accumulated on the EPISODE and attributed to its close day below:
+        # a day's realised IL is the IL of the episodes that CLOSED that day,
+        # discount included -- an open episode's discount-so-far is not
+        # settled IL yet, and the trailing budget base must be a number the
+        # accounting can stand behind at midnight
+        out["ep_discount_cost"] = out.get("ep_discount_cost", 0.0) + \
             float(ep["original_price"][t]) * legacy_d * sold
         last_obs = (q, sold, float(ep["cost"][t]), ending, row_day)
 
@@ -362,6 +367,7 @@ def _shadow_one(ep, ctx):
     if last_obs is not None:
         start, sold_last, unit_cost, ending_last, close_day = last_obs
         out["last_row"] = {"episode_id": ep["episode_id"],
+                           "discount_cost": out.get("ep_discount_cost", 0.0),
                            "starting_inventory": start,
                            "units_sold": sold_last, "cost": unit_cost,
                            "ending_inventory": ending_last,
@@ -428,7 +434,6 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     # rather than collected into rows: at --max-episodes 0 the row list would
     # be millions of dicts and the answer is two scalars.
     il_discount = 0.0
-    il_disc_by_day = {}
     # Q-spreads for every decision on THIS path, so tau can be re-derived on
     # the population that will actually run rather than inherited from the
     # replay's entry-only one.
@@ -470,9 +475,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         latencies.extend(out["latencies"])
         for key in drift:
             drift[key].extend(out["drift"][key])
-        for day, amount in out["il_by_day"].items():
-            il_discount += amount
-            il_disc_by_day[day] = il_disc_by_day.get(day, 0.0) + amount
+        il_discount += out["ep_discount_cost"]
         for day, costs in out["spreads"]:
             ledger.add(day, costs)
         if out["last_row"] is not None:
@@ -527,12 +530,20 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     il_scrap = float(scrap_per_ep.sum())
     il_unknown_scrap = int((kind == episodes.NOT_CLOSED).sum())
     markdown_il = il_discount + il_scrap
-    # Scrap lands on the day the episode CLOSED, so a day's budget is funded
-    # by the IL that day actually carried. Charging it to the opening day
-    # would fund exploration out of losses that had not happened yet.
-    il_by_day = dict(il_disc_by_day)
-    for day, amount in zip(last.close_day.to_numpy(), scrap_per_ep):
-        il_by_day[day] = il_by_day.get(day, 0.0) + float(amount)
+    # A DAY'S REALISED IL IS THE IL OF THE EPISODES THAT CLOSED THAT DAY --
+    # the whole episode, discount AND scrap, attributed at close. Only at
+    # close is an episode's IL a settled number; an open episode's
+    # discount-so-far is an estimate of a loss still in motion, and the
+    # trailing budget base has to be something the accounting can stand
+    # behind at midnight. Unclosed episodes therefore contribute NOTHING to
+    # the base until they close (their eventual IL lands on that day), and
+    # the base is knowable at the start of each day by construction.
+    closed = (kind != episodes.NOT_CLOSED).to_numpy()
+    ep_il = last.discount_cost.to_numpy() + scrap_per_ep
+    il_by_day = {}
+    for day, amount, ok in zip(last.close_day.to_numpy(), ep_il, closed):
+        if ok:
+            il_by_day[day] = il_by_day.get(day, 0.0) + float(amount)
 
     # The budget production applies, not a simplified one: budget_today
     # scales the share down as the posterior narrows. Nothing moves the

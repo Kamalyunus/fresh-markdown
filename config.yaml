@@ -347,7 +347,10 @@ exploration:
   tau_spend_guard: 1.0                 # SET  divide-by-zero guard on realised cost, currency
   budget_il_window_days: 7             # SET  the IL base for a day's budget
     # is the mean of REALISED daily markdown IL over this many trailing
-    # calendar days, ending yesterday. Trailing, not same-day (unobservable
+    # calendar days, ending yesterday. A day's realised IL is the IL --
+    # discount AND scrap -- of the episodes that CLOSED that day: only at
+    # close is an episode's IL settled, so the base is fully knowable at
+    # midnight when the day's tau is set, whatever today brings. Trailing, not same-day (unobservable
     # until the day closes, and it funds exploration hardest on the worst
     # days) and not a forecast (nothing here forecasts IL). 7 smooths the
     # weekday cycle exactly once while still following drift in markdown
