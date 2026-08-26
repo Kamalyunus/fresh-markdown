@@ -34,7 +34,7 @@ Then, in order:
 1. **Level diagnostic (review, not a gate).** Calibration is always
    fitted and applied (the script's step 3b). Read `reports/backtest.json`
    → `calibration_gate_value` against the band `[0.90, 1.10]`: out of band
-   is a drift/staleness reading — follow the decision tree in `AGENTS.md`
+   is a drift/staleness reading — follow the decision tree in `docs/design.md` §9.2
    to separate wobble from trend — surfaced as WARN in `status`, never a
    launch blocker.
 2. **GATE — prior (owner).** Read `artifacts/prior.json` in this order:

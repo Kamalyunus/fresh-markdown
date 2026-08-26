@@ -246,7 +246,7 @@ capped at 1% of markdown IL per day.
 FROZEN (fit offline, unchanged during the MVP window)
   baseline_model.txt      demand at the reference discount, by context
   feature_schema.json     feature order and categorical levels
-  calibration.json        per-category level factors (fitted; NOT applied — gate passed without)
+  calibration.json        per-category level factors (always fitted AND applied — owner, 2026-08-25)
   r_lookup.json           negative-binomial dispersion by subcategory
   rho.json                intra-episode demand correlation (one scalar)
   prior.json              elasticity prior: a density per category, with
@@ -296,7 +296,18 @@ surface, and the strict-mode loader *refuses to start* while any measured or
 owner-decided value is null — the system cannot silently run on a guessed
 parameter. Every value is labelled by provenance: `MEASURED` (produced by
 the bootstrap pipeline), `SET` (design choice), or `SET BY OWNER` (business
-decision), so responsibility for every number is explicit.
+decision), so responsibility for every number is explicit. The six
+runtime-required values `load_config(strict=True)` refuses on while null:
+`dispersion.rho`, `dispersion.mean_forced_hours_per_episode`,
+`exploration.tau_initial` (from shadow's `tau_initial_derivation`),
+`monitoring.stop_conditions.scrap_deterioration_pct` and
+`margin_deterioration_pct`, and `ab_test.min_detectable_effect_pct`.
+MEASURED values are pasted into `config.yaml` by hand from their one source;
+SET BY OWNER values come from the product owner only — **an agent must never
+invent them**. And the boundary of the surface: config is the source of
+every *tunable* and of no *secret* — credentials live in `~/.env` and reach
+code as `REDSHIFT_*` environment variables; no hostname, credential, or
+connection string goes in `config.yaml`, in a module, or in a commit.
 
 ### 5.2 Data preparation — schema mapping and filter chain
 
@@ -314,6 +325,9 @@ those conditions are flags, because `FEATURES` carries neither `cost` nor
 `hours_remaining` nor anything about the inventory chain, so the demand model
 cannot see them and such an episode is an ordinary observation to every frozen
 artifact. Dropping them removed **>70% of the extract's COGS** from every fit.
+The transferable rule: **never gate on a condition a constraint already
+handles** — ask what actually happens if the row stays; a loud refusal
+counted in a report is usually better than a silent removal upstream.
 
 | Step | Drops |
 | --- | --- |
@@ -336,10 +350,10 @@ labelled with the first it trips.
 
 | Flag | Why the DP cannot act on it |
 | --- | --- |
-| `cost_missing` | `cost <= 0` — a *missing* cost, not a free good. `d_max` reads 1.0, so the DP would discount to the tier cap believing scrap is free, and IL reads zero |
+| `cost_missing` | `cost <= 0` — a *missing* cost, not a free good, and the `=` is load-bearing. At zero cost `non_priceable` reads `d_max = 1.0` (*maximally* priceable), a 100% discount enters the action set, and `mu(d) = mu_ref · ((1−d)/(1−d_ref))^ε` at `d = 1` is `0 ** negative` — a `ZeroDivisionError` out of `pricing.demand`. Quieter and worse: scrap is `cost × leftover`, so zero-cost episodes contributed discount cost and **no scrap at all**, deflating every IL figure over them. The fix is two layers on purpose and neither makes the other redundant: `pricing.dp.feasible_tiers` excludes any tier whose price is not strictly positive (that layer owns "which prices are legal" and must not depend on an upstream filter), and this flag keeps unknown-cost episodes out of every DP-side number — the flag cannot protect a production caller, and the tier rule cannot un-deflate an IL baseline. `m6_il_pct` excludes `cost <= 0` from BOTH of its `by_population` bases. The bug surfaced only from `pipeline.shadow --max-episodes 0`: the 3,000-episode default had never drawn a zero-cost episode, so **the gate passed on a sample that hid a crash** — quote the sampling caveat for more than the violation count |
 | `non_priceable` | `cost >= original_price`, so `d_max <= 0` and `feasible_tiers` is EMPTY |
 | `negative_window` | `hours_remaining` still `< 0` after recovery — the DP takes its horizon from the counter and `extend_to_window` builds the synthetic tail from it |
-| `window_too_long` | above `data.max_window_hours` (**120**) — `extend_to_window` RAISES above the cap, so this is a crash rather than a refusal |
+| `window_too_long` | above `data.max_window_hours` (**120** — raised from 48 by the owner: 48 was cutting legitimate multi-day windows, not only upstream defects) — `extend_to_window` RAISES above the cap, so this is a crash rather than a refusal. The bad value is dropped, never clamped: clamping would invent a window end the data never recorded, and the counter is load-bearing three ways (episode identification, the DP horizon, the synthetic tail) |
 | `outcome_unknown` | the episode never closed inside this data. Gates `eligible` as well: an unfinished episode is not a complete observation of anything, and two consumers silently mis-weighted one before this existed |
 | `final_hour_restock` | the last row sold more than it opened with, so stock arrived during the close and the leftover is a guess. Gates `eligible` too |
 
@@ -347,10 +361,38 @@ Four conditions are flagged and gate nothing:
 
 | Flag | Why it does not gate |
 | --- | --- |
-| `below_cost_hours` | a price the LEGACY policy set, which the agent is constrained never to set |
-| `edge_truncated` | of the unfinished episodes, the ones the extract boundary explains — the diagnostic that says whether the count is the boundary or a feed problem |
+| `below_cost_hours` | a price the LEGACY policy set, which the agent is constrained never to set. No harness special-cases it: the backtest's DP arm is **self-anchored** (`anchor = d_t`, its own previous choice) and never sees the legacy price; in shadow the legacy price IS the anchor, so from the crossing hour the action set is empty and `validate_state` refuses every remaining hour — the cost floor working, counted in `rejected_reasons` — while the hours *before* the crossing are good decisions the old chain deleted with the episode. Test below-cost as `original_price × (1 − discount)`, NEVER `applied_price` (zeroed on ~78% of rows). These episodes carry the widest price spread the extract has, which the elasticity prior is otherwise starved of |
+| `edge_truncated` | of the unfinished episodes, the ones the extract boundary explains — the diagnostic that says whether the count is the boundary or a feed problem. It has an expected magnitude: only the extract's last hours can leave an episode unfinished (`window_slice` assigns episodes whole by opening date), so a 175-day extract of ~36h windows should read under 1% — production measured 3.38%, above expectation |
 | `restocked` | units arrived mid-window. Does NOT gate: the replay re-solves hourly and applies the episode's own per-hour adjustment, so the DP meets an arrival exactly as it does live |
-| `shrink` | units left unsold and unwritten-off. Does NOT gate: they are counted into scrap, so `supply == sold + scrap` still closes |
+| `shrink` | units left unsold and unwritten-off. Does NOT gate: they are counted into scrap, so `supply == sold + scrap` still closes. `unreconciled_anomalies` in the split manifest locates shrink episodes by category and month for business deep-dive — a report, not a gate |
+
+The episode-level stock invariant is against SUPPLY, not opening stock:
+`sold <= opening + restocked`, following from the identity (scrap is
+non-negative) rather than from any filter;
+`test_prepared_data_is_priceable_and_self_consistent` asserts it on the
+output. The older opening-stock form was simply false once restocked
+episodes stopped being excluded — 13 episodes tripped it, every one
+correctly. The other postconditions asserted by test rather than assumed:
+discount in [0,1], non-negative quantities, `d_max > 0`, category present,
+no hour inside the exclusion window, `hours_remaining` within the cap, a
+monotone window counter inside every episode.
+
+The negative-window cap is a claim about the data and the stage *checks* it:
+an episode entering negative that runs longer than the cap is not recovered
+— it is flagged `negative_window` and counted as
+`episodes_entering_negative_but_longer_than_cap`. **If that count is not
+near-zero on your extract, the cap is wrong — fix the cap, do not widen the
+recovery.** The run-after-re-segmentation ordering above is not cosmetic:
+run first, the synthetic countdown once lined up with a genuine neighbouring
+window on the production extract (165 rows) and merged the two, and the
+invariant assertion misreported it as "a filter is dropping rows" — the one
+explanation that could not be true, since every drop is
+`isin(episode_id)`-scoped. Do not move it back. `negative_window_recovered`
+is also the **last** `hard_drop` row, so its counts ARE the `integrity`
+population; `episode_universe` runs *before* re-segmentation, so a future
+row-scoped filter would leave its continuity check and every id-keyed flag
+silently stale — which is why re-segmentation is an assertion, not a bare
+recompute.
 
 `eligible` — the middle population — is **three conditions and no more**, all
 evaluated in `common.episodes.episode_flow` and exposed as one column:
@@ -360,10 +402,36 @@ balances), `final_hour_clean` (`starting − sold >= 0` on the last row), and
 before; closure used to be re-derived independently at each consumer, which is
 one chance per consumer to forget it, and two did.
 
+The middle tier exists because of the censored likelihood, which corrects
+the earlier "FEATURES cannot see the chain, so nothing matters" argument in
+one place: the likelihood treats an hour as censored when the shelf ran out,
+and **that call is read off the inventory** — an ambiguous final hour means
+an untrustworthy censoring flag, and a wrong censoring flag biases demand
+directly. Everything `dp_eligible` additionally rejects (missing cost,
+unreadable horizon, mid-window restock or shrink) really is invisible to the
+model, so those episodes stay in `eligible`. `integrity` — everything that
+survived the chain, "rows that can be believed" — is read by nothing by
+default. The prepared frame carries `units_restocked`, `units_shrink`,
+`episode_supply`, `episode_scrap`, `episode_clearance`, `final_hour_clean`,
+`outcome_known` and `episode_eligible`; the reason column is
+`dp_ineligible_reason`, set to the FIRST flag tripped so it reads as a
+cause.
+
 Which population a consumer reads is one decision, in
-`baseline_model.train_population` (default `integrity`), resolved through
-`prepare_data.population`. The three artifact fits read the config; the DP,
-the calibration gate, the backtest and shadow always pass `"dp_eligible"`.
+`baseline_model.train_population` (default **`eligible`**), resolved through
+`prepare_data.population(d, cfg[, which])` — always call it, never re-derive
+the filter. The three artifact fits read the config; the DP, the
+calibration gate, the backtest, shadow, `tau` and the A/B always pass
+`"dp_eligible"` explicitly, because for them it is a precondition, not a
+choice — the DP has no feasible tier otherwise, and `extend_to_window`
+refuses a counter above the cap. Two population facts are fixed: `m1` /
+gate 1 reads `integrity` always (on `dp_eligible` it reads ~0 by
+construction and cannot fail), and `m6` IL% reports `by_population` on both
+bases — integrity is what the business loses, `dp_eligible` what the MVP
+addresses. Choosing between train populations is a **two-run comparison**,
+not a field in one report: flip `train_population`, re-run, compare
+`calibration_gate_value` (on `dp_eligible` either way); the backtest stamps
+`artifact_versions.train_population` so the two reports cannot be confused.
 
 Every stage also reports **`cogs_at_risk`** — unit cost × **supply** (opening stock plus gross arrivals; owner, 2026-08-24 — opening stock alone understated every restocked episode, and `tools.eda`'s clearance panel had already made the same correction for its own denominator),
 counted once per episode — with `cogs_dropped` and `cogs_dropped_pct_of_raw`
@@ -388,6 +456,24 @@ splits — production and evaluation must derive identical episode boundaries
 or every episode-level metric diverges unauditably. The waterfall exists
 because a filter chain that cannot show what it dropped, in order, cannot
 be reviewed.
+
+The chain is **13 waterfall rows**, the first being `raw` (the starting
+count before any drop). Every row carries `kind` and `used_by`: read
+`used_by` before quoting a row as "the data we trained on" — the two
+`population_gate` rows are the only place the consumers diverge.
+`python3 -m tools.export_waterfall --input <raw>.parquet` writes the whole
+chain as a workbook: the stages with `kind` and `used_by`, three WHOLE
+example episodes per removal reason drawn from the raw feed, then every rule
+in prose. The example ids are emitted by `load_and_filter` itself as it
+drops them — an exporter re-deriving which episodes a filter removed would
+be a second copy of the chain, disagreeing silently in the document meant to
+establish trust.
+
+Only `bootstrap.measure` and `bootstrap.prepare_data` accept raw data —
+never feed raw to a module that expects `data/prepared.parquet` (the
+percent→fraction conversion happens exactly once, here). A prepared parquet
+predating the SKU rate feature set fails prediction with a clear error —
+re-run `prepare_data` before retraining.
 
 ### 5.3 Historical measurement — measure first, then build
 
@@ -526,9 +612,34 @@ for the level factor to carry this particular load.
 Demand is modelled negative-binomial: `Var[D] = mu + mu²/r`. The dispersion
 `r` is fitted per subcategory by censored maximum likelihood on the
 calibration weeks, with a fallback chain (subcategory → category → global)
-for thin groups and a clamp on implausibly-high converged values. `rho`, the
-correlation of within-episode demand residuals, is one global scalar fitted
-against the model's own residuals. **Why negative-binomial:** observed
+for thin groups and a clamp on implausibly-high converged values. **An `r`
+at the search ceiling has two causes wanting opposite treatment**: a thin
+group whose MLE wandered there wants the clamp
+(`dispersion.clamp_percentile`); a group genuinely steadier than Poisson
+also lands there — no NB can represent it, `Var = mu + mu²/r` being at least
+`mu` for every finite `r` — and clamping THAT one inflates the variance
+claimed for exactly the cell that has least, which the DP's censored demand
+expectation, the posterior likelihood and every tier's exploration cost all
+inherit. Pearson dispersion `mean((k−mu)²/mu)` tells them apart: below 1.0
+the group is exempt from the clamp and listed in
+`r_lookup.under_dispersed_groups`. **A long list indicts the NB family for
+the extract, not just those cells** — read `pearson_global` beside it.
+`rho`, the correlation of within-episode demand residuals, is one global
+scalar fitted against the model's own residuals — which is why
+`dispersion.rho` and `dispersion.mean_forced_hours_per_episode` must be
+re-pasted from `artifacts/rho.json` after EVERY retrain (and after a prior
+change, which moves the working elasticity: −1.0 → −1.5 moved ρ
+0.3103 → 0.4236, deff 3.347 → 4.204, and the level-calibration factor
+1.4779 → 1.6222). They set `deff`, which divides accumulated information in
+`pipeline.update`, so a stale paste mis-weights every posterior step
+silently, **in the direction of slower learning**; the mirror check refuses
+the divergence only in strict mode, so re-paste as part of the retrain, not
+when something breaks. Take them from `artifacts/rho.json` (fitted against
+the model's own residuals), never from phase 0's
+`m3_intra_episode_correlation` — a category × hour proxy computed before any
+model exists, which says so in its own `note`. `pipeline.assurance` shares
+`fit_dispersion._working_elasticity`, so its live `rho` check cannot drift
+onto a different basis. **Why negative-binomial:** observed
 hourly demand is far more variable than Poisson (bursty shoppers, basket
 effects); a Poisson likelihood would make every learning update
 overconfident. **Why `r` per subcategory but `rho` global:** dispersion
@@ -556,8 +667,15 @@ support; a wrong-signed one (unconstrained peak at or above zero, searched
 *past* the sign bounds) is discarded for the pooled density and named in
 `wrong_sign_categories`; the std is the widest of three measured floors
 (density width, grid resolution, fold spread) and can never be zero — a
-zero-width prior would freeze the posterior. The upper bound (−0.05) remains
-a *sign constraint*, never to be widened.
+zero-width prior would freeze the posterior. The upper bound
+(`posterior.epsilon_max`, −0.05) remains a *sign constraint*, never to be
+widened: an estimate pinned at the UPPER bound means the estimator found no
+negative price response — an artifact of confounded data, not evidence that
+elasticity is near zero — and positive elasticity must stay
+unrepresentable. Widening applies only to the LOWER bound (the −1.5
+boundary defect in `docs/learnings.md`). Wrong-signed categories are
+measured *backwards, not weakly* — usually the legacy ramp confound at full
+strength; only exogenous price variation (`pricing.explore`) fixes it.
 
 **The full specification** (implementation `bootstrap.prior_density`, driven
 by `bootstrap.estimate_prior`):
@@ -589,12 +707,19 @@ by `bootstrap.estimate_prior`):
   reported so a reader can see whether the control is actually being applied.
 - **Read the artifact in this order:** `design_comparison` (every rows ×
   hour-control combination, scored for sign, span and cell size — which
-  combination an extract supports is a property of the extract), then
-  `wrong_sign_categories` with `unconstrained_argmax`, then
+  combination an extract supports is a property of the extract; rank fewest
+  wrong-signed first, then `median_span`, then `median_rows_per_time_cell`),
+  then `wrong_sign_categories` with `unconstrained_argmax`, then
   `holdout_comparison` — `log ∫ p(y_hold|ε)π(ε)dε` per held-out row,
   bracketed by `oracle` and `uniform`, reading
   `information_available_per_row` (oracle − uniform) first; candidates below
   `uniform` are named in `worse_than_a_flat_prior`.
+- **Tune `own_information_saturation` against production, once.** It is the
+  log-likelihood span at which a category stops borrowing from the pooled
+  density and stands on its own data; the shipped 2.0 is the chi-square 95%
+  cutoff. Read `likelihood_span` across categories: nearly all clear it →
+  pooling never fires and thin cells trust their own noise, raise it;
+  nearly none → everything drags to the pool, lower it.
 - **The acceptance gate is human** (section 9.3): there is no reject path in
   the estimator — a category that fails to identify ε widens instead of being
   replaced — so the gate is a reading of the artifact, not a flag in it.
@@ -946,7 +1071,46 @@ normalises, and takes moments. Mechanics and rationale:
   destroy the posterior; the human gate caps learning at one reviewed step
   per day until an evidence record justifies automating it, with the
   automation criteria deliberately drafted later from observed behaviour
-  rather than guessed now.
+  rather than guessed now. When reviewing a cell's block, read
+  `predictive_check.information_available_per_row` first, and raise a
+  persisting `worse_than_a_flat_prior` at the gate before approving further
+  updates.
+- **No `information_since_update` counter — re-adding one is a bug.** The
+  trigger is evaluated on the UNCONSUMED BATCH, not a running total: nothing
+  consumes a sub-threshold batch, so incrementing a counter while the same
+  outcomes are re-read next run double-counts them (the original spec
+  carried the counter; this replaced it). `accumulated_information` is the
+  running total across *committed* revisions.
+
+**What `--apply` moves, and on what evidence.** `artifacts/posterior.json`
+is the only file production writes, and two different things move in it on
+two kinds of evidence:
+
+| moves | on | when |
+| --- | --- | --- |
+| `mean`, `std`, `version`, `accumulated_information`, `n_obs` | INFORMATION | only when a cell's effective information crosses `learning.information_increment` |
+| `processed_outcome_ids` | — | with the revision that consumed them, same atomic write |
+| `tau`, `tau_calibrated_through` | SPEND (§5.8) | every run, whether or not any cell triggered |
+
+`tau` moves on spend, not on evidence — a day that explored and learned
+nothing still cost money, which is exactly what `tau` prices. It lives in
+`posterior.json`, not `config.yaml`: it is production learning state, and a
+running system must not edit its own hand-maintained source of truth.
+`PosteriorStore.tau(cfg)` is the contract — it falls back to
+`exploration.tau_initial` until the first calibration and is what a
+production caller passes to `inference.decide`; reading the config key
+directly pins `tau` at launch forever. `tau_calibration` deliberately uses
+the same two numbers `pipeline.monitor` compares for its
+`exploration_cost_vs_budget` stop condition — realised exploration cost
+against `budget_today` on realised markdown IL — so the proportional
+correction and the suspension backstop cannot disagree about "over budget",
+and `tau` starts shrinking well before the 2× stop fires, the ordering that
+keeps exploration running rather than switching it off. The date stamp is
+the exactly-once guard: two runs in one day would apply the same ratio
+twice and move `tau` by its square. Everything else in the file is static
+by design — `cell_of` (cell assignment does not move during the MVP window)
+and `prior_source` (provenance) — and `bootstrap.init_posterior` refuses to
+overwrite it without `--force`.
 
 ### 5.12 Monitoring — three families, three questions
 
@@ -984,18 +1148,53 @@ discount deltas (first look at how different the policy really is), and the
 drift ratio above — which also answers the learning-throughput question of
 section 13 *before* any price is applied.
 
-**The hold-out run.** `data.holdout` names a window *after* `test_end` that
-no artifact was fit on and no gate was decided on; `--holdout` runs it.
-Standing at `test_end` and walking that window forward is the only
-unrehearsed test the extract can give, because every other window grades
-something that was fitted to it — the calibration gate, the drift ratio and
-the `tau` derivation all report in-sample numbers or 1.00× on their own
-population. It is a **one-shot** resource: tune a value on it and re-run, and
-it is a second calibration set. Date cuts are episode-scoped
+**The hold-out run is the DEFAULT.** `data.holdout` names a window *after*
+`test_end` that no artifact was fit on and no gate was decided on; shadow
+runs it with no flag at all (`--holdout` is accepted for explicitness and
+changes nothing), because the honest run must not be the one someone has to
+remember. Standing at `test_end` and walking that window forward is the only
+unrehearsed test the extract can give — every other window grades something
+that was fitted to it: the calibration gate, the drift ratio and the `tau`
+derivation all report in-sample numbers or 1.00× on their own population
+(the bisection's 1.00× hid the entry-only scoping bug, which was **~8×
+wrong**, for the whole life of that code — the same reading applies to
+`budget_share_of_il` and to every gate whose window overlaps its own fit
+window). `--all` sweeps the whole extract instead and stamps
+`shadow_gate.in_sample_caveat`, naming exactly which numbers that flatters
+(drift ratio, `tau_recommended`, learning yield) and which it does not
+(completeness, matched rate, cost-floor — plumbing, not fit);
+`window.basis` / `window.out_of_sample` record which run happened, and a
+missing `data.holdout` is an error, never a silent full run. It is a
+**one-shot** resource: tune a value on it and re-run, and it is a second
+calibration set. Date cuts are episode-scoped
 (`common.episodes.window_slice`, assigning by the date a window *opened*);
 row-scoped slicing would keep the tail of an episode that opened the evening
 before as its own short episode — no entry decision, wrong opening
-inventory, a countdown starting mid-window.
+inventory, a countdown starting mid-window. That bug was live in shadow's
+own `--date-start` until the hold-out work; `split_frames` and shadow now
+call the one function.
+
+**Sampling.** Shadow draws a uniform episode sample of
+`monitoring.shadow_gate.sample_episodes` (default 3,000; `--max-episodes N`
+overrides, `0` = every episode — for the final pre-launch record, not
+iteration), drawn BEFORE `mu_ref` prediction so cost scales with the sample
+(~3.5 min vs ~47 for a full 18-day hold-out sweep). 3,000 is derived, not
+chosen: the SE on a rate near 0.99 is 0.18pp against the 1.00pp the gate
+discriminates on. A sampled report sets `window.sampled` and adds
+`shadow_gate.sampling_caveat` — quote it whenever quoting the zero
+violation count (the zero-cost-episode crash passed on a sample once, §5.2).
+Sampling degrades exactly ONE figure: the gate reads rates, and
+`tau_recommended` / `spend_over_budget` equate two quantities that both
+scale linearly with the sample, so they are sample-invariant; the exception
+is `tau_controller_trace.by_day`, which divides the sample across the
+window's days (~167 episodes/day at the default) and makes the controller
+look jumpier than it is — the trace reports `episodes_per_day_sampled`
+against `episodes_per_day_population` and says so. Quote the pooled
+`spend_over_budget`; raise `--max-episodes` only to read the daily series.
+Each episode draws from its own generator seeded by episode id, so results
+are identical serial or parallel and independent of order — a change that
+moved the numbers relative to any earlier run at the same seed (hard rule:
+restart comparisons across it).
 
 The controller trace seeds its trailing-IL base with the legacy IL of
 episodes that closed in the `budget_il_window_days` *before* the window
@@ -1021,17 +1220,41 @@ population's spend.
 
 Shadow also re-runs the bisection pooled over its whole window
 (`tau_recommended` — a cross-check on the launch value, no longer its source)
-and walks the controller day by day (`tau_controller_trace`). The trace
+and walks the controller day by day (`tau_controller_trace`). The
+`exploration_budget_would_be` block answers the question the backtest
+structurally cannot — **is this `tau` affordable?** — because the backtest's
+`implied_daily_spend` matches `daily_budget` BY CONSTRUCTION; shadow reports
+both sides on its own basis, same episodes and same days, with the ratio
+graded against the `exploration_cost_vs_budget` stop multiple. Reading rule
+before the pilot: over 2× and exploration suspends on day one; between 1×
+and 2× the controller walks it down. Check `tau_recommended_implied_spend`
+sits just *under* `daily_budget` — it will never equal it, because spend
+**steps** as each cost crosses `tau` rather than sliding. The trace
 exists because a single spend/budget multiple cannot answer the question that
 matters: `tau_next` reads only the day just closed, so day one is spent at
 whatever `tau` was launched with, the stop condition is evaluated on that
 same day's spend, and a `tau` that is 8× too generous suspends exploration
-before the controller has anything to correct from. The pilot's launch value
-is still a paste — `tau_initial` is MEASURED — but its source is now the
-shadow report's `tau_initial_derivation`, with
+before the controller has anything to correct from. It reports three day
+counts and none is interchangeable: `window_days` (the calendar span the
+budget divides by), `days_with_decisions`, and `days_simulated` (capped at
+60, with `days_truncated` naming what was dropped). The pilot's launch value
+is still a paste — `tau_initial` is MEASURED, going through the paste gate
+like `rho` with `artifact_mirror_drift` covering the silent-rewrite case —
+but its source is now the shadow report's `tau_initial_derivation`, with
 `pricing.explore.tau_provenance_error` refusing a paste that has no source
 or no longer matches its derivation (the backtest block is accepted only
-while no shadow derivation exists).
+while no shadow derivation exists, only from a report whose fidelity gate
+PASSED, and only one carrying `spread_decisions` — older reports predate
+the entry-only scoping fix). A stale paste is refused at start-up and
+`pipeline.status` reports FAIL rather than passing a number for being
+non-null. Two more standing facts: the budget charges scrap through
+`common.episodes.classify_last`, never a local copy (an inline copy once
+dropped ALL scrap on a feed with no write-off sentinel, understated the
+budget 10× and flipped the verdict to WOULD SUSPEND — see
+`docs/learnings.md`), and
+`realised_vs_predicted_sold_ratio_at_legacy_price` in the report is the
+production continuation of the calibration diagnostic — the first place
+frozen-baseline drift shows.
 
 ### 5.14 Replay and threshold derivation — evaluation discipline
 
@@ -1043,13 +1266,22 @@ and prior, so model bias hits both arms identically and cancels in the
 comparison. Comparing observed reality (legacy) against model-simulated
 outcomes (DP) — the naive framing — charges every ounce of model bias to
 one side and can make a superior policy look catastrophic; observed-vs-model
-differences belong to *fidelity*, never to the policy verdict. Even
-like-for-like, **replay output is never evidence the policy works** — the
-model whose world both arms share is the same model whose price response is
-an unvalidated prior, so replay can only show internal consistency; the
+differences belong to *fidelity*, never to the policy verdict. The
+like-for-like verdict field is `policy_deltas.policy_gap_like_for_like`.
+Even like-for-like, **replay output is never evidence the policy works** —
+the model whose world both arms share is the same model whose price response
+is an unvalidated prior, so replay can only show internal consistency; the
 controlled experiment is the only evidence of policy quality (an early run
 made this concrete: a 9.4% simulated improvement on a model selling 24%
 light).
+
+**Three rungs, not interchangeable.** Replay is the agent against *our
+model of the world*; shadow is the same machine against *the world itself*;
+only the A/B answers whether the advice is better. Shadow is the more
+realistic about the decision path and says strictly *less* about the
+policy: no price was applied, so there is no counterfactual outcome and
+**no IL figure exists in a shadow run at all**. Never "replace replay with
+shadow" — that deletes the only loss number and puts nothing in its place.
 
 **The replay's headline result comes with a caveat that must travel with
 it.** The DP arm shows **38.0% less IL** than the legacy arm, and it gets
@@ -1114,13 +1346,16 @@ against measured evidence (section 12).
 
 ### 5.14a The frozen artifacts are one bundle
 
-Six artifacts are fitted in sequence and frozen together, and they are only
+Seven artifacts are fitted in sequence and frozen together, and they are only
 meaningful together: `rho` deflates evidence measured against one model's
 residuals, the level factors correct that same model, and the prior was
 estimated from that model's predictions and that `r_lookup`. Mixing vintages
 raises no error — the numbers simply stop describing the same world, silently,
 for the whole window. Section 9.2's insistence that only the level multiplier
-tracks the world depends on that coherence holding.
+tracks the world depends on that coherence holding. Because
+`calibration.json` is fitted in a separate step (`--fit-calibration`),
+**re-run `bootstrap.seal` after it** — a seal taken before that step does
+not describe the artifact it later reads.
 
 **The bundle id is the baseline model version**, not a separate timestamp.
 Every downstream artifact is fitted *against* a model, so keying on the model
@@ -1160,6 +1395,30 @@ vintage row of their own: `monitor` and `assurance` are recomputed each day
 from events that are individually stamped, and assurance's reproduction check
 re-solves those events against the current artifacts, so a vintage mix
 surfaces there as a mismatch with the stamped versions in the failure record.
+The A/B in production therefore has no report to vintage-check: its
+freshness signals are that the daily lane actually ran
+(`batch_oldest_outcome_age_days` in `pipeline.update`) and that
+`assurance · reproduction` stays green.
+
+**The operating instruction that makes all of this bite:** run
+`python3 -m pipeline.status` before quoting from any report and again before
+ending any session that touched artifacts, config, or reports, and read the
+`artifact bundle` / `artifact mirrors` / `report vintages` /
+`walkthrough · *` lines as one freshness verdict. **Never quote, compare, or
+paste from a report one of those lines calls stale — re-run it first**; a
+`report vintages` FAIL means the report grades a ghost model. `status`
+computes nothing (every line is read from a report some other step wrote), a
+check that did not run reports `not run` and never PASS
+(`tests/test_status.py` asserts it), and it exits 1 on any FAIL so it can
+gate a script; everything below it is tier two, opened when a line goes red.
+The re-run map, in pipeline order:
+
+| after changing | re-run | re-paste |
+| --- | --- | --- |
+| baseline (retrain) | `estimate_prior` → `fit_dispersion` → `backtest` → `--fit-calibration` → `seal` → `shadow` | `rho`, `mean_forced_hours_per_episode` |
+| elasticity prior | `fit_dispersion` onward (§5.5) | same two mirrors |
+| a config tunable a report reads | that report onward; bump `meta.config_version` so `report vintages` WARNs on whatever did not re-run | — |
+| the extract | everything from `prepare_data` and `measure` | phase-0 values incl. the A/B power SE |
 
 ### 5.15 Production assurance — testing the assumptions, not the code
 
@@ -1196,10 +1455,22 @@ because miscalibration flat in `mu` is a level problem and miscalibration that
 grows with `mu` is a shape problem, and only the second indicts `r`.
 
 **`rho` is re-measured on the basis it was frozen on** — residuals against raw
-`mu` at the *working* elasticity (the per-category prior means), never at the
-posterior mean. Measuring at a moved posterior would make `rho` drift for a reason that has
-nothing to do with the world, and the number would stop being comparable to the
-one `deff` came from.
+`mu` at the *working* elasticity (the per-category prior means, read through
+the shared `fit_dispersion._working_elasticity` so the two cannot diverge),
+never at the posterior mean. Measuring at a moved posterior would make `rho`
+drift for a reason that has nothing to do with the world, and the number
+would stop being comparable to the one `deff` came from. The
+`rho_drift_alert` threshold (0.10) is tight enough to fire on a pure basis
+mismatch — including measuring at a fallback constant now that dispersion is
+fitted after the prior.
+
+Two standing rules follow from the reproduction check. Never remove a
+decision-event field because "nothing reads it" — the event is the audit
+surface, and `test_end_to_end` asserts every emitted decision re-solves to
+itself. And the `exploration` check also asserts the invariant that a
+non-empty affordable set always produced an exploration. Assurance
+thresholds live in `config.yaml` under `assurance:` (§5.1's one-surface
+rule).
 
 None of these suspend pricing. They report beside the section 15 families with
 their own verdict and are read at the operator gate, because the right response
@@ -1368,6 +1639,51 @@ level multiplier tracks the world, which is exactly what a multiplier is
 for. Status: final retrain + re-gate at the launch freeze, with scheduled
 in-window recalibration adopted in response to the measured August trend.
 
+**Reading the report.** The gate window is whatever
+`baseline_model.calibration_gate_window` names (currently `test`), recorded
+as `fidelity.gate_window` — read the field rather than assuming — and it
+must stay DISJOINT from `calibration_fit_window` or the gate grades its own
+fit; `fidelity.by_window.all` is diagnostic only, since no static factor can
+or should fix level drift between training and launch.
+`fidelity.fidelity_episode_sold_ratio` is actual ÷ predicted: above 1 the
+model under-predicts, below 1 it over-predicts. `calibration_gate_metric` /
+`calibration_gate_value` name what the verdict used, and
+`fidelity.measurement_10` separates level error (`level_bias_at_anchor` far
+from 1 with a flat slope → calibration permitted) from slope error (≈1 at
+anchor, degrading with `|discount − d_ref|` → re-estimate the prior). A
+factor **below 1 on a long fit window** means the model genuinely
+over-predicts at the anchor — investigate before applying, never apply
+blindly. A comparison across two backtests is valid only when
+`artifact_versions.baseline_model_version` matches in **both** reports;
+`--fit-calibration` does not retrain, while plain `train_baseline` and
+`run_bootstrap.sh` do.
+
+**The triage order when the level diagnostic is out of band** (this is a
+drift/staleness reading, never a launch blocker):
+
+```
+├─ FIRST fidelity.by_week — wobble vs trend:
+│  · wobble (swings around a level wider than the band): week-scale demand
+│    volatility. No retrain or calibration can pass it; OWNER decision, three
+│    options — longer gate window, wider band, or gate on
+│    level_bias_at_anchor (baseline_model.calibration_gate_metric)
+│  · monotone trend (anchor ratio climbing week over week): the level is in
+│    motion and the gated model is STALE — do not tune bands; check
+│    anchor_ratio_by_rate_history first (no_history ≫ with_history means
+│    new-assortment SKUs, not a macro trend)
+├─ by_window shows train ≉ calib/test → regime drift: the config-only first
+│  remedy is a LATER data.split.train_start (the model learns the
+│  launch-adjacent regime), then retrain — a fresh baseline, so restart any
+│  before/after comparison
+├─ level_bias_at_anchor far from 1, flat slope → re-fit the factors on a
+│  trailing window (--fit-calibration) and re-run the backtest, NO retrain —
+│  the factors are stale, not absent
+├─ anchor ≈ 1 but slope degrades with gap → re-run estimate_prior; a
+│  pooled/uniform prior is a valid outcome
+└─ far out of band AFTER a re-fit → the model itself is stale: escalate to
+   the product owner (retrain decision)
+```
+
 ### 9.3 Prior-acceptance gate (blocking) — is the prior honest?
 
 A human reading of `prior.json`, not a flag in it (section 5.6): the
@@ -1528,7 +1844,14 @@ order.
 
 **One config value serves both phases, so it must clear the larger of the
 two floors.** `guardrail_threshold_recommendation` reports the trailing floor,
-the control-arm floor, which one binds, and the verdict. It also stamps
+the control-arm floor, which one binds, and the verdict — never sign a
+threshold off the `guardrail_noise` line alone; it speaks only for the
+pre-A/B phase. The control-arm basis uses the **identical arm hash**
+`pipeline.monitor` uses, so the floor and the live trigger cannot measure
+different quantities (the comparison itself lives once, in
+`common.guardrail.deviation`). A margin threshold under ~0.136 is in the
+`TOO TIGHT` band — buy sensitivity back with `persistence_days`, never by
+going under the floor. The tool also stamps
 `CLEARS THE FLOOR BUT LIKELY INERT` on anything more than 3× the binding
 floor — because clearing the floor is necessary, not sufficient, and a
 guardrail that cannot fire is an absent one rather than a conservative one.
@@ -1677,6 +2000,38 @@ series, and the window extension all go through it.
 `last_row_ending_inventory_ever_positive` so the convention can be confirmed
 on any new extract rather than assumed.
 
+The convention, stated positively: **`ending_inventory` is the FINAL
+quantity on hand at the close of the hour, AFTER anything that arrived
+during it** — not `starting − sold`, but what the source counted at the end.
+Every hour-level rule follows from that one sentence, and
+`common.episodes.hour_status` is the only place it is written down:
+
+| | Meaning |
+| --- | --- |
+| `ending == starting − sold` | ordinary hour, nothing arrived |
+| `ending > starting − sold` | **RESTOCK** — holds whenever stock arrived, including an hour that sold MORE than it opened with (`starting − sold` goes negative, so any ending exceeds it) |
+| `ending == 0` and `net > 0` | the source wrote the remainder off: how a listing closes |
+| `0 < ending < starting − sold` | stock left unsold and unwritten-off — shrink |
+
+The flow identity has a second line: **`clearance == sold / supply`**, where
+`supply = opening + restocked` — so clearance cannot exceed 1. The identity
+itself is enforced in `common.episodes.flow_identity_violations`, reported
+every run in `dp_eligible.flow_identity`, and asserted on every episode of
+the prepared frame by `tests/test_end_to_end`; chain continuity makes the
+two sides provably equal, so a violation is a bug here rather than a feed
+defect — it caught one.
+
+**Censoring is decided at the LAST ROW only.** It cannot happen anywhere
+else: the source stops emitting rows once inventory reaches zero (which is
+why `extend_to_window` exists), so an empty shelf ends the episode.
+Measured: 259 of 259 rows with `starting == sold` are final rows, and no row
+anywhere has `starting_inventory == 0`; `censoring_off_last_row` reports any
+row that breaks it. And a restock never binds the monotone-price constraint
+the wrong way: more stock argues for a *deeper* discount, and deeper is
+always allowed — `tests/test_restock.py` holds the whole
+production-absorbs-restocks claim up with a three-hour episode that gains
+five units mid-window, asserting IL to the won.
+
 Three knock-ons for the event store, which quarantines any outcome whose
 inventory does not reconcile without a documented reason. A **restock** is
 inventory going *up* — the next hour opening with more than this one left
@@ -1684,8 +2039,23 @@ behind — not inequality in either direction, since the write-off makes many
 hours fail an inequality test. The **write-off is recognised by the zero
 itself**, not by position: the source zeroes at its own episode boundary, so
 after a window is merged across midnight that row can sit mid-episode for us.
-And a partial shortfall (above zero but below the leftover) is **shrink**, now
-named `unexplained_shortfall` rather than left undocumented.
+(The *offline* continuity drop applies the write-off exemption to the LAST
+ROW only — mid-episode, a zero ending with stock still owed is shrink, not a
+close, and exempting it there loses those units. The two rules are about
+different code paths and both are deliberate.) And a partial shortfall
+(above zero but below the leftover) is **shrink**, now named
+`unexplained_shortfall` rather than left undocumented.
+
+Exactly three `adjustment_reason` values are legitimate, and they are the
+same rule the offline chain enforces (`events.store._validate_outcome`
+mirrors the continuity check): `intraday_restock`
+(`ending > max(0, starting − sold)`), `episode_close_write_off`
+(`ending == 0` while stock remained), and `unexplained_shortfall`
+(`0 < ending < starting − sold`). `common.episodes.adjustment_reason` is the
+ONE implementation — production integrations call it rather than
+reimplement. An integration that omits `episode_close_write_off` quarantines
+every one of the ~13.5% of episodes that end holding stock and fails the
+shadow gate for what looks like a pipeline defect.
 
 That third one is a correction. Leaving it unnamed so it would quarantine and
 "stay visible" was the last place the live path treated shrink as an anomaly
@@ -1912,6 +2282,7 @@ definitions were corrected.
 | 7 | **Multi-day episode fix invalidates the measured baseline** (section 12a) — 36-hour windows are common, so every episode-terminal figure was measured under a broken key | Monotonicity reset mid-window; DP terminal value fired 2-3x per window; carried inventory counted as scrap at each seam | Fixed at the source: episodes are now maximal runs with a consistent `hours_remaining` countdown, split assignment and the feature leakage guard follow the episode. **Full bootstrap must be re-run before any number is quoted** | Eng |
 | 8 | **Episode fragmentation from missing source hours** — a single absent hour splits one economic episode into two | Worked example: a BABY FOOD episode runs 06:00–15:00, hour 16 is absent, and the feed resumes at 17:00 with `flc_window` stepping 33→31. The clock and the counter still AGREE (both step 2), but `assign_episode_ids` requires both to step exactly 1, so it starts a new episode. Measured: **2.61% of episodes (8,711) end with no closure sentinel**, holding **27,105 units of ambiguous scrap** against 111,694 counted; median 21 hours nominally unrecorded | Conservative today — ambiguous leftover is excluded rather than invented, and the later fragment usually carries the real outcome, so scrap TOTALS are close to right. What is distorted: episode counts are inflated, and the second fragment's first hour looks like an entry hour when it is mid-episode, which is dirt in exactly the rows the section 5.6 identification depends on. Fix is to stitch where clock and counter agree (capped), with interior synthetic rows so `validate_state`'s horizon invariant still holds — deferred to after the launch decision because it changes the analysis population again | Eng |
 | 9 | **Model under-prediction from censored training labels** | Anchor under-prediction with median starting inventory ~2 and ~12.6% stocked-out hours | First phase-2 priority: censored-count training | Eng |
+| 10 | **Censoring flag discards information on restocked hours** — `grid_update` flags censoring with `units_sold >= starting_inventory`, wrong for an hour that sold MORE than it opened with (stock arrived during it): demand was observed exactly, but the likelihood uses "at least `starting_inventory`" | Deliberately pinned, not repaired: it discards information rather than biasing ε — the safe direction | Recorded here and held by test; make it an exact count only deliberately (the test will tell you) | Eng |
 
 ## 14. Phase 2 (deferred until the loop demonstrably works)
 
@@ -1938,9 +2309,39 @@ threshold against the Q-spread (07), the learning-yield calendar floor (10),
 the shadow gate against its thresholds (11) and the per-category profile
 likelihoods (`tools.profile_epsilon`), all under `reports/charts/`.
 
+The pipeline, step by step — what each module writes and reads:
+
+```
+step                                          writes                                  reads
+0. bootstrap.download_flc                     data/flc_raw.parquet                    sb_scm.fresh_flc_detail
+   (Redshift extract; REDSHIFT_* from ~/.env, never config.yaml. Outside
+   run_bootstrap.sh on purpose — the script takes the parquet as its argument)
+1. bootstrap.prepare_data --input <raw>       data/prepared.parquet,                  raw FLC parquet
+                                              artifacts/split_manifest.json
+1b. tools.eda --input prepared                reports/eda.json, docs/eda.html         prepared + config
+   (15 descriptive panels; decides nothing, produces no config value — read
+   it BEFORE the fits, it costs seconds)
+2. bootstrap.measure --input <raw>            reports/phase0.json                     raw FLC parquet
+3. bootstrap.train_baseline --input prepared  artifacts/baseline_model.txt,           prepared
+                                              artifacts/feature_schema.json
+4. bootstrap.estimate_prior --input prepared  artifacts/prior.json                    prepared + baseline
+5. bootstrap.fit_dispersion --input prepared  artifacts/r_lookup.json, rho.json       prepared + baseline + PRIOR
+6. backtest --input prepared                  reports/backtest.json                   prepared + all fits
+7. bootstrap.train_baseline --fit-calibration artifacts/calibration.json              prepared + baseline
+7b. bootstrap.derive_thresholds               reports/thresholds.json                 prepared
+8. bootstrap.init_posterior                   artifacts/posterior.json                prior.json  (refuses overwrite without --force)
+9. pipeline.shadow --input prepared           reports/shadow.json                     prepared + all artifacts
+10. tools.make_charts                         reports/charts/*.png                    every report above
+11. bootstrap.seal                            artifacts/bundle.json                   every frozen artifact
+```
+
 ```bash
-# bootstrap, in order (retrains the model — see AGENTS.md before iterating)
+# bootstrap, steps 1-6 + 10-11 in order, ending with pipeline.status so the
+# run ends with where it stands. RETRAINS THE MODEL EVERY TIME (§9.2's
+# comparison rule) — iterate on single modules, never the script. It stops
+# at the calibration and prior gates' evidence: those are human reviews.
 scripts/run_bootstrap.sh data/flc_filtered.parquet
+#   after --fit-calibration (step 7), re-run bootstrap.seal (§5.14a)
 
 # evidence for the three owner thresholds
 python3 -m bootstrap.derive_thresholds --input data/prepared.parquet --mde 0.075
@@ -1949,12 +2350,16 @@ python3 -m bootstrap.derive_thresholds --input data/prepared.parquet --mde 0.075
 python3 -m bootstrap.init_posterior
 python3 -m pipeline.shadow --input data/prepared.parquet --out reports/shadow.json
 #   samples monitoring.shadow_gate.sample_episodes episodes (default 3,000);
-#   --max-episodes 0 sweeps everything, for the final pre-launch record
+#   --max-episodes 0 sweeps everything — once, for the final pre-launch record
+#   --workers N (0 = every core but one) parallelises this and the backtest;
+#   reports are byte-identical serial or parallel
 
 # daily production loop
-python3 -m pipeline.update             # monitor only
-python3 -m pipeline.update --apply     # human-gated bounded update
-python3 -m pipeline.monitor
+python3 -m pipeline.update             # monitor only, always safe
+python3 -m pipeline.update --apply     # human-gated bounded update (§5.11)
+python3 -m pipeline.monitor            # §5.12 families
+python3 -m pipeline.assurance          # §5.15, standalone
+python3 -m pipeline.status             # the dozen numbers that decide something
 
 # regenerate every chart in this document from the current reports
 python3 -m tools.make_charts

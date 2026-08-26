@@ -26,8 +26,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # Every doc that describes the filter chain and therefore has to keep up. A
 # doc that merely mentions the pipeline is not listed -- the point is to catch
-# the ones a reader would trust for the chain itself.
-CHAIN_DOCS = ["AGENTS.md", "docs/design.md"]
+# the ones a reader would trust for the chain itself. AGENTS.md is no longer
+# listed: it is a router now, pointing at design.md for the chain.
+CHAIN_DOCS = ["docs/design.md"]
 
 # Names the chain USED to carry. Any of these appearing as a live stage or
 # flag means a doc is describing a rule that no longer exists.
@@ -199,3 +200,19 @@ def test_the_bootstrap_run_refreshes_the_documents():
     assert '--dataset "$INPUT"' in script, \
         "the refresh must name the dataset it read, or the fixture guard " \
         "cannot fire and the stamp says nothing"
+
+
+def test_agents_md_stays_a_router_not_a_reference():
+    """AGENTS.md was 1,564 lines and small-model agents missed instructions
+    buried mid-file. It is a router now: one-line non-negotiables up front,
+    pointers to design.md for everything else. This budget is what keeps it
+    that way -- new material goes to design.md (spec), learnings.md
+    (history), or docs/maintaining_docs.md (doc tooling), with at most a
+    one-liner and a pointer here."""
+    text = (ROOT / "AGENTS.md").read_text()
+    lines = text.count("\n") + 1
+    assert lines <= 400, (
+        f"AGENTS.md is {lines} lines, over the 400-line router budget -- "
+        "move the new content to its reference home and point to it")
+    # the non-negotiables must stay at the top, ahead of everything else
+    assert text.index("## Non-negotiables") < text.index("## Setup")

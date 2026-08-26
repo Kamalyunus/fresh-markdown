@@ -3,8 +3,8 @@
 # Usage: scripts/run_bootstrap.sh <flc_parquet>
 #
 # Runs steps 1-6, then charts (10) and seal (11). Step numbers below are the
-# ones in the AGENTS.md pipeline table -- the single numbering anyone reading
-# both is meant to follow.
+# ones in the AGENTS.md / design.md Appendix A pipeline table -- the single
+# numbering anyone reading both is meant to follow.
 #
 # The prior-acceptance gate (step 4's artifact) is a human review; this
 # script produces its evidence and stops. Calibration is ALWAYS fitted and

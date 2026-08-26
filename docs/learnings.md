@@ -139,6 +139,18 @@ excluded from the pool they fall back to — otherwise the fallback inherits
 the confound. With nothing left to pool, the pool is the uniform, which is
 the honest statement that the extract does not identify elasticity.
 
+### Search bounds: the −1.5 boundary defect
+An estimate pinned at the LOWER search bound (−1.5 at the time) was read as
+"elasticity is about −1.5" when it meant the likelihood ran off the support
+— a boundary solution, not an estimate. The remedy is asymmetric and stayed:
+the lower bound may be widened when a fit pins there (the truth may sit
+further out), but the upper bound (`epsilon_max`, −0.05) is a sign
+constraint and is never widened — pinning THERE means the estimator found no
+negative price response at all, the confound's signature. `search_bounds`
+must equal `[epsilon_min, epsilon_max]` (load_config enforces it), so
+widening is one config edit, followed by re-running the prior and everything
+downstream of it (the dispersion step reads the prior's means).
+
 ---
 
 ## Dispersion (r, ρ, deff)

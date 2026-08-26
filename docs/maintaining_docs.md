@@ -11,7 +11,9 @@ spec is `docs/design.md`; superseded approaches are in `docs/learnings.md`.
 python3 -m tools.make_charts        # -> reports/charts/*.png
 ```
 
-Seven charts — exactly the ones `docs/design.md` embeds — every one generated
+The charts `docs/design.md` embeds, plus the un-embedded extras Appendix A
+names (exploration threshold, learning-yield floor, shadow gate, profile
+likelihoods) — every one generated
 from a report artifact, never hand-drawn, so a chart that disagrees with the
 pipeline cannot exist. **Re-run this after any bootstrap or the document shows
 the previous run's pictures beside the current run's numbers.** Process

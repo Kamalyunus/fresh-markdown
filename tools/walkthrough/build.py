@@ -1,15 +1,18 @@
 """tools.walkthrough.build -- assemble docs/system_walkthrough.html.
 
-The leadership-facing walkthrough: one tab per frozen artifact, one for the
-hourly decision, one for the learning loop. Run from the repo root:
+The leadership-facing walkthrough: one tab per frozen artifact, plus the
+hourly decision, the learning loop, the replay evidence and the production
+assurance. Run from the repo root:
 
     python3 -m tools.walkthrough.build
 
 `_source.html` is the original single-topic DP page, kept pristine so this is
 re-runnable; its sections are lifted verbatim because they are already
-number-checked against the solver. The artifact tabs live in `panels.py`.
+number-checked against the solver. Tab prose lives in `panels/<tab>.html`
+(one file per tab; `panels.py` is only the loader) -- edit those, NEVER the
+built output.
 
-Figures on the artifact tabs come from the v3 deck and docs/design.md -- the
+Figures on the artifact tabs are quoted from docs/design.md -- the
 baseline-20260811043259 production run -- so the whole page quotes one vintage.
 The decision tab is a self-contained solve whose inputs are stated on it.
 

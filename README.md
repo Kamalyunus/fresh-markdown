@@ -130,7 +130,7 @@ on the path production runs (`tau_recommended`) and walks the `tau` controller
 day by day (`tau_controller_trace`) so you can see whether the pilot survives
 its own first day — the backtest's derivation reports 1.00x by construction
 and cannot. One shot: tune anything on this window and it stops being a
-hold-out. See `AGENTS.md`.
+hold-out. See `docs/design.md` §5.13.
 
 Daily production loop after the shadow gate passes: `inference.decide` per
 decision interval, then
