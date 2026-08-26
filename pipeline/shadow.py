@@ -597,8 +597,16 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     closed = (kind != episodes.NOT_CLOSED).to_numpy()
     ep_il = last.discount_cost.to_numpy() + scrap_per_ep
     # seeded with pre-window closed-episode IL, so the window's first days
-    # carry the trailing base production would actually hold at launch
-    il_by_day = dict(prior_il_by_day or {})
+    # carry the trailing base production would actually hold at launch.
+    # SCALE IT TO THE SAMPLE: the seed is measured on the FULL frame (it has
+    # to be -- those episodes are outside the window and never sampled),
+    # while the window's own IL and the SPEND it is compared against are
+    # measured on the sampled slice. Left unscaled it inflates the first
+    # budget_il_window_days of budget by 1/sample_fraction and drives
+    # spend_over_budget toward zero on any sampled run.
+    seed_scale = len(groups) / max(len(population), 1)
+    il_by_day = {day: amount * seed_scale
+                 for day, amount in (prior_il_by_day or {}).items()}
     for day, amount, ok in zip(last.close_day.to_numpy(), ep_il, closed):
         if ok:
             il_by_day[day] = il_by_day.get(day, 0.0) + float(amount)
@@ -630,6 +638,9 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         "implied_daily_spend": round(implied_daily_spend, 1),
         "daily_budget": round(daily_budget, 1),
         "trailing_basis_seeded_days": len(prior_il_by_day or {}),
+        # the seed is population-scale and everything it is compared against
+        # is sample-scale; this is the factor that reconciles them
+        "trailing_basis_seed_scale": round(seed_scale, 6),
         "budget_basis": (f"mean of per-day budgets on the trailing "
                          f"{cfg['exploration']['budget_il_window_days']}-day "
                          "realised-IL base (explore.trailing_daily_il) -- the "

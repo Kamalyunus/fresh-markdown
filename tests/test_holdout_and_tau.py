@@ -548,6 +548,35 @@ def test_the_first_shadow_day_carries_the_pre_window_trailing_base():
     assert pre_window_il_history(d, cfg, None) == {}
 
 
+def test_the_pre_window_seed_is_scaled_to_the_sample():
+    """The seed and the spend must describe the SAME slice of the business.
+
+    The pre-window IL has to be measured on the full frame -- those episodes
+    are outside the window and are never sampled -- while the window's own IL
+    and the exploration spend it is graded against are measured on the sample.
+    Left unscaled the first `budget_il_window_days` of budget come in at
+    1/sample_fraction too large, and `spend_over_budget` reads near zero on
+    any sampled run: a 2.9% sample inflated the reported budget ~14x and
+    turned a ~0.7x into 0.05x. The bug is invisible at --max-episodes 0,
+    which is exactly why it needs a test.
+    """
+    import inspect
+    from pipeline import shadow
+
+    src = inspect.getsource(shadow.run_shadow)
+    assert "seed_scale" in src, "the pre-window seed is not scaled at all"
+    seeded = src[src.index("seed_scale ="):]
+    assert "len(groups)" in seeded.split("\n")[0] and \
+        "len(population)" in seeded.split("\n")[0], \
+        "the scale must be the WINDOW's sample fraction, sampled/population"
+    # and it must be applied to the seed, not merely computed
+    applied = seeded[:400]
+    assert "amount * seed_scale" in applied, \
+        "seed_scale is computed but never multiplied into il_by_day"
+    # a full run must be unaffected: scale is exactly 1 when nothing sampled
+    assert "max(len(population), 1)" in seeded.split("\n")[0]
+
+
 def test_the_controller_holds_tau_on_a_zero_budget():
     """A zero budget from an EMPTY trailing history is an absence of signal,
     not an overspend: the controller must hold tau, not halve it. The moment
