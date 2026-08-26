@@ -614,6 +614,41 @@ decision. Thresholds live in `config.yaml` under `assurance:`.
     that is what `data.holdout` and `pipeline.shadow --holdout` are for.
     The same reading applies to `budget_share_of_il` and every gate whose
     window overlaps its own fit window.
+18. **A metric is only current if its whole chain is current — verify the
+    vintage before quoting, and re-run downstream after changing anything
+    upstream.** Every number an agent quotes, compares, or pastes must trace
+    to the artifacts NOW on disk. `python3 -m pipeline.status` is the
+    enforcement — run it before quoting from any report and again before
+    ending any session that touched artifacts, config, or reports, and treat
+    these four lines as the freshness verdict:
+    - `artifact bundle` — one vintage on disk, unedited since sealing;
+    - `artifact mirrors` — every config paste matches its source (`rho` and
+      forced hours ↔ `artifacts/rho.json`; the A/B power SE ↔ `phase0.json`;
+      `tau_initial` ↔ its derivation, via its own `exploration tau` line);
+    - `report vintages` — `backtest.json` and `shadow.json` were produced
+      against the bundle on disk (FAIL = the report grades a ghost model;
+      re-run it, never quote it);
+    - `walkthrough · *` — figures typed into documents still match the
+      reports they were read from (`tools.refresh_figures` rewrites them).
+
+    **Never quote, compare, or paste from a report one of those lines calls
+    stale — re-run the report first.** Re-run map, in pipeline order:
+
+    | after changing | re-run | re-paste |
+    | --- | --- | --- |
+    | baseline (retrain) | `estimate_prior` → `fit_dispersion` → `backtest` → `--fit-calibration` → `seal` → `shadow` | `rho`, `mean_forced_hours_per_episode` |
+    | elasticity prior | `fit_dispersion` onward (rule 1a) | same two mirrors |
+    | a config tunable a report reads | that report onward; bump `meta.config_version` so `report vintages` WARNs on whatever did not re-run | — |
+    | the extract | everything from `prepare_data` and `measure` | phase-0 values incl. the A/B power SE |
+
+    Per process: **backtest and shadow** freshness is mechanical — `report
+    vintages` reads their `artifact_versions` stamp. **The A/B in
+    production** has no report to vintage-check: `monitor` and `assurance`
+    are recomputed daily from events that are individually version-stamped,
+    so their freshness checks are that the daily lane actually ran
+    (`batch_oldest_outcome_age_days` in `pipeline.update`) and that
+    `assurance · reproduction` stays green — a vintage mix in live events
+    surfaces there, with the stamped versions in the failure record.
 
 ## Reading a backtest report
 
