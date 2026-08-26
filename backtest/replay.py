@@ -366,6 +366,10 @@ def _episode_frame(g, unfinished=frozenset()):
                          if "hour_of_day" in g else list(range(len(g)))),
         "is_observed": obs.astype(bool),
         "starting_inventory": g.starting_inventory.to_numpy(),
+        # the SOURCE's own close-of-hour count, carried for the trace only:
+        # zeroed on the last row of a closed episode whatever remained, which
+        # is the write-off and is meant to be visible (design 12a)
+        "ending_inventory": g.ending_inventory.to_numpy(),
     }
 
 
@@ -415,11 +419,11 @@ def _replay_one(e, cfg):
             lg_disc_weighted += d_t * sold
             lg_sold_total += sold
             q -= sold
-            rec(t, legacy_q=q_int, legacy_discount=d_t,
+            rec(t, legacy_start_inv=q_int, legacy_discount=d_t,
                 legacy_price=p0 * (1 - d_t), legacy_mu=float(mu),
                 legacy_units=float(sold))
         else:
-            rec(t, legacy_q=0, legacy_discount=None, legacy_price=None,
+            rec(t, legacy_start_inv=0, legacy_discount=None, legacy_price=None,
                 legacy_mu=None, legacy_units=0.0)
         # a negative adjustment can only take what the SIMULATED shelf still
         # holds -- units this arm already sold cannot also shrink. The clipped
@@ -427,6 +431,9 @@ def _replay_one(e, cfg):
         # it anyway broke the supply identity by exactly the clipped amount.
         lg_clip += max(0.0, -(q + adj[t]))
         q = max(q + adj[t], 0.0)
+        # close of hour = after sales AND after the adjustment, the source's
+        # own convention -- so end[t] == start[t+1] and the sheet self-checks
+        rec(t, legacy_end_inv=float(q))
         if q <= 0 and not adj[t + 1:].any():
             break
     # captured before the DP loop reuses `q`
@@ -443,10 +450,11 @@ def _replay_one(e, cfg):
         # empty shelf ends the episode only if nothing more is coming; the DP
         # never anticipates a delivery -- it learns next hour, as production does
         if q_int <= 0:
-            rec(t, dp_q=0, dp_discount=None, dp_price=None, dp_mu=None,
+            rec(t, dp_start_inv=0, dp_discount=None, dp_price=None, dp_mu=None,
                 dp_units=0.0)
             dp_clip += max(0.0, -(q + adj[t]))
             q = max(q + adj[t], 0.0)
+            rec(t, dp_end_inv=float(q))
             if q <= 0 and not adj[t + 1:].any():
                 break
             continue
@@ -469,12 +477,13 @@ def _replay_one(e, cfg):
         dp_disc_cost += p0 * d_t * sold
         dp_disc_weighted += d_t * sold
         dp_sold_total += sold
-        rec(t, dp_q=q_int, dp_discount=d_t, dp_price=p0 * (1 - d_t),
+        rec(t, dp_start_inv=q_int, dp_discount=d_t, dp_price=p0 * (1 - d_t),
             dp_mu=float(mu), dp_units=float(sold),
             dp_is_entry=bool(t == 0),
             dp_feasible_tiers=len(res.tiers))
         dp_clip += max(0.0, -(q - sold + adj[t]))
         q = max(q - sold + adj[t], 0.0)
+        rec(t, dp_end_inv=float(q))
     dp_shrink = max(e["shrink"] - dp_clip, 0.0)
     dp_scrap = cost * (max(q, 0.0) + dp_shrink)
 
@@ -553,19 +562,24 @@ def _replay_one(e, cfg):
                 "original_price": p0, "cost": cost, "d_ref": e["d_ref"],
                 "mu_ref": float(e["mu_ref_path"][t]),
                 "hour_adjustment": float(e["adjustment"][t]),
-                # observed world
-                "actual_q": int(e["starting_inventory"][t]),
+                # observed world. `actual_end_inv` is the SOURCE's own count,
+                # so on a closed episode's last row it is 0 whatever remained
+                # -- that zero IS the write-off, not a broken chain (12a)
+                "actual_start_inv": int(e["starting_inventory"][t]),
+                "actual_end_inv": int(e["ending_inventory"][t]),
                 "actual_discount": a_d,
                 "actual_price": p0 * (1 - a_d),
                 "actual_units": float(e["actual_sold"][t]),
                 # legacy prices under the MODEL's demand
-                "legacy_q": rt.get("legacy_q"),
+                "legacy_start_inv": rt.get("legacy_start_inv"),
+                "legacy_end_inv": rt.get("legacy_end_inv"),
                 "legacy_discount": rt.get("legacy_discount"),
                 "legacy_price": rt.get("legacy_price"),
                 "legacy_mu": rt.get("legacy_mu"),
                 "legacy_units": rt.get("legacy_units"),
                 # the DP's own choice, same demand model
-                "dp_q": rt.get("dp_q"),
+                "dp_start_inv": rt.get("dp_start_inv"),
+                "dp_end_inv": rt.get("dp_end_inv"),
                 "dp_discount": rt.get("dp_discount"),
                 "dp_price": rt.get("dp_price"),
                 "dp_mu": rt.get("dp_mu"),

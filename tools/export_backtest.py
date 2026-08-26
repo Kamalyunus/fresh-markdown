@@ -27,6 +27,22 @@ model error and flatters whichever arm the model happens to favour; design 5.14
 is explicit that a replay under-predicting demand always flatters a
 price-holding policy.
 
+INVENTORY, per arm, per hour: `*_start_inv` opens the hour, `*_end_inv` closes
+it -- after sales AND after that hour's restock/shrink (`hour_adjustment`), the
+source's own convention, so `*_end_inv[t]` carries into `*_start_inv[t+1]`. The
+arms hold DIFFERENT stock from the first hour they price differently, which is
+the point. Three things a reader will notice and none is a defect:
+
+  * `actual_end_inv` is 0 on a closed episode's LAST row whatever remained --
+    the source writes the remainder off there, and that zero IS the scrap
+    (design 12a). Read the leftover off `actual_start_inv - actual_units`.
+  * the simulated arms carry FRACTIONAL inventory, because each hour removes
+    E[min(D,q)] rather than a whole-unit draw (docs/stockout_gap.html).
+  * on those arms `*_start_inv` is the INTEGER shelf the solver priced
+    (`int(round(q))`) while `*_end_inv` is the exact carry, so consecutive
+    hours can differ by up to half a unit. The DP prices integer inventory;
+    rounding once at the decision is what that costs.
+
 Usage:
     python3 -m tools.export_backtest --input data/prepared.parquet \
         --out reports/backtest_episodes.xlsx --episodes 300 [--html]
@@ -50,9 +66,15 @@ HOUR_COLS = [
     "episode_id", "date", "hour_of_day", "t", "is_observed",
     "sku_id", "fc", "category",
     "original_price", "cost", "d_ref", "mu_ref", "hour_adjustment",
-    "actual_q", "actual_discount", "actual_price", "actual_units",
-    "legacy_q", "legacy_discount", "legacy_price", "legacy_mu", "legacy_units",
-    "dp_q", "dp_discount", "dp_price", "dp_mu", "dp_units",
+    # each arm: what it opened the hour with, what it sold, what it closed
+    # with. `*_end_inv` is AFTER sales and AFTER the hour's restock/shrink, so
+    # `*_end_inv[t] == *_start_inv[t+1]` down every arm.
+    "actual_start_inv", "actual_discount", "actual_price", "actual_units",
+    "actual_end_inv",
+    "legacy_start_inv", "legacy_discount", "legacy_price", "legacy_mu",
+    "legacy_units", "legacy_end_inv",
+    "dp_start_inv", "dp_discount", "dp_price", "dp_mu", "dp_units",
+    "dp_end_inv",
     "dp_is_entry", "dp_feasible_tiers", "dp_minus_actual_discount",
 ]
 

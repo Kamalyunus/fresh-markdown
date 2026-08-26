@@ -778,6 +778,49 @@ def test_tracing_changes_no_reported_number():
                     f"{accumulator} is being computed from the trace"
 
 
+def test_every_arm_traces_its_own_inventory_chain(cfg):
+    """Each arm holds DIFFERENT stock the moment it prices differently, so
+    each carries its own start/end pair. End of hour is AFTER sales and AFTER
+    that hour's restock/shrink -- the source's convention -- so `end[t]`
+    carries into `start[t+1]`, the invariant that says the columns mean what
+    their names say. Tolerance is half a unit because the simulated arms open
+    on the INTEGER shelf the solver priced while their carry is fractional;
+    the actual arm is exempt on the LAST row, where the source zeroes its
+    count to write the remainder off (design 12a)."""
+    from backtest.replay import _episode_frame, _replay_one
+
+    g = pd.DataFrame({
+        "episode_id": ["e"] * 4,
+        "date": ["2026-05-01"] * 4, "hour_of_day": [9, 10, 11, 12],
+        "total_discount": [0.25, 0.25, 0.30, 0.30],
+        "original_price": [10_000.0] * 4, "cost": [4000.0] * 4,
+        "d_ref": [0.25] * 4, "starting_inventory": [6, 5, 4, 3],
+        "units_sold": [1, 1, 1, 1], "mu_ref_hat": [1.5] * 4,
+        "r": [3.0] * 4, "eps": [-1.0] * 4,
+    })
+    g["ending_inventory"] = g.starting_inventory - g.units_sold
+    e = _episode_frame(g)
+    e["trace"] = True
+    row, _ = _replay_one(e, cfg)
+    hours = row["hours_trace"]
+    assert len(hours) == 4
+
+    for arm in ("actual", "legacy", "dp"):
+        for h in hours:
+            assert h[f"{arm}_start_inv"] is not None, f"{arm} start missing"
+            assert h[f"{arm}_end_inv"] is not None, f"{arm} end missing"
+        # the chain: this hour's close is next hour's open, down every arm
+        for a, b in zip(hours, hours[1:]):
+            assert a[f"{arm}_end_inv"] == pytest.approx(b[f"{arm}_start_inv"],
+                                                        abs=0.5), \
+                f"{arm} inventory chain breaks between hours"
+
+    # the arms are genuinely separate shelves, not three copies of one
+    assert any(h["dp_end_inv"] != h["legacy_end_inv"] for h in hours) or \
+        all(h["dp_discount"] == h["legacy_discount"] for h in hours), \
+        "the DP priced differently but its shelf never diverged"
+
+
 def test_step_sensitivity_prices_the_cap_on_real_episodes(cfg):
     """`learning.max_mean_step` is justified by measurement, not judgment:
     the sweep re-solves the DP arm at eps +- step and reports what moves.
