@@ -822,3 +822,31 @@ def test_the_calibration_gate_is_wired_into_the_apply_refusal():
     assert 'gates["calibration_schedule_current"] = calibration_current' in src
     # hard_fail is computed AFTER the gate is added, or it can never refuse
     assert src.index("calibration_schedule_current") < src.index("hard_fail = ")
+
+
+def test_a_partial_trailing_window_is_counted_not_passed_off_as_full():
+    """`trailing_weeks: 4` does not mean every week HAS four behind it.
+
+    Two places have less: the start of the extract, and the weeks just after
+    the exclusion window, where the gap leaves only post-gap history. Those
+    weeks still fit -- a large extract clears min_anchor on one week -- but a
+    factor fit on 1 of 4 intended weeks is noisier than its label claims, and
+    the second group sits mid-extract rather than harmlessly at the start.
+    """
+    import json
+    import os
+
+    cfg = load_config()
+    path = cfg["baseline_model"]["calibration_factor_path"]
+    if not os.path.exists(path):
+        pytest.skip("no calibration artifact on disk")
+    sched = (json.load(open(path)).get("schedule") or {})
+    if not sched.get("by_week"):
+        pytest.skip("calibration is not on the rolling schedule")
+
+    assert "weeks_on_partial_window" in sched, \
+        "a short trailing window must be counted, not silently labelled full"
+    for row in sched["weeks_on_partial_window"]:
+        assert row["weeks_in_window"] < sched["trailing_weeks"]
+        assert row["week"] in sched["by_week"], \
+            "a partial week is still fitted -- it is flagged, not dropped"

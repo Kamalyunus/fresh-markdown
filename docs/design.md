@@ -1726,6 +1726,19 @@ prevents, and it is the same discipline as §12a's velocity features.
 Both harnesses get it through `BaselineModel.predict_mu_ref` alone; neither
 has factor-selection code of its own, because a second copy would drift.
 
+`trailing_weeks: 4` does not mean every week has four behind it. Two places
+have fewer: the **start of the extract**, and the weeks just after the
+**exclusion window**, where the gap leaves only post-gap history in reach.
+Those weeks still fit — a large extract clears `min_anchor` on a single week
+— but a factor fitted on 1 of 4 intended weeks is noisier than its label
+claims, and the second group sits mid-extract rather than harmlessly at the
+start. `schedule.weeks_on_partial_window` names them with the weeks actually
+in reach. They are flagged, not dropped: the alternative — holding them at
+the fallback — would price them on a factor fitted *later* in the extract,
+which is the leak this whole mechanism exists to prevent. Read the list
+before reading a per-week fidelity series, and treat a partial week's factor
+as the weakest point of that series.
+
 Four weeks was chosen on the rolling-origin evidence in
 `fidelity.calibration_window_sweep`, which fits on the trailing W and scores
 the **next** week: 4w put 86.7% of weeks inside the band at a mean absolute

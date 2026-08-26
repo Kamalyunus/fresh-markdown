@@ -414,6 +414,13 @@ def fit_level_calibration(d, cfg):
                            & (wk.dt.start_time < w.start_time)]
             if not len(window):
                 continue
+            # PARTIAL WINDOW: the first weeks of an extract have less history
+            # behind them than the trailing length asks for. They still fit
+            # (a big extract clears min_anchor on one week), but a factor fit
+            # on 1 of 4 intended weeks is noisier than its label claims, so
+            # it is counted rather than passed off as a full-window fit.
+            weeks_seen = int(wk[(wk.dt.start_time >= lo)
+                                & (wk.dt.start_time < w.start_time)].nunique())
             fitted = _solve_level_factors(
                 window.copy(), cfg, model, grain, k_shrink, min_anchor,
                 tier_step, max_k, r_lookup if censored_basis else None)
@@ -423,7 +430,9 @@ def fit_level_calibration(d, cfg):
                 continue
             by_week[str(w.start_time.date())] = fitted[0]
             coverage.append({"week": str(w.start_time.date()), "fitted": True,
-                             "fit_rows": int(len(window))})
+                             "fit_rows": int(len(window)),
+                             "weeks_in_window": weeks_seen,
+                             "partial": weeks_seen < weeks_back})
         schedule = {
             "mode": "rolling_trailing",
             "trailing_weeks": weeks_back,
@@ -434,6 +443,13 @@ def fit_level_calibration(d, cfg):
             "weeks_fitted": sum(1 for c in coverage if c["fitted"]),
             "weeks_unfitted_held_at_1": [c["week"] for c in coverage
                                          if not c["fitted"]],
+            # fitted on LESS history than trailing_weeks asks for -- the start
+            # of the extract, where there is not yet a full window behind each
+            # week. Noisier than the label; the gate window is normally far
+            # from these, but say so rather than let "4w" mean 1w silently.
+            "weeks_on_partial_window": [
+                {"week": c["week"], "weeks_in_window": c["weeks_in_window"]}
+                for c in coverage if c.get("partial")],
             "by_week": by_week,
         }
 
