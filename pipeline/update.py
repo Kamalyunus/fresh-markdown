@@ -17,7 +17,9 @@ Refuses to apply while any hard event-quality gate fails.
 """
 
 import argparse
+import json
 import math
+import os
 
 import numpy as np
 import pandas as pd
@@ -219,11 +221,56 @@ def tau_calibration(decisions, outcomes, posterior, cfg):
     return block
 
 
-def run(cfg, apply=False, events_root=None, posterior_path=None):
+def calibration_current(cfg, today=None):
+    """Does the level-calibration schedule cover the week being priced?
+
+    A row in a week the schedule does not reach takes the FROZEN fallback and
+    nothing raises -- so a missed weekly re-fit silently reverts production to
+    stale factors, the drift the point-in-time schedule exists to remove
+    (design 9.2). Detection after the fact is not enough: this is the hard
+    gate that stops the loop learning from prices set on factors nobody
+    refreshed.
+
+    Static calibration is a legitimate configuration and passes: there is no
+    schedule to outrun. `today` is injectable so the check is testable.
+    """
+    path = cfg["baseline_model"]["calibration_factor_path"]
+    if not os.path.exists(path):
+        return {"value": "none", "threshold": "schedule covers today",
+                "pass": True, "note": "no calibration artifact; factors are 1.0"}
+    with open(path) as f:
+        sched = (json.load(f).get("schedule") or {}).get("by_week") or {}
+    if not sched:
+        return {"value": "static", "threshold": "schedule covers today",
+                "pass": True,
+                "note": "artifact carries no schedule -- one frozen factor "
+                        "set, nothing to keep current"}
+    now = pd.Timestamp(today) if today is not None else pd.Timestamp.now("UTC")
+    week = pd.Timestamp(now).tz_localize(None) if now.tzinfo else now
+    week = week.to_period("W").start_time.strftime("%Y-%m-%d")
+    last = max(sched)
+    ok = week <= last
+    return {
+        "value": week,
+        "threshold": f"<= {last} (last fitted week)",
+        "pass": bool(ok),
+        "note": ("schedule covers this week" if ok else
+                 f"THE WEEKLY RE-FIT WAS MISSED: pricing is in week {week} but "
+                 f"the schedule stops at {last}, so production is running on "
+                 "the frozen fallback factors. Run `bootstrap.train_baseline "
+                 "--fit-calibration` and `bootstrap.seal`, then re-run "
+                 "(RUNBOOK Lane C)."),
+    }
+
+
+def run(cfg, apply=False, events_root=None, posterior_path=None, today=None):
     store = EventStore(cfg, root=events_root)
     posterior = PosteriorStore(cfg, path=posterior_path)
     per_cell, gates, decision_list, outcome_list = collect_batch(
         store, posterior, cfg)
+    # a HARD gate beside the event-quality ones: learning from prices set on
+    # stale factors banks evidence about a model that is not the one running
+    gates["calibration_schedule_current"] = calibration_current(cfg, today)
 
     hard_fail = [name for name, g in gates.items() if not g["pass"]]
     report = {"event_quality_gates": gates, "cells": {}, "applied": False}
@@ -284,7 +331,7 @@ def run(cfg, apply=False, events_root=None, posterior_path=None):
 
     if apply:
         if hard_fail:
-            report["refused"] = (f"hard event-quality gate(s) failed: {hard_fail}; "
+            report["refused"] = (f"hard gate(s) failed: {hard_fail}; "
                                  "no update applied")
         else:
             report["applied"] = True

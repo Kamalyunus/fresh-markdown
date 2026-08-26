@@ -1100,7 +1100,13 @@ normalises, and takes moments. Mechanics and rationale:
   destroy the posterior; the human gate caps learning at one reviewed step
   per day until an evidence record justifies automating it, with the
   automation criteria deliberately drafted later from observed behaviour
-  rather than guessed now. When reviewing a cell's block, read
+  rather than guessed now. A fourth hard gate joins the event-quality ones:
+  `calibration_schedule_current` refuses the apply when the point-in-time
+  factor schedule no longer reaches the week being priced (§9.2) — a missed
+  weekly re-fit puts production back on frozen factors silently, and
+  learning from prices set that way banks evidence about a model that is not
+  the one running. Static calibration passes: there is no schedule to
+  outrun. When reviewing a cell's block, read
   `predictive_check.information_available_per_row` first, and raise a
   persisting `worse_than_a_flat_prior` at the gate before approving further
   updates.

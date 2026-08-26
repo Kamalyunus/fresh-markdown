@@ -537,7 +537,12 @@ def test_decision_loop_and_exactly_once_update(workspace):
         len(replayed), cfg["assurance"]["reproduction_sample"])
     assert repro["decisions_skipped_no_inputs"] == 0
 
-    report = update_run(cfg, apply=True)
+    # `today` is pinned inside the fixture's span: the calibration-currency
+    # gate compares the week being priced against the schedule's last fitted
+    # week, and a test that read the wall clock would start failing the week
+    # after it was written
+    day = cfg["data"]["split"]["test_end"]
+    report = update_run(cfg, apply=True, today=day)
     assert all(g["pass"] for g in report["event_quality_gates"].values())
     assert report["applied"]
     for cell, c in report["cells"].items():
@@ -553,7 +558,7 @@ def test_decision_loop_and_exactly_once_update(workspace):
     if not any(c["update_triggered"] for c in cells.values()):
         before = {k: (v["forced_outcomes"], v["effective_information"])
                   for k, v in cells.items()}
-        again = update_run(cfg, apply=True)["cells"]
+        again = update_run(cfg, apply=True, today=day)["cells"]
         assert {k: (v["forced_outcomes"], v["effective_information"])
                 for k, v in again.items()} == before
         for c in again.values():
@@ -562,10 +567,10 @@ def test_decision_loop_and_exactly_once_update(workspace):
     # exactly-once, on a batch that DOES commit: lower the bar so the same
     # evidence triggers, then confirm a second apply consumes nothing
     cfg["learning"]["information_increment"] = 1e-9
-    triggered = update_run(cfg, apply=True)
+    triggered = update_run(cfg, apply=True, today=day)
     assert triggered["applied"]
     assert all(c["update_triggered"] for c in triggered["cells"].values())
-    assert not update_run(cfg, apply=True)["cells"]
+    assert not update_run(cfg, apply=True, today=day)["cells"]
 
     # the section 15.4 guardrails must be computed from these events, not
     # merely declared in config: with both thresholds null they report BLOCKED,

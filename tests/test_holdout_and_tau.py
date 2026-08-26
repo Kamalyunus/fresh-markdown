@@ -775,3 +775,50 @@ def test_both_reports_carry_the_calibration_coverage():
     for mod, name in ((bt, "backtest"), (shadow, "pipeline.shadow")):
         assert "calibration_coverage()" in inspect.getsource(mod), \
             f"{name} does not report calibration coverage"
+
+
+def test_apply_refuses_when_the_weekly_refit_was_missed(tmp_path):
+    """Detection after the fact is not enough. Learning from prices set on
+    stale factors banks evidence about a model that is not the one running,
+    so a schedule that no longer reaches today is a HARD gate on --apply --
+    the same standing as a duplicate-event breach."""
+    import json
+
+    from pipeline.update import calibration_current
+
+    cfg = load_config()
+    path = tmp_path / "calibration.json"
+    cfg = dict(cfg, baseline_model=dict(cfg["baseline_model"],
+                                        calibration_factor_path=str(path)))
+    path.write_text(json.dumps({
+        "grain": "category", "factors": {"FRUIT": 1.2},
+        "schedule": {"mode": "rolling_trailing", "trailing_weeks": 4,
+                     "by_week": {"2026-07-06": {"FRUIT": 1.1},
+                                 "2026-07-13": {"FRUIT": 1.1}}}}))
+
+    # inside the schedule -> passes
+    assert calibration_current(cfg, today="2026-07-15")["pass"]
+    # the week AFTER the last fitted one -> refuses, and names the remedy
+    late = calibration_current(cfg, today="2026-07-21")
+    assert not late["pass"]
+    assert "--fit-calibration" in late["note"]
+
+    # static calibration is a legitimate configuration: nothing to outrun
+    path.write_text(json.dumps({"grain": "category", "factors": {"FRUIT": 1.2}}))
+    assert calibration_current(cfg, today="2027-01-01")["pass"]
+
+    # and no artifact at all means factors are 1.0 -- also not a failure
+    path.unlink()
+    assert calibration_current(cfg, today="2027-01-01")["pass"]
+
+
+def test_the_calibration_gate_is_wired_into_the_apply_refusal():
+    """It only bites if `run` treats it as hard, beside the event-quality
+    gates, and reports it on the monitor-only pass too."""
+    import inspect
+    from pipeline import update
+
+    src = inspect.getsource(update.run)
+    assert 'gates["calibration_schedule_current"] = calibration_current' in src
+    # hard_fail is computed AFTER the gate is added, or it can never refuse
+    assert src.index("calibration_schedule_current") < src.index("hard_fail = ")

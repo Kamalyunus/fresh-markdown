@@ -150,6 +150,7 @@ cell per day. Before approving, read each cell's block:
 | `bound_clipped` | occasional | most updates clip — step cap or increment mis-sized; escalate |
 | `batch_oldest_outcome_age_days` | near the expected cadence | growing without a trigger — the loop is stalling; check volumes and tau |
 | event-quality gates | green (the command refuses on red) | never work around a refusal |
+| `calibration_schedule_current` | green | red means the weekly re-fit above was missed — `--apply` refuses, because learning from prices set on stale factors banks evidence about a model that is not the one running |
 
 `tau` recalibrates on the same `--apply`, on spend rather than evidence,
 exactly once per day — a second run in the same day is a no-op, not a bug.

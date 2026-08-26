@@ -26,6 +26,12 @@ def cfg():
     c = load_config()
     if c["exploration"]["tau_initial"] is None:      # null until a gate passes
         c["exploration"]["tau_initial"] = 447.78     # the production paste
+    # These tests are about TAU, not about level calibration. Point the factor
+    # artifact at a path that does not exist so the calibration-currency gate
+    # passes trivially: otherwise they read whichever schedule happens to be
+    # in artifacts/ and start failing the week after it was last fitted.
+    c["baseline_model"] = dict(c["baseline_model"],
+                               calibration_factor_path="artifacts/__absent__.json")
     return c
 
 
