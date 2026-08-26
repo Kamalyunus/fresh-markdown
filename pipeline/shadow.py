@@ -342,6 +342,10 @@ def _shadow_one(ep, ctx):
         "events": [], "rejected": {}, "spreads": [],
         "cost_floor_violations": 0, "n_forced": 0, "empty_affordable": 0,
         "would_be_cost": 0.0, "raw_information": 0.0,
+        # the two factors behind raw_information, kept apart: how FAR a forced
+        # price moved from the reference, and how much demand was there to
+        # measure it on. Information is quadratic in the first.
+        "abs_log_ratio": 0.0, "forced_mu": 0.0, "forced_discount_gap": 0.0,
         "rec_disc": 0.0, "leg_disc": 0.0, "differs": 0,
         "ep_discount_cost": 0.0, "latencies": [],
         "drift": {"mu": [], "r": [], "q": [], "sold": []},
@@ -406,6 +410,10 @@ def _shadow_one(ep, ctx):
                 evt["epsilon_posterior_mean"] * lr), cfg["pricing"]["demand_floor"])
             r_ep = evt["dispersion_r"]
             out["raw_information"] += mu_rec * lr ** 2 * r_ep / (r_ep + mu_rec)
+            out["abs_log_ratio"] += abs(lr)
+            out["forced_mu"] += mu_rec
+            out["forced_discount_gap"] += abs(evt["applied_discount"]
+                                              - evt["reference_discount"])
         if evt["affordable_set_size"] == 0:
             out["empty_affordable"] += 1
         out["rec_disc"] += evt["applied_discount"]
@@ -506,6 +514,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     rec_disc = leg_disc = would_be_cost = 0.0
     n_forced = empty_affordable = 0
     raw_information = 0.0
+    abs_log_ratio = forced_mu = forced_discount_gap = 0.0
     # markdown IL on the SAME episodes/window as the spend, so budget and
     # spend share a population; accumulated as scalars, not rows
     il_discount = 0.0
@@ -530,6 +539,9 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         empty_affordable += out["empty_affordable"]
         would_be_cost += out["would_be_cost"]
         raw_information += out["raw_information"]
+        abs_log_ratio += out["abs_log_ratio"]
+        forced_mu += out["forced_mu"]
+        forced_discount_gap += out["forced_discount_gap"]
         rec_disc += out["rec_disc"]
         leg_disc += out["leg_disc"]
         differs += out["differs"]
@@ -683,6 +695,21 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             if per_episode > 0 else None,
         "max_mean_step": step,
         "calendar_floor_days_per_0.15_of_mean": 1,
+        # WHY the yield is what it is. A low per-episode figure has two very
+        # different causes with opposite remedies -- too few forced decisions
+        # (raise tau) or forced prices sitting too close to the reference
+        # (the affordable set only reaches the nearest tiers) -- and the
+        # aggregate cannot tell them apart. Information is QUADRATIC in the
+        # log price ratio, so the mean move is the term to read first.
+        "forced_decisions": n_forced,
+        "information_per_forced_decision": round(
+            raw_information / n_forced, 6) if n_forced else None,
+        "mean_abs_log_price_ratio_forced": round(
+            abs_log_ratio / n_forced, 4) if n_forced else None,
+        "mean_discount_gap_from_reference_forced_pp": round(
+            100 * forced_discount_gap / n_forced, 2) if n_forced else None,
+        "mean_mu_on_forced_hours": round(
+            forced_mu / n_forced, 3) if n_forced else None,
         "note": ("Would-be: no price was applied, so this is the evidence the "
                  "recommendations WOULD have bought. Each bounded update moves "
                  f"the posterior mean at most {step} and at most one commits "
@@ -690,7 +717,18 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
                  f"least ceil(X/{step}) calendar days however much evidence "
                  "arrives. Divide episodes_per_bounded_update by the pilot's "
                  "daily episode count for the evidence-side estimate; the "
-                 "binding constraint is whichever is larger."),
+                 "binding constraint is whichever is larger. To read a "
+                 "DISAPPOINTING yield, go to the three terms behind it: "
+                 "information per forced decision is mu * L^2 * r/(r+mu) with "
+                 "L the log price ratio vs the REFERENCE discount, so it is "
+                 "quadratic in how far exploration moved the price and only "
+                 "linear in how much demand was there. A small "
+                 "mean_discount_gap_from_reference_forced_pp is the usual "
+                 "culprit and tau is its lever: tau buys the CHEAPEST "
+                 "alternatives first, and those are the tiers nearest the "
+                 "optimum -- the quadratically least informative ones. Compare "
+                 "the tau in force against q_spread_distribution: funding only "
+                 "sub-p25 spreads means exploring often and learning little."),
     }
 
     completeness = n_out / n_dec
@@ -887,6 +925,11 @@ def main():
           f"updates from this window "
           f"({ly['episodes_per_bounded_update']} episodes per update); "
           f"calendar floor is 1 update/day")
+    if ly["forced_decisions"]:
+        print(f"  evidence per hour: {ly['forced_decisions']:,} forced "
+              f"decisions x {ly['information_per_forced_decision']} info each"
+              f" · mean move {ly['mean_discount_gap_from_reference_forced_pp']}"
+              f"pp from reference (info is QUADRATIC in this)")
     td = report.get("tau_initial_derivation")
     if td and td.get("tau_initial") is not None:
         print(f"tau launch         : {td['tau_initial']:,.2f} derived on the "

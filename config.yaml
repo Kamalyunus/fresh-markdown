@@ -253,7 +253,11 @@ posterior:
     # The cell map is frozen into artifacts/posterior.json by
     # bootstrap.init_posterior and read from there at runtime; changing this
     # string alone has no effect. Subcategory cells are phase 2 (design 14).
-  min_episodes_per_week_for_cell: 250  # SET  below this -> read the global cell
+  min_episodes_per_week_for_cell: 150  # SET  below this -> read the global cell
+    # Lowered from 250 (owner, 2026-08-26): a cell that reads the global one
+    # learns nothing of its own, and at 250 too many categories were pooled
+    # away. Re-run bootstrap.init_posterior for a change here to take effect --
+    # the cell map is frozen into artifacts/posterior.json.
   epsilon_min: -4.00                   # SET  grid bound
   epsilon_max: -0.05                   # SET  sign constraint
   grid_size: 801                       # SET

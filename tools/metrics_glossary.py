@@ -423,6 +423,22 @@ CATALOGUE = [
    "`information_increment ÷ effective information per episode`. Divide by the "
    "pilot's daily episode count for the evidence-side floor; the binding constraint "
    "is whichever is larger, that or the calendar.", "weeks-to-convergence"),
+  ("information_per_forced_decision", "count",
+   "`mu · L² · r/(r+mu)` averaged over forced hours, where L is the log price ratio "
+   "vs the REFERENCE discount. **The yield's unit economics** — multiply by "
+   "`forced_decisions` to rebuild `effective_information_total` (before deff).", ""),
+  ("mean_discount_gap_from_reference_forced_pp", "pp",
+   "How far a forced price actually moved from the reference, in percentage points. "
+   "**Read this first when the yield disappoints**: information is QUADRATIC in it, "
+   "so one tier step (2.5pp) buys ~1/18th of a 10pp move. `tau` is the lever, and it "
+   "buys the CHEAPEST alternatives first — the tiers nearest the optimum, which are "
+   "the quadratically least informative. Compare `tau` against "
+   "`q_spread_distribution`: funding only sub-p25 spreads means exploring often and "
+   "learning little.", ""),
+  ("mean_mu_on_forced_hours", "count",
+   "Demand available to measure on, per forced hour. The other term in the yield, "
+   "and only LINEAR — a thin-demand book is a far smaller problem than a "
+   "small price move.", ""),
   ("realised_vs_predicted_sold_ratio_at_legacy_price", "ratio",
    "The production continuation of the calibration gate, and the first place "
    "frozen-baseline drift shows.", ""),

@@ -821,6 +821,43 @@ def test_every_arm_traces_its_own_inventory_chain(cfg):
         "the DP priced differently but its shelf never diverged"
 
 
+def test_the_learning_yield_reports_the_terms_behind_it():
+    """A disappointing yield has two causes with OPPOSITE remedies -- too few
+    forced decisions, or forced prices sitting too close to the reference --
+    and the per-episode aggregate cannot tell them apart. So the report
+    carries the decomposition, and the identity that makes it checkable:
+
+        information_per_forced_decision x forced_decisions
+            == effective_information_total x deff
+
+    Information is QUADRATIC in the log price ratio and only LINEAR in mu,
+    which is why the mean move is the term to read first.
+    """
+    import inspect
+    from pipeline import shadow
+
+    src = inspect.getsource(shadow.run_shadow)
+    for field in ("forced_decisions", "information_per_forced_decision",
+                  "mean_abs_log_price_ratio_forced",
+                  "mean_discount_gap_from_reference_forced_pp",
+                  "mean_mu_on_forced_hours"):
+        assert field in src, f"{field} missing from the learning yield"
+
+    # the components are accumulated on the SAME branch as the information,
+    # or they would describe a different set of hours than they explain
+    one = inspect.getsource(shadow._shadow_one)
+    body = one[one.index('if evt["is_exploration"]'):]
+    info_at = body.index('out["raw_information"] +=')
+    for comp in ('out["abs_log_ratio"] +=', 'out["forced_mu"] +=',
+                 'out["forced_discount_gap"] +='):
+        assert comp in body, f"{comp} is not accumulated on forced hours"
+    # and the gap is measured against the REFERENCE, the same baseline the
+    # log ratio uses -- not against the optimum or the anchor
+    gap = body[body.index('out["forced_discount_gap"] +='):]
+    assert 'reference_discount' in gap[:220], \
+        "the discount gap must be measured against the reference discount"
+
+
 def test_the_hourly_trace_accounts_for_every_unit_in_every_arm(cfg):
     """Every unit an episode had either sold, shrank, or was scrapped at the
     close -- there is no fourth fate, so per arm:
