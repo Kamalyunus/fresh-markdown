@@ -708,6 +708,7 @@ def test_a_level_shift_does_not_leak_into_its_own_weeks_factor(tmp_path):
     model.calibration = artifact["factors"]
     model.calibration_grain = "category"
     model.calibration_schedule = artifact["schedule"]["by_week"]
+    model._reset_calibration_counters()
 
     rows = pd.DataFrame({
         "category": ["FRUIT"] * 4,
@@ -726,3 +727,51 @@ def test_a_level_shift_does_not_leak_into_its_own_weeks_factor(tmp_path):
     assert f[3] == pytest.approx(fallback), \
         "an unfitted week must fall back to the frozen set, never borrow " \
         "a later week's factors"
+
+
+def test_running_past_the_calibration_schedule_is_reported_not_silent():
+    """The schedule only covers weeks it was fitted on. A row past its end
+    takes the frozen fallback and nothing errors -- so production drifts back
+    onto stale factors the moment the weekly re-fit is missed, invisibly.
+    That is the failure the point-in-time change exists to remove, so it has
+    to be counted and named."""
+    import pandas as pd
+
+    from bootstrap.train_baseline import BaselineModel
+
+    model = BaselineModel.__new__(BaselineModel)
+    model.cfg = load_config()
+    model.calibration = {"FRUIT": 1.33}
+    model.calibration_grain = "category"
+    model.calibration_schedule = {"2026-07-06": {"FRUIT": 1.10}}
+    model._reset_calibration_counters()
+
+    rows = pd.DataFrame({"category": ["FRUIT"] * 3,
+                         "date": ["2026-07-08",     # inside the schedule
+                                  "2026-07-20",     # PAST its end
+                                  "2026-07-27"]})   # past its end
+    f = model._factor_vector(rows)
+    assert f[0] == pytest.approx(1.10)
+    assert f[1] == pytest.approx(1.33) and f[2] == pytest.approx(1.33)
+
+    cov = model.calibration_coverage()
+    assert cov["rows_on_schedule"] == 1
+    assert cov["rows_on_fallback"] == 2
+    assert cov["weeks_after_schedule_end"] == ["2026-07-20", "2026-07-27"]
+    assert cov["verdict"].startswith("STALE FACTORS IN USE")
+    # the verdict must name the remedy, not merely report the count
+    assert "--fit-calibration" in cov["verdict"]
+
+    # a run entirely inside the schedule says so, and says nothing alarming
+    model._cal_rows_fallback, model._cal_fallback_weeks = 0, set()
+    assert model.calibration_coverage()["verdict"].startswith("OK")
+
+
+def test_both_reports_carry_the_calibration_coverage():
+    """It is only useful where the numbers are read."""
+    import inspect
+    from backtest import __main__ as bt
+    from pipeline import shadow
+    for mod, name in ((bt, "backtest"), (shadow, "pipeline.shadow")):
+        assert "calibration_coverage()" in inspect.getsource(mod), \
+            f"{name} does not report calibration coverage"

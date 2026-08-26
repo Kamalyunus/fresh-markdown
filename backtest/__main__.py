@@ -68,6 +68,9 @@ def main():
             "train_population": cfg["baseline_model"]["train_population"],
             "prior_source": prior["source"],
             "config_version": cfg["meta"]["config_version"],
+            # did every priced row get its OWN week's level factors, or did
+            # some fall back to the frozen set? Silent by construction
+            "calibration_coverage": model.calibration_coverage(),
         },
         # two blocks, reported separately and never summed (design 5.14)
         "fidelity": fid,

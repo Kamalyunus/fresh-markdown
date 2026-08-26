@@ -64,13 +64,22 @@ class BaselineModel:
             sched = cal.get("schedule")
             if sched and sched.get("by_week"):
                 self.calibration_schedule = sched["by_week"]
+        self._reset_calibration_counters()
         self.version = self.schema["model_version"]
+
+    def _reset_calibration_counters(self):
+        """Coverage counters: which priced rows got their OWN week's factors."""
+        self._cal_rows_scheduled = 0
+        self._cal_rows_fallback = 0
+        self._cal_rows_static = 0
+        self._cal_fallback_weeks = set()
 
     def _factor_vector(self, d):
         """Per-row level factor. With a schedule, each row takes the factors
         in force for ITS week; without one, the single frozen set."""
         keys = d[self.calibration_grain].astype(str)
         if self.calibration_schedule is None:
+            self._cal_rows_static += len(d)
             return keys.map(lambda k: self.calibration.get(k, 1.0)).to_numpy()
         weeks = pd.to_datetime(d["date"]).dt.to_period("W").dt.start_time
         weeks = weeks.dt.strftime("%Y-%m-%d")
@@ -80,9 +89,58 @@ class BaselineModel:
             # closed) holds at the frozen fallback, never at a later week's
             # factors -- borrowing forward is the leak this exists to prevent
             table = self.calibration_schedule.get(wk)
-            out[i] = (table.get(key, 1.0) if table is not None
-                      else self.calibration.get(key, 1.0))
+            if table is None:
+                self._cal_rows_fallback += 1
+                self._cal_fallback_weeks.add(str(wk))
+                out[i] = self.calibration.get(key, 1.0)
+            else:
+                self._cal_rows_scheduled += 1
+                out[i] = table.get(key, 1.0)
         return out
+
+    def calibration_coverage(self):
+        """How many priced rows got a POINT-IN-TIME factor and how many fell
+        back to the frozen set.
+
+        The fallback is silent by construction -- a row in a week the schedule
+        does not cover simply takes the static factors -- and the week that
+        matters is the one PAST THE END of the schedule: production drifts
+        back onto stale factors the moment it runs beyond the last week
+        `--fit-calibration` saw, which is exactly what the weekly re-fit
+        exists to prevent. Reported so it cannot happen unnoticed.
+        """
+        if self.calibration_schedule is None:
+            return {"mode": "static", "rows": self._cal_rows_static,
+                    "note": "no schedule in the artifact: one frozen factor "
+                            "set applied to every row"}
+        priced = self._cal_rows_scheduled + self._cal_rows_fallback
+        weeks = sorted(self.calibration_schedule)
+        return {
+            "mode": "point_in_time",
+            "schedule_covers": [weeks[0], weeks[-1]] if weeks else None,
+            "rows_priced": priced,
+            "rows_on_schedule": self._cal_rows_scheduled,
+            "rows_on_fallback": self._cal_rows_fallback,
+            "fallback_share": round(self._cal_rows_fallback / priced, 4)
+                if priced else None,
+            "fallback_weeks": sorted(self._cal_fallback_weeks),
+            "weeks_after_schedule_end": sorted(
+                w for w in self._cal_fallback_weeks
+                if weeks and w > weeks[-1]),
+            "verdict": (
+                "OK -- every priced row took its own week's factors"
+                if not self._cal_rows_fallback else
+                "STALE FACTORS IN USE -- {} rows ({:.1%}) are in weeks PAST "
+                "the end of the schedule and fell back to the frozen set. "
+                "Re-run `train_baseline --fit-calibration`: the schedule "
+                "stops at the last week it was fitted on.".format(
+                    self._cal_rows_fallback,
+                    self._cal_rows_fallback / max(priced, 1))
+                if any(weeks and w > weeks[-1]
+                       for w in self._cal_fallback_weeks) else
+                "fallback used before the schedule starts -- expected, the "
+                "first trailing window had not closed yet"),
+        }
 
     def _matrix(self, d):
         missing = [f for f in self.schema["features"]

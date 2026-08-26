@@ -794,6 +794,9 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             "posterior_versions": {c: r["version"]
                                    for c, r in posterior.state["cells"].items()},
             "config_version": cfg["meta"]["config_version"],
+            # did every priced row get its OWN week's level factors, or did
+            # some fall back to the frozen set? Silent by construction
+            "calibration_coverage": model.calibration_coverage(),
         },
         "window": {"date_min": str(d.date.min()), "date_max": str(d.date.max()),
                    "episodes": len(groups),

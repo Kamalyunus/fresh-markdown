@@ -120,6 +120,27 @@ python3 -m pipeline.assurance          # the frozen artifacts vs the live world
 python3 -m pipeline.status             # the only screen that must be read daily
 ```
 
+**Weekly, in the same lane — re-fit the level factors.** The calibration
+schedule only covers weeks it was fitted on, and a row past its end falls
+back to the frozen factors **silently**. That is the staleness the point-in-
+time change exists to remove, so the re-fit is an operational step, not a
+launch-time one:
+
+```bash
+python3 -m bootstrap.train_baseline --input data/prepared.parquet --fit-calibration
+python3 -m bootstrap.seal        # calibration.json changed -- re-seal the bundle
+```
+
+- **This is NOT a retrain.** The model, `r`, `rho` and the prior do not move,
+  so before/after comparisons stay valid under hard rule 1 — but say which
+  factor vintage a report ran under, because the factors did move.
+- Read `artifact_versions.calibration_coverage` in the next backtest or
+  shadow report: `rows_on_fallback` should be 0 and the verdict `OK`.
+  `STALE FACTORS IN USE` means the schedule ran out and the run was priced on
+  frozen factors.
+- If `calibration_window_sweep` starts preferring a different trailing
+  window, that is an owner decision — re-read it, do not drift the config.
+
 **The `--apply` gate.** One human approves at most one posterior step per
 cell per day. Before approving, read each cell's block:
 
@@ -141,6 +162,7 @@ exactly once per day — a second run in the same day is a no-op, not a bug.
 | `assurance · reproduction` FAIL | something moved under the solver (config edit, artifact swap, deploy, library). Diff the bundle first: `artifact bundle` line, then `artifact mirrors` |
 | `artifact mirrors` FAIL | config paste and its source disagree (rho, forced hours, or the phase-0 A/B power SE). Read the **bundle** line before re-pasting — the stale side is not always config |
 | `report vintages` FAIL | backtest/shadow report was produced against a model no longer on disk — its gate rows grade a ghost. Re-run that report; do not launch on it |
+| `calibration_coverage` says `STALE FACTORS IN USE` | the weekly re-fit was missed: the schedule ran out and rows were priced on frozen factors. Re-run `--fit-calibration`, re-seal, re-run the report |
 | posterior std flat ≥ alert days | the loop is dead: no committed update. Check batch age, tau, volumes — in that order |
 | guardrail breach (scrap/margin, 2 consecutive days) | business decision, not a code fix — escalate to the owner with the monitor's arm comparison |
 | `INSUFFICIENT` verdicts | not a pass. A thin window said so; widen or wait |
