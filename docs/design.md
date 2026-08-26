@@ -650,6 +650,45 @@ gates learning. **Why legacy data is legitimate here** when it is banned for
 elasticity: these are second-moment structures — variance and correlation
 *around* the mean — and the policy confound moves the mean, not them.
 
+**What moves in production, and what does not (owner, 2026-08-26).** Two
+things are re-fit and two are frozen:
+
+| | Cadence | Evidence it moves on |
+| --- | --- | --- |
+| level factors | **weekly** (§9.2) | anchor rows — readable directly, no randomisation needed |
+| ε posterior | **daily**, human-gated (§5.11) | forced exploration outcomes only |
+| `mu_ref` shape | frozen | — retrain decision |
+| `r`, `rho` | frozen | — retrain decision |
+
+The split is not arbitrary: the two that move are identified by different
+evidence and can each be estimated without disturbing the other — the level
+is fit on anchor rows *only*, where the price term is ≈1, so slope error
+cannot leak into it, and ε is identified by variation *away* from the
+anchor. The two that are frozen are what make attribution possible: if
+`mu_ref` moved, posterior movement could not be told from model drift, and
+the A/B would stop being interpretable.
+
+`r` and `rho` are frozen for three reasons, in order of force. **They are
+second moments from weak signal** — `r` falls back a level whenever a group
+misses `min_rows_per_group`, and `rho` is one global scalar that divides
+*all* accumulated evidence through `deff`, so noise there rescales the
+learning rate. **Re-fitting `r` inside the learning phase reintroduces the
+ε ↔ r cycle** §5.6 removed by making the prior a censored Poisson profile:
+ε moves → residuals change → `r` changes → the likelihood reweights.
+And **the cadence question is answerable, and the answer is no**:
+`fit_dispersion.drift_by_window` re-fits both on rolling windows and reports
+whether a shorter cadence is even estimable. Measured on the fixture, 14 of
+17 weekly windows cannot fit `r` at all — under-dispersed (Pearson < 1,
+which no NB expresses) or pinned at a search bound — so a weekly `r` would
+bank failed fits as measurements.
+
+**The consequence to accept with this decision:** `assurance.dispersion` and
+`assurance.correlation` become the *sole* guard on `r` and `rho`. They are
+detectors, not correctors — the remedy when either fires is a retrain, which
+is out of band — so their thresholds have to discriminate. `drift_by_window`
+reports `rho_spread_vs_alert` for exactly this: above 1, the live alert
+fires on ordinary variation and is an alarm rather than a detector.
+
 ### 5.6 Elasticity prior — the profile likelihood as a density
 
 Per category, a censored **Poisson** log-likelihood is profiled over the ε
