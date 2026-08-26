@@ -1127,3 +1127,54 @@ def test_the_hour_control_can_be_keyed_on_the_day_not_just_the_clock():
     # exists to prevent at small cell sizes
     fitted, _ = pdn.hour_multipliers(mu, np.array(cells), k, cen, min_rows=1)
     assert not np.allclose(fitted, 1.0)
+
+
+def test_dispersion_drift_separates_a_failed_fit_from_a_moved_parameter():
+    """The measurement that says whether freezing r and rho is defensible --
+    and the trap it has to avoid.
+
+    Under-dispersed data (Pearson < 1) cannot be expressed by ANY negative
+    binomial, since Var = mu + mu^2/r >= mu. The MLE then runs to the search
+    ceiling, and a naive spread reads that pinned value as a huge drift. On
+    the fixture 14 of 17 weekly windows are like this, so the spread over all
+    windows is ~49 while the spread over the fittable ones is ~0.3. Reporting
+    the first would argue for re-fitting r weekly on the strength of failed
+    fits.
+    """
+    import json
+    import os
+
+    from bootstrap import fit_dispersion as fd
+
+    # the discriminator itself: below 1 is inexpressible, above is ordinary
+    steady = np.full(400, 2.0)
+    assert fd.pearson_dispersion(steady, np.full(400, 2.0)) < 1.0
+    rng = np.random.default_rng(0)
+    bursty = rng.negative_binomial(0.7, 0.7 / (0.7 + 2.0), 400)
+    assert fd.pearson_dispersion(bursty, np.full(400, 2.0)) > 1.0
+
+    path = "artifacts/rho.json"
+    if not os.path.exists(path):
+        pytest.skip("no rho artifact on disk")
+    drift = json.load(open(path)).get("drift_by_window")
+    if not drift or not drift.get("windows_fitted"):
+        pytest.skip("no drift block in the artifact")
+
+    for w, v in drift["by_window"].items():
+        # every window declares whether its r means anything, and why
+        assert set(("pearson", "nb_expressible", "r_at_search_bound",
+                    "r_usable")) <= set(v), w
+        if v["pearson"] < 1.0:
+            assert not v["r_usable"], \
+                f"{w}: Pearson < 1 but its r is being treated as a measurement"
+
+    # the headline r spread must be over USABLE windows only
+    usable = [v["r"] for v in drift["by_window"].values() if v["r_usable"]]
+    if usable:
+        assert drift["r_spread"] == pytest.approx(
+            max(usable) - min(usable), abs=1e-3)
+        assert drift["r_windows_usable"] == len(usable)
+
+    # and when most windows are unfittable the verdict says THAT, not "drift"
+    if drift["r_unusable_share"] > 0.34:
+        assert "NOT FITTABLE AT THIS CADENCE" in drift["verdict"]

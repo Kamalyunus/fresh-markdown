@@ -176,6 +176,143 @@ def fit_dispersion(d, cfg):
     return r_lookup, rho_out
 
 
+def drift_by_window(d, cfg, freq="W"):
+    """Do `r` and `rho` actually move over time, or are they stable enough to
+    freeze? Refits BOTH on each rolling window of `freq`, using the same
+    estimators the frozen fit uses -- a second implementation would answer a
+    different question.
+
+    Why this is a MEASUREMENT and not a re-fit schedule. Both are second
+    moments from weak signal: `r` already falls back a level whenever a group
+    holds fewer than `min_rows_per_group` rows, and `rho` is one global scalar
+    that divides ALL accumulated evidence through `deff`. Fitting either on a
+    week would add noise to quantities the learning rate is denominated in.
+    And re-fitting `r` inside the learning phase reintroduces the eps <-> r
+    cycle design 5.6 removed by making the prior a censored Poisson profile:
+    eps moves -> residuals change -> r changes -> the likelihood reweights.
+
+    So the honest use of this series is to decide the RETRAIN cadence, and to
+    give `assurance.dispersion` / `assurance.correlation` a baseline for what
+    ordinary movement looks like. `spread_vs_alert` compares the observed
+    spread against `rho_drift_alert`: above 1 the live alert would fire on
+    ordinary variation, which makes it an alarm rather than a detector.
+    """
+    dc = cfg["dispersion"]
+    model = BaselineModel(cfg)
+    eps_by_cat, eps0 = _working_elasticity(cfg)
+    bounds = dc["r_search_bounds"]
+
+    full = population(d, cfg).copy()
+    full = full[full.starting_inventory >= 1]
+    if not len(full):
+        return {"verdict": "NOT RUN -- no rows"}
+    mu_ref = model.predict_mu_ref(full)
+    ratio = (1 - full.total_discount.to_numpy()) / (1 - full.d_ref.to_numpy())
+    eps_row = full.category.astype(str).map(eps_by_cat).fillna(eps0).to_numpy()
+    full["mu_hat"] = np.clip(mu_ref * ratio ** eps_row,
+                             cfg["pricing"]["demand_floor"], None)
+    full["censored"] = episodes.censored_hours(full)
+    full["resid"] = full.units_sold - full.mu_hat
+    full["_win"] = pd.to_datetime(full.date).dt.to_period(freq)
+
+    by_window, thin = {}, []
+    for win, g in full.groupby("_win"):
+        label = str(win.start_time.date())
+        if len(g) < dc["min_rows_per_group"]:
+            thin.append(label)
+            continue
+        r, ok = fit_r(g.units_sold.to_numpy(), g.mu_hat.to_numpy(),
+                      g.censored.to_numpy(), bounds)
+        sizes = g.groupby("episode_id")["resid"].size()
+        sub = g[g.episode_id.isin(sizes[sizes >= 3].index)]
+        total = sub["resid"].var(ddof=1) if len(sub) > 1 else 0.0
+        rho_w = (float(np.clip(sub.groupby("episode_id")["resid"].mean()
+                               .var(ddof=1) / total, 0.0, 0.95))
+                 if total and total > 0 else None)
+        pear = pearson_dispersion(g.units_sold.to_numpy(), g.mu_hat.to_numpy())
+        # An r near the search bound is the estimator FAILING, not a large r:
+        # under-dispersed data (Pearson < 1) cannot be expressed by any NB
+        # (Var = mu + mu^2/r >= mu), so the MLE runs to the ceiling. Folding
+        # those into a spread reads a failed fit as drift -- the exact
+        # mistake this block exists to prevent someone making.
+        at_bound = bool(ok and (r >= bounds[1] * 0.99 or r <= bounds[0] * 1.01))
+        usable = bool(ok and pear >= 1.0 and not at_bound)
+        sizes = g.groupby("episode_id")["resid"].size()
+        sub = g[g.episode_id.isin(sizes[sizes >= 3].index)]
+        total = sub["resid"].var(ddof=1) if len(sub) > 1 else 0.0
+        rho_w = (float(np.clip(sub.groupby("episode_id")["resid"].mean()
+                               .var(ddof=1) / total, 0.0, 0.95))
+                 if total and total > 0 else None)
+        by_window[label] = {
+            "rows": int(len(g)),
+            "r": round(r, 4) if ok else None,
+            "rho": round(rho_w, 4) if rho_w is not None else None,
+            "pearson": round(pear, 3),
+            "nb_expressible": bool(pear >= 1.0),
+            "r_at_search_bound": at_bound,
+            "r_usable": usable,
+        }
+
+    # r stats over the windows where an NB fit MEANS anything
+    rs = [v["r"] for v in by_window.values() if v["r_usable"]]
+    unusable = [w for w, v in by_window.items() if not v["r_usable"]]
+    rhos = [v["rho"] for v in by_window.values() if v["rho"] is not None]
+    pears = [v["pearson"] for v in by_window.values()]
+    alert = cfg["assurance"].get("rho_drift_alert")
+
+    def spread(xs):
+        return (round(max(xs) - min(xs), 4), round(float(np.median(xs)), 4)) \
+            if xs else (None, None)
+
+    r_spread, r_med = spread(rs)
+    rho_spread, rho_med = spread(rhos)
+    unusable_share = len(unusable) / max(len(by_window), 1)
+    return {
+        "freq": freq,
+        "windows_fitted": len(by_window),
+        "windows_too_thin": thin,
+        "by_window": by_window,
+        "r_median": r_med, "r_spread": r_spread,
+        "r_windows_usable": len(rs),
+        "r_windows_unusable": unusable,
+        "r_unusable_share": round(unusable_share, 3),
+        "rho_median": rho_med, "rho_spread": rho_spread,
+        "rho_drift_alert": alert,
+        "rho_spread_vs_alert": round(rho_spread / alert, 2)
+            if rho_spread and alert else None,
+        "pearson_median": round(float(np.median(pears)), 3) if pears else None,
+        "pearson_range": [round(min(pears), 3), round(max(pears), 3)]
+            if pears else None,
+        "verdict": (
+            "NOT ENOUGH WINDOWS -- widen freq or the extract"
+            if len(by_window) < 3 else
+            f"r IS NOT FITTABLE AT THIS CADENCE -- {len(unusable)} of "
+            f"{len(by_window)} windows are under-dispersed (Pearson < 1, which "
+            "no NB expresses) or pinned at a search bound, so their r is a "
+            "failed fit rather than a value. Re-fitting r this often would "
+            "bank those as if they were measurements; read pearson_range "
+            "before reading r at all"
+            if unusable_share > 0.34 else
+            f"rho varies by {rho_spread} across {freq} windows against a "
+            f"{alert} live alert ({rho_spread / alert:.1f}x): the alert would "
+            "fire on ORDINARY variation, so treat it as an alarm to retune "
+            "rather than a drift detector"
+            if rho_spread and alert and rho_spread > alert else
+            f"rho varies by {rho_spread} across {freq} windows, inside the "
+            f"{alert} live alert -- freezing it is defensible and the alert "
+            "discriminates real drift"),
+        "note": ("A MEASUREMENT, not a re-fit schedule: both are second "
+                 "moments from weak signal, and re-fitting r during learning "
+                 "reintroduces the eps <-> r cycle design 5.6 removed. Use it "
+                 "to set the RETRAIN cadence and to sanity-check the live "
+                 "assurance alerts. READ PEARSON FIRST: a window below 1.0 is "
+                 "steadier than Poisson, so its r is the MLE running to a "
+                 "bound rather than a dispersion estimate, and a SHIFT in "
+                 "pearson across windows is a regime change -- which is a "
+                 "retrain question, not a re-fit-more-often one."),
+    }
+
+
 def lookup_r(r_lookup, subcategory, category):
     for level in r_lookup["fallback_order"]:
         if level == "subcategory" and str(subcategory) in r_lookup["subcategory"]:
@@ -199,6 +336,10 @@ def main():
 
     dc = cfg["dispersion"]
     os.makedirs(os.path.dirname(dc["r_lookup_path"]) or ".", exist_ok=True)
+    # is freezing these defensible on THIS extract? Measured, not assumed --
+    # and it sets the retrain cadence rather than a weekly re-fit (see
+    # drift_by_window on why weekly is the wrong answer)
+    rho_out["drift_by_window"] = drift_by_window(d, cfg)
     bundle = BaselineModel(cfg).version
     stamp(r_lookup, cfg, bundle, "bootstrap.fit_dispersion")
     stamp(rho_out, cfg, bundle, "bootstrap.fit_dispersion")
@@ -212,6 +353,12 @@ def main():
     print(f"rho              : {rho_out['rho']}  "
           f"(forced hours {rho_out['mean_forced_hours_per_episode']}, "
           f"deff {rho_out['implied_deff']})")
+    dr = rho_out["drift_by_window"]
+    if dr.get("windows_fitted"):
+        print(f"drift ({dr['freq']})       : r {dr['r_median']} +-{dr['r_spread']} | "
+              f"rho {dr['rho_median']} +-{dr['rho_spread']} over "
+              f"{dr['windows_fitted']} windows")
+        print(f"                   {dr['verdict']}")
     print("paste into config.yaml: dispersion.rho, "
           "dispersion.mean_forced_hours_per_episode")
 
