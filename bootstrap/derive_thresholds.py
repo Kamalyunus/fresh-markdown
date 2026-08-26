@@ -478,6 +478,96 @@ def information_increment(cfg):
     }
 
 
+def bounded_step(cfg):
+    """`max_mean_step` and `max_std_shrink` -- the two rails on one update.
+
+    They are NOT independent. `max_std_shrink` is the primary rate limiter:
+    it fixes how fast a cell may converge, and `information_increment` is
+    derived from it (see `information_increment`). `max_mean_step` then rails
+    the mean, and the coherent question is whether the two bind at the SAME
+    level of surprise.
+
+    A cap-sized update -- one carrying exactly the information that saturates
+    `max_std_shrink` -- moves the mean toward the batch's own estimate by
+
+        [1 - (1-max_std_shrink)^2] x |batch estimate - current mean|
+
+    (precision-weighted average, Normal approximation to the grid update).
+    So for a batch pulling one prior std away, the mean moves
+    `0.4375 x std` at a 25% shrink cap. If `max_mean_step` is far below that,
+    the mean rail clips on ordinary batches while the std rail almost never
+    binds -- the RUNBOOK's "most updates clip -> mis-sized" condition, by
+    construction rather than by accident.
+
+    Neither is fully derivable: they encode risk appetite. What IS derivable
+    is their consistency, the surprise level each one trips at, and the
+    convergence they imply. The policy consequence of a mean step is measured
+    separately, by `backtest.step_sensitivity`, which re-solves the DP arm at
+    eps +- max_mean_step on real episodes -- cross-check there before moving it.
+    """
+    lc = cfg["learning"]
+    shrink, step = lc["max_std_shrink"], lc["max_mean_step"]
+    pull_frac = 1.0 - (1.0 - shrink) ** 2
+    min_std = cfg["posterior"]["min_std"]
+    with open(cfg["posterior"]["prior"]["path"]) as f:
+        prior = json.load(f)
+    stds = {c: float(v["std"]) for c, v in prior.get("per_category", {}).items()
+            if v.get("std")}
+    if not stds:
+        return {"verdict": "NOT RUN -- no per-category prior stds"}
+
+    med = float(np.median(list(stds.values())))
+    # what a cap-sized update does to the mean, per prior std of surprise
+    move_per_std = pull_frac * med
+    # ...and therefore the surprise at which the MEAN rail starts clipping
+    clips_at_std = step / move_per_std if move_per_std > 0 else None
+    # convergence the shrink cap allows, at one human-gated update per day
+    updates_to_floor = {
+        c: round(float(np.log(min_std / v) / np.log(1.0 - shrink)), 1)
+        for c, v in sorted(stds.items())}
+
+    consistent = pull_frac * med
+    return {
+        "max_std_shrink": shrink,
+        "max_mean_step": step,
+        "median_launch_std": round(med, 4),
+        "mean_move_fraction_of_pull_at_cap": round(pull_frac, 4),
+        "mean_move_at_cap_per_prior_std": round(move_per_std, 4),
+        "mean_rail_clips_above_pull_of_std": round(clips_at_std, 3)
+            if clips_at_std else None,
+        "updates_to_min_std_by_category": updates_to_floor,
+        "days_to_min_std_median": round(float(np.median(
+            list(updates_to_floor.values()))), 1),
+        "consistent_max_mean_step": round(consistent, 3),
+        "consistent_basis": ("the mean move a CAP-SIZED update makes on a "
+                             "one-prior-std surprise -- set here, both rails "
+                             "trip at the same surprise instead of one "
+                             "clipping every batch"),
+        "verdict": (
+            f"CONSISTENT -- both rails trip near a "
+            f"{clips_at_std:.2f}-std surprise"
+            if clips_at_std is not None and 0.7 <= clips_at_std <= 1.4 else
+            f"MEAN RAIL BINDS FIRST -- max_mean_step {step} clips at a "
+            f"{clips_at_std:.2f}-std surprise while max_std_shrink needs a "
+            f"full cap-sized update, so the mean cap does the work and "
+            f"`bound_clipped` fires routinely. OWNER DECISION: raise "
+            f"max_mean_step toward {consistent:.2f} (check the price "
+            f"consequence in backtest.step_sensitivity FIRST), or lower "
+            f"max_std_shrink so the two agree"
+            if clips_at_std is not None and clips_at_std < 0.7 else
+            f"STD RAIL BINDS FIRST -- max_mean_step {step} only clips beyond a "
+            f"{clips_at_std:.2f}-std surprise, so convergence is limited by "
+            f"max_std_shrink alone" if clips_at_std is not None else
+            "NOT RUN -- degenerate prior widths"),
+        "note": ("Both rails widen in effect as the posterior narrows: "
+                 "mean_move_at_cap scales with the CURRENT std, so a launch "
+                 "derivation is the tight case and the rails loosen from "
+                 "there. max_std_shrink is the one to set first -- "
+                 "information_increment is derived from it, and changing it "
+                 "moves that too."),
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(prog="bootstrap.derive_thresholds")
     ap.add_argument("--input", required=True)
@@ -503,6 +593,7 @@ def main():
         "guardrail_threshold_recommendation": recommend_thresholds(
             trailing, control, cfg),
         "information_increment_recommendation": information_increment(cfg),
+        "bounded_step_recommendation": bounded_step(cfg),
     }
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
@@ -544,6 +635,13 @@ def main():
         print(f"{'info increment':12s}: configured {ii['configured']} | launch "
               f"ceiling {ii['recommended']} "
               f"(range {ii['range_across_cells']}) -> {ii['verdict']}")
+    bs = report["bounded_step_recommendation"]
+    if isinstance(bs, dict) and "consistent_max_mean_step" in bs:
+        print(f"{'bounded step':12s}: mean {bs['max_mean_step']} / shrink "
+              f"{bs['max_std_shrink']} | mean rail clips above a "
+              f"{bs['mean_rail_clips_above_pull_of_std']}-std surprise | "
+              f"{bs['days_to_min_std_median']} updates to min_std")
+        print(f"{'':12s}  -> {bs['verdict']}")
     print(f"wrote {args.out}")
 
 

@@ -780,6 +780,45 @@ def test_the_information_increment_is_derived_from_the_posterior_arithmetic(
     assert dt.information_increment(cfg)["verdict"].startswith("OK")
 
 
+def test_the_two_bounded_step_rails_are_graded_against_each_other(tmp_path):
+    """`max_mean_step` and `max_std_shrink` are one decision expressed twice.
+    A cap-sized update moves the mean by [1-(1-shrink)^2] x pull, so if the
+    mean rail sits far below that it clips every ordinary batch while the
+    shrink rail never binds -- and `bound_clipped` stops meaning anything.
+    The report has to say which rail binds first, and at what surprise."""
+    import copy
+    import json
+
+    from bootstrap import derive_thresholds as dt
+
+    cfg = copy.deepcopy(CFG)
+    prior_path = tmp_path / "prior.json"
+    prior_path.write_text(json.dumps(
+        {"per_category": {"A": {"mean": -1.0, "std": 1.0}}}))
+    cfg["posterior"]["prior"]["path"] = str(prior_path)
+    cfg["learning"]["max_std_shrink"] = 0.25
+
+    # a mean rail far under the cap-sized move: clips on ordinary batches
+    cfg["learning"]["max_mean_step"] = 0.15
+    tight = dt.bounded_step(cfg)
+    assert tight["mean_move_fraction_of_pull_at_cap"] == pytest.approx(0.4375)
+    assert tight["consistent_max_mean_step"] == pytest.approx(0.4375, abs=1e-3)
+    assert tight["mean_rail_clips_above_pull_of_std"] == pytest.approx(
+        0.15 / 0.4375, abs=1e-2)
+    assert tight["verdict"].startswith("MEAN RAIL BINDS FIRST")
+    # the verdict must name the owner's actual options, not just complain
+    assert "step_sensitivity" in tight["verdict"]
+
+    # set to the consistent value and both rails trip at a 1-std surprise
+    cfg["learning"]["max_mean_step"] = tight["consistent_max_mean_step"]
+    assert dt.bounded_step(cfg)["verdict"].startswith("CONSISTENT")
+
+    # and the shrink cap alone fixes convergence: 25%/update from 1.0 to the
+    # 0.05 floor is log(0.05)/log(0.75) updates, nothing to do with the mean
+    assert dt.bounded_step(cfg)["updates_to_min_std_by_category"]["A"] == \
+        pytest.approx(np.log(cfg["posterior"]["min_std"]) / np.log(0.75), abs=0.1)
+
+
 def test_the_floor_and_the_trigger_compute_the_same_quantity():
     """`derive_thresholds` measures the floor and `pipeline.monitor` evaluates
     the trigger. If they compute different things the threshold is graded

@@ -57,7 +57,11 @@ Then, in order:
 4. **Owner sets the `SET BY OWNER` keys** (`scrap_deterioration_pct`,
    `margin_deterioration_pct`, `min_detectable_effect_pct`) from
    `reports/thresholds.json` — never invented, and never below a floor the
-   report stamps `TOO TIGHT`.
+   report stamps `TOO TIGHT`. The two learning rails
+   (`learning.max_std_shrink`, then `learning.max_mean_step`) are owner calls
+   too: read `bounded_step_recommendation` for which one binds first, and
+   `backtest.step_sensitivity` for what a mean step does to prices. Set
+   `max_std_shrink` first — `information_increment` is derived from it.
 5. `python3 -m bootstrap.init_posterior` (once, at launch — refuses to
    overwrite production learning state without `--force`).
 6. **Shadow, on the hold-out** (default window):

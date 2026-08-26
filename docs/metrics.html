@@ -105,7 +105,7 @@ footer code{font-family:var(--data)}
 <div class="bar"><div class="inner">
   <input id="q" type="search" placeholder="filter — try  il, tau, censor, rho, gate" aria-label="Filter metrics">
   <button class="toggle" id="gateonly" aria-pressed="false">gates only</button>
-  <span id="count">146 metrics</span>
+  <span id="count">147 metrics</span>
 </div></div>
 
 <div class="wrap">
@@ -230,6 +230,7 @@ footer code{font-family:var(--data)}
 <div class="row" data-gate="0"><div class="nm">guardrail_noise (trailing basis)<span class="u">0–1</span></div><div class="mn">Each day against a trailing 28-day mean. Applies only BEFORE an A/B is running.</div></div>
 <div class="row" data-gate="0"><div class="nm">guardrail_noise_control_arm_basis<span class="u">0–1</span></div><div class="mn">Same-day treatment vs control, using the identical arm hash the monitor uses and smoothed the same way. This is what binds once both arms are populated.</div></div>
 <div class="row" data-gate="1"><div class="nm">information_increment_recommendation<span class="u">n</span></div><div class="mn"><code>learning.information_increment</code>, derived rather than chosen: <code>I* = (1/std²)·[1/(1−max_std_shrink)² − 1]</code>, the information one bounded update can actually USE. A CEILING — <code>bounded_step</code> clips at the cap and discards the excess, so a larger value waits to gather evidence it throws away. Scales as <code>1/std²</code>, so derive it for the LAUNCH stds and accept that it becomes conservative as the posterior narrows. <code>configured_implied_std</code> is the std the current value was implicitly sized for.<span class="rd"><b>gates</b>TOO LARGE is blocking</span></div></div>
+<div class="row" data-gate="1"><div class="nm">bounded_step_recommendation<span class="u">✓/✗</span></div><div class="mn">Grades <code>max_mean_step</code> against <code>max_std_shrink</code> — they are one decision expressed twice. A cap-sized update moves the mean by <code>[1−(1−max_std_shrink)²] × pull</code>, so <code>mean_rail_clips_above_pull_of_std</code> says at what surprise the mean rail trips. Far below 1 and it clips every ordinary batch while the shrink rail never binds — <code>bound_clipped</code> stops meaning anything. Set <code>max_std_shrink</code> FIRST: <code>information_increment</code> is derived from it. Price any mean-step change in <code>step_sensitivity</code> first.<span class="rd"><b>gates</b>owner-set</span></div></div>
 <div class="row" data-gate="1"><div class="nm">guardrail_threshold_recommendation<span class="u">✓/✗</span></div><div class="mn">Reports BOTH floors, names the binding one, and stamps a verdict. <code>TOO TIGHT</code> and <code>CLEARS THE FLOOR BUT LIKELY INERT</code> are both blocking, not advisory.<span class="rd"><b>gates</b>read by pipeline.status</span></div></div>
 </div>
 </section>

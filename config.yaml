@@ -420,8 +420,31 @@ learning:
     #
     # I* rises as 1/std^2 as the posterior narrows, so a launch-derived value
     # becomes conservative later. That direction is safe; the other is not.
-  max_mean_step: 0.15                  # SET  bound per update cycle
-  max_std_shrink: 0.25                 # SET  bound per update cycle
+  max_mean_step: 0.15                  # SET BY OWNER  risk rail on the mean.
+    # Read `reports/thresholds.json` -> bounded_step_recommendation before
+    # moving it, and `backtest.step_sensitivity` (which re-solves the DP arm at
+    # eps +- this value on real episodes) for the PRICE consequence.
+    #
+    # It is not independent of max_std_shrink. A cap-sized update -- one
+    # carrying exactly the information that saturates the shrink cap -- moves
+    # the mean toward the batch's own estimate by
+    # [1-(1-max_std_shrink)^2] x |pull|, i.e. 0.4375 x |pull| at 25%. So the
+    # coherent question is whether the two rails trip at the SAME surprise.
+    # Measured on the current fixture they do not: 0.15 clips at a 0.30-std
+    # pull while the shrink cap needs a full cap-sized update, so the mean
+    # rail does all the work and `bound_clipped` fires routinely -- the
+    # RUNBOOK's "most updates clip -> mis-sized" condition by construction.
+    # Consistent value there would be ~0.50. Raising it is an OWNER call:
+    # price it in step_sensitivity first, since the deepening bar means a
+    # larger step can re-price a lot of episodes at once.
+  max_std_shrink: 0.25                 # SET BY OWNER  the PRIMARY rate limit:
+    # how fast a cell may converge. Set this one FIRST -- information_increment
+    # is derived from it (I* = (1/std^2)[1/(1-max_std_shrink)^2 - 1]) and
+    # max_mean_step is graded against it, so moving it moves both. At 25% with
+    # one human-gated update a day, a launch-width cell reaches min_std in ~11
+    # updates. Its symptom when too loose is `predictive_check`'s
+    # worse_than_a_flat_prior persisting: the posterior tightening faster than
+    # the evidence justifies.
   use_exploitation_outcomes: false     # SET  do not change in MVP
 
 events:

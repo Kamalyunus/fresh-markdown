@@ -342,6 +342,15 @@ CATALOGUE = [
    "it becomes conservative as the posterior narrows. `configured_implied_std` "
    "is the std the current value was implicitly sized for.",
    "GATE — TOO LARGE is blocking"),
+  ("bounded_step_recommendation", "verdict",
+   "Grades `max_mean_step` against `max_std_shrink` — they are one decision "
+   "expressed twice. A cap-sized update moves the mean by "
+   "`[1−(1−max_std_shrink)²] × pull`, so `mean_rail_clips_above_pull_of_std` "
+   "says at what surprise the mean rail trips. Far below 1 and it clips every "
+   "ordinary batch while the shrink rail never binds — `bound_clipped` stops "
+   "meaning anything. Set `max_std_shrink` FIRST: `information_increment` is "
+   "derived from it. Price any mean-step change in `step_sensitivity` first.",
+   "GATE — owner-set"),
   ("guardrail_threshold_recommendation", "verdict",
    "Reports BOTH floors, names the binding one, and stamps a verdict. `TOO TIGHT` "
    "and `CLEARS THE FLOOR BUT LIKELY INERT` are both blocking, not advisory.",

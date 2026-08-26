@@ -1072,7 +1072,23 @@ normalises, and takes moments. Mechanics and rationale:
   conservative later, which is the safe direction.
   `bootstrap.derive_thresholds` reports it per cell as
   `information_increment_recommendation`, with the std the configured value
-  implies and a `TOO LARGE` verdict when it runs over. The step size is priced rather than asserted:
+  implies and a `TOO LARGE` verdict when it runs over.
+
+  **The two rails are one decision expressed twice.** A cap-sized update
+  moves the mean toward the batch's own estimate by
+  `[1 − (1−max_std_shrink)²] × |pull|` — 0.4375 × the pull at a 25% cap — so
+  `max_mean_step` and `max_std_shrink` should trip at the same level of
+  *surprise*. When the mean rail sits far below that, it clips every
+  ordinary batch while the shrink rail never binds, and `bound_clipped`
+  stops carrying information (the RUNBOOK escalates on "most updates clip",
+  which that arrangement guarantees). `max_std_shrink` is the one to set
+  first: it is the primary convergence limit *and* `information_increment`
+  is derived from it. `bounded_step_recommendation` reports which rail binds
+  first and at what surprise; the *price* consequence of a mean step is
+  measured separately by `backtest.step_sensitivity`, which re-solves the DP
+  arm at ε ± the step on real episodes — read it before moving the rail,
+  because the deepening bar means a larger step can re-price many episodes
+  at once. The step size is priced rather than asserted:
   `backtest`'s `step_sensitivity` block re-solves the DP arm at ε ± 0.15 on
   real episodes and reports how many prices move and what the shift costs in
   IL — below the deepening bar a step changes nothing, which is what makes a
