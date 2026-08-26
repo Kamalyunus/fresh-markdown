@@ -45,6 +45,10 @@ Then, in order:
 3. **Paste MEASURED values into `config.yaml`** — the only hand step:
    - `dispersion.rho`, `dispersion.mean_forced_hours_per_episode` — from
      `artifacts/rho.json`, after **every** retrain;
+   - `learning.information_increment` — from `reports/thresholds.json` →
+     `information_increment_recommendation.recommended`, re-derived after
+     **every** prior change (it is the ceiling above which a bounded update
+     discards the evidence it waited for; the report stamps `TOO LARGE`);
    - `exploration.tau_initial` — from `reports/shadow.json` →
      `tau_initial_derivation.tau_initial` (shadow derives it itself on the
      trailing pre-window week, so this paste happens AFTER step 6 and feeds

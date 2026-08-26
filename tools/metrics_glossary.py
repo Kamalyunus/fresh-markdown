@@ -333,6 +333,15 @@ CATALOGUE = [
   ("guardrail_noise_control_arm_basis", "rate",
    "Same-day treatment vs control, using the identical arm hash the monitor uses and "
    "smoothed the same way. This is what binds once both arms are populated.", ""),
+  ("information_increment_recommendation", "count",
+   "`learning.information_increment`, derived rather than chosen: "
+   "`I* = (1/std²)·[1/(1−max_std_shrink)² − 1]`, the information one bounded "
+   "update can actually USE. A CEILING — `bounded_step` clips at the cap and "
+   "discards the excess, so a larger value waits to gather evidence it throws "
+   "away. Scales as `1/std²`, so derive it for the LAUNCH stds and accept that "
+   "it becomes conservative as the posterior narrows. `configured_implied_std` "
+   "is the std the current value was implicitly sized for.",
+   "GATE — TOO LARGE is blocking"),
   ("guardrail_threshold_recommendation", "verdict",
    "Reports BOTH floors, names the binding one, and stamps a verdict. `TOO TIGHT` "
    "and `CLEARS THE FLOOR BUT LIKELY INERT` are both blocking, not advisory.",

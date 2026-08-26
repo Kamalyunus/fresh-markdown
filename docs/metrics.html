@@ -105,7 +105,7 @@ footer code{font-family:var(--data)}
 <div class="bar"><div class="inner">
   <input id="q" type="search" placeholder="filter — try  il, tau, censor, rho, gate" aria-label="Filter metrics">
   <button class="toggle" id="gateonly" aria-pressed="false">gates only</button>
-  <span id="count">145 metrics</span>
+  <span id="count">146 metrics</span>
 </div></div>
 
 <div class="wrap">
@@ -229,6 +229,7 @@ footer code{font-family:var(--data)}
 <div class="row" data-gate="1"><div class="nm">three_sigma / three_sigma_robust<span class="u">0–1</span></div><div class="mn">Noise floor of a guardrail series — raw and outlier-resistant. A floor above 1.0 means the series swings by more than its own level, and NO threshold on that basis is both safe and useful.<span class="rd"><b>gates</b>guardrail floors</span></div></div>
 <div class="row" data-gate="0"><div class="nm">guardrail_noise (trailing basis)<span class="u">0–1</span></div><div class="mn">Each day against a trailing 28-day mean. Applies only BEFORE an A/B is running.</div></div>
 <div class="row" data-gate="0"><div class="nm">guardrail_noise_control_arm_basis<span class="u">0–1</span></div><div class="mn">Same-day treatment vs control, using the identical arm hash the monitor uses and smoothed the same way. This is what binds once both arms are populated.</div></div>
+<div class="row" data-gate="1"><div class="nm">information_increment_recommendation<span class="u">n</span></div><div class="mn"><code>learning.information_increment</code>, derived rather than chosen: <code>I* = (1/std²)·[1/(1−max_std_shrink)² − 1]</code>, the information one bounded update can actually USE. A CEILING — <code>bounded_step</code> clips at the cap and discards the excess, so a larger value waits to gather evidence it throws away. Scales as <code>1/std²</code>, so derive it for the LAUNCH stds and accept that it becomes conservative as the posterior narrows. <code>configured_implied_std</code> is the std the current value was implicitly sized for.<span class="rd"><b>gates</b>TOO LARGE is blocking</span></div></div>
 <div class="row" data-gate="1"><div class="nm">guardrail_threshold_recommendation<span class="u">✓/✗</span></div><div class="mn">Reports BOTH floors, names the binding one, and stamps a verdict. <code>TOO TIGHT</code> and <code>CLEARS THE FLOOR BUT LIKELY INERT</code> are both blocking, not advisory.<span class="rd"><b>gates</b>read by pipeline.status</span></div></div>
 </div>
 </section>

@@ -725,6 +725,61 @@ def test_a_relative_floor_above_one_is_reported_as_blocked_not_as_a_number():
     assert not v2.startswith("BLOCKED"), v2
 
 
+def test_the_information_increment_is_derived_from_the_posterior_arithmetic(
+        tmp_path):
+    """`information_increment` is the evidence a bounded update may USE, and
+    that is fixed by the posterior's own algebra rather than judgment.
+
+    Fisher information adds to precision, so shrinking the std by exactly
+    `max_std_shrink` costs I* = (1/s^2)[1/(1-shrink)^2 - 1]. Above I* the
+    update clips and `bounded_step` DISCARDS the excess -- the outcomes are
+    marked processed either way -- so I* is a ceiling. It scales as 1/s^2,
+    which is why a wide launch prior is cheap to move and a narrow one is not.
+    """
+    import copy
+    import json
+    import numpy as np
+
+    from bootstrap import derive_thresholds as dt
+
+    cfg = copy.deepcopy(CFG)
+    prior_path = tmp_path / "prior.json"
+    # two cells an octave apart in width: 4x the precision, 4x the cost
+    prior_path.write_text(json.dumps({"per_category": {
+        "WIDE": {"mean": -1.0, "std": 1.0},
+        "NARROW": {"mean": -1.0, "std": 0.5}}}))
+    cfg["posterior"]["prior"]["path"] = str(prior_path)
+    cfg["learning"]["max_std_shrink"] = 0.25
+
+    out = dt.information_increment(cfg)
+    k = 1.0 / 0.75 ** 2 - 1.0
+    need = out["information_to_saturate_cap_by_category"]
+    assert need["WIDE"] == pytest.approx(k, abs=1e-3)
+    assert need["NARROW"] == pytest.approx(k / 0.25, abs=1e-3)
+    assert need["NARROW"] == pytest.approx(4 * need["WIDE"], rel=1e-3), \
+        "halving the std must quadruple the information -- precision is 1/s^2"
+
+    # the ceiling is checkable against the posterior step it claims to fund:
+    # spending exactly I* on the wide cell lands on the shrink cap
+    s0 = 1.0
+    s1 = 1.0 / np.sqrt(1.0 / s0 ** 2 + need["WIDE"])
+    # tolerance is what the report's 3dp rounding permits, nothing looser
+    assert s1 == pytest.approx(s0 * (1 - cfg["learning"]["max_std_shrink"]),
+                               rel=1e-3)
+
+    # and an over-sized configured value is named, with the std it was
+    # implicitly sized for -- the number that says what it was fitted to
+    cfg["learning"]["information_increment"] = 12.0
+    over = dt.information_increment(cfg)
+    assert over["verdict"].startswith("TOO LARGE")
+    assert over["configured_implied_std"] == pytest.approx(
+        np.sqrt(k / 12.0), abs=1e-3)
+    assert over["wastes_at_launch"] > 1
+
+    cfg["learning"]["information_increment"] = over["recommended"]
+    assert dt.information_increment(cfg)["verdict"].startswith("OK")
+
+
 def test_the_floor_and_the_trigger_compute_the_same_quantity():
     """`derive_thresholds` measures the floor and `pipeline.monitor` evaluates
     the trigger. If they compute different things the threshold is graded

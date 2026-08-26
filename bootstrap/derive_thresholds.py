@@ -410,6 +410,74 @@ def guardrail_noise(d, cfg):
     }
 
 
+def information_increment(cfg):
+    """`learning.information_increment` from the posterior's own arithmetic,
+    not judgment.
+
+    Fisher information adds to PRECISION: 1/s1^2 = 1/s0^2 + I. So the
+    information that shrinks the std by exactly `max_std_shrink` is
+
+        I* = (1/s0^2) * [1/(1-max_std_shrink)^2 - 1]
+
+    I* is a CEILING, not a target. `bounded_step` clips the update at the cap
+    and the excess is discarded -- outcomes are marked processed either way --
+    so an increment above I* waits longer to gather evidence it then throws
+    away. Below I* the update is simply a smaller step, which is safe.
+
+    I* moves with s0 (as 1/s0^2), so no single constant is right for the whole
+    pilot: it is smallest at launch, when the prior is widest and cheapest to
+    move, and grows as the posterior narrows. Derive it for the LAUNCH stds --
+    the phase the pilot exists to get through -- and re-derive after a prior
+    change. `wastes_at_launch` is what the CONFIGURED value throws away on a
+    launch-width cell, in multiples of what that step could use.
+    """
+    s = cfg["learning"]["max_std_shrink"]
+    k = 1.0 / (1.0 - s) ** 2 - 1.0
+    with open(cfg["posterior"]["prior"]["path"]) as f:
+        prior = json.load(f)
+    per = prior.get("per_category", {})
+    stds = {c: float(v["std"]) for c, v in per.items() if v.get("std")}
+    if not stds:
+        return {"verdict": "NOT RUN -- no per-category prior stds"}
+
+    need = {c: k / v ** 2 for c, v in stds.items()}
+    widest = min(need.values())          # widest std -> cheapest to move
+    narrowest = max(need.values())
+    configured = float(cfg["learning"]["information_increment"])
+    # the std at which the CONFIGURED value exactly saturates the cap: what
+    # that number was implicitly sized for
+    implied_std = float(np.sqrt(k / configured)) if configured > 0 else None
+    median_need = float(np.median(list(need.values())))
+    return {
+        "max_std_shrink": s,
+        "k_shrink_to_cap": round(k, 4),
+        "prior_std_by_category": {c: round(v, 4) for c, v in stds.items()},
+        "information_to_saturate_cap_by_category": {
+            c: round(v, 3) for c, v in sorted(need.items(), key=lambda kv: kv[1])},
+        "recommended": round(median_need, 3),
+        "recommended_basis": ("median across cells of I* at the LAUNCH prior "
+                              "std -- the ceiling above which evidence is "
+                              "clipped away rather than used"),
+        "range_across_cells": [round(widest, 3), round(narrowest, 3)],
+        "configured": configured,
+        "configured_implied_std": round(implied_std, 4) if implied_std else None,
+        "wastes_at_launch": round(configured / median_need, 1)
+            if median_need > 0 else None,
+        "verdict": (
+            "OK -- at or below the launch ceiling" if configured <= median_need
+            else f"TOO LARGE -- {configured / median_need:.1f}x the launch "
+                 f"ceiling; every update gathers that multiple of the evidence "
+                 f"one capped step can use, and bounded_step discards the rest"),
+        "note": ("Information here is the NB Fisher information "
+                 "mu*L^2*r/(r+mu) that `pipeline.update` accumulates, AFTER "
+                 "deff deflation -- the same quantity the trigger compares. "
+                 "Re-derive after any change to the prior or to "
+                 "max_std_shrink. As the posterior narrows the ceiling rises "
+                 "as 1/std^2, so a value set for launch becomes conservative "
+                 "later: that direction is safe, the other is not."),
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(prog="bootstrap.derive_thresholds")
     ap.add_argument("--input", required=True)
@@ -434,6 +502,7 @@ def main():
         "guardrail_noise_control_arm_basis": control,
         "guardrail_threshold_recommendation": recommend_thresholds(
             trailing, control, cfg),
+        "information_increment_recommendation": information_increment(cfg),
     }
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
@@ -470,6 +539,11 @@ def main():
               f"control-arm {rec.get('control_arm_floor')} | "
               f"binding {rec.get('binding_floor')} "
               f"({rec.get('binding_basis')}) -> {rec['verdict']}")
+    ii = report["information_increment_recommendation"]
+    if isinstance(ii, dict) and "recommended" in ii:
+        print(f"{'info increment':12s}: configured {ii['configured']} | launch "
+              f"ceiling {ii['recommended']} "
+              f"(range {ii['range_across_cells']}) -> {ii['verdict']}")
     print(f"wrote {args.out}")
 
 

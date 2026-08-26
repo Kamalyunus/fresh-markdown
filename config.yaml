@@ -397,7 +397,29 @@ exploration:
   min_feasible_tiers: 2                # SET  below this: non-explorable
 
 learning:
-  information_increment: 12.0          # SET  effective info per update
+  information_increment: 12.0          # MEASURED  effective (deff-deflated) NB
+    # information per update. PASTE from `reports/thresholds.json` ->
+    # information_increment_recommendation.recommended, re-derived after any
+    # prior change (bootstrap.derive_thresholds).
+    #
+    # Why it is measured and not chosen: Fisher information adds to PRECISION,
+    # 1/s1^2 = 1/s0^2 + I, so the information that shrinks the std by exactly
+    # max_std_shrink is I* = (1/s0^2) * [1/(1-max_std_shrink)^2 - 1]. That is a
+    # CEILING, not a target -- `bounded_step` clips the update at the cap and
+    # the excess is DISCARDED (the outcomes are marked processed either way),
+    # so an increment above I* waits to gather evidence it then throws away.
+    # Under it, updates are simply smaller steps, which is safe.
+    #
+    # 12.0 has no recorded derivation and saturates the cap at a posterior std
+    # of ~0.25 -- a LATE-stage posterior. At launch-width priors the ceiling is
+    # an order of magnitude lower (0.15-0.61 on the current fixture), so 12.0
+    # runs ~20x over and discards most of what it waits for. This is NOT the
+    # Poisson->NB correction: that fixed a measurement that was 1.6-1.9x too
+    # LARGE, which pushes the same way. Re-derive on production before the
+    # pilot and paste; the report stamps TOO LARGE until you do.
+    #
+    # I* rises as 1/std^2 as the posterior narrows, so a launch-derived value
+    # becomes conservative later. That direction is safe; the other is not.
   max_mean_step: 0.15                  # SET  bound per update cycle
   max_std_shrink: 0.25                 # SET  bound per update cycle
   use_exploitation_outcomes: false     # SET  do not change in MVP

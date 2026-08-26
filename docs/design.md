@@ -1059,7 +1059,20 @@ normalises, and takes moments. Mechanics and rationale:
 - **Bounded steps, human-gated.** An update applies when accumulated
   effective information crosses a threshold; each step moves the mean at
   most 0.15 and shrinks the std at most 25% (floored), with any clipped
-  bound flagged for review. The step size is priced rather than asserted:
+  bound flagged for review. **The threshold is MEASURED, not chosen.**
+  Fisher information adds to precision (`1/s₁² = 1/s₀² + I`), so the
+  information that shrinks the std by exactly `max_std_shrink` is
+  `I* = (1/s₀²)·[1/(1−max_std_shrink)² − 1]` — and that is a *ceiling*, not
+  a target: `bounded_step` clips at the cap and the excess is discarded (the
+  outcomes are marked processed either way), so an increment above `I*`
+  waits to gather evidence it then throws away, while one below it simply
+  takes smaller steps. `I*` rises as `1/s₀²` as the posterior narrows, so no
+  single constant is right throughout; derive it for the *launch* stds — the
+  phase the pilot exists to get through — and accept that it becomes
+  conservative later, which is the safe direction.
+  `bootstrap.derive_thresholds` reports it per cell as
+  `information_increment_recommendation`, with the std the configured value
+  implies and a `TOO LARGE` verdict when it runs over. The step size is priced rather than asserted:
   `backtest`'s `step_sensitivity` block re-solves the DP arm at ε ± 0.15 on
   real episodes and reports how many prices move and what the shift costs in
   IL — below the deepening bar a step changes nothing, which is what makes a
