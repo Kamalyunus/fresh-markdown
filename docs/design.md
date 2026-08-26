@@ -1693,6 +1693,39 @@ hold-out drift showed the level had moved. **A re-fit is not a retrain** —
 the model does not move, so hard rule 1 comparisons stay valid — but a
 report must say which factor vintage it ran under.
 
+**What it does to the prior and the dispersion.** Both are fitted against
+`mu_ref`, so changing the factors changes their inputs and the full chain
+must be re-run (§5.5, §5.6). Measured on the fixture, `estimate_prior` then
+`fit_dispersion`:
+
+| | before | after |
+| --- | --- | --- |
+| `rho` | 0.1288 | 0.1334 (+3.6%) |
+| `deff` | 1.647 | 1.671 (+1.5%) |
+| global `r` | 0.7033 | 0.7129 (+1.4%) |
+| prior mean (all cells) | ≈ −2.02 | ≈ −2.24 |
+| prior std | 1.13 / 2.23 | 1.12 / 2.28 |
+
+**The dispersion side is a formality — 1–4%.** The intuition that a level
+correction should cut `rho` is wrong, and worth stating so it is not
+re-derived: `rho` is the correlation of residuals *within* an episode, and a
+per-category weekly factor is constant across every hour of an episode, so
+it rescales that episode's residuals uniformly and cannot remove the
+correlation between them. A level offset and a within-episode common shock
+are different things; only the second moves `rho`.
+
+**The prior side is untestable on the fixture and remains open.** The
+fixture is the `--policy legacy` build, made to reproduce the production
+confound, and the estimator says so — two of five categories wrong-signed,
+every cell pooled to nearly one value, `information_available_per_row`
+0.0014 nats/row, no candidate beating a flat prior. Both the before and
+after means sit near −2.2 against generator truths of −0.85 to −1.70, so
+the 0.22 shift is movement in a quantity the data does not identify and
+says nothing about whether point-in-time helps. Decide it on production, in
+the §5.6 reading order, and watch `pct_dp_deepened`: 0.22 is 1.5×
+`max_mean_step` and the deepening bar sits near 2.43, so a shift that size
+moves cells toward the bar, where prices change discretely.
+
 **Reading the report.** The gate window is whatever
 `baseline_model.calibration_gate_window` names (currently `test`), recorded
 as `fidelity.gate_window` — read the field rather than assuming — and it
