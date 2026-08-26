@@ -43,6 +43,20 @@ the point. Three things a reader will notice and none is a defect:
     hours can differ by up to half a unit. The DP prices integer inventory;
     rounding once at the decision is what that costs.
 
+WHERE THE UNITS WENT, per arm: every unit an episode had either sold, shrank,
+or was scrapped at the close -- there is no fourth fate, so the hourly sheet
+accounts for all of them:
+
+    sum(*_units) + sum(*_shrink) + sum(*_scrap_at_close)  ==  supply
+
+`*_shrink` is an HOURLY event (the exogenous loss in `hour_adjustment`), and
+each simulated arm absorbs only what its own shelf still held -- units an arm
+already sold cannot also shrink, so the arms can differ here and their totals
+differ from the observed `shrink`. `*_scrap_at_close` is a TERMINAL event and
+is non-zero only on the episode's LAST row; it is zero throughout an unfinished
+episode, whose stock is still on the shelf when the extract ends. The episode
+sheet's `*_scrap_units` is the sum of the two.
+
 Usage:
     python3 -m tools.export_backtest --input data/prepared.parquet \
         --out reports/backtest_episodes.xlsx --episodes 300 [--html]
@@ -70,11 +84,11 @@ HOUR_COLS = [
     # with. `*_end_inv` is AFTER sales and AFTER the hour's restock/shrink, so
     # `*_end_inv[t] == *_start_inv[t+1]` down every arm.
     "actual_start_inv", "actual_discount", "actual_price", "actual_units",
-    "actual_end_inv",
+    "actual_shrink", "actual_scrap_at_close", "actual_end_inv",
     "legacy_start_inv", "legacy_discount", "legacy_price", "legacy_mu",
-    "legacy_units", "legacy_end_inv",
+    "legacy_units", "legacy_shrink", "legacy_scrap_at_close", "legacy_end_inv",
     "dp_start_inv", "dp_discount", "dp_price", "dp_mu", "dp_units",
-    "dp_end_inv",
+    "dp_shrink", "dp_scrap_at_close", "dp_end_inv",
     "dp_is_entry", "dp_feasible_tiers", "dp_minus_actual_discount",
 ]
 
@@ -90,10 +104,11 @@ EP_COLS = [
     "actual_il", "actual_discount_cost", "actual_scrap_cost",
     "actual_denom", "actual_cleared", "actual_mean_discount",
     "legacy_model_sold_units", "legacy_model_leftover_units",
-    "legacy_model_scrap_units",
+    "legacy_model_shrink_applied", "legacy_model_scrap_units",
     "legacy_model_il", "legacy_model_discount_cost", "legacy_model_scrap_cost",
     "legacy_model_denom", "legacy_model_cleared", "legacy_model_mean_discount",
-    "dp_sold_units", "dp_leftover_units", "dp_scrap_units",
+    "dp_sold_units", "dp_leftover_units", "dp_shrink_applied",
+    "dp_scrap_units",
     "dp_il", "dp_discount_cost", "dp_scrap_cost",
     "dp_denom", "dp_cleared", "dp_mean_discount",
 ]

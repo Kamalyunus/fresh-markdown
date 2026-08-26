@@ -429,11 +429,15 @@ def _replay_one(e, cfg):
         # holds -- units this arm already sold cannot also shrink. The clipped
         # remainder is shrink that never happened in this world, and charging
         # it anyway broke the supply identity by exactly the clipped amount.
-        lg_clip += max(0.0, -(q + adj[t]))
+        lg_clip_t = max(0.0, -(q + adj[t]))
+        lg_clip += lg_clip_t
         q = max(q + adj[t], 0.0)
         # close of hour = after sales AND after the adjustment, the source's
-        # own convention -- so end[t] == start[t+1] and the sheet self-checks
-        rec(t, legacy_end_inv=float(q))
+        # own convention -- so end[t] == start[t+1] and the sheet self-checks.
+        # Shrink APPLIED this hour is what the shelf still held to lose: the
+        # requested loss less the part clipped away.
+        rec(t, legacy_end_inv=float(q),
+            legacy_shrink=float(max(0.0, -adj[t]) - lg_clip_t))
         if q <= 0 and not adj[t + 1:].any():
             break
     # captured before the DP loop reuses `q`
@@ -452,9 +456,11 @@ def _replay_one(e, cfg):
         if q_int <= 0:
             rec(t, dp_start_inv=0, dp_discount=None, dp_price=None, dp_mu=None,
                 dp_units=0.0)
-            dp_clip += max(0.0, -(q + adj[t]))
+            dp_clip_t = max(0.0, -(q + adj[t]))
+            dp_clip += dp_clip_t
             q = max(q + adj[t], 0.0)
-            rec(t, dp_end_inv=float(q))
+            rec(t, dp_end_inv=float(q),
+                dp_shrink=float(max(0.0, -adj[t]) - dp_clip_t))
             if q <= 0 and not adj[t + 1:].any():
                 break
             continue
@@ -481,9 +487,11 @@ def _replay_one(e, cfg):
             dp_mu=float(mu), dp_units=float(sold),
             dp_is_entry=bool(t == 0),
             dp_feasible_tiers=len(res.tiers))
-        dp_clip += max(0.0, -(q - sold + adj[t]))
+        dp_clip_t = max(0.0, -(q - sold + adj[t]))
+        dp_clip += dp_clip_t
         q = max(q - sold + adj[t], 0.0)
-        rec(t, dp_end_inv=float(q))
+        rec(t, dp_end_inv=float(q),
+            dp_shrink=float(max(0.0, -adj[t]) - dp_clip_t))
     dp_shrink = max(e["shrink"] - dp_clip, 0.0)
     dp_scrap = cost * (max(q, 0.0) + dp_shrink)
 
@@ -570,6 +578,9 @@ def _replay_one(e, cfg):
                 "actual_discount": a_d,
                 "actual_price": p0 * (1 - a_d),
                 "actual_units": float(e["actual_sold"][t]),
+                # the observed world absorbs the whole exogenous loss: it IS
+                # where the shrink was measured
+                "actual_shrink": float(max(0.0, -e["adjustment"][t])),
                 # legacy prices under the MODEL's demand
                 "legacy_start_inv": rt.get("legacy_start_inv"),
                 "legacy_end_inv": rt.get("legacy_end_inv"),
@@ -577,6 +588,7 @@ def _replay_one(e, cfg):
                 "legacy_price": rt.get("legacy_price"),
                 "legacy_mu": rt.get("legacy_mu"),
                 "legacy_units": rt.get("legacy_units"),
+                "legacy_shrink": rt.get("legacy_shrink"),
                 # the DP's own choice, same demand model
                 "dp_start_inv": rt.get("dp_start_inv"),
                 "dp_end_inv": rt.get("dp_end_inv"),
@@ -584,6 +596,7 @@ def _replay_one(e, cfg):
                 "dp_price": rt.get("dp_price"),
                 "dp_mu": rt.get("dp_mu"),
                 "dp_units": rt.get("dp_units"),
+                "dp_shrink": rt.get("dp_shrink"),
                 "dp_is_entry": rt.get("dp_is_entry", False),
                 "dp_feasible_tiers": rt.get("dp_feasible_tiers"),
             })
@@ -591,6 +604,19 @@ def _replay_one(e, cfg):
             h["dp_minus_actual_discount"] = (
                 None if h["dp_discount"] is None
                 else h["dp_discount"] - h["actual_discount"])
+        # scrap is a TERMINAL event, not an hourly one: the leftover is
+        # disposed when the listing closes. It lands on the episode's final
+        # row so the hourly sheet still accounts for every unit --
+        # sum(*_shrink) + sum(*_scrap_at_close) == the episode's *_scrap_units.
+        # An unfinished episode disposes of nothing: its stock is still on
+        # the shelf when the extract ends.
+        last = hours[-1]
+        last["actual_scrap_at_close"] = float(a_left)
+        last["legacy_scrap_at_close"] = float(lg_left)
+        last["dp_scrap_at_close"] = float(dp_left)
+        for h in hours[:-1]:
+            for arm in ("actual", "legacy", "dp"):
+                h[f"{arm}_scrap_at_close"] = 0.0
         row["hours_trace"] = hours
     return row, spreads
 

@@ -821,6 +821,52 @@ def test_every_arm_traces_its_own_inventory_chain(cfg):
         "the DP priced differently but its shelf never diverged"
 
 
+def test_the_hourly_trace_accounts_for_every_unit_in_every_arm(cfg):
+    """Every unit an episode had either sold, shrank, or was scrapped at the
+    close -- there is no fourth fate, so per arm:
+
+        sum(units) + sum(shrink) + sum(scrap_at_close) == supply
+
+    Scrap is TERMINAL, so it may land only on the last row; shrink is hourly
+    and each simulated arm absorbs only what its own shelf still held.
+    Without this the hourly sheet would show a policy's sales without
+    showing where the rest of its stock went.
+    """
+    from backtest.replay import _episode_frame, _replay_one
+
+    # hour 2 loses 2 units to shrink; the episode closes holding stock
+    g = pd.DataFrame({
+        "episode_id": ["e"] * 4,
+        "date": ["2026-05-01"] * 4, "hour_of_day": [9, 10, 11, 12],
+        "total_discount": [0.25, 0.25, 0.30, 0.30],
+        "original_price": [10_000.0] * 4, "cost": [4000.0] * 4,
+        "d_ref": [0.25] * 4, "starting_inventory": [9, 8, 7, 5],
+        "units_sold": [1, 1, 0, 1], "mu_ref_hat": [1.5] * 4,
+        "r": [3.0] * 4, "eps": [-1.0] * 4,
+    })
+    #                      shrink of 2 between hour 2 and hour 3  ^
+    g["ending_inventory"] = [8, 7, 5, 0]
+    e = _episode_frame(g)
+    e["trace"] = True
+    row, _ = _replay_one(e, cfg)
+    hours = row["hours_trace"]
+
+    assert e["shrink"] == 2, "fixture no longer exercises shrink"
+    for arm, ep_arm in (("actual", "actual"), ("legacy", "legacy_model"),
+                        ("dp", "dp")):
+        sold = sum(h[f"{arm}_units"] or 0 for h in hours)
+        shrink = sum(h[f"{arm}_shrink"] or 0 for h in hours)
+        scrap = sum(h[f"{arm}_scrap_at_close"] or 0 for h in hours)
+        assert sold + shrink + scrap == pytest.approx(e["supply"]), \
+            f"{arm}: units unaccounted for on the hourly sheet"
+        # and the hourly decomposition rebuilds the episode's own scrap total
+        assert shrink + scrap == pytest.approx(row[f"{ep_arm}_scrap_units"]), \
+            f"{arm}: hourly scrap disagrees with the episode sheet"
+        # terminal by construction: nothing scrapped before the close
+        assert all(h[f"{arm}_scrap_at_close"] == 0 for h in hours[:-1]), \
+            f"{arm}: scrap landed before the episode closed"
+
+
 def test_step_sensitivity_prices_the_cap_on_real_episodes(cfg):
     """`learning.max_mean_step` is justified by measurement, not judgment:
     the sweep re-solves the DP arm at eps +- step and reports what moves.
