@@ -2021,6 +2021,14 @@ the prepared frame by `tests/test_end_to_end`; chain continuity makes the
 two sides provably equal, so a violation is a bug here rather than a feed
 defect — it caught one.
 
+Two quantities follow from this and are reported side by side everywhere —
+`*_mu`, the NB mean (units wanted), and `*_units`, `E[min(D, q)]` (units
+sellable off this shelf). They are never equal for finite `q`: the shelf
+does not truncate the *probability* of a busy hour, it caps that hour's
+*contribution*, so what is lost is `Σ_{k>q} (k−q)·P(k)` — the demand that
+overflowed. `docs/stockout_gap.html` is the business-facing explainer for
+that gap, for the question category owners always ask first.
+
 **Censoring is decided at the LAST ROW only.** It cannot happen anywhere
 else: the source stops emitting rows once inventory reaches zero (which is
 why `extend_to_window` exists), so an empty shelf ends the episode.

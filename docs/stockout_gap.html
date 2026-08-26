@@ -1,0 +1,799 @@
+<title>The Stockout Gap</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&display=swap">
+
+<style>
+  :root {
+    color-scheme: light;
+    --paper:      #F7F9F7;
+    --card:       #FFFFFF;
+    --sunk:       #EFF3F0;
+    --rule:       #DDE5E0;
+    --rule-firm:  #C3D0C8;
+    --ink:        #12201B;
+    --ink-soft:   #55635C;
+    --ink-faint:  #7D8B84;
+    --sold:       #1baf7a;
+    --lost:       #eb6834;
+    --sold-wash:  #E3F5EE;
+    --lost-wash:  #FCEAE2;
+    --shadow:     0 1px 2px rgba(18,32,27,.06), 0 8px 24px -12px rgba(18,32,27,.14);
+
+    --display: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+    --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --data: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --paper:      #121815;
+      --card:       #1A211D;
+      --sunk:       #202823;
+      --rule:       #2C352F;
+      --rule-firm:  #3E4A43;
+      --ink:        #E8EDE9;
+      --ink-soft:   #9BA9A2;
+      --ink-faint:  #77857E;
+      --sold:       #199e70;
+      --lost:       #d95926;
+      --sold-wash:  #16302A;
+      --lost-wash:  #33211A;
+      --shadow:     0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.6);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --paper:      #121815;
+    --card:       #1A211D;
+    --sunk:       #202823;
+    --rule:       #2C352F;
+    --rule-firm:  #3E4A43;
+    --ink:        #E8EDE9;
+    --ink-soft:   #9BA9A2;
+    --ink-faint:  #77857E;
+    --sold:       #199e70;
+    --lost:       #d95926;
+    --sold-wash:  #16302A;
+    --lost-wash:  #33211A;
+    --shadow:     0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.6);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16.5px;
+    line-height: 1.6;
+    margin: 0;
+    padding: clamp(2rem, 5vw, 4.5rem) 1.25rem clamp(3rem, 6vw, 5rem);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: 940px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: clamp(2.5rem, 5vw, 3.75rem);
+  }
+
+  .measure { max-width: 68ch; }
+
+  /* ---------------------------------------------------------- masthead */
+
+  .masthead { display: flex; flex-direction: column; gap: 1.1rem; }
+
+  .eyebrow {
+    font-family: var(--data);
+    font-size: .72rem;
+    font-weight: 600;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0;
+  }
+
+  h1 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: clamp(2.1rem, 5.2vw, 3.05rem);
+    line-height: 1.08;
+    letter-spacing: -.018em;
+    text-wrap: balance;
+    margin: 0;
+    max-width: 20ch;
+  }
+
+  .standfirst {
+    font-size: clamp(1.06rem, 2vw, 1.22rem);
+    line-height: 1.52;
+    color: var(--ink-soft);
+    margin: 0;
+    max-width: 60ch;
+  }
+
+  .standfirst strong { color: var(--ink); font-weight: 600; }
+
+  /* ---------------------------------------------------------- sections */
+
+  section { display: flex; flex-direction: column; gap: 1.15rem; }
+
+  h2 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: clamp(1.35rem, 3vw, 1.72rem);
+    line-height: 1.22;
+    letter-spacing: -.012em;
+    text-wrap: balance;
+    margin: 0;
+    max-width: 26ch;
+  }
+
+  p { margin: 0; }
+  .measure + .measure { margin-top: -.35rem; }
+
+  em.term {
+    font-style: normal;
+    font-family: var(--data);
+    font-size: .92em;
+    color: var(--ink);
+    background: var(--sunk);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: .08em .34em;
+  }
+
+  /* ---------------------------------------------------------- figures */
+
+  figure {
+    margin: 0;
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    padding: clamp(1.25rem, 3vw, 1.9rem);
+    display: flex;
+    flex-direction: column;
+    gap: 1.35rem;
+  }
+
+  .fig-head { display: flex; flex-direction: column; gap: .3rem; }
+
+  .fig-title {
+    font-family: var(--body);
+    font-weight: 600;
+    font-size: 1.02rem;
+    letter-spacing: -.005em;
+    margin: 0;
+  }
+
+  .fig-sub {
+    font-size: .875rem;
+    color: var(--ink-soft);
+    margin: 0;
+    max-width: 62ch;
+  }
+
+  figcaption {
+    font-size: .85rem;
+    line-height: 1.5;
+    color: var(--ink-soft);
+    border-top: 1px solid var(--rule);
+    padding-top: .9rem;
+    margin: 0;
+  }
+
+  figcaption strong { color: var(--ink); font-weight: 600; }
+
+  /* legend */
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.1rem;
+    align-items: center;
+    font-family: var(--data);
+    font-size: .74rem;
+    font-weight: 500;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  .legend span { display: inline-flex; align-items: center; gap: .45rem; }
+
+  .swatch {
+    width: 11px; height: 11px; border-radius: 3px; flex: none;
+    background: var(--k);
+  }
+
+  /* -------------------------------------------------- chart A: columns */
+
+  .cols {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: clamp(6px, 1.4vw, 14px);
+    align-items: end;
+    height: 232px;
+    padding-bottom: 2px;
+    border-bottom: 1px solid var(--rule-firm);
+    position: relative;
+  }
+
+  .gridline {
+    position: absolute;
+    left: 0; right: 0;
+    border-top: 1px dashed var(--rule);
+    pointer-events: none;
+  }
+
+  .gridline b {
+    position: absolute;
+    right: 0; top: -.55rem;
+    font-family: var(--data);
+    font-size: .68rem;
+    font-weight: 500;
+    color: var(--ink-faint);
+    background: var(--card);
+    padding-left: .45rem;
+  }
+
+  .col {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    height: 100%;
+    min-width: 0;
+    border: 0;
+    background: none;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    cursor: default;
+  }
+
+  .col .bar {
+    flex: none;
+    background: var(--sold);
+    border-radius: 4px 4px 0 0;
+    min-height: 3px;
+    transition: filter .12s ease;
+  }
+
+  .col:hover .bar, .col:focus-visible .bar { filter: brightness(1.12) saturate(1.1); }
+
+  .col .val {
+    font-family: var(--data);
+    font-size: .76rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+    text-align: center;
+    padding-bottom: .35rem;
+  }
+
+  .axis {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: clamp(6px, 1.4vw, 14px);
+    padding-top: .55rem;
+  }
+
+  .axis span {
+    font-family: var(--data);
+    font-size: .78rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-soft);
+    text-align: center;
+  }
+
+  .axis-title {
+    font-family: var(--data);
+    font-size: .7rem;
+    font-weight: 500;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    text-align: center;
+    padding-top: .1rem;
+  }
+
+  /* the tail annotation */
+  .tail-note {
+    grid-column: 4 / 8;
+    display: flex;
+    align-items: center;
+    gap: .55rem;
+    margin-top: .5rem;
+    padding: .5rem .7rem;
+    background: var(--lost-wash);
+    border-left: 3px solid var(--lost);
+    border-radius: 0 6px 6px 0;
+    font-size: .82rem;
+    line-height: 1.4;
+    color: var(--ink);
+  }
+
+  .tail-note b {
+    font-family: var(--data);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* --------------------------------------------- chart B: stacked bars */
+
+  .shelf-chart { display: flex; flex-direction: column; gap: .8rem; }
+
+  .shelfrow {
+    display: grid;
+    grid-template-columns: minmax(84px, 108px) 1fr;
+    gap: clamp(.6rem, 2vw, 1.1rem);
+    align-items: center;
+  }
+
+  .shelflabel {
+    font-family: var(--data);
+    font-size: .8rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-soft);
+    text-align: right;
+    line-height: 1.3;
+  }
+
+  .shelflabel b {
+    display: block;
+    font-weight: 600;
+    font-size: 1.02rem;
+    color: var(--ink);
+  }
+
+  .shelflabel.is-median b { color: var(--sold); }
+
+  .shelflabel .pin {
+    display: inline-block;
+    font-size: .62rem;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--sold);
+  }
+
+  .stack {
+    display: flex;
+    gap: 2px;
+    height: 40px;
+    align-items: stretch;
+  }
+
+  .seg {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    padding: 0 .6rem;
+    font-family: var(--data);
+    font-size: .78rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: #0B2119;
+    white-space: nowrap;
+    overflow: hidden;
+    transition: filter .12s ease;
+  }
+
+  .seg-sold { background: var(--sold); border-radius: 5px 2px 2px 5px; }
+  .seg-lost { background: var(--lost); border-radius: 2px 5px 5px 2px; justify-content: flex-end; }
+  .stack:hover .seg { filter: brightness(1.08) saturate(1.06); }
+
+  .seg.is-tiny { padding: 0; }
+
+  .seg-outside {
+    font-family: var(--data);
+    font-size: .78rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--lost);
+    padding-left: .5rem;
+    display: flex;
+    align-items: center;
+    white-space: nowrap;
+  }
+
+  /* ---------------------------------------------------------- callout */
+
+  .callout {
+    background: var(--sunk);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    padding: clamp(1.2rem, 3vw, 1.6rem) clamp(1.2rem, 3vw, 1.8rem);
+    display: flex;
+    flex-direction: column;
+    gap: .7rem;
+  }
+
+  .callout p { max-width: 64ch; }
+
+  .callout .lede {
+    font-family: var(--display);
+    font-size: clamp(1.1rem, 2.3vw, 1.3rem);
+    line-height: 1.4;
+    font-weight: 500;
+    color: var(--ink);
+    max-width: 40ch;
+  }
+
+  /* two-up: what it means */
+
+  .twoup {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 1rem;
+  }
+
+  .stance {
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    padding: 1.15rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: .5rem;
+  }
+
+  .stance h3 {
+    font-family: var(--data);
+    font-size: .72rem;
+    font-weight: 600;
+    letter-spacing: .11em;
+    text-transform: uppercase;
+    margin: 0;
+    color: var(--k);
+  }
+
+  .stance p { font-size: .93rem; line-height: 1.55; color: var(--ink-soft); }
+  .stance strong { color: var(--ink); font-weight: 600; }
+
+  /* ---------------------------------------------------------- table */
+
+  .tablewrap {
+    overflow-x: auto;
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    background: var(--card);
+  }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-family: var(--data);
+    font-size: .82rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  th, td {
+    padding: .6rem .85rem;
+    text-align: right;
+    border-bottom: 1px solid var(--rule);
+    white-space: nowrap;
+  }
+
+  th {
+    font-weight: 600;
+    font-size: .7rem;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    background: var(--sunk);
+  }
+
+  th:first-child, td:first-child { text-align: left; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr.is-median td { background: var(--sold-wash); }
+  tbody tr.is-median td:first-child { font-weight: 600; }
+
+  /* ---------------------------------------------------------- footer */
+
+  .glossary {
+    border-top: 1px solid var(--rule);
+    padding-top: 1.4rem;
+    display: flex;
+    flex-direction: column;
+    gap: .8rem;
+  }
+
+  .glossary dl {
+    margin: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: .75rem 1.5rem;
+  }
+
+  .glossary div { display: flex; flex-direction: column; gap: .15rem; }
+
+  .glossary dt {
+    font-family: var(--data);
+    font-size: .78rem;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .glossary dd {
+    margin: 0;
+    font-size: .85rem;
+    line-height: 1.45;
+    color: var(--ink-soft);
+  }
+
+  .source {
+    font-size: .78rem;
+    color: var(--ink-faint);
+    line-height: 1.5;
+    max-width: 70ch;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--sold);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+
+  @media (max-width: 560px) {
+    .cols { height: 180px; }
+    .shelfrow { grid-template-columns: 72px 1fr; }
+    .tail-note { grid-column: 1 / -1; }
+  }
+</style>
+
+<div class="page">
+
+  <header class="masthead">
+    <p class="eyebrow">Reading the backtest · Demand vs. sales</p>
+    <h1>Why sales come in under demand</h1>
+    <p class="standfirst">The report shows two numbers for every hour: the units
+      customers wanted, and the units we actually sold. They are never the same, and the gap is not a
+      modelling quirk — <strong>it is sales we lost because the shelf ran out</strong>.
+      On a thin shelf that gap is large. Stock deeper and it closes.</p>
+  </header>
+
+  <section>
+    <h2>Demand does not arrive one unit at a time</h2>
+    <p class="measure">This is the part that surprises people. An item that averages
+      <strong>one unit an hour</strong> does not sell one unit an hour. It sells nothing
+      for most of the hour, then several at once. Half of all hours are completely
+      quiet — and one hour in eight wants three units or more.</p>
+
+    <figure>
+      <div class="fig-head">
+        <p class="fig-title">How many units are actually wanted in an hour</p>
+        <p class="fig-sub">An item averaging 1 unit per hour, at the demand variability
+          measured in our own data. Share of hours.</p>
+      </div>
+
+      <div>
+        <div class="cols">
+          <div class="gridline" style="bottom: 49.2%"><b>30%</b></div>
+          <div class="gridline" style="bottom: 81.9%"><b>50%</b></div>
+
+          <div class="col" tabindex="0" title="0 units wanted: 53.7% of hours">
+            <div class="val">53.7%</div>
+            <div class="bar" style="height: 88.0%"></div>
+          </div>
+          <div class="col" tabindex="0" title="1 unit wanted: 22.2% of hours">
+            <div class="val">22.2%</div>
+            <div class="bar" style="height: 36.4%"></div>
+          </div>
+          <div class="col" tabindex="0" title="2 units wanted: 11.1% of hours">
+            <div class="val">11.1%</div>
+            <div class="bar" style="height: 18.2%"></div>
+          </div>
+          <div class="col" tabindex="0" title="3 units wanted: 5.9% of hours">
+            <div class="val">5.9%</div>
+            <div class="bar" style="height: 9.7%"></div>
+          </div>
+          <div class="col" tabindex="0" title="4 units wanted: 3.2% of hours">
+            <div class="val">3.2%</div>
+            <div class="bar" style="height: 5.2%"></div>
+          </div>
+          <div class="col" tabindex="0" title="5 units wanted: 1.8% of hours">
+            <div class="val">1.8%</div>
+            <div class="bar" style="height: 3.0%"></div>
+          </div>
+          <div class="col" tabindex="0" title="6 or more units wanted: 2.3% of hours">
+            <div class="val">2.3%</div>
+            <div class="bar" style="height: 3.8%"></div>
+          </div>
+        </div>
+
+        <div class="axis">
+          <span>0</span><span>1</span><span>2</span><span>3</span>
+          <span>4</span><span>5</span><span>6+</span>
+        </div>
+        <p class="axis-title">Units wanted in the hour</p>
+
+        <div class="axis" style="grid-template-columns: repeat(7, 1fr); padding-top: 0;">
+          <div class="tail-note">
+            <span><b>13%</b> of hours want <b>3 units or more</b> at once — and that is
+              where a thin shelf loses the sale.</span>
+          </div>
+        </div>
+      </div>
+
+      <figcaption>The average is a poor description of a single hour. <strong>Two units on
+        the shelf covers every quiet hour and fails exactly in the busy ones</strong> —
+        which is where the volume is.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2>Same demand, same price — only the shelf changes</h2>
+    <p class="measure">Each bar below is the <em>same</em> item at the <em>same</em>
+      price, wanting the same one unit an hour. The only thing that changes is how many
+      units are sitting on the shelf. The green is what we hand over; the orange is
+      demand that walked out.</p>
+
+    <figure>
+      <div class="fig-head">
+        <p class="fig-title">What we capture, by how much stock is on the shelf</p>
+        <p class="fig-sub">Each bar is 100% of the demand for that hour, split into the
+          part we serve and the part we lose to an empty shelf.</p>
+      </div>
+
+      <div class="legend">
+        <span><i class="swatch" style="--k: var(--sold)"></i>Sold</span>
+        <span><i class="swatch" style="--k: var(--lost)"></i>Lost — shelf was empty</span>
+      </div>
+
+      <div class="shelf-chart">
+        <div class="shelfrow">
+          <div class="shelflabel"><b>1</b> unit on shelf</div>
+          <div class="stack" title="1 unit on the shelf — 46.3% sold, 53.7% lost">
+            <div class="seg seg-sold" style="flex: 46.3">46.3%</div>
+            <div class="seg seg-lost" style="flex: 53.7">53.7% lost</div>
+          </div>
+        </div>
+
+        <div class="shelfrow">
+          <div class="shelflabel is-median">
+            <b>2</b> units on shelf
+            <span class="pin">◂ our median</span>
+          </div>
+          <div class="stack" title="2 units on the shelf — 70.5% sold, 29.5% lost">
+            <div class="seg seg-sold" style="flex: 70.5">70.5%</div>
+            <div class="seg seg-lost" style="flex: 29.5">29.5% lost</div>
+          </div>
+        </div>
+
+        <div class="shelfrow">
+          <div class="shelflabel"><b>3</b> units on shelf</div>
+          <div class="stack" title="3 units on the shelf — 83.5% sold, 16.5% lost">
+            <div class="seg seg-sold" style="flex: 83.5">83.5%</div>
+            <div class="seg seg-lost" style="flex: 16.5">16.5% lost</div>
+          </div>
+        </div>
+
+        <div class="shelfrow">
+          <div class="shelflabel"><b>5</b> units on shelf</div>
+          <div class="stack" title="5 units on the shelf — 94.8% sold, 5.2% lost">
+            <div class="seg seg-sold" style="flex: 94.8">94.8%</div>
+            <div class="seg seg-lost" style="flex: 5.2">5.2%</div>
+          </div>
+        </div>
+
+        <div class="shelfrow">
+          <div class="shelflabel"><b>10</b> units on shelf</div>
+          <div class="stack" title="10 units on the shelf — 99.7% sold, 0.3% lost">
+            <div class="seg seg-sold" style="flex: 99.7">99.7%</div>
+            <div class="seg seg-lost is-tiny" style="flex: 0.3"></div>
+          </div>
+        </div>
+      </div>
+
+      <figcaption>Nothing about the demand changed between the top bar and the bottom
+        one. <strong>Demand was always 1.0; our ability to serve it went from 46% to
+        99.7%.</strong> Our median shelf holds two units — so the second bar is the one
+        to look at.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <div class="callout">
+      <p class="lede">A bakery selling one croissant an hour.</p>
+      <p>Most hours nothing sells. Occasionally someone wants four at once. Stock two
+        and you sell two — the other two units were wanted and you had nothing to hand
+        over. Stock ten and you sell all four, and the ones wanted after that.</p>
+      <p>The demand forecast never changed. What changed is how much of it you could
+        physically hand over.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Why this matters for markdown decisions</h2>
+    <p class="measure">This is not a caveat on the numbers — it is the reason the pricing
+      engine behaves the way it does, and the strongest argument for letting it.</p>
+
+    <div class="twoup">
+      <div class="stance" style="--k: var(--lost)">
+        <h3>Nearly empty shelf</h3>
+        <p>A deeper markdown creates more demand, but there is <strong>nothing left to
+          sell it</strong>. You give away margin on the units that were going to sell
+          anyway. This is when <strong>holding price is right</strong>.</p>
+      </div>
+      <div class="stance" style="--k: var(--sold)">
+        <h3>Well-stocked shelf</h3>
+        <p>Extra demand can actually be served, and every unit that does not move
+          becomes waste at full cost. This is when <strong>marking down pays</strong> —
+          and the engine goes deeper.</p>
+      </div>
+    </div>
+
+    <p class="measure">It is also why the engine opens shallower than the old markdown
+      ramp and still ends up losing substantially less: much of the old loss was
+      discount given away on stock that was going to clear regardless.</p>
+  </section>
+
+  <section>
+    <h2>The numbers behind the charts</h2>
+    <p class="measure">Same item, same price, one hour. Demand averages 1.00 units
+      throughout; only the shelf changes.</p>
+
+    <div class="tablewrap">
+      <table>
+        <caption class="visually-hidden" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;">Sales captured and lost by units on shelf</caption>
+        <thead>
+          <tr>
+            <th scope="col">Units on shelf</th>
+            <th scope="col">Demand</th>
+            <th scope="col">Sold</th>
+            <th scope="col">Lost</th>
+            <th scope="col">Lost %</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>1</td><td>1.00</td><td>0.46</td><td>0.54</td><td>53.7%</td></tr>
+          <tr class="is-median"><td>2 · our median</td><td>1.00</td><td>0.70</td><td>0.30</td><td>29.5%</td></tr>
+          <tr><td>3</td><td>1.00</td><td>0.84</td><td>0.16</td><td>16.5%</td></tr>
+          <tr><td>4</td><td>1.00</td><td>0.91</td><td>0.09</td><td>9.3%</td></tr>
+          <tr><td>5</td><td>1.00</td><td>0.95</td><td>0.05</td><td>5.2%</td></tr>
+          <tr><td>7</td><td>1.00</td><td>0.98</td><td>0.02</td><td>1.7%</td></tr>
+          <tr><td>10</td><td>1.00</td><td>1.00</td><td>0.00</td><td>0.3%</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="glossary">
+    <p class="eyebrow">If you are reading the workbook itself</p>
+    <dl>
+      <div>
+        <dt>legacy_mu · dp_mu</dt>
+        <dd>Demand — units customers wanted that hour, before the shelf limits anything.</dd>
+      </div>
+      <div>
+        <dt>legacy_units · dp_units</dt>
+        <dd>Sales — units we could actually hand over, given the stock on hand.</dd>
+      </div>
+      <div>
+        <dt>The gap between them</dt>
+        <dd>Lost sales. It appears in every arm, including the record of what really happened.</dd>
+      </div>
+    </dl>
+    <p class="source">Demand variability is taken from the dispersion fitted on our own
+      sales history (<b>r&nbsp;=&nbsp;0.70</b>); the shelf figures are the same calculation
+      the pricing engine runs when it values a price. Median starting inventory of two units
+      is measured on the current extract, where roughly one hour in eight is already sold
+      out. <b>The figures on this page are hand-built against that fitted dispersion</b> — if
+      the baseline is retrained and <code>r</code> moves materially, regenerate them rather
+      than quoting this page.</p>
+  </footer>
+
+</div>
