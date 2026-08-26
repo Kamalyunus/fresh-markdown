@@ -50,12 +50,39 @@ class BaselineModel:
         with open(bm["feature_schema_path"]) as f:
             self.schema = json.load(f)
         self.calibration, self.calibration_grain = {}, "category"
+        # POINT-IN-TIME factors, when the artifact carries a schedule: the
+        # week-keyed map is applied by ROW DATE, so a row is never priced by
+        # a factor fitted on its own week or later. `calibration` remains the
+        # fallback -- rows before the first fitted week, and artifacts written
+        # before the schedule existed.
+        self.calibration_schedule = None
         if os.path.exists(bm["calibration_factor_path"]):
             with open(bm["calibration_factor_path"]) as f:
                 cal = json.load(f)
             self.calibration = cal.get("factors", cal.get("factor_by_category", {}))
             self.calibration_grain = cal.get("grain", "category")
+            sched = cal.get("schedule")
+            if sched and sched.get("by_week"):
+                self.calibration_schedule = sched["by_week"]
         self.version = self.schema["model_version"]
+
+    def _factor_vector(self, d):
+        """Per-row level factor. With a schedule, each row takes the factors
+        in force for ITS week; without one, the single frozen set."""
+        keys = d[self.calibration_grain].astype(str)
+        if self.calibration_schedule is None:
+            return keys.map(lambda k: self.calibration.get(k, 1.0)).to_numpy()
+        weeks = pd.to_datetime(d["date"]).dt.to_period("W").dt.start_time
+        weeks = weeks.dt.strftime("%Y-%m-%d")
+        out = np.ones(len(d))
+        for i, (wk, key) in enumerate(zip(weeks.to_numpy(), keys.to_numpy())):
+            # an unfitted week (too thin, or before the first trailing window
+            # closed) holds at the frozen fallback, never at a later week's
+            # factors -- borrowing forward is the leak this exists to prevent
+            table = self.calibration_schedule.get(wk)
+            out[i] = (table.get(key, 1.0) if table is not None
+                      else self.calibration.get(key, 1.0))
+        return out
 
     def _matrix(self, d):
         missing = [f for f in self.schema["features"]
@@ -83,9 +110,7 @@ class BaselineModel:
         mu = self.booster.predict(self._matrix(d))
         mu = np.clip(mu, self.cfg["pricing"]["demand_floor"], None)
         if self.cfg["baseline_model"]["apply_level_calibration"]:
-            key = d[self.calibration_grain]      # grain is the artifact's own
-            factor = key.map(lambda k: self.calibration.get(str(k), 1.0)).to_numpy()
-            mu = mu * factor
+            mu = mu * self._factor_vector(d)
         return mu
 
 
@@ -136,6 +161,101 @@ def train(d, cfg):
     return schema
 
 
+def _solve_level_factors(calib, cfg, model, grain, k_shrink, min_anchor,
+                         tier_step, max_k, r_lookup):
+    """Factors for ONE fit window. The single definition of the solve, shared
+    by the static windows and by every week of the rolling schedule -- two
+    copies would drift and only the rolling one is exercised weekly.
+
+    Returns (factors, detail, global_factor), or None when the window holds
+    too few anchor rows to fit on: the caller holds those weeks at 1.0 rather
+    than fitting noise, and says which.
+    """
+    from bootstrap.fit_dispersion import lookup_r   # local: avoids a cycle
+
+    saved = cfg["baseline_model"]["apply_level_calibration"]
+    cfg["baseline_model"]["apply_level_calibration"] = False
+    calib["mu_ref_hat"] = model.predict_mu_ref(calib)
+    cfg["baseline_model"]["apply_level_calibration"] = saved
+
+    if r_lookup is not None:
+        calib["r_val"] = [lookup_r(r_lookup, s, c)
+                          for s, c in zip(calib.subcategory, calib.category)]
+
+    def solve_factor(anchor):
+        sold = float(anchor["units_sold"].sum())
+        mu = anchor["mu_ref_hat"].to_numpy()
+        if r_lookup is None:
+            pred = float(mu.sum())
+            return (sold / pred if pred > 0 else 1.0), pred
+        r = anchor["r_val"].to_numpy()
+        q = anchor["starting_inventory"].to_numpy()
+
+        def predicted(f):
+            return float(expected_min_demand_inventory_vec(
+                f * mu, r, q, max_k).sum())
+
+        base = predicted(1.0)
+        if base <= 0 or sold <= 0:
+            return 1.0, base
+        lo, hi = 0.1, 10.0
+        if predicted(lo) > sold:
+            return lo, base
+        if predicted(hi) < sold:
+            return hi, base
+        for _ in range(40):                    # monotone in f -> bisection
+            mid = (lo + hi) / 2
+            if predicted(mid) < sold:
+                lo = mid
+            else:
+                hi = mid
+        return (lo + hi) / 2, base
+
+    def shrink(cell, parent, evidence):
+        if evidence <= 0 or cell <= 0:
+            return parent
+        w = evidence / (evidence + k_shrink)
+        return float(np.exp(w * np.log(cell) + (1 - w) * np.log(parent)))
+
+    anchor_all = calib[(calib.total_discount - calib.d_ref).abs()
+                       <= tier_step / 2]
+    if len(anchor_all) < min_anchor or anchor_all["mu_ref_hat"].sum() <= 0:
+        return None
+
+    f_global, _ = solve_factor(anchor_all)
+
+    def fit_level(groups, parent_of):
+        out, det = {}, {}
+        for key, g in groups:
+            raw, pred = solve_factor(g)
+            evidence = float(g["units_sold"].sum())
+            parent = parent_of(key, g)
+            f = shrink(raw, parent, evidence)
+            out[str(key)] = round(float(f), 4)
+            det[str(key)] = {
+                "anchor_rows": int(len(g)),
+                "anchor_sold": int(evidence),
+                "anchor_predicted_at_f1": round(float(pred), 1),
+                "raw_factor": round(float(raw), 4),
+                "parent_factor": round(float(parent), 4),
+                "shrinkage_weight_on_self": round(
+                    float(evidence / (evidence + k_shrink)), 3),
+            }
+        return out, det
+
+    cat_factors, cat_detail = fit_level(
+        anchor_all.groupby("category"), lambda k, g: f_global)
+    if grain == "subcategory":
+        factors, detail = fit_level(
+            anchor_all.groupby("subcategory"),
+            lambda k, g: cat_factors.get(str(g["category"].iloc[0]), f_global))
+    elif grain == "category":
+        factors, detail = cat_factors, cat_detail
+    else:
+        raise ValueError(f"unknown calibration_grain: {grain}")
+    return factors, detail, f_global
+
+
 def fit_level_calibration(d, cfg):
     """Per-category multiplicative level factor, fit on ANCHOR ROWS ONLY
     (elasticity ~1 there, so slope error cannot leak in; thin cells stay 1.0).
@@ -155,7 +275,9 @@ def fit_level_calibration(d, cfg):
     elif fit_window == "all":
         # "all" means all PRE-LAUNCH data, never the hold-out
         calib = population(pre_launch(d, cfg), cfg).copy()
-    elif fit_window == "trailing":
+    elif fit_window in ("trailing", "rolling_trailing"):
+        # rolling_trailing fits a WEEKLY SCHEDULE below; this static set is
+        # its fallback, for weeks before the first trailing window closes
         # last N weeks ENDING WHERE THE GATE WINDOW BEGINS: recent, and
         # disjoint from what the gate evaluates
         weeks = cfg["baseline_model"]["calibration_fit_trailing_weeks"]
@@ -198,86 +320,64 @@ def fit_level_calibration(d, cfg):
         calib["r_val"] = [lookup_r(r_lookup, s, c)
                           for s, c in zip(calib.subcategory, calib.category)]
 
-    def solve_factor(anchor):
-        sold = float(anchor["units_sold"].sum())
-        mu = anchor["mu_ref_hat"].to_numpy()
-        if not censored_basis:
-            pred = float(mu.sum())
-            return (sold / pred if pred > 0 else 1.0), pred
-        r = anchor["r_val"].to_numpy()
-        q = anchor["starting_inventory"].to_numpy()
-
-        def predicted(f):
-            return float(expected_min_demand_inventory_vec(
-                f * mu, r, q, max_k).sum())
-
-        base = predicted(1.0)
-        if base <= 0 or sold <= 0:
-            return 1.0, base
-        lo, hi = 0.1, 10.0
-        if predicted(lo) > sold:
-            return lo, base
-        if predicted(hi) < sold:
-            return hi, base
-        for _ in range(40):                    # monotone in f -> bisection
-            mid = (lo + hi) / 2
-            if predicted(mid) < sold:
-                lo = mid
-            else:
-                hi = mid
-        return (lo + hi) / 2, base
-
     min_anchor = cfg["baseline_model"]["calibration_min_anchor_rows"]
     grain = cfg["baseline_model"]["calibration_grain"]
     k_shrink = cfg["baseline_model"]["calibration_shrinkage_units"]
+    r_lookup_or_none = r_lookup if censored_basis else None
 
-    anchor_all = calib[(calib.total_discount - calib.d_ref).abs() <= tier_step / 2]
-    if len(anchor_all) < min_anchor or anchor_all["mu_ref_hat"].sum() <= 0:
+    fitted = _solve_level_factors(calib, cfg, model, grain, k_shrink,
+                                  min_anchor, tier_step, max_k,
+                                  r_lookup_or_none)
+    if fitted is None:
+        anchors = len(calib[(calib.total_discount - calib.d_ref).abs()
+                            <= tier_step / 2])
         raise RuntimeError(
-            f"fit window has only {len(anchor_all)} anchor rows "
+            f"fit window has only {anchors} anchor rows "
             f"(need {min_anchor}) -- widen calibration_fit_window")
+    factors, detail, f_global = fitted
+    cat_factors = factors if grain == "category" else None
 
-    def shrink(cell, parent, evidence):
-        """Geometric shrinkage toward the parent, weighted by evidence (anchor
-        units sold). Factors are multiplicative, so the pull is in log space.
-        Zero evidence lands exactly on the parent -- no threshold cliff."""
-        if evidence <= 0 or cell <= 0:
-            return parent
-        w = evidence / (evidence + k_shrink)
-        return float(np.exp(w * np.log(cell) + (1 - w) * np.log(parent)))
-
-    f_global, _ = solve_factor(anchor_all)
-
-    def fit_level(groups, parent_of):
-        out, det = {}, {}
-        for key, g in groups:
-            raw, pred = solve_factor(g)
-            evidence = float(g["units_sold"].sum())
-            parent = parent_of(key, g)
-            f = shrink(raw, parent, evidence)
-            out[str(key)] = round(float(f), 4)
-            det[str(key)] = {
-                "anchor_rows": int(len(g)),
-                "anchor_sold": int(evidence),
-                "anchor_predicted_at_f1": round(float(pred), 1),
-                "raw_factor": round(float(raw), 4),
-                "parent_factor": round(float(parent), 4),
-                "shrinkage_weight_on_self": round(
-                    float(evidence / (evidence + k_shrink)), 3),
-            }
-        return out, det
-
-    cat_factors, cat_detail = fit_level(
-        anchor_all.groupby("category"), lambda k, g: f_global)
-
-    if grain == "subcategory":
-        factors, detail = fit_level(
-            anchor_all.groupby("subcategory"),
-            lambda k, g: cat_factors.get(str(g["category"].iloc[0]), f_global))
-    elif grain == "category":
-        factors, detail = cat_factors, cat_detail
-    else:
-        raise ValueError(f"unknown calibration_grain: {grain}")
+    # POINT-IN-TIME schedule: factors the way production would actually hold
+    # them -- re-fit every week on the trailing window ENDING STRICTLY BEFORE
+    # that week, so no row is ever priced by a factor fitted on its own week
+    # or later. Both harnesses read it by row date, so the hold-out drift
+    # ratio grades the MECHANISM rather than one frozen snapshot.
+    schedule = None
+    if fit_window == "rolling_trailing":
+        weeks_back = cfg["baseline_model"]["calibration_fit_trailing_weeks"]
+        # never past the gate window: a pre-launch artifact must not read the
+        # hold-out, and the sweep that chose this window did not either
+        scope = population(pre_launch(d, cfg), cfg).copy()
+        by_week, coverage = {}, []
+        wk = pd.to_datetime(scope.date).dt.to_period("W")
+        for w in sorted(wk.unique()):
+            lo = w.start_time - pd.Timedelta(weeks=weeks_back)
+            window = scope[(wk.dt.start_time >= lo)
+                           & (wk.dt.start_time < w.start_time)]
+            if not len(window):
+                continue
+            fitted = _solve_level_factors(
+                window.copy(), cfg, model, grain, k_shrink, min_anchor,
+                tier_step, max_k, r_lookup if censored_basis else None)
+            if fitted is None:                # too thin: hold 1.0, say so
+                coverage.append({"week": str(w.start_time.date()),
+                                 "fitted": False})
+                continue
+            by_week[str(w.start_time.date())] = fitted[0]
+            coverage.append({"week": str(w.start_time.date()), "fitted": True,
+                             "fit_rows": int(len(window))})
+        schedule = {
+            "mode": "rolling_trailing",
+            "trailing_weeks": weeks_back,
+            "week_key": "ISO week start (Monday) the factors APPLY to; they "
+                        "are fit on the trailing window ENDING STRICTLY "
+                        "BEFORE it, so no row sees a factor fitted on its own "
+                        "week or later",
+            "weeks_fitted": sum(1 for c in coverage if c["fitted"]),
+            "weeks_unfitted_held_at_1": [c["week"] for c in coverage
+                                         if not c["fitted"]],
+            "by_week": by_week,
+        }
 
     path = cfg["baseline_model"]["calibration_factor_path"]
     with open(path, "w") as f:
@@ -297,6 +397,11 @@ def fit_level_calibration(d, cfg):
                                "training, not only in the multiplier",
                    },
                    "factors": factors,
+                   # present only in rolling_trailing: the point-in-time
+                   # schedule both harnesses read by row date. `factors`
+                   # stays as the fallback for rows before the first fitted
+                   # week and for any reader that predates the schedule.
+                   "schedule": schedule,
                    "detail": detail,
                    "global_factor": round(float(f_global), 4),
                    "category_factors": cat_factors,

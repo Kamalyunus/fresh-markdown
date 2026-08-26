@@ -1668,6 +1668,31 @@ level multiplier tracks the world, which is exactly what a multiplier is
 for. Status: final retrain + re-gate at the launch freeze, with scheduled
 in-window recalibration adopted in response to the measured August trend.
 
+**Point-in-time factors (owner, 2026-08-26).** The factors are re-fit
+**every week** on the trailing `calibration_fit_trailing_weeks` (4), on the
+window *ending strictly before* that week, and applied **by row date**. So
+no row is ever priced by a factor fitted on its own week or later, and the
+backtest and shadow grade the *mechanism production runs* rather than one
+frozen snapshot. The schedule lives in `calibration.json` →
+`schedule.by_week`; `factors` remains the fallback for weeks before the
+first trailing window closes, and an unfitted week holds the fallback rather
+than borrowing a later week's — borrowing forward is precisely the leak this
+prevents, and it is the same discipline as §12a's velocity features.
+Both harnesses get it through `BaselineModel.predict_mu_ref` alone; neither
+has factor-selection code of its own, because a second copy would drift.
+
+Four weeks was chosen on the rolling-origin evidence in
+`fidelity.calibration_window_sweep`, which fits on the trailing W and scores
+the **next** week: 4w put 86.7% of weeks inside the band at a mean absolute
+log error of 0.050, against 22.2% and 0.143 uncalibrated, beating 1w/2w/8w
+on both. Measured effect of the switch: the backtest's
+`calibration_gate_value` moved 1.1317 → 0.9297 (out of band → in band) and
+shadow's hold-out drift ratio 1.2294 → 1.0415. It supersedes the 2026-08-09
+`train+calib` decision, which was taken on gate-window evidence before the
+hold-out drift showed the level had moved. **A re-fit is not a retrain** —
+the model does not move, so hard rule 1 comparisons stay valid — but a
+report must say which factor vintage it ran under.
+
 **Reading the report.** The gate window is whatever
 `baseline_model.calibration_gate_window` names (currently `test`), recorded
 as `fidelity.gate_window` — read the field rather than assuming — and it

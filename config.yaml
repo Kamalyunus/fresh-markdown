@@ -191,9 +191,12 @@ baseline_model:
     # fit factors on the trailing W weeks, apply to the next week, measure the
     # anchor ratio that results. Under a trending level a LONGER window is
     # more stale, not more accurate -- the sweep decides W with data.
-  calibration_fit_trailing_weeks: 2    # SET BY OWNER 2026-08-09  weeks used by
-    # the "trailing" fit window: recent enough to track a moving demand level,
-    # long enough for stable anchor-row counts.
+  calibration_fit_trailing_weeks: 4    # SET BY OWNER 2026-08-26  weeks in the
+    # trailing window, for both "trailing" and "rolling_trailing". Raised 2 ->
+    # 4 on the rolling-origin sweep: 4w scored best on BOTH criteria (86.7% of
+    # weeks in band, mean abs log error 0.050) against 1w/2w/8w. Recent enough
+    # to track a moving level, long enough that no single week's +-8% swing
+    # dominates -- the failure that made the 07-13 fortnight unusable.
   calibration_gate_window: "test"      # SET  "test" | "calib+test". Must be
     # DISJOINT from the fit window, or the gate grades its own fit. With
     # fit_window "calib" the pairing is the split's intended design: train ->
@@ -201,7 +204,24 @@ baseline_model:
     # later still), which is exactly production's fit-on-trailing,
     # apply-forward protocol. Note a one-week test window carries the full
     # weekly demand noise; widen test_end when the extract allows.
-  calibration_fit_window: "train+calib"  # SET BY OWNER 2026-08-09. The short
+  calibration_fit_window: "rolling_trailing"  # SET BY OWNER 2026-08-26:
+    # POINT-IN-TIME calibration. Factors are re-fit every week on the trailing
+    # calibration_fit_trailing_weeks, ENDING STRICTLY BEFORE that week, and
+    # applied by ROW DATE -- so no row is ever priced by a factor fitted on
+    # its own week or later, and backtest and shadow grade the MECHANISM
+    # production runs rather than one frozen snapshot. The schedule lives in
+    # calibration.json -> schedule.by_week; `factors` remains the fallback for
+    # weeks before the first trailing window closes.
+    #
+    # Chosen on the rolling-origin evidence in
+    # backtest.fidelity.calibration_window_sweep, which fits on the trailing W
+    # and scores the NEXT week: 4w put 86.7% of weeks inside the band at a
+    # mean abs log error of 0.050, against 22.2% and 0.143 uncalibrated, and
+    # beat 1w/2w/8w on both. It supersedes the 2026-08-09 train+calib decision
+    # below, which was taken on gate-window evidence BEFORE the hold-out drift
+    # (realised/predicted 0.8459) showed the level had moved.
+    #
+    # Superseded, kept for the reasoning: "train+calib"  # SET BY OWNER 2026-08-09. The short
     # windows were tried first and lost on production data: the calib
     # fortnight was itself the most anomalous stretch in the five-month
     # weekly series (1.06 against a 1.30 mean), so factors fit on it inherited

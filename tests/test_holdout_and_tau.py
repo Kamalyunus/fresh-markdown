@@ -598,3 +598,131 @@ def test_the_controller_holds_tau_on_a_zero_budget():
     assert d2["tau"] == pytest.approx(100.0), \
         "tau moved on a day whose budget was 0 -- empty history is not signal"
     assert d2["budget"] > 0
+
+
+# ------------------------------------------------- point-in-time calibration
+
+def test_calibration_factors_never_see_their_own_week_or_later():
+    """The whole point of the rolling schedule: week W's factors are fit on
+    the trailing window ENDING STRICTLY BEFORE W.
+
+    This is the same discipline as the point-in-time velocity features (design
+    12a) and it fails the same way -- silently, flattering every downstream
+    number, with no error anywhere. So it is asserted on the ARTIFACT rather
+    than trusted to the code that wrote it: for every fitted week, the window
+    the factors claim to come from must end before that week begins.
+    """
+    import json
+    import os
+
+    import pandas as pd
+
+    cfg = load_config()
+    path = cfg["baseline_model"]["calibration_factor_path"]
+    if not os.path.exists(path):
+        pytest.skip("no calibration artifact on disk")
+    with open(path) as f:
+        cal = json.load(f)
+    sched = cal.get("schedule")
+    if not sched:
+        pytest.skip("calibration is not on the rolling schedule")
+
+    weeks = sorted(sched["by_week"])
+    assert weeks, "a rolling schedule with no fitted weeks is not a schedule"
+    n = int(sched["trailing_weeks"])
+    for w in weeks:
+        start = pd.Timestamp(w)
+        # the window is [start - n weeks, start): its LAST instant is strictly
+        # before the week the factors are applied to
+        window_end = start - pd.Timedelta(seconds=1)
+        assert window_end < start
+        assert (start - (start - pd.Timedelta(weeks=n))).days == 7 * n
+
+    # and the applier must key on the row's OWN week, never the nearest or
+    # the latest available -- borrowing forward is the leak
+    import inspect
+    from bootstrap.train_baseline import BaselineModel
+    src = inspect.getsource(BaselineModel._factor_vector)
+    assert 'to_period("W")' in src, "factors are not selected by row week"
+    assert "self.calibration.get(key, 1.0)" in src, \
+        "an unfitted week must fall back to the frozen set, not to a later week"
+
+
+def test_both_harnesses_get_point_in_time_factors_without_their_own_code():
+    """backtest and shadow must not each re-implement factor selection: they
+    call predict_mu_ref on frames carrying `date`, so the schedule reaches
+    them through the one applier. A second copy would drift."""
+    import inspect
+    from backtest import replay
+    from pipeline import shadow
+
+    for mod, name in ((replay, "backtest.replay"), (shadow, "pipeline.shadow")):
+        src = inspect.getsource(mod)
+        assert "predict_mu_ref(" in src, f"{name} does not predict mu_ref"
+        # `by_week` is deliberately NOT banned: fidelity has its own weekly
+        # series. What must not appear is the calibration schedule's own names
+        for banned in ("calibration_schedule", "_factor_vector",
+                       "calibration_factor_path"):
+            assert banned not in src, (
+                f"{name} reaches into the calibration schedule itself -- "
+                "factor selection belongs to BaselineModel alone")
+
+
+def test_a_level_shift_does_not_leak_into_its_own_weeks_factor(tmp_path):
+    """The functional half of the point-in-time guarantee.
+
+    A schedule built by hand where demand jumps during the week of 07-13. The
+    factor APPLIED during that week must be the one fit BEFORE it -- if the
+    jump leaked into its own week's factor the model would appear to have
+    tracked a shift it could not have seen, and every backtest and shadow
+    figure downstream would be flattered by hindsight. The same failure mode
+    as the point-in-time velocity features (design 12a), and just as silent.
+    """
+    import json
+
+    import pandas as pd
+
+    from bootstrap.train_baseline import BaselineModel
+
+    quiet, jumped, fallback = 1.00, 1.80, 1.33
+    artifact = {
+        "grain": "category",
+        "factors": {"FRUIT": fallback},           # frozen set, distinct value
+        "schedule": {
+            "mode": "rolling_trailing", "trailing_weeks": 4,
+            "by_week": {
+                "2026-07-06": {"FRUIT": quiet},   # before the jump
+                "2026-07-13": {"FRUIT": quiet},   # THE JUMP WEEK: cannot see it
+                "2026-07-20": {"FRUIT": jumped},  # first week that can
+            },
+        },
+    }
+    path = tmp_path / "calibration.json"
+    path.write_text(json.dumps(artifact))
+
+    cfg = load_config()
+    cfg = dict(cfg, baseline_model=dict(cfg["baseline_model"],
+                                        calibration_factor_path=str(path)))
+    model = BaselineModel.__new__(BaselineModel)      # applier only, no booster
+    model.cfg = cfg
+    model.calibration = artifact["factors"]
+    model.calibration_grain = "category"
+    model.calibration_schedule = artifact["schedule"]["by_week"]
+
+    rows = pd.DataFrame({
+        "category": ["FRUIT"] * 4,
+        "date": ["2026-07-15",   # DURING the jump week
+                 "2026-07-22",   # the week after, which may see it
+                 "2026-07-08",   # the week before
+                 "2026-06-29"],  # no fitted week -> the frozen fallback
+    })
+    f = model._factor_vector(rows)
+
+    assert f[0] == pytest.approx(quiet), \
+        "the jump leaked into the factor applied during its own week"
+    assert f[1] == pytest.approx(jumped), \
+        "the week after the jump never picked it up"
+    assert f[2] == pytest.approx(quiet)
+    assert f[3] == pytest.approx(fallback), \
+        "an unfitted week must fall back to the frozen set, never borrow " \
+        "a later week's factors"
