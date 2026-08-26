@@ -1726,6 +1726,36 @@ prevents, and it is the same discipline as §12a's velocity features.
 Both harnesses get it through `BaselineModel.predict_mu_ref` alone; neither
 has factor-selection code of its own, because a second copy would drift.
 
+**Calibration is post-processing, and the schedule stops at the gate
+(owner, 2026-08-26).** The level factor's job is to solve the *anchor*: the
+raw model is trained and graded, and the factor is then fit on the trailing
+4 weeks **ending where the graded window opens** and held frozen across it —
+the launch it simulates. So the rolling schedule covers **pre-gate weeks
+only**. A week is scheduled only when its whole applied range `[w, w+7)`
+precedes `gate_start`, which makes "the graded window holds exactly one
+anchor" literally true; the straddling ISO week is skipped rather than
+splitting the hold-out across two factor sets for no gain.
+
+This corrects a real leak. The schedule was scoped with `pre_launch()`,
+which runs to `test_end`, not `test_start` — so a week *inside* the hold-out
+was fitted on a trailing window made mostly of **earlier hold-out days**.
+There was no look-ahead (only strictly-earlier data was ever read), but the
+level factor read the rows it was being graded on, and the code's own
+comment claimed the opposite. The damage scales with the hold-out: for a
+W-week test window, week 1 is clean and weeks 2..W are each fitted on
+windows containing earlier test data, so roughly **(W−1)/W** of the gate was
+self-calibrated. On the one-week fixture it was 1 of 7 days and the gate
+moved 0.9301 → 0.9207; on a four-week hold-out it would be most of it.
+
+Expect the honest number to read **higher**, not lower, against a rising
+level: a frozen anchor is ~2 weeks stale by mid-test and ~4 by the end. That
+decay is the point — it is the measurement that sizes the production re-fit
+cadence, and the leaked version was flattering it. `schedule.stops_at_gate_start`
+records the boundary so `calibration_coverage()` can tell a deliberate stop
+(the graded window, correct) from production running past its last fitted
+week (genuinely stale) — the two look identical in a fallback count and must
+never share a verdict.
+
 `trailing_weeks: 4` does not mean every week has four behind it. Two places
 have fewer: the **start of the extract**, and the weeks just after the
 **exclusion window**, where the gap leaves only post-gap history in reach.

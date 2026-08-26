@@ -43,6 +43,10 @@ def add_derived(d):
 class BaselineModel:
     """Frozen mu_ref predictor. Loads model + schema + calibration artifacts."""
 
+    # class-level default: artifacts written before the schedule carried a
+    # stop, and instances built via __new__, still answer coverage queries
+    calibration_stops_at = None
+
     def __init__(self, cfg):
         bm = cfg["baseline_model"]
         self.cfg = cfg
@@ -56,6 +60,11 @@ class BaselineModel:
         # fallback -- rows before the first fitted week, and artifacts written
         # before the schedule existed.
         self.calibration_schedule = None
+        # the week the schedule deliberately stops at (the gate window's
+        # start), if it does. Rows past a DELIBERATE stop are the graded
+        # window holding a frozen anchor by design, not production drifting
+        # onto stale factors -- coverage must not call the two the same thing.
+        self.calibration_stops_at = None
         if os.path.exists(bm["calibration_factor_path"]):
             with open(bm["calibration_factor_path"]) as f:
                 cal = json.load(f)
@@ -64,6 +73,7 @@ class BaselineModel:
             sched = cal.get("schedule")
             if sched and sched.get("by_week"):
                 self.calibration_schedule = sched["by_week"]
+                self.calibration_stops_at = sched.get("stops_at_gate_start")
         self._reset_calibration_counters()
         self.version = self.schema["model_version"]
 
@@ -127,9 +137,29 @@ class BaselineModel:
             "weeks_after_schedule_end": sorted(
                 w for w in self._cal_fallback_weeks
                 if weeks and w > weeks[-1]),
+            "stops_at_gate_start": self.calibration_stops_at,
             "verdict": (
                 "OK -- every priced row took its own week's factors"
                 if not self._cal_rows_fallback else
+                # a schedule that stops at the gate start is SUPPOSED to run
+                # out there: the graded window holds the frozen anchor, which
+                # is the launch it simulates. Only an unbounded schedule
+                # running past its last fitted week is staleness. The two
+                # fallback groups are named apart -- weeks past the stop are
+                # the graded window, weeks before the schedule are the
+                # unclosed first trailing window.
+                "OK -- {} rows ({:.1%}) on the frozen anchor, spanning {} "
+                "week(s) at or past the {} stop (the graded window, held "
+                "frozen by design) and {} week(s) before the schedule opens "
+                "(first trailing window not yet closed).".format(
+                    self._cal_rows_fallback,
+                    self._cal_rows_fallback / max(priced, 1),
+                    len([w for w in self._cal_fallback_weeks
+                         if weeks and w > weeks[-1]]),
+                    self.calibration_stops_at,
+                    len([w for w in self._cal_fallback_weeks
+                         if weeks and w < weeks[0]]))
+                if self.calibration_stops_at else
                 "STALE FACTORS IN USE -- {} rows ({:.1%}) are in weeks PAST "
                 "the end of the schedule and fell back to the frozen set. "
                 "Re-run `train_baseline --fit-calibration`: the schedule "
@@ -326,6 +356,15 @@ def fit_level_calibration(d, cfg):
     splits = split_frames(d, cfg)
     fit_window = cfg["baseline_model"]["calibration_fit_window"]
     splits = {k: population(v, cfg) for k, v in splits.items()}
+    # where the graded window opens -- the gate window's own start, not a
+    # hardcoded calib_start: test_start when the gate reads test, calib_start
+    # when it reads calib+test. NOTHING the calibration reads may sit at or
+    # after this instant, or the level factor grades itself.
+    split = cfg["data"]["split"]
+    gate_start = pd.Timestamp(
+        split["test_start"]
+        if cfg["baseline_model"]["calibration_gate_window"] == "test"
+        else split["calib_start"])
     if fit_window == "calib":
         calib = splits["calib"].copy()
     elif fit_window == "train+calib":
@@ -339,13 +378,6 @@ def fit_level_calibration(d, cfg):
         # last N weeks ENDING WHERE THE GATE WINDOW BEGINS: recent, and
         # disjoint from what the gate evaluates
         weeks = cfg["baseline_model"]["calibration_fit_trailing_weeks"]
-        # the gate window's own start, not hardcoded calib_start -- test_start
-        # when the gate reads test, calib_start when it reads calib+test
-        split = cfg["data"]["split"]
-        gate_start = pd.Timestamp(
-            split["test_start"]
-            if cfg["baseline_model"]["calibration_gate_window"] == "test"
-            else split["calib_start"])
         lo = gate_start - pd.Timedelta(weeks=weeks)
         dates = pd.to_datetime(d.date)
         calib = d[(dates >= lo) & (dates < gate_start)].copy()
@@ -403,12 +435,32 @@ def fit_level_calibration(d, cfg):
     schedule = None
     if fit_window == "rolling_trailing":
         weeks_back = cfg["baseline_model"]["calibration_fit_trailing_weeks"]
-        # never past the gate window: a pre-launch artifact must not read the
-        # hold-out, and the sweep that chose this window did not either
+        # STOPS AT THE GATE WINDOW, not at test_end. `pre_launch` runs to
+        # test_end, so scoping there let a week INSIDE the hold-out be fitted
+        # on a trailing window made mostly of earlier hold-out days -- no
+        # look-ahead, but the level factor still read the rows it is graded
+        # on. Calibration is a POST-PROCESSING step: it solves the level
+        # anchor from data ending where the graded window opens, and is then
+        # frozen across that window, exactly as a launch would hold it. So
+        # the schedule covers pre-gate weeks only, and every gate row falls
+        # back to `factors` -- the one anchor fit on the trailing window
+        # ending at gate_start. The hold-out grades a frozen anchor, and how
+        # much it decays across that window is the reading that sizes the
+        # production re-fit cadence.
         scope = population(pre_launch(d, cfg), cfg).copy()
+        scope = scope[pd.to_datetime(scope.date) < gate_start]
         by_week, coverage = {}, []
         wk = pd.to_datetime(scope.date).dt.to_period("W")
         for w in sorted(wk.unique()):
+            # a week APPLIES to [w, w+7). The ISO week straddling gate_start
+            # would otherwise price most of the graded window off a scheduled
+            # factor while the rest took the anchor -- two factor sets across
+            # one hold-out, for no gain (its fit window is pre-gate either
+            # way). Skipping it makes "the graded window holds exactly one
+            # anchor" literally true, which is what makes the decay reading
+            # interpretable.
+            if w.start_time + pd.Timedelta(days=7) > gate_start:
+                continue
             lo = w.start_time - pd.Timedelta(weeks=weeks_back)
             window = scope[(wk.dt.start_time >= lo)
                            & (wk.dt.start_time < w.start_time)]
@@ -436,6 +488,13 @@ def fit_level_calibration(d, cfg):
         schedule = {
             "mode": "rolling_trailing",
             "trailing_weeks": weeks_back,
+            # the schedule STOPS here on purpose. Gate-window rows fall back
+            # to `factors`, the single anchor fit on the trailing window
+            # ending at this instant, and hold it frozen across the graded
+            # window -- the launch this backtest simulates. Anything the
+            # schedule covered past this point would have read the hold-out.
+            "stops_at_gate_start": str(gate_start.date()),
+            "gate_rows_hold": "factors (the frozen anchor), by design",
             "week_key": "ISO week start (Monday) the factors APPLY to; they "
                         "are fit on the trailing window ENDING STRICTLY "
                         "BEFORE it, so no row sees a factor fitted on its own "

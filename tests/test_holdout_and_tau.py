@@ -850,3 +850,46 @@ def test_a_partial_trailing_window_is_counted_not_passed_off_as_full():
         assert row["weeks_in_window"] < sched["trailing_weeks"]
         assert row["week"] in sched["by_week"], \
             "a partial week is still fitted -- it is flagged, not dropped"
+
+
+def test_no_calibration_factor_is_fitted_on_the_window_it_is_graded_on():
+    """Calibration is POST-PROCESSING: the anchor is solved on data ending
+    where the graded window opens, then frozen across it.
+
+    The schedule was once scoped with `pre_launch`, which runs to test_END, so
+    a week inside the hold-out was fitted on a trailing window made mostly of
+    earlier hold-out days -- no look-ahead, but the level factor still read the
+    rows it was graded on. Two things must hold, and only the pair is enough:
+    no scheduled week may be FIT on gate-window data, and none may APPLY into
+    the gate window either, or the hold-out gets priced by two factor sets and
+    the decay reading stops meaning anything.
+    """
+    import json
+    import os
+
+    cfg = load_config()
+    path = cfg["baseline_model"]["calibration_factor_path"]
+    if not os.path.exists(path):
+        pytest.skip("no calibration artifact on disk")
+    sched = (json.load(open(path)).get("schedule") or {})
+    if not sched.get("by_week"):
+        pytest.skip("calibration is not on the rolling schedule")
+
+    split = cfg["data"]["split"]
+    gate_start = pd.Timestamp(
+        split["test_start"]
+        if cfg["baseline_model"]["calibration_gate_window"] == "test"
+        else split["calib_start"])
+    assert sched.get("stops_at_gate_start") == str(gate_start.date()), (
+        "the artifact must record the stop, or coverage cannot tell a "
+        "deliberate stop from production running onto stale factors")
+
+    weeks_back = sched["trailing_weeks"]
+    for wk in sched["by_week"]:
+        w = pd.Timestamp(wk)
+        # applies to [w, w+7) -- the whole span must precede the gate
+        assert w + pd.Timedelta(days=7) <= gate_start, \
+            f"scheduled week {wk} applies into the graded window"
+        # fit on [w - N weeks, w) -- already before w, so the line above
+        # bounds it too; asserted explicitly so the intent survives edits
+        assert w - pd.Timedelta(weeks=weeks_back) < gate_start
