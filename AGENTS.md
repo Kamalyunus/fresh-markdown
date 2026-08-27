@@ -71,6 +71,15 @@ statement and the incident that created the rule.
     and before ending a session that touched artifacts, config or reports;
     never use a report the `artifact bundle` / `artifact mirrors` /
     `report vintages` / `walkthrough` lines call stale. Re-run map: §5.14.
+19. **The repo's data is SYNTHETIC; the owner's is real** — every number a
+    local run prints is a fixture number and is evidence about the fixture
+    only. Never state one as a finding about the owner's extract, and never
+    advise on their data from one: **ask them for the number first.** What
+    does carry over is structural — code paths, leak/ordering arguments,
+    arithmetic (e.g. "a W-week hold-out self-calibrates (W−1)/W of the
+    gate"). What does not is anything measured: gate values, ratios, `r`,
+    `rho`, prior scores, week counts, verdicts. Label which one you are
+    giving. (§9.2)
 
 And the standing prohibitions:
 
