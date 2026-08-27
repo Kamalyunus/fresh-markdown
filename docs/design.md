@@ -1563,6 +1563,45 @@ calibration window (dispersion, level factors, fidelity), and a held-out
 test week — split boundaries and the episode-construction rule persisted in
 a manifest so every consumer derives identical data.
 
+**How to size the split (owner + dependency analysis, 2026-08-27).** The
+four windows are not symmetric, and their sizes follow from the dependency
+graph rather than taste. `test` and `holdout` are pure *grading* windows —
+nothing may be fit on them (`test` is the calibration gate, whose
+`predicted_units` embed `r` and the prior; `holdout` is shadow's, read
+once). Every residual-based quantity — `r`, `rho`, the level anchor, the
+prior's *selection* — must therefore live in `calib`, because residuals on
+`train` are in-sample (the model fits there by construction, so dispersion
+reads low; measured on the fixture, in-train `rho` is under half the
+out-of-sample value). That makes `calib`, not `train`, the scarce resource.
+Sizing rules, in order:
+
+1. **`calib ≥ 2 × calibration_fit_trailing_weeks`.** The first W calib
+   weeks carry point-in-time factors fit partly on train-period rows
+   (biased low); only the back half has factors fit wholly out-of-train,
+   and that back half is where the anchor is fit and where `r`/`rho`
+   residuals sit under clean factors.
+2. **W from the rolling-origin sweep** (`calibration_window_sweep`), not
+   assumed. If the sweep wants a W that violates rule 1, the split — not
+   the band — is what to revisit.
+3. **`test` = 2 weeks**: one week carries the full weekly demand swing;
+   beyond two, the frozen anchor only gets staler (the launch gate grades
+   the artifact frozen at `gate_start`; `weekly_refit` prices the same
+   window with the schedule and the spread is what re-fitting buys).
+4. **`holdout` ≈ 3 weeks**: enough for the tau-controller walk and several
+   posterior updates; most recent regime, so shadow grades launch-adjacent
+   conditions.
+5. **`train` takes the remainder.** It may straddle an exclusion gap
+   (episodes are whole); `calib`/`test`/`holdout` must not, and all three
+   sit contiguous at the extract's end so recency is graded, not history.
+6. **`test_start` on an ISO Monday** keeps the anchor window and the weekly
+   schedule aligned to the same week grid.
+
+Checks after any split move: rows-per-subcategory in the new `calib` vs
+`dispersion.min_rows_per_group` (does subcategory `r` fit at all), the sweep
+re-read under the new split, and `--check-convergence` green. A split change
+moves `train_end`, so it is a full retrain — nothing from the old split is
+comparable (hard rule 1).
+
 **Synthetic validation:** a generator reproduces the schema with known
 ground-truth elasticity in two modes — `legacy` (reproduces the clock
 confound; estimators must *detect* it) and `randomized` (elasticity
