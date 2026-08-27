@@ -215,12 +215,25 @@ def fidelity(d, cfg, model, prior, r_lookup):
     sales at actual historical prices. The gate reads the calib+test windows
     -- the launch-adjacent regime the 9.3 level factors are fit on; the
     all-history ratio is diagnostic only (dominated by in-sample rows)."""
+    # THE GATE GRADES A FROZEN ARTIFACT. The calibration schedule re-fits
+    # every week (production does, and the DP replay below should see that),
+    # but a factor fit inside the graded window has read the rows it is being
+    # graded on -- so fidelity prices the gate window off the anchor instead,
+    # fit on the trailing window ending where the gate opens. The weekly-refit
+    # reading is reported next to it as `weekly_refit`, because the two answer
+    # different questions: "does the artifact as frozen hold up" and "does
+    # frozen model + weekly re-fit track demand".
+    split = cfg["data"]["split"]
+    gate_window = cfg["baseline_model"]["calibration_gate_window"]
+    gate_start = pd.Timestamp(split["test_start"] if gate_window == "test"
+                              else split["calib_start"])
     # predict over the FULL window (the DP plans over it); every ratio below
     # sees observed rows only -- synthetic rows would read as under-prediction
+    d_in = d                      # unextended; the refit pass below re-reads it
+    model.freeze_calibration_from(gate_start)
     d_full = _attach_predictions(d, cfg, model, prior, r_lookup)
     d = d_full[d_full.is_observed]
     splits = split_frames(d, cfg)
-    gate_window = cfg["baseline_model"]["calibration_gate_window"]
     gate_d = (splits["test"] if gate_window == "test"
               else pd.concat([splits["calib"], splits["test"]]))
     if not len(gate_d) or gate_d.predicted_units.sum() <= 0:
@@ -310,6 +323,46 @@ def fidelity(d, cfg, model, prior, r_lookup):
     block["calibration_gate"] = ("PASS" if band[0] <= gate_value <= band[1]
                                  else "OUT OF BAND -- level diagnostic; "
                                       "investigate drift (design 9.2)")
+    block["calibration_frozen_at"] = str(gate_start.date())
+
+    # THE MECHANISM READING, next to the frozen one. Re-prices the same gate
+    # window with the weekly schedule in force -- what production actually
+    # runs. It is NOT the gate (its factors read the graded rows), but the
+    # spread between the two IS the value of re-fitting weekly: how much of
+    # the frozen artifact's level error a weekly re-fit would have removed.
+    # counters belong to the GATE pass -- artifact_versions reports that one,
+    # so this second pass must not be folded into its coverage
+    counters = (model._cal_rows_scheduled, model._cal_rows_fallback,
+                model._cal_rows_frozen, model._cal_rows_static,
+                set(model._cal_fallback_weeks))
+    model.freeze_calibration_from(None)
+    refit = _attach_predictions(d_in, cfg, model, prior, r_lookup)
+    refit = refit[refit.is_observed]
+    refit_splits = split_frames(refit, cfg)
+    refit_gate = (refit_splits["test"] if gate_window == "test"
+                  else pd.concat([refit_splits["calib"], refit_splits["test"]]))
+    refit_m10 = (m10_fidelity_decomposition(refit_gate, cfg)
+                 if len(refit_gate) else {})
+    (model._cal_rows_scheduled, model._cal_rows_fallback,
+     model._cal_rows_frozen, model._cal_rows_static,
+     model._cal_fallback_weeks) = counters
+    model.freeze_calibration_from(gate_start)
+    refit_anchor = refit_m10.get("level_bias_at_anchor")
+    block["weekly_refit"] = {
+        "level_bias_at_anchor": refit_anchor,
+        "overall_sold_ratio": refit_m10.get("overall_sold_ratio"),
+        "in_band": (None if refit_anchor is None
+                    else bool(band[0] <= refit_anchor <= band[1])),
+        "vs_frozen": (None if (refit_anchor is None or not anchor_val)
+                      else round(refit_anchor - anchor_val, 4)),
+        "note": "the same gate window re-priced with the weekly schedule in "
+                "force -- production's mechanism, not a gate. Its factors "
+                "read the graded rows, so it cannot grade the launch; the "
+                "gap to calibration_gate_value is what weekly re-fitting "
+                "buys. Both moving together = the level moved and re-fitting "
+                "cannot catch it; only the frozen one out of band = the "
+                "anchor went stale and the weekly re-fit is doing its job.",
+    }
     return block, d_full
 
 

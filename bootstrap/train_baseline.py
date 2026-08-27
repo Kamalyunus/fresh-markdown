@@ -43,9 +43,10 @@ def add_derived(d):
 class BaselineModel:
     """Frozen mu_ref predictor. Loads model + schema + calibration artifacts."""
 
-    # class-level default: artifacts written before the schedule carried a
+    # class-level defaults: artifacts written before the schedule carried a
     # stop, and instances built via __new__, still answer coverage queries
     calibration_stops_at = None
+    _freeze_from = None
 
     def __init__(self, cfg):
         bm = cfg["baseline_model"]
@@ -73,7 +74,7 @@ class BaselineModel:
             sched = cal.get("schedule")
             if sched and sched.get("by_week"):
                 self.calibration_schedule = sched["by_week"]
-                self.calibration_stops_at = sched.get("stops_at_gate_start")
+                self.calibration_stops_at = sched.get("gate_freezes_at")
         self._reset_calibration_counters()
         self.version = self.schema["model_version"]
 
@@ -81,23 +82,51 @@ class BaselineModel:
         """Coverage counters: which priced rows got their OWN week's factors."""
         self._cal_rows_scheduled = 0
         self._cal_rows_fallback = 0
+        self._cal_rows_frozen = 0
         self._cal_rows_static = 0
         self._cal_fallback_weeks = set()
 
+    def freeze_calibration_from(self, date):
+        """Price rows on or after `date` with the frozen anchor, ignoring the
+        weekly schedule. `None` restores the schedule.
+
+        The two readings a harness needs from ONE artifact. Left alone, the
+        schedule re-fits weekly and the model mirrors production, which is
+        what a forward-time replay (shadow, the DP walk) should see: at week k
+        only weeks < k were ever read, so there is no look-ahead. But the
+        LAUNCH GATE asks a different question -- does the artifact as frozen
+        reproduce hold-out sales -- and a factor re-fit inside the hold-out has
+        read the rows it is graded on. Freezing at the gate start answers that
+        one without a second artifact, and without a second copy of the
+        factor-selection logic to drift out of sync.
+        """
+        self._freeze_from = pd.Timestamp(date) if date is not None else None
+        return self
+
     def _factor_vector(self, d):
         """Per-row level factor. With a schedule, each row takes the factors
-        in force for ITS week; without one, the single frozen set."""
+        in force for ITS week; without one, the single frozen set. Rows at or
+        after a `freeze_calibration_from` point take the anchor regardless."""
         keys = d[self.calibration_grain].astype(str)
         if self.calibration_schedule is None:
             self._cal_rows_static += len(d)
             return keys.map(lambda k: self.calibration.get(k, 1.0)).to_numpy()
-        weeks = pd.to_datetime(d["date"]).dt.to_period("W").dt.start_time
-        weeks = weeks.dt.strftime("%Y-%m-%d")
+        dates = pd.to_datetime(d["date"])
+        weeks = dates.dt.to_period("W").dt.start_time.dt.strftime("%Y-%m-%d")
+        frozen = (dates >= self._freeze_from).to_numpy() \
+            if getattr(self, "_freeze_from", None) is not None \
+            else np.zeros(len(d), bool)
         out = np.ones(len(d))
         for i, (wk, key) in enumerate(zip(weeks.to_numpy(), keys.to_numpy())):
             # an unfitted week (too thin, or before the first trailing window
             # closed) holds at the frozen fallback, never at a later week's
             # factors -- borrowing forward is the leak this exists to prevent
+            if frozen[i]:
+                # DELIBERATE, not a gap: counted apart so a gate run cannot
+                # read as production drifting onto stale factors
+                self._cal_rows_frozen += 1
+                out[i] = self.calibration.get(key, 1.0)
+                continue
             table = self.calibration_schedule.get(wk)
             if table is None:
                 self._cal_rows_fallback += 1
@@ -112,64 +141,56 @@ class BaselineModel:
         """How many priced rows got a POINT-IN-TIME factor and how many fell
         back to the frozen set.
 
-        The fallback is silent by construction -- a row in a week the schedule
-        does not cover simply takes the static factors -- and the week that
-        matters is the one PAST THE END of the schedule: production drifts
-        back onto stale factors the moment it runs beyond the last week
-        `--fit-calibration` saw, which is exactly what the weekly re-fit
-        exists to prevent. Reported so it cannot happen unnoticed.
+        Three ways a row can end up on the anchor instead, and they must never
+        share a verdict. DELIBERATE: the run called
+        `freeze_calibration_from` -- the launch gate, pricing its hold-out off
+        a frozen artifact on purpose. BEFORE THE START: the first trailing
+        window had not closed yet. PAST THE END: production drifting back onto
+        stale factors the moment it runs beyond the last week
+        `--fit-calibration` saw, which is the one the weekly re-fit exists to
+        prevent and the only one that is a problem.
         """
         if self.calibration_schedule is None:
             return {"mode": "static", "rows": self._cal_rows_static,
                     "note": "no schedule in the artifact: one frozen factor "
                             "set applied to every row"}
-        priced = self._cal_rows_scheduled + self._cal_rows_fallback
+        priced = (self._cal_rows_scheduled + self._cal_rows_fallback
+                  + self._cal_rows_frozen)
         weeks = sorted(self.calibration_schedule)
+        past_end = sorted(w for w in self._cal_fallback_weeks
+                          if weeks and w > weeks[-1])
+        share = self._cal_rows_fallback / max(priced, 1)
         return {
             "mode": "point_in_time",
             "schedule_covers": [weeks[0], weeks[-1]] if weeks else None,
             "rows_priced": priced,
             "rows_on_schedule": self._cal_rows_scheduled,
             "rows_on_fallback": self._cal_rows_fallback,
+            "rows_frozen_at_anchor": self._cal_rows_frozen,
+            "frozen_from": (str(self._freeze_from.date())
+                            if self._freeze_from is not None else None),
             "fallback_share": round(self._cal_rows_fallback / priced, 4)
                 if priced else None,
             "fallback_weeks": sorted(self._cal_fallback_weeks),
-            "weeks_after_schedule_end": sorted(
-                w for w in self._cal_fallback_weeks
-                if weeks and w > weeks[-1]),
-            "stops_at_gate_start": self.calibration_stops_at,
+            "weeks_after_schedule_end": past_end,
+            "gate_freezes_at": self.calibration_stops_at,
             "verdict": (
-                "OK -- every priced row took its own week's factors"
-                if not self._cal_rows_fallback else
-                # a schedule that stops at the gate start is SUPPOSED to run
-                # out there: the graded window holds the frozen anchor, which
-                # is the launch it simulates. Only an unbounded schedule
-                # running past its last fitted week is staleness. The two
-                # fallback groups are named apart -- weeks past the stop are
-                # the graded window, weeks before the schedule are the
-                # unclosed first trailing window.
-                "OK -- {} rows ({:.1%}) on the frozen anchor, spanning {} "
-                "week(s) at or past the {} stop (the graded window, held "
-                "frozen by design) and {} week(s) before the schedule opens "
-                "(first trailing window not yet closed).".format(
-                    self._cal_rows_fallback,
-                    self._cal_rows_fallback / max(priced, 1),
-                    len([w for w in self._cal_fallback_weeks
-                         if weeks and w > weeks[-1]]),
-                    self.calibration_stops_at,
-                    len([w for w in self._cal_fallback_weeks
-                         if weeks and w < weeks[0]]))
-                if self.calibration_stops_at else
                 "STALE FACTORS IN USE -- {} rows ({:.1%}) are in weeks PAST "
                 "the end of the schedule and fell back to the frozen set. "
                 "Re-run `train_baseline --fit-calibration`: the schedule "
                 "stops at the last week it was fitted on.".format(
-                    self._cal_rows_fallback,
-                    self._cal_rows_fallback / max(priced, 1))
-                if any(weeks and w > weeks[-1]
-                       for w in self._cal_fallback_weeks) else
-                "fallback used before the schedule starts -- expected, the "
-                "first trailing window had not closed yet"),
+                    self._cal_rows_fallback, share)
+                if past_end else
+                "OK -- {} rows frozen at the anchor from {} on purpose (the "
+                "launch gate prices its hold-out off the frozen artifact); "
+                "every other priced row took its own week's factors".format(
+                    self._cal_rows_frozen, self._freeze_from.date())
+                if self._freeze_from is not None else
+                "OK -- every priced row took its own week's factors"
+                if not self._cal_rows_fallback else
+                "OK -- {} rows ({:.1%}) fell back before the schedule opens; "
+                "the first trailing window had not closed yet".format(
+                    self._cal_rows_fallback, share)),
         }
 
     def _matrix(self, d):
@@ -435,32 +456,18 @@ def fit_level_calibration(d, cfg):
     schedule = None
     if fit_window == "rolling_trailing":
         weeks_back = cfg["baseline_model"]["calibration_fit_trailing_weeks"]
-        # STOPS AT THE GATE WINDOW, not at test_end. `pre_launch` runs to
-        # test_end, so scoping there let a week INSIDE the hold-out be fitted
-        # on a trailing window made mostly of earlier hold-out days -- no
-        # look-ahead, but the level factor still read the rows it is graded
-        # on. Calibration is a POST-PROCESSING step: it solves the level
-        # anchor from data ending where the graded window opens, and is then
-        # frozen across that window, exactly as a launch would hold it. So
-        # the schedule covers pre-gate weeks only, and every gate row falls
-        # back to `factors` -- the one anchor fit on the trailing window
-        # ending at gate_start. The hold-out grades a frozen anchor, and how
-        # much it decays across that window is the reading that sizes the
-        # production re-fit cadence.
+        # Runs through EVERY week, because production re-fits every week and
+        # a forward-time replay (shadow, the DP walk) should see exactly that:
+        # at week k the factors were fit on weeks < k, so there is no
+        # look-ahead to leak. What must NOT read its own graded rows is the
+        # launch gate, and that is handled where the question is asked --
+        # `freeze_calibration_from(gate_start)` prices the graded window off
+        # the anchor instead. Bounding the artifact here would answer the gate
+        # correctly and make shadow silently stop mirroring production.
         scope = population(pre_launch(d, cfg), cfg).copy()
-        scope = scope[pd.to_datetime(scope.date) < gate_start]
         by_week, coverage = {}, []
         wk = pd.to_datetime(scope.date).dt.to_period("W")
         for w in sorted(wk.unique()):
-            # a week APPLIES to [w, w+7). The ISO week straddling gate_start
-            # would otherwise price most of the graded window off a scheduled
-            # factor while the rest took the anchor -- two factor sets across
-            # one hold-out, for no gain (its fit window is pre-gate either
-            # way). Skipping it makes "the graded window holds exactly one
-            # anchor" literally true, which is what makes the decay reading
-            # interpretable.
-            if w.start_time + pd.Timedelta(days=7) > gate_start:
-                continue
             lo = w.start_time - pd.Timedelta(weeks=weeks_back)
             window = scope[(wk.dt.start_time >= lo)
                            & (wk.dt.start_time < w.start_time)]
@@ -488,13 +495,15 @@ def fit_level_calibration(d, cfg):
         schedule = {
             "mode": "rolling_trailing",
             "trailing_weeks": weeks_back,
-            # the schedule STOPS here on purpose. Gate-window rows fall back
-            # to `factors`, the single anchor fit on the trailing window
-            # ending at this instant, and hold it frozen across the graded
-            # window -- the launch this backtest simulates. Anything the
-            # schedule covered past this point would have read the hold-out.
-            "stops_at_gate_start": str(gate_start.date()),
-            "gate_rows_hold": "factors (the frozen anchor), by design",
+            # where the LAUNCH GATE freezes. The schedule itself runs past
+            # this (production re-fits weekly, and a forward replay should see
+            # that), but a factor fit inside the graded window has read the
+            # rows it is graded on -- so the gate calls
+            # freeze_calibration_from(this) and prices the hold-out off
+            # `factors`, the anchor fit on the trailing window ending here.
+            "gate_freezes_at": str(gate_start.date()),
+            "anchor_fit_window": [str((gate_start - pd.Timedelta(
+                weeks=weeks_back)).date()), str(gate_start.date())],
             "week_key": "ISO week start (Monday) the factors APPLY to; they "
                         "are fit on the trailing window ENDING STRICTLY "
                         "BEFORE it, so no row sees a factor fitted on its own "

@@ -852,17 +852,18 @@ def test_a_partial_trailing_window_is_counted_not_passed_off_as_full():
             "a partial week is still fitted -- it is flagged, not dropped"
 
 
-def test_no_calibration_factor_is_fitted_on_the_window_it_is_graded_on():
-    """Calibration is POST-PROCESSING: the anchor is solved on data ending
-    where the graded window opens, then frozen across it.
+def test_the_gate_freezes_calibration_even_though_the_schedule_runs_past_it():
+    """Two questions, one artifact, and they must not be confused.
 
-    The schedule was once scoped with `pre_launch`, which runs to test_END, so
-    a week inside the hold-out was fitted on a trailing window made mostly of
-    earlier hold-out days -- no look-ahead, but the level factor still read the
-    rows it was graded on. Two things must hold, and only the pair is enough:
-    no scheduled week may be FIT on gate-window data, and none may APPLY into
-    the gate window either, or the hold-out gets priced by two factor sets and
-    the decay reading stops meaning anything.
+    The schedule re-fits every week and runs through the whole extract,
+    because production re-fits weekly and a forward-time replay (shadow, the
+    DP walk) should see exactly that -- at week k only weeks < k were read, so
+    there is no look-ahead. But the LAUNCH GATE grades a frozen artifact, and
+    a factor re-fit inside the hold-out has read the rows it is graded on. So
+    fidelity calls `freeze_calibration_from(gate_start)` and prices the gate
+    window off the anchor, while `weekly_refit` reports the mechanism reading
+    beside it. Freezing the ARTIFACT instead would answer the gate correctly
+    and silently stop shadow mirroring production.
     """
     import json
     import os
@@ -880,16 +881,39 @@ def test_no_calibration_factor_is_fitted_on_the_window_it_is_graded_on():
         split["test_start"]
         if cfg["baseline_model"]["calibration_gate_window"] == "test"
         else split["calib_start"])
-    assert sched.get("stops_at_gate_start") == str(gate_start.date()), (
-        "the artifact must record the stop, or coverage cannot tell a "
-        "deliberate stop from production running onto stale factors")
+    assert sched.get("gate_freezes_at") == str(gate_start.date()), (
+        "the artifact must record where the gate freezes, or coverage cannot "
+        "tell a deliberate freeze from production running onto stale factors")
 
-    weeks_back = sched["trailing_weeks"]
-    for wk in sched["by_week"]:
-        w = pd.Timestamp(wk)
-        # applies to [w, w+7) -- the whole span must precede the gate
-        assert w + pd.Timedelta(days=7) <= gate_start, \
-            f"scheduled week {wk} applies into the graded window"
-        # fit on [w - N weeks, w) -- already before w, so the line above
-        # bounds it too; asserted explicitly so the intent survives edits
-        assert w - pd.Timedelta(weeks=weeks_back) < gate_start
+    # the gate does the freezing, not the artifact
+    import inspect
+
+    from backtest import replay
+
+    src = inspect.getsource(replay.fidelity)
+    assert "freeze_calibration_from(gate_start)" in src, \
+        "the fidelity gate must freeze calibration at the gate window start"
+    assert '"weekly_refit"' in src, \
+        "the mechanism reading must be reported beside the frozen gate"
+
+    # frozen rows take the anchor, scheduled rows take their own week
+    from bootstrap.train_baseline import BaselineModel
+    m = BaselineModel.__new__(BaselineModel)
+    m.calibration_grain = "category"
+    m.calibration = {"A": 2.0}
+    m.calibration_schedule = {"2026-07-27": {"A": 5.0},
+                              "2026-08-03": {"A": 9.0}}
+    m._reset_calibration_counters()
+    frame = pd.DataFrame({"date": ["2026-07-28", "2026-08-03"],
+                          "category": ["A", "A"]})
+
+    m.freeze_calibration_from(None)
+    assert list(m._factor_vector(frame)) == [5.0, 9.0], \
+        "unfrozen, every row takes its own week -- production's mechanism"
+
+    m._reset_calibration_counters()
+    m.freeze_calibration_from(gate_start)
+    assert list(m._factor_vector(frame)) == [2.0, 2.0], \
+        "frozen at the gate, every graded row takes the anchor"
+    assert m._cal_rows_frozen == 2 and m._cal_rows_fallback == 0, \
+        "a deliberate freeze must not be counted as a fallback gap"

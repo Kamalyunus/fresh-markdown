@@ -1726,35 +1726,48 @@ prevents, and it is the same discipline as §12a's velocity features.
 Both harnesses get it through `BaselineModel.predict_mu_ref` alone; neither
 has factor-selection code of its own, because a second copy would drift.
 
-**Calibration is post-processing, and the schedule stops at the gate
-(owner, 2026-08-26).** The level factor's job is to solve the *anchor*: the
-raw model is trained and graded, and the factor is then fit on the trailing
-4 weeks **ending where the graded window opens** and held frozen across it —
-the launch it simulates. So the rolling schedule covers **pre-gate weeks
-only**. A week is scheduled only when its whole applied range `[w, w+7)`
-precedes `gate_start`, which makes "the graded window holds exactly one
-anchor" literally true; the straddling ISO week is skipped rather than
-splitting the hold-out across two factor sets for no gain.
+**The gate freezes; the schedule does not (owner, 2026-08-27).** Two
+questions share one artifact and must not be confused:
 
-This corrects a real leak. The schedule was scoped with `pre_launch()`,
-which runs to `test_end`, not `test_start` — so a week *inside* the hold-out
-was fitted on a trailing window made mostly of **earlier hold-out days**.
-There was no look-ahead (only strictly-earlier data was ever read), but the
-level factor read the rows it was being graded on, and the code's own
-comment claimed the opposite. The damage scales with the hold-out: for a
-W-week test window, week 1 is clean and weeks 2..W are each fitted on
-windows containing earlier test data, so roughly **(W−1)/W** of the gate was
-self-calibrated. On the one-week fixture it was 1 of 7 days and the gate
-moved 0.9301 → 0.9207; on a four-week hold-out it would be most of it.
+| | question | calibration |
+| --- | --- | --- |
+| launch gate | does the artifact **as frozen** reproduce hold-out sales? | anchor, frozen at `gate_start` |
+| mechanism | does frozen model + **weekly re-fit** track demand? | weekly schedule |
 
-Expect the honest number to read **higher**, not lower, against a rising
-level: a frozen anchor is ~2 weeks stale by mid-test and ~4 by the end. That
-decay is the point — it is the measurement that sizes the production re-fit
-cadence, and the leaked version was flattering it. `schedule.stops_at_gate_start`
-records the boundary so `calibration_coverage()` can tell a deliberate stop
-(the graded window, correct) from production running past its last fitted
-week (genuinely stale) — the two look identical in a fallback count and must
-never share a verdict.
+The schedule re-fits every week and runs through the whole extract, because
+production re-fits weekly and a forward-time replay — shadow, the DP walk —
+should see exactly that. There is no look-ahead in a replay: at week *k* the
+factors were fit on weeks *< k* only. But the gate asks the other question,
+and a factor re-fit *inside* the hold-out has read the rows it is graded on.
+So `backtest.fidelity` calls `model.freeze_calibration_from(gate_start)` and
+prices the graded window off `factors` — the anchor fit on the trailing
+window ending where the gate opens — and reports the mechanism reading
+beside it as `fidelity.weekly_refit`. The spread between them is what weekly
+re-fitting buys. Freezing the *artifact* instead would answer the gate
+correctly and silently stop shadow mirroring production.
+
+This supersedes the 08-26 attempt, which bounded the schedule itself at
+`gate_start`. That fixed a real leak — the schedule had been scoped with
+`pre_launch()`, which runs to `test_end`, not `test_start`, so a week
+*inside* the hold-out was fitted on a window made mostly of **earlier
+hold-out days**, and the code's own comment claimed the opposite. The damage
+scales with the hold-out: for a W-week test window, week 1 is clean and
+weeks 2..W are each fitted on windows containing earlier test data, so
+roughly **(W−1)/W** of the gate was self-calibrated. But bounding the
+artifact fixed it in the wrong place, at the cost of shadow.
+
+Measured on the fixture (one-week hold-out, `trailing_weeks: 2`): gate
+0.8753, weekly re-fit 0.8832, spread **0.0079**. Weekly re-fitting buys
+almost nothing there — with a one-week hold-out the frozen anchor is at most
+a week stale — which is exactly why the spread is worth reporting rather
+than assumed. Read the pair together: **both** out of band means the level
+moved and re-fitting cannot catch it; **only the frozen one** out of band
+means the anchor went stale and the weekly re-fit is doing its job.
+
+`schedule.gate_freezes_at` records the boundary, and
+`calibration_coverage()` counts frozen rows apart from fallback rows — a
+deliberate freeze and production running past its last fitted week look
+identical in a fallback count and must never share a verdict.
 
 `trailing_weeks: 4` does not mean every week has four behind it. Two places
 have fewer: the **start of the extract**, and the weeks just after the
