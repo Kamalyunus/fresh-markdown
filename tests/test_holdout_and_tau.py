@@ -917,3 +917,57 @@ def test_the_gate_freezes_calibration_even_though_the_schedule_runs_past_it():
         "frozen at the gate, every graded row takes the anchor"
     assert m._cal_rows_frozen == 2 and m._cal_rows_fallback == 0, \
         "a deliberate freeze must not be counted as a fallback gap"
+
+
+def test_convergence_check_flags_drift_and_never_commits_the_resolve(
+        tmp_path, monkeypatch):
+    """The f <-> r cycle is broken by iteration, and this is the assertion
+    that the iteration settled. Dry run is load-bearing: committing the
+    re-solve while prior/dispersion lag it would CREATE the inconsistency
+    being tested for."""
+    import copy
+
+    import bootstrap.train_baseline as tb
+
+    cfg = copy.deepcopy(load_config())
+    path = str(tmp_path / "cal.json")
+    cfg["baseline_model"]["calibration_factor_path"] = path
+    cfg["baseline_model"]["calibration_convergence_tol_log"] = 0.02
+    old = {"factors": {"A": 1.0, "B": 1.2},
+           "schedule": {"by_week": {"2026-07-06": {"A": 1.05}}}}
+    json.dump(old, open(path, "w"))
+
+    def fake(art):
+        def _fit(d, c):
+            json.dump(art, open(path, "w"))
+        return _fit
+
+    # a factor moved 1.2 -> 1.3 under the current r/prior -> NOT CONVERGED,
+    # named, and the disk artifact still holds iteration k
+    monkeypatch.setattr(tb, "fit_level_calibration", fake(
+        {"factors": {"A": 1.0, "B": 1.3},
+         "schedule": {"by_week": {"2026-07-06": {"A": 1.05}}}}))
+    block = tb.check_calibration_convergence(None, cfg)
+    assert not block["converged"]
+    assert block["worst_cell"] == "anchor:B"
+    assert abs(block["max_abs_dlog"] - abs(np.log(1.3 / 1.2))) < 1e-5
+    disk = json.load(open(path))
+    assert disk["factors"] == old["factors"], "dry run must restore"
+    assert disk["convergence"]["converged"] is False
+
+    # identical re-solve -> converged; a schedule week's cell moving is
+    # caught the same way as the anchor's
+    monkeypatch.setattr(tb, "fit_level_calibration", fake(old))
+    assert tb.check_calibration_convergence(None, cfg)["converged"]
+    monkeypatch.setattr(tb, "fit_level_calibration", fake(
+        {"factors": {"A": 1.0, "B": 1.2},
+         "schedule": {"by_week": {"2026-07-06": {"A": 1.30}}}}))
+    block = tb.check_calibration_convergence(None, cfg)
+    assert not block["converged"] and block["worst_cell"] == "2026-07-06:A"
+
+    # a cell appearing or vanishing is never averaged away
+    monkeypatch.setattr(tb, "fit_level_calibration", fake(
+        {"factors": {"A": 1.0}, "schedule": {"by_week": {}}}))
+    block = tb.check_calibration_convergence(None, cfg)
+    assert not block["converged"]
+    assert "anchor:B" in block["cells_appeared_or_gone"]

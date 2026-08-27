@@ -564,6 +564,84 @@ def fit_level_calibration(d, cfg):
     return factors
 
 
+def check_calibration_convergence(d, cfg):
+    """Has the calibration <-> dispersion fixed point settled?
+
+    The chain is circular across runs: the factor solve consumes `r` (the
+    censored basis), and `r`, `rho` and the prior are all fitted against
+    CALIBRATED mu_ref. The pipeline breaks the cycle by iteration -- fit
+    calibration, then re-fit prior and dispersion against it -- and that is
+    only sound if one more turn of the loop would reproduce the factors.
+    Nothing asserted it, so every downstream number silently depended on how
+    many iterations happened to run.
+
+    This re-solves the factors with the prior and r_lookup NOW on disk and
+    compares per cell (and per schedule week) in log space against the
+    artifact. It is a DRY RUN: the prior artifact is restored afterwards with
+    a `convergence` block attached, so the chain on disk stays exactly the
+    one prior and dispersion were fitted against -- committing the re-solve
+    while they lag it would create the very inconsistency being tested for.
+    NOT CONVERGED means: run --fit-calibration, estimate_prior and
+    fit_dispersion once more, then check again.
+    """
+    path = cfg["baseline_model"]["calibration_factor_path"]
+    with open(path) as f:
+        old = json.load(f)
+    tol = cfg["baseline_model"]["calibration_convergence_tol_log"]
+
+    try:
+        fit_level_calibration(d, cfg)          # iteration k+1, on disk briefly
+        with open(path) as f:
+            new = json.load(f)
+    finally:
+        with open(path, "w") as f:             # dry run: restore iteration k
+            json.dump(old, f, indent=2)
+
+    def compare(a, b, scope):
+        worst, missing = (0.0, None), []
+        for key in sorted(set(a) | set(b)):
+            fa, fb = a.get(key), b.get(key)
+            if not fa or not fb:
+                missing.append(f"{scope}:{key}")
+                continue
+            dlog = abs(float(np.log(fb / fa)))
+            if dlog > worst[0]:
+                worst = (dlog, f"{scope}:{key}")
+        return worst, missing
+
+    worst, missing = compare(old.get("factors", {}),
+                             new.get("factors", {}), "anchor")
+    old_bw = (old.get("schedule") or {}).get("by_week", {})
+    new_bw = (new.get("schedule") or {}).get("by_week", {})
+    for wk in sorted(set(old_bw) | set(new_bw)):
+        w, m = compare(old_bw.get(wk) or {}, new_bw.get(wk) or {}, wk)
+        if w[0] > worst[0]:
+            worst = w
+        missing += m
+
+    converged = not missing and worst[0] <= tol
+    block = {
+        "tol_log": tol,
+        "max_abs_dlog": round(worst[0], 6),
+        "worst_cell": worst[1],
+        "cells_appeared_or_gone": missing,
+        "converged": converged,
+        "method": "re-solved with the prior and r_lookup now on disk; "
+                  "artifact restored (dry run)",
+        "verdict": (
+            "CONVERGED -- one more iteration reproduces the factors within "
+            "tolerance; the calibration <-> dispersion loop has settled"
+            if converged else
+            "NOT CONVERGED -- the factors move {:.1%} (> {:.1%}) under the "
+            "current prior/r. Run --fit-calibration, estimate_prior and "
+            "fit_dispersion once more, then re-check.".format(worst[0], tol)),
+    }
+    old["convergence"] = block
+    with open(path, "w") as f:
+        json.dump(old, f, indent=2)
+    return block
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
@@ -572,10 +650,24 @@ def main():
                     help="fit the section 9.3 per-category level-calibration "
                          "factors from the already-trained baseline and the "
                          "section 9.5 prior, instead of training")
+    ap.add_argument("--check-convergence", action="store_true",
+                    help="dry-run re-solve of the calibration factors with "
+                         "the prior/r now on disk; verifies the calibration "
+                         "<-> dispersion fixed point has settled")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     d = pd.read_parquet(args.input)
+
+    if args.check_convergence:
+        block = check_calibration_convergence(d, cfg)
+        print(f"max |dlog f| = {block['max_abs_dlog']:.4f} "
+              f"(tol {block['tol_log']}) at {block['worst_cell']}")
+        if block["cells_appeared_or_gone"]:
+            print(f"cells appeared/disappeared: "
+                  f"{block['cells_appeared_or_gone']}")
+        print(block["verdict"])
+        return
 
     if args.fit_calibration:
         factors = fit_level_calibration(d, cfg)

@@ -145,3 +145,25 @@ def test_overall_verdict_and_render(cfg, tmp_path):
     assert report["not_run"]
     text = status.render(report)
     assert "not run" in text and len(text.splitlines()) >= len(report["checks"])
+
+
+def test_convergence_row_warns_until_the_fixed_point_is_asserted(cfg, tmp_path):
+    """The calibration <-> dispersion loop is resolved by iteration; this row
+    is the difference between 'assumed settled' and 'asserted settled'."""
+    p = tmp_path / "cal.json"
+    c = dict(cfg, baseline_model=dict(cfg["baseline_model"],
+                                      calibration_factor_path=str(p)))
+    # no artifact / never checked -> not run, never a silent pass
+    assert status._calibration_convergence(c)["verdict"] == status.NONE
+    p.write_text(json.dumps({"factors": {"A": 1.1}}))
+    row = status._calibration_convergence(c)
+    assert row["verdict"] == status.NONE and "never checked" in row["detail"]
+    # checked and settled -> PASS; moved past tolerance -> WARN (not FAIL:
+    # a chain-health reading, not a launch gate)
+    p.write_text(json.dumps({"factors": {"A": 1.1}, "convergence": {
+        "converged": True, "max_abs_dlog": 0.001, "tol_log": 0.02}}))
+    assert status._calibration_convergence(c)["verdict"] == status.PASS
+    p.write_text(json.dumps({"factors": {"A": 1.1}, "convergence": {
+        "converged": False, "max_abs_dlog": 0.09, "tol_log": 0.02}}))
+    row = status._calibration_convergence(c)
+    assert row["verdict"] == status.WARN and "one more iteration" in row["where"]

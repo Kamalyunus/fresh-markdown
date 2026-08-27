@@ -167,6 +167,12 @@ baseline_model:
     # is shrunk toward its parent by the evidence behind it, so thin cells
     # inherit the parent rather than contributing noise -- no threshold
     # cliff, and zero evidence lands exactly on the parent factor.
+  calibration_convergence_tol_log: 0.02  # SET  the chain is circular across
+    # runs (f needs r; r, rho and the prior read calibrated mu_ref) and is
+    # resolved by iteration. --check-convergence re-solves f with the
+    # prior/r now on disk; max |log(f_new/f_old)| above this means the fixed
+    # point has not settled -- run one more iteration. 0.02 ~= 2%, well under
+    # the [0.90, 1.10] gate band's half-width.
   calibration_shrinkage_units: 100     # SET  pseudo-count, in anchor units
     # sold, pulling a cell toward its parent. A cell with this many units has
     # equal weight on itself and its parent.

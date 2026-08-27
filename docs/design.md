@@ -1815,6 +1815,32 @@ it rescales that episode's residuals uniformly and cannot remove the
 correlation between them. A level offset and a within-episode common shock
 are different things; only the second moves `rho`.
 
+**The loop is circular by construction, and convergence is asserted, not
+assumed (owner, 2026-08-27).** The factor solve consumes `r` (the censored
+basis), while `r`, `rho` and the prior are all fitted against *calibrated*
+`mu_ref` — a genuine cycle, broken by iteration: fit calibration, re-fit
+prior and dispersion against it, repeat until the factors stop moving. It
+converges because the loop gain is small in both directions — `r` enters `f`
+only through the censoring correction (irrelevant on well-stocked anchor
+rows), and `f` shifts the level while `r`/`rho` measure second moments
+(measured on the fixture: a wholesale factor change moved global `r` +1.4%,
+`rho` +3.6%). What was missing was the assertion: nothing checked that one
+more turn of the loop reproduces the factors, so every downstream number
+silently depended on how many iterations happened to run.
+`train_baseline --check-convergence` (pipeline step 5b) is that check — a
+**dry run** that re-solves the factors with the prior and `r` now on disk,
+compares per cell and per schedule week in log space against
+`calibration_convergence_tol_log` (0.02), then restores the artifact so the
+chain on disk stays the one prior and dispersion were fitted against.
+Committing the re-solve while they lag it would create the very
+inconsistency being tested for. The verdict lands in
+`calibration.json → convergence` and the `calibration convergence` status
+row (WARN, not FAIL — chain health, not a launch gate); NOT CONVERGED means
+run steps 3b–5 once more and re-check. On production, a loop that does not
+settle in two iterations means the couplings are stronger on that extract
+than the fixture measured — stop and understand why before trusting either
+artifact.
+
 **The prior side is untestable on the fixture and remains open.** The
 fixture is the `--policy legacy` build, made to reproduce the production
 confound, and the estimator says so — two of five categories wrong-signed,

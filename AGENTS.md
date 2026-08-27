@@ -122,6 +122,7 @@ step                                          writes
 3. bootstrap.train_baseline --input prepared  artifacts/baseline_model.txt, feature_schema.json
 4. bootstrap.estimate_prior --input prepared  artifacts/prior.json           (BEFORE dispersion — §5.6)
 5. bootstrap.fit_dispersion --input prepared  artifacts/r_lookup.json, rho.json
+5b. bootstrap.train_baseline --check-convergence  (dry run; asserts the f<->r loop settled)
 6. backtest --input prepared                  reports/backtest.json
 7. bootstrap.train_baseline --fit-calibration artifacts/calibration.json     (ALWAYS run; re-seal after)
 7b. bootstrap.derive_thresholds               reports/thresholds.json

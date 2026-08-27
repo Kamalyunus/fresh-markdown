@@ -107,6 +107,28 @@ def _calibration(cfg, backtest):
                 "" if ok else "fidelity.by_week, by_window, measurement_10")
 
 
+def _calibration_convergence(cfg):
+    # the calibration <-> dispersion loop is resolved by iteration; this row
+    # says whether anyone ASSERTED the fixed point settled. WARN, not FAIL:
+    # like the level band it is a chain-health reading, not a launch gate.
+    cal = _read(cfg["baseline_model"]["calibration_factor_path"])
+    if not cal:
+        return _row("calibration convergence", NONE, "no calibration artifact")
+    block = cal.get("convergence")
+    if not block:
+        return _row("calibration convergence", NONE,
+                    "never checked -- the factor <-> r loop is assumed, "
+                    "not asserted",
+                    "python3 -m bootstrap.train_baseline --input "
+                    "data/prepared.parquet --check-convergence")
+    ok = bool(block.get("converged"))
+    return _row("calibration convergence", PASS if ok else WARN,
+                f"max |dlog f| {block.get('max_abs_dlog')} vs tol "
+                f"{block.get('tol_log')}",
+                "" if ok else "one more iteration: --fit-calibration, "
+                              "estimate_prior, fit_dispersion, re-check")
+
+
 def _prior(cfg):
     prior = _read(cfg["posterior"]["prior"]["path"])
     if not prior:
@@ -293,6 +315,7 @@ def collect(cfg, root="reports"):
         _mirrors(cfg, _read(os.path.join(root, "phase0.json"))),
         _vintages(cfg, state, backtest, shadow),
         _calibration(cfg, backtest),
+        _calibration_convergence(cfg),
         _prior(cfg),
         _tau(cfg, backtest, shadow),
         _shadow(shadow),

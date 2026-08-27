@@ -45,6 +45,16 @@ python3 -m bootstrap.estimate_prior --input data/prepared.parquet
 echo "== step 5: bootstrap.fit_dispersion ============================="
 python3 -m bootstrap.fit_dispersion --input data/prepared.parquet
 
+echo "== step 5b: calibration <-> dispersion convergence =============="
+# The chain is CIRCULAR across runs: the factor solve consumes r, and r, rho
+# and the prior are fitted against calibrated mu_ref. Steps 3b-5 are one
+# iteration of that loop; this asserts one more turn would reproduce the
+# factors (dry run -- the artifact is restored, so the chain on disk stays
+# the one steps 4-5 were fitted against). NOT CONVERGED -> run 3b, 4, 5, 5b
+# again. Non-fatal: the status line below carries the verdict.
+python3 -m bootstrap.train_baseline --input data/prepared.parquet \
+    --check-convergence || echo "  (convergence check errored -- see above)"
+
 echo "== step 6: backtest -- level diagnostic + tau cross-check ======="
 python3 -m backtest --input data/prepared.parquet --out reports/backtest.json
 

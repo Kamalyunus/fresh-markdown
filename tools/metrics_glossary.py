@@ -650,6 +650,7 @@ CATALOGUE = [
    "that no longer exists (hard rule 1). Model mismatch FAILs — re-run the "
    "report; a moved config_version WARNs.", "GATE"),
   ("calibration level", "verdict", "The level at the anchor, in band. Diagnostic — WARN out of band, since calibration is always applied.", ""),
+  ("calibration convergence", "verdict", "Whether one more turn of the calibration <-> dispersion loop reproduces the factors (--check-convergence, dry run). PASS settled; WARN moved past tolerance — iterate steps 3b-5 again; not run means assumed, never asserted.", ""),
   ("elasticity prior", "verdict", "How many categories stand on their own data, and how many are wrong-signed.", ""),
   ("exploration tau", "verdict", "What is in force, and the latest derivation.", "GATE"),
   ("shadow gate", "verdict", "Completeness, matched rate, cost-floor violations.", "GATE"),
