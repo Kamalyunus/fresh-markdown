@@ -149,28 +149,38 @@ def fit_dispersion(d, cfg):
                 "working_elasticity_by_category": {
                     k: round(v, 4) for k, v in sorted(eps_by_cat.items())}}
 
-    # rho against fitted residuals -- the authoritative value (phase 0's m3 is a proxy)
-    full = d.copy()
-    mu_ref_full = model.predict_mu_ref(full)
-    ratio_full = (1 - full.total_discount.to_numpy()) / (1 - full.d_ref.to_numpy())
-    full["resid"] = full.units_sold - np.clip(
-        mu_ref_full * ratio_full ** full.category.astype(str).map(
-            eps_by_cat).fillna(eps0).to_numpy(),
-        cfg["pricing"]["demand_floor"], None)
+    # rho against fitted residuals -- the authoritative value (phase 0's m3
+    # is a proxy). SAME WINDOW AS r: it once read the full frame, which is
+    # ~83% training rows -- where the model fits its own residuals by
+    # construction, so between-episode variance read artificially small
+    # (fixture: in-train rho 0.081 vs out-of-sample 0.230) -- and, on an
+    # extract that runs past test_end, hold-out rows too (hard rule 16). An
+    # understated rho understates deff, and deff deflates every posterior
+    # update, so every episode was counted as more evidence than it carries.
+    # calib is the one window that is both out-of-train and pre-gate (design
+    # 6); mean_forced_hours is measured on the same window so the deff pair
+    # is internally consistent.
+    calib["resid"] = calib.units_sold - calib.mu_hat
 
-    sizes = full.groupby("episode_id")["resid"].size()
-    sub_d = full[full.episode_id.isin(sizes[sizes >= 3].index)]
+    sizes = calib.groupby("episode_id")["resid"].size()
+    sub_d = calib[calib.episode_id.isin(sizes[sizes >= 3].index)]
     between = sub_d.groupby("episode_id")["resid"].mean().var(ddof=1)
     total = sub_d["resid"].var(ddof=1)
     rho = float(np.clip(between / total, 0.0, 0.95)) if total > 0 else 0.0
 
-    hours = full.groupby("episode_id").size()
-    changed = full.groupby("episode_id")["total_discount"].nunique() > 1
+    hours = calib.groupby("episode_id").size()
+    changed = calib.groupby("episode_id")["total_discount"].nunique() > 1
     hours_forced = hours[changed[changed].index]
     h_forced = float(hours_forced.mean()) if len(hours_forced) else float(hours.mean())
 
+    dates = pd.to_datetime(calib.date)
     rho_out = {"rho": round(rho, 4),
                "rho_method": "variance_decomposition_on_fitted_mu_residuals",
+               "fit_window": "calib",
+               "fit_window_dates": [str(dates.min().date()),
+                                    str(dates.max().date())],
+               "fit_rows": int(len(calib)),
+               "fit_episodes": int(calib.episode_id.nunique()),
                "mean_forced_hours_per_episode": round(h_forced, 3),
                "implied_deff": round(design_effect(rho, h_forced), 3)}
     return r_lookup, rho_out

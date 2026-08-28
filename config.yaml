@@ -302,13 +302,13 @@ dispersion:
   r_search_bounds: [0.05, 50.0]        # SET  MLE search range for r
   r_lookup_path: "artifacts/r_lookup.json"
   rho_path: "artifacts/rho.json"
-  rho: 0.1781                          # MEASURED  bootstrap.fit_dispersion,
+  rho: 0.2436                          # MEASURED  bootstrap.fit_dispersion,
     # against FITTED mu_ref residuals -- NOT phase 0's m3, which is a
     # category x hour proxy computed before any model exists and disclaims
     # itself. Must equal artifacts/rho.json; strict mode refuses to start on
     # divergence, because these two values set deff and deff deflates every
     # posterior update. Re-paste after every retrain.
-  mean_forced_hours_per_episode: 6.028 # MEASURED  ditto -> deff = 1.895
+  mean_forced_hours_per_episode: 5.909 # MEASURED  ditto -> deff = 2.196
 
 posterior:
     # The cell map is frozen into artifacts/posterior.json by

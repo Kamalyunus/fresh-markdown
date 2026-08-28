@@ -971,3 +971,26 @@ def test_convergence_check_flags_drift_and_never_commits_the_resolve(
     block = tb.check_calibration_convergence(None, cfg)
     assert not block["converged"]
     assert "anchor:B" in block["cells_appeared_or_gone"]
+
+
+def test_rho_is_fit_on_the_calib_window_not_the_full_frame():
+    """rho once read the whole input frame: ~83% training rows, where the
+    model fits its own residuals and between-episode variance reads small
+    (fixture: in-train rho 0.081 vs out-of-sample 0.230) -- plus, on a longer
+    extract, rows past test_end (hard rule 16). An understated rho understates
+    deff, and deff deflates every posterior update. calib is the one window
+    both out-of-train and pre-gate, and r already lives there."""
+    import inspect
+
+    from bootstrap import fit_dispersion as fd
+
+    src = inspect.getsource(fd.fit_dispersion)
+    rho_part = src[src.index("rho against fitted residuals"):]
+    assert "d.copy()" not in rho_part, \
+        "rho must not be fit on the raw input frame"
+    assert 'calib.groupby("episode_id")' in rho_part
+
+    art = fd and __import__("json").load(
+        open(load_config()["dispersion"]["rho_path"]))
+    if "fit_window" in art:                 # artifact written post-change
+        assert art["fit_window"] == "calib"

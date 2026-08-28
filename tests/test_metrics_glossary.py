@@ -104,8 +104,8 @@ def test_the_status_section_matches_the_real_check_names(cfg):
 
 # ------------------------------------------------------- figures quoted inline
 @pytest.mark.parametrize("figure, path", [
-    ("0.1781", ("dispersion", "rho")),
-    ("6.028", ("dispersion", "mean_forced_hours_per_episode")),
+    ("0.2436", ("dispersion", "rho")),
+    ("5.909", ("dispersion", "mean_forced_hours_per_episode")),
     ("12.0", ("learning", "information_increment")),
     ("0.15", ("learning", "max_mean_step")),
 ])
