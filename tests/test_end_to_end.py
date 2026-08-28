@@ -36,8 +36,11 @@ def workspace(tmp_path_factory):
         assert r.returncode == 0, r.stdout + r.stderr
         return r.stdout
 
+    # no --days: the generator derives the span from config so it covers
+    # every split INCLUDING the hold-out -- a pinned day count silently
+    # stops short of the hold-out whenever the split moves
     run(os.path.join(REPO, "tools", "make_dummy_flc.py"),
-        "--skus", "120", "--days", "160", "--policy", "randomized",
+        "--skus", "120", "--policy", "randomized",
         "--seed", "3", "--out", "data/flc.parquet")
     run("-m", "bootstrap.prepare_data", "--input", "data/flc.parquet",
         "--out", "data/prepared.parquet")

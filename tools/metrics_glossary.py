@@ -194,14 +194,14 @@ CATALOGUE = [
   ("rho", "rate",
    "Correlation between hours within one episode, measured on the FITTED MODEL'S "
    "residuals at the working elasticity (the per-category prior means). "
-   "**0.3103.** A changed prior invalidates it.", "GATE — mirrored into config"),
+   "**0.1781.** A changed prior invalidates it.", "GATE — mirrored into config"),
   ("mean_forced_hours_per_episode", "hours",
    "Average number of hours per episode that carry forced (randomised) prices. "
-   "**8.563.** The cluster size in the design effect.", "GATE — mirrored into config"),
+   "**6.028.** The cluster size in the design effect.", "GATE — mirrored into config"),
   ("deff", "ratio",
-   "Design effect `1 + (m − 1)·ρ` = **3.347**. Divides Fisher information before it "
-   "is compared to the learning threshold: 8.563 correlated hours carry the "
-   "information of about 2.56 independent ones.", "every posterior update"),
+   "Design effect `1 + (m − 1)·ρ` = **1.895**. Divides Fisher information before it "
+   "is compared to the learning threshold: 6.028 correlated hours carry the "
+   "information of about 3.18 independent ones.", "every posterior update"),
  ]),
 
 ("Elasticity prior", "bootstrap.estimate_prior → artifacts/prior.json",

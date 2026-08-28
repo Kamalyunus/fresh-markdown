@@ -136,6 +136,10 @@ def span_covering_splits(cfg):
         split = cfg["data"]["split"]
         lo = dt.date.fromisoformat(str(split["train_start"]))
         hi = dt.date.fromisoformat(str(split["test_end"]))
+        # the hold-out sits past test_end and shadow's honest run needs it
+        h = (cfg["data"].get("holdout") or {}).get("end")
+        if h:
+            hi = max(hi, dt.date.fromisoformat(str(h)))
     except Exception:                                   # noqa: BLE001
         return DEFAULT_START, 90
     # the exclusion window sits inside the span and removes its rows, so the
