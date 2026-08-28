@@ -234,14 +234,15 @@
 
 <section>
   <span class="stepnum">STEP 1 · feasible_tiers</span>
-  <h2>Build the legal price grid</h2>
+  <h2>17 legal, 5 choosable</h2>
   <p>Discounts run from 0 in 2.5&thinsp;pp steps up to the cost floor
   <code style="font-family:var(--data)">d_max = 1 − cost/price = 40%</code>:
-  <b>17 tiers</b>. Nothing below cost is ever <em>representable</em> — the floor
-  lives in the action space itself, not in a check that could be skipped. And
-  mid-episode, everything shallower than the 30% anchor is history: markdown
-  never retreats, so those tiers are legal for the value function but no longer
-  choosable.</p>
+  <b>17 legal tiers</b>. Nothing below cost is ever <em>representable</em> — the
+  floor lives in the action space itself, not in a check that could be skipped.
+  But mid-episode, everything shallower than the 30% anchor is history: markdown
+  never retreats, so only the <b>5 tiers from 30% to 40%</b> are choosable this
+  hour. The shallow tiers stay in the value function (the same solver serves the
+  entry decision, where they are reachable), but they cannot be picked here.</p>
   <div class="strip" aria-hidden="true">
     <div class="cell locked"></div><div class="cell locked"></div><div class="cell locked"></div><div class="cell locked"></div>
     <div class="cell locked"></div><div class="cell locked"></div><div class="cell locked"></div><div class="cell locked"></div>
