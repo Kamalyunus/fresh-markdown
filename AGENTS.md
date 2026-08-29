@@ -120,21 +120,32 @@ step                                          writes
 1b. tools.eda --input prepared                reports/eda.json, docs/eda.html  (descriptive only)
 2. bootstrap.measure --input <raw>            reports/phase0.json
 3. bootstrap.train_baseline --input prepared  artifacts/baseline_model.txt, feature_schema.json
+3b. bootstrap.train_baseline --fit-calibration artifacts/calibration.json    (BEFORE prior — see below)
 4. bootstrap.estimate_prior --input prepared  artifacts/prior.json           (BEFORE dispersion — §5.6)
 5. bootstrap.fit_dispersion --input prepared  artifacts/r_lookup.json, rho.json
 5b. bootstrap.train_baseline --check-convergence  (dry run; asserts the f<->r loop settled)
 6. backtest --input prepared                  reports/backtest.json
-7. bootstrap.train_baseline --fit-calibration artifacts/calibration.json     (ALWAYS run; re-seal after)
-7b. bootstrap.derive_thresholds               reports/thresholds.json
+6b. bootstrap.derive_thresholds               reports/thresholds.json
 8. bootstrap.init_posterior                   artifacts/posterior.json       (once; --force to overwrite)
 9. pipeline.shadow --input prepared           reports/shadow.json            (holdout by default)
 10. tools.make_charts                         reports/charts/*.png
 11. bootstrap.seal                            artifacts/bundle.json
 ```
 
-`scripts/run_bootstrap.sh <raw>` runs 1–6, 10, 11 and prints `status`. **It
-retrains the baseline every time** (rule 1) — iterate on single modules, not
-the script. After `--fit-calibration`, **re-run `bootstrap.seal`**.
+**The order above is a LOOP, not a line, and 3b is where it turns.** The
+factor solve consumes `r`, while `r`, `rho` and the prior are all fitted
+against *calibrated* `mu_ref` — so calibration comes **before** prior and
+dispersion, and they are re-fitted against it. On a first run there is no
+`r_lookup` yet and 3b silently uses the raw-mu basis; the second pass gets
+the censored one. Step 5b asserts the fixed point settled: **NOT CONVERGED
+means run 3b → 4 → 5 → 5b again**, which is normal after a retrain or a
+split change. (§9.2)
+
+`scripts/run_bootstrap.sh <raw>` runs 1–6, 10, 11 and prints `status`, in
+exactly this order — it is the executable copy of the table above; if the two
+disagree, the script is right. **It retrains the baseline every time**
+(rule 1) — iterate on single modules, not the script. After a later
+standalone `--fit-calibration`, **re-run `bootstrap.seal`**.
 
 Daily production loop (Lane C — full operator guidance in `RUNBOOK.md`):
 

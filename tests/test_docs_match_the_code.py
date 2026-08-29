@@ -216,3 +216,51 @@ def test_agents_md_stays_a_router_not_a_reference():
         "move the new content to its reference home and point to it")
     # the non-negotiables must stay at the top, ahead of everything else
     assert text.index("## Non-negotiables") < text.index("## Setup")
+
+
+def test_the_pipeline_table_matches_the_executable_script():
+    """AGENTS.md's step table and run_bootstrap.sh are two copies of one
+    order, and they silently drifted: the table left calibration at step 7
+    (after backtest) while the script had long moved it to 3b (before prior,
+    because prior and dispersion are fitted against CALIBRATED mu_ref). An
+    agent following the table would run --check-convergence before
+    calibration.json existed. The script is the authority; this pins the
+    table to it on the steps whose ORDER carries a dependency."""
+    import re
+
+    text = (ROOT / "AGENTS.md").read_text()
+    script = (ROOT / "scripts" / "run_bootstrap.sh").read_text()
+
+    def table_pos(token):
+        i = text.find("## Pipeline order")
+        j = text.find(token, i)
+        assert j > 0, f"{token} missing from the AGENTS.md pipeline table"
+        return j
+
+    def script_pos(token):
+        j = script.find(token)
+        assert j > 0, f"{token} missing from run_bootstrap.sh"
+        return j
+
+    # the dependency chain: calibration -> prior -> dispersion -> convergence.
+    # Matched on INVOCATIONS, not mentions: the script explains the ordering
+    # in a comment that names later steps before it runs them.
+    table_chain = ["--fit-calibration", "estimate_prior", "fit_dispersion",
+                   "--check-convergence"]
+    script_chain = ["--fit-calibration",
+                    "python3 -m bootstrap.estimate_prior",
+                    "python3 -m bootstrap.fit_dispersion",
+                    "--check-convergence"]
+    for where, pos, chain in (("AGENTS.md", table_pos, table_chain),
+                              ("run_bootstrap.sh", script_pos, script_chain)):
+        offsets = [pos(t) for t in chain]
+        assert offsets == sorted(offsets), (
+            f"{where} orders the calibration/prior/dispersion/convergence "
+            f"chain wrongly: {chain} must appear in that order")
+
+    # and the table must not still promise a post-backtest calibration step
+    tail = text[table_pos("--fit-calibration"):table_pos("--check-convergence")]
+    assert "backtest" not in tail, \
+        "calibration must precede backtest in the table, as it does in the script"
+    # the step label the script uses for it
+    assert re.search(r"3b\.\s+bootstrap\.train_baseline --fit-calibration", text)
