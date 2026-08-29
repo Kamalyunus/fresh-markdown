@@ -1765,6 +1765,36 @@ prevents, and it is the same discipline as §12a's velocity features.
 Both harnesses get it through `BaselineModel.predict_mu_ref` alone; neither
 has factor-selection code of its own, because a second copy would drift.
 
+**Shadow reports both calibration regimes (owner, 2026-08-28).** The 08-27
+change moved the freeze into the backtest gate and left the artifact's
+schedule running weekly — but that schedule is built over `pre_launch` data
+and stops at `split.test_end`, and the hold-out begins *after* it. So every
+shadow row fell back to the frozen anchor, and shadow was measuring **launch
+and never re-calibrate** while appearing to mirror production. The fix in the
+backtest did nothing for shadow; the gap was real and is now closed.
+
+`pipeline.shadow.weekly_refit_schedule` re-fits the factors for each week of
+the replay window on the trailing `calibration_fit_trailing_weeks` ending
+**strictly before** that week — the way the production cron holds them — and
+the report carries both readings side by side in `calibration_regimes`:
+`frozen_anchor`, `weekly_refit`, and their `spread`. Both ratios are
+`realised / E[min(D,q)]` on the *same rows at the same legacy prices*; only
+the level factor differs, and because a factor is a per-(cell, week)
+multiplier the second reading is an exact rescale of `mu`, not a
+re-prediction.
+
+Two placement decisions carry it. It is fitted **in shadow, not in the
+artifact**: extending the artifact's schedule past `test_end` would put
+hold-out rows into a pre-launch bundle (hard rule 16), whereas a forward
+replay at week *k* legitimately reads weeks *< k* — exactly what the cron has
+available on that Monday. And each week's window ends *strictly before* it,
+so the replay never borrows its own future. Reading the pair: both near 1.0,
+the level held; only `frozen_anchor` off, the anchor went stale and weekly
+re-fitting earns its keep; both off, the level moved faster than a weekly
+cadence can track and the answer is a retrain, not a cadence change. The
+spread is the measured value of weekly re-calibration on that window — read
+it before setting the production cadence.
+
 **The gate freezes; the schedule does not (owner, 2026-08-27).** Two
 questions share one artifact and must not be confused:
 

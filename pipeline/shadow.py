@@ -104,6 +104,58 @@ EP_COLS = ("hour_of_day", "sku_id", "fc", "category", "subcategory",
            "mu_ref_hat", "date", "is_observed")
 
 
+def weekly_refit_schedule(d_full, cfg, model, r_lookup, start, end):
+    """Re-fit the level factors for each week of the shadow window, the way
+    production's weekly cron would.
+
+    THIS IS WHAT THE ARTIFACT CANNOT CARRY. The calibration schedule is built
+    over pre-launch data and stops at `split.test_end`, so every hold-out row
+    falls back to the frozen anchor -- shadow therefore measures "launch and
+    never re-calibrate". Production does re-calibrate weekly, and the honest
+    comparison needs both. Fitting it HERE rather than in the artifact keeps
+    the pre-launch bundle clean of hold-out rows (hard rule 16): shadow is a
+    forward replay, so at week k it may fit on weeks < k, which is exactly
+    what the cron has available on that Monday.
+
+    Returns {week_start: {cell: factor}} for the weeks the window spans.
+    """
+    from bootstrap.train_baseline import _solve_level_factors
+    from bootstrap.prepare_data import population
+
+    bm = cfg["baseline_model"]
+    weeks_back = bm["calibration_fit_trailing_weeks"]
+    grain = model.calibration_grain
+    scope = population(d_full, cfg).copy()
+    dates = pd.to_datetime(scope.date)
+    wk = dates.dt.to_period("W")
+    lo_w = pd.Timestamp(start).to_period("W").start_time
+    hi_w = pd.Timestamp(end).to_period("W").start_time
+
+    out, coverage = {}, []
+    for w in sorted(wk.unique()):
+        w0 = w.start_time
+        if w0 < lo_w or w0 > hi_w:
+            continue
+        lo = w0 - pd.Timedelta(weeks=weeks_back)
+        # STRICTLY BEFORE this week: no look-ahead inside the replay
+        window = scope[(wk.dt.start_time >= lo) & (wk.dt.start_time < w0)]
+        weeks_seen = int(wk[(wk.dt.start_time >= lo)
+                            & (wk.dt.start_time < w0)].nunique())
+        fitted = _solve_level_factors(
+            window.copy(), cfg, model, grain, bm["calibration_shrinkage_units"],
+            bm["calibration_min_anchor_rows"], cfg["pricing"]["tier_step"],
+            cfg["pricing"]["negbin_max_k"], r_lookup) if len(window) else None
+        if fitted is None:                 # too thin: that week keeps the anchor
+            coverage.append({"week": str(w0.date()), "fitted": False})
+            continue
+        out[str(w0.date())] = fitted[0]
+        coverage.append({"week": str(w0.date()), "fitted": True,
+                         "fit_rows": int(len(window)),
+                         "weeks_in_window": weeks_seen,
+                         "partial": weeks_seen < weeks_back})
+    return out, coverage
+
+
 def _prepare_items(d, cfg, model, r_lookup):
     """Extend to the full window BEFORE predicting (early sell-out must not
     shorten the DP horizon), then pack per-episode arrays for _shadow_one."""
@@ -179,7 +231,7 @@ def derive_tau0(d_full, cfg, start, model, posterior, r_lookup, il_history,
     # tau None: nothing explores, and the ledger does not care -- spreads are
     # recorded before the draw, independent of the tau in force
     ctx = {"cfg": cfg, "tau": None, "model_version": model.version,
-           "seed": seed,
+           "seed": seed, "cal_grain": model.calibration_grain,
            "cells": {str(c): posterior.get(c) for c in pre.category.unique()}}
     ledger = explore.SpreadLedger()
     for out in map_episodes(_shadow_one, items, ctx, workers):
@@ -348,7 +400,12 @@ def _shadow_one(ep, ctx):
         "abs_log_ratio": 0.0, "forced_mu": 0.0, "forced_discount_gap": 0.0,
         "rec_disc": 0.0, "leg_disc": 0.0, "differs": 0,
         "ep_discount_cost": 0.0, "latencies": [],
-        "drift": {"mu": [], "r": [], "q": [], "sold": []},
+        # `date` and `cell` ride along so the drift ratio can be recomputed
+        # under a WEEKLY RE-FIT calibration as well as the frozen anchor --
+        # a level factor is a per-(cell, week) multiplier, so swapping it is
+        # an exact rescale of mu, no re-prediction needed
+        "drift": {"mu": [], "r": [], "q": [], "sold": [], "date": [],
+                  "cell": []},
         "last_row": None,
     }
     anchor, last_obs = None, None
@@ -447,6 +504,8 @@ def _shadow_one(ep, ctx):
         out["drift"]["r"].append(float(ep["r_val"][t]))
         out["drift"]["q"].append(q)
         out["drift"]["sold"].append(sold)
+        out["drift"]["date"].append(str(ep["date"][t]))
+        out["drift"]["cell"].append(str(ep[ctx["cal_grain"]][t]))
 
         anchor = legacy_d                 # reality's price is the next anchor
 
@@ -525,10 +584,11 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     # scrap is classified by common.episodes.classify_last, not a copy of it
     last_rows = []
     latencies = []
-    drift = {"mu": [], "r": [], "q": [], "sold": []}
+    drift = {"mu": [], "r": [], "q": [], "sold": [], "date": [],
+             "cell": []}
 
     ctx = {"cfg": cfg, "tau": tau, "model_version": model.version,
-           "seed": seed,
+           "seed": seed, "cal_grain": model.calibration_grain,
            "cells": {str(c): posterior.get(c) for c in d.category.unique()}}
 
     for out in map_episodes(_shadow_one, items, ctx, workers):
@@ -567,11 +627,48 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
 
     # censored basis: sales cannot exceed inventory, so the drift ratio
     # compares realised sales against E[min(D, q)] -- never raw mu
-    predicted = expected_min_demand_inventory_vec(
-        np.array(drift["mu"]), np.array(drift["r"]),
-        np.array(drift["q"], dtype=float), cfg["pricing"]["negbin_max_k"])
-    drift_ratio = (float(np.sum(drift["sold"]) / predicted.sum())
-                   if predicted.sum() > 0 else None)
+    mu_arr = np.array(drift["mu"])
+    r_arr = np.array(drift["r"])
+    q_arr = np.array(drift["q"], dtype=float)
+    max_k = cfg["pricing"]["negbin_max_k"]
+    sold_total = float(np.sum(drift["sold"]))
+
+    def _ratio(mu):
+        pred = expected_min_demand_inventory_vec(mu, r_arr, q_arr, max_k)
+        return (float(sold_total / pred.sum()) if pred.sum() > 0 else None)
+
+    drift_ratio = _ratio(mu_arr)
+
+    # THE SECOND READING: the same rows re-priced under a WEEKLY RE-FIT, the
+    # way production's cron would hold the factors. The artifact's schedule
+    # stops at test_end, so `drift_ratio` above is "launch and never
+    # re-calibrate"; this one is "launch and re-fit weekly", and the spread
+    # between them is what weekly re-calibration is worth on this window.
+    # A factor is a per-(cell, week) multiplier, so swapping it is an exact
+    # rescale of mu -- no re-prediction, and eps/r/q are untouched.
+    refit_ratio, refit_cov, refit_applied = None, [], 0
+    refit = {}
+    if pre_window_frame is not None and drift["date"]:
+        try:
+            refit, refit_cov = weekly_refit_schedule(
+                pre_window_frame, cfg, model, r_lookup,
+                min(drift["date"]), max(drift["date"]))
+        except Exception as exc:                          # noqa: BLE001
+            refit, refit_cov = {}, [{"error": str(exc)}]
+    if refit:
+        anchor_f = model.calibration
+        weeks = pd.to_datetime(pd.Series(drift["date"])) \
+                  .dt.to_period("W").dt.start_time.dt.strftime("%Y-%m-%d")
+        scale = np.ones(len(mu_arr))
+        for i, (wkey, cell) in enumerate(zip(weeks.to_numpy(),
+                                             drift["cell"])):
+            table = refit.get(wkey)
+            if table is None:
+                continue                       # unfitted week keeps the anchor
+            base = float(anchor_f.get(cell, 1.0)) or 1.0
+            scale[i] = float(table.get(cell, base)) / base
+            refit_applied += 1
+        refit_ratio = _ratio(mu_arr * scale)
 
     # weeks-to-convergence input: evidence bought -> bounded posterior steps;
     # the step cap and daily human gate keep a calendar floor regardless
@@ -833,6 +930,34 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         },
         "realised_vs_predicted_sold_ratio_at_legacy_price": round(drift_ratio, 4)
             if drift_ratio else None,
+        # BOTH calibration regimes on the same rows (owner, 2026-08-28).
+        # frozen = the shipped artifact, whose weekly schedule stops at
+        # test_end so every hold-out row holds the anchor: "launch and never
+        # re-calibrate". weekly_refit = factors re-fit each week on the
+        # trailing window ending strictly before it, the way production's
+        # cron holds them. The SPREAD is what weekly re-calibration is worth
+        # over this window; read it before deciding the production cadence.
+        "calibration_regimes": {
+            "frozen_anchor": round(drift_ratio, 4) if drift_ratio else None,
+            "weekly_refit": round(refit_ratio, 4) if refit_ratio else None,
+            "spread": (round(refit_ratio - drift_ratio, 4)
+                       if (refit_ratio and drift_ratio) else None),
+            "rows_rescaled": refit_applied,
+            "weeks_refit": sum(1 for c in refit_cov if c.get("fitted")),
+            "weeks_on_partial_window": [
+                c["week"] for c in refit_cov if c.get("partial")],
+            "weeks_unfitted_held_at_anchor": [
+                c["week"] for c in refit_cov if c.get("fitted") is False],
+            "note": ("Both ratios are realised/E[min(D,q)] on the SAME rows "
+                     "at the legacy price -- only the level factor differs. "
+                     "The schedule is fit here, not in the artifact, so the "
+                     "pre-launch bundle stays clean of hold-out rows (rule "
+                     "16); at week k it reads only weeks < k, which is what "
+                     "the cron has on that Monday. Both near 1.0 = the level "
+                     "held. Only frozen off = the anchor went stale and "
+                     "weekly re-fitting earns its keep. Both off = the level "
+                     "moved faster than a weekly cadence can track."),
+        },
         "solver_latency_p95_s": round(float(np.percentile(latencies, 95)), 4),
         "note": ("Shadow outcomes carry execution_status="
                  f"'{SHADOW_STATUS}' and are ineligible for pipeline.update: "
@@ -934,6 +1059,14 @@ def main():
           f"(differs {rv['share_hours_differing']:.1%} of hours)")
     print(f"drift ratio        : "
           f"{report['realised_vs_predicted_sold_ratio_at_legacy_price']}")
+    cr = report.get("calibration_regimes") or {}
+    if cr.get("weekly_refit") is not None:
+        print(f"calibration      : frozen {cr['frozen_anchor']} | "
+              f"weekly re-fit {cr['weekly_refit']} | spread {cr['spread']} "
+              f"({cr['weeks_refit']} weeks re-fit)")
+    elif cr:
+        print("calibration      : frozen anchor only -- no week could be "
+              "re-fit on this window")
     ly = report["learning_yield_would_be"]
     print(f"would-be learning  : {ly['bounded_updates_supported']} bounded "
           f"updates from this window "

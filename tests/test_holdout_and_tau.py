@@ -994,3 +994,37 @@ def test_rho_is_fit_on_the_calib_window_not_the_full_frame():
         open(load_config()["dispersion"]["rho_path"]))
     if "fit_window" in art:                 # artifact written post-change
         assert art["fit_window"] == "calib"
+
+
+def test_shadow_refits_calibration_forward_only_and_reports_both_regimes():
+    """Shadow must answer BOTH calibration questions, and the re-fit one must
+    not cheat.
+
+    The artifact's schedule is built over pre-launch data and stops at
+    test_end, so every hold-out row falls back to the anchor -- shadow alone
+    measures "launch and never re-calibrate". Production re-fits weekly, so
+    the report carries that reading too. It is fitted in SHADOW, not in the
+    artifact, so the pre-launch bundle stays clean of hold-out rows (rule 16),
+    and each week may read only weeks STRICTLY BEFORE it -- a forward replay
+    has no later data, and borrowing it would make the comparison meaningless.
+    """
+    import inspect
+
+    from pipeline import shadow
+
+    src = inspect.getsource(shadow.weekly_refit_schedule)
+    assert "wk.dt.start_time < w0" in src, \
+        "each week must fit on data strictly before it -- no look-ahead"
+    assert "_solve_level_factors" in src, \
+        "must reuse the one factor solve, not a second copy"
+
+    run = inspect.getsource(shadow.run_shadow)
+    assert '"calibration_regimes"' in run
+    for key in ("frozen_anchor", "weekly_refit", "spread"):
+        assert f'"{key}"' in run, f"the report must carry {key}"
+    # the artifact is never written by shadow: the bundle stays pre-launch
+    assert "fit_level_calibration" not in run
+
+    # both ratios are computed on the SAME rows -- only the factor differs
+    assert "mu_arr * scale" in run, \
+        "the re-fit reading must rescale mu, not re-predict it"

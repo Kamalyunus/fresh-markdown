@@ -460,6 +460,17 @@ CATALOGUE = [
   ("realised_vs_predicted_sold_ratio_at_legacy_price", "ratio",
    "The production continuation of the calibration gate, and the first place "
    "frozen-baseline drift shows.", ""),
+  ("calibration_regimes", "ratio",
+   "Two readings of the SAME hold-out rows at the same legacy prices -- only the "
+   "level factor differs. `frozen_anchor` is the shipped artifact, whose weekly "
+   "schedule stops at test_end, so every hold-out row holds the anchor: launch and "
+   "never re-calibrate. `weekly_refit` re-fits each week on the trailing window "
+   "ending STRICTLY BEFORE it, the way production's cron holds them (fitted in "
+   "shadow, not in the artifact, so the pre-launch bundle stays clean of hold-out "
+   "rows). Both near 1.0 = the level held; only frozen off = the anchor went stale "
+   "and weekly re-fitting earns its keep; both off = the level moved faster than a "
+   "weekly cadence can track, and the answer is a retrain.",
+   "the production re-calibration cadence decision"),
   ("solver_latency_p95_s", "secs",
    "95th percentile DP solve time.", ""),
  ]),
