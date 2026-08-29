@@ -167,3 +167,43 @@ def test_convergence_row_warns_until_the_fixed_point_is_asserted(cfg, tmp_path):
         "converged": False, "max_abs_dlog": 0.09, "tol_log": 0.02}}))
     row = status._calibration_convergence(c)
     assert row["verdict"] == status.WARN and "one more iteration" in row["where"]
+
+
+def test_convergence_goes_stale_when_the_chain_it_checked_moves(cfg, tmp_path):
+    """A convergence verdict is only about the artifacts in force when it ran.
+    Re-fit the prior or the dispersion and the loop has turned again, so a
+    green line would describe a chain that no longer exists -- the same
+    failure `report vintages` prevents for reports. Production re-fits
+    calibration weekly against a FROZEN r and rho, which does not turn the
+    loop; a retrain of either does, and this is what notices."""
+    prior = tmp_path / "prior.json"
+    prior.write_text(json.dumps({"per_category": {}}))
+    cal = tmp_path / "cal.json"
+    c = dict(cfg,
+             baseline_model=dict(cfg["baseline_model"],
+                                 calibration_factor_path=str(cal)),
+             posterior=dict(cfg["posterior"],
+                            prior=dict(cfg["posterior"]["prior"],
+                                       path=str(prior))),
+             dispersion=dict(cfg["dispersion"],
+                             r_lookup_path=str(tmp_path / "absent_r.json"),
+                             rho_path=str(tmp_path / "absent_rho.json")))
+    from common.provenance import file_digest
+
+    cal.write_text(json.dumps({"factors": {"A": 1.1}, "convergence": {
+        "converged": True, "max_abs_dlog": 0.001, "tol_log": 0.02,
+        "checked_against": {"prior": file_digest(str(prior))}}}))
+    assert status._calibration_convergence(c)["verdict"] == status.PASS
+
+    prior.write_text(json.dumps({"per_category": {}, "refitted": True}))
+    row = status._calibration_convergence(c)
+    assert row["verdict"] == status.WARN
+    assert "prior" in row["detail"] and "moved" in row["detail"]
+
+    # an artifact written before digests existed cannot be checked for
+    # staleness -- say so rather than implying the check still holds
+    cal.write_text(json.dumps({"factors": {"A": 1.1}, "convergence": {
+        "converged": True, "max_abs_dlog": 0.001, "tol_log": 0.02}}))
+    row = status._calibration_convergence(c)
+    assert row["verdict"] == status.PASS
+    assert "staleness unverifiable" in row["detail"]

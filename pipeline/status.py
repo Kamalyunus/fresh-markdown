@@ -121,10 +121,32 @@ def _calibration_convergence(cfg):
                     "not asserted",
                     "python3 -m bootstrap.train_baseline --input "
                     "data/prepared.parquet --check-convergence")
+    # STALE BEATS CONVERGED. The verdict is only about the artifacts in force
+    # when it ran: re-fit the prior or the dispersion and the loop has turned
+    # again, so a green line would describe a chain that no longer exists.
+    # Production re-fits calibration weekly against a FROZEN r and rho, which
+    # does not turn the loop -- but a retrain of either does, and this is what
+    # notices (assurance watches the live drift; this watches the artifacts).
+    from common.provenance import file_digest
+    moved = []
+    for name, path in (("prior", (cfg["posterior"]["prior"] or {}).get("path")),
+                       ("r_lookup", cfg["dispersion"].get("r_lookup_path")),
+                       ("rho", cfg["dispersion"].get("rho_path"))):
+        was = (block.get("checked_against") or {}).get(name)
+        if was and path and os.path.exists(path) and file_digest(path) != was:
+            moved.append(name)
+    if moved:
+        return _row("calibration convergence", WARN,
+                    f"checked against a chain that has since moved: "
+                    f"{', '.join(moved)} re-fitted after the check",
+                    "re-run --check-convergence; the loop turned again")
+
     ok = bool(block.get("converged"))
     return _row("calibration convergence", PASS if ok else WARN,
                 f"max |dlog f| {block.get('max_abs_dlog')} vs tol "
-                f"{block.get('tol_log')}",
+                f"{block.get('tol_log')}"
+                + ("" if block.get("checked_against") else
+                   " · pre-digest check, staleness unverifiable"),
                 "" if ok else "one more iteration: --fit-calibration, "
                               "estimate_prior, fit_dispersion, re-check")
 

@@ -619,9 +619,28 @@ def check_calibration_convergence(d, cfg):
             worst = w
         missing += m
 
+    # WHAT IT WAS CHECKED AGAINST. A convergence verdict is only about the
+    # artifacts in force when it ran: re-fit the prior or the dispersion and
+    # the loop has turned again, so the stored verdict describes a chain that
+    # no longer exists. Digests let `status` say so instead of showing a green
+    # line for a check nobody re-ran (the same discipline as report vintages).
+    from common.provenance import file_digest
+    checked_against = {}
+    for name, path_key in (("prior", ("posterior", "prior", "path")),
+                           ("r_lookup", ("dispersion", "r_lookup_path")),
+                           ("rho", ("dispersion", "rho_path"))):
+        node = cfg
+        for k in path_key:
+            node = node.get(k) if isinstance(node, dict) else None
+            if node is None:
+                break
+        if isinstance(node, str) and os.path.exists(node):
+            checked_against[name] = file_digest(node)
+
     converged = not missing and worst[0] <= tol
     block = {
         "tol_log": tol,
+        "checked_against": checked_against,
         "max_abs_dlog": round(worst[0], 6),
         "worst_cell": worst[1],
         "cells_appeared_or_gone": missing,

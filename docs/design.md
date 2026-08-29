@@ -1896,6 +1896,32 @@ rows), and `f` shifts the level while `r`/`rho` measure second moments
 `rho` +3.6%). What was missing was the assertion: nothing checked that one
 more turn of the loop reproduces the factors, so every downstream number
 silently depended on how many iterations happened to run.
+**What it is and is not.** Convergence is a NUMERICAL property, not a
+generalization one: it asserts that one more turn of the loop reproduces the
+factors, which is a property of the iteration on a given dataset. It is
+measured in-sample by construction, and correctly so — "would this hold on
+unseen data" is not a meaningful question about a fixed point. **Converged is
+not correct**: a loop can settle stably on a bad fixed point. Out-of-sample
+validity is answered by different instruments, and those are held out —
+`level_bias_at_anchor` on `test`, the rolling-origin
+`calibration_window_sweep`, and shadow's `calibration_regimes` on the
+hold-out. Convergence is the precondition that makes those three mean
+anything: without it, each would depend on how many iterations happened to
+run.
+
+**In production the loop does not turn, so the check does not run there.**
+Only calibration and epsilon are re-fitted weekly; the model, `r` and `rho`
+stay frozen, which makes the weekly re-fit a one-directional `f <- r` with no
+feedback. The consistency established at launch does decay — each weekly
+re-fit shifts `mu_ref` while `r` and `rho` were fitted against an older `f` —
+and `pipeline.assurance` is what watches that on live outcomes
+(`dispersion_fit`, `correlation_drift`). Convergence gates the launch bundle;
+assurance watches the drift afterwards. What re-turns the loop is a RETRAIN
+of the prior or the dispersion, and the `convergence` block records the
+digests of the artifacts it was checked against so `pipeline.status` reports
+the verdict as STALE rather than green once any of them moves — the same
+discipline `report vintages` applies to reports.
+
 `train_baseline --check-convergence` (pipeline step 5b) is that check — a
 **dry run** that re-solves the factors with the prior and `r` now on disk,
 compares per cell and per schedule week in log space against
