@@ -1803,7 +1803,13 @@ the config; the pipeline measures what a forced decision costs, what it buys,
 and how many the budget funds, but nothing says how much margin learning is
 worth. `ab_test.min_detectable_effect_pct` — the reports say what effect is
 DETECTABLE, never what size is worth detecting, and setting it to the
-achievable number would make the power check pass by construction.
+achievable number would make the power check pass by construction. `tune`
+therefore reports the **frontier** rather than a recommendation: what each
+duration can resolve, and whether any reaches the target. Echoing the
+`--mde` flag back would be recommending the question as its own answer. When
+no duration reaches the target the finding says so and names the options --
+a longer pilot, more traffic, or a different question -- because that is a
+real finding about the extract, not a value to paste.
 `learning.max_std_shrink` — the two rails resolve the same mismatch and WHICH
 one moves is a safety posture: raising `max_mean_step` lets prices move
 faster, lowering `max_std_shrink` makes the system slower to become

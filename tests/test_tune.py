@@ -164,6 +164,11 @@ def test_a_tolerance_stays_with_the_owner(cfg, tmp_path):
     assert mde["class"] == "OWNER"
     assert "NOT measurable" in mde["evidence"]
     assert mde["key"] not in {f["key"] for f in rep["to_paste"]}
+    # the FRONTIER, not the target: echoing back the --mde flag would be
+    # recommending the question as its own answer
+    assert mde["recommended"] == 0.241, "must report what IS detectable"
+    assert "4w -> 0.241" in mde["evidence"]
+    assert "NO duration reaches" in mde["evidence"]
 
 
 def test_owner_values_are_never_written(cfg, tmp_path):

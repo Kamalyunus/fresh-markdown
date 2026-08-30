@@ -350,23 +350,34 @@ def _business(cfg, thresholds):
             "thresholds.bounded_step_recommendation.median_launch_std"))
     ab = (thresholds or {}).get("ab_duration") or {}
     by = ab.get("by_duration") or {}
-    passing = [k for k, v in by.items()
-               if str(v.get("meets_target")).lower() == "true"]
     cur = _get(cfg, ("ab_test", "min_detectable_effect_pct"))
     if by:
-        best = min(
-            (v.get("detectable_mde_rel") for v in by.values()
-             if v.get("detectable_mde_rel") is not None), default=None)
+        # the FRONTIER, not the target. Echoing back the --mde flag would be
+        # recommending the question as its own answer; what the data supplies
+        # is what each duration can resolve, and the owner picks a number they
+        # would act on -- or learns the A/B cannot resolve one that small.
+        achievable = sorted(
+            ((v.get("detectable_mde_rel"), k) for k, v in by.items()
+             if v.get("detectable_mde_rel") is not None))
+        best, best_dur = achievable[0] if achievable else (None, None)
+        target = ab.get("target_mde_rel")
+        passing = [k for k, v in by.items()
+                   if str(v.get("meets_target")).lower() == "true"]
+        frontier = ", ".join(f"{d} -> {m}" for m, d in achievable[:5])
         out.append(_finding(
             ("ab_test", "min_detectable_effect_pct"), OWNER,
-            OK if cur is not None else ACT, cur, ab.get("target_mde_rel"),
-            (f"no duration reaches the {ab.get('target_mde_rel')} target; the "
-             f"best any window achieves is {best}" if not passing else
-             f"durations meeting the target: {', '.join(sorted(passing))}")
-            + ". NOT measurable: the data says what is DETECTABLE, never what "
-              "size of effect is worth detecting -- setting this to the "
-              "achievable number would make the power check pass by "
-              "construction",
+            OK if cur is not None else ACT, cur, best,
+            (f"detectable by duration: {frontier}. "
+             + (f"The {target} target is met by {', '.join(sorted(passing))}."
+                if passing else
+                f"NO duration reaches the {target} target -- the best the "
+                f"extract can resolve is {best} at {best_dur}.")
+             + " NOT measurable: the data says what is DETECTABLE, never what "
+               "size of effect is worth acting on. Set the smallest effect the "
+               "business would act on; if that is below the frontier above, "
+               "this A/B cannot resolve it at any duration and the honest "
+               "options are a longer pilot, more traffic, or a different "
+               "question"),
             "thresholds.ab_duration.by_duration"))
     return out
 
