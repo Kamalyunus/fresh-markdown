@@ -72,12 +72,11 @@ def settle(cfg, max_turns):
             step("loop turn 1: 3b calibration",
                  ["bootstrap.train_baseline", "--input", PREPARED,
                   "--fit-calibration"])
-        # --fast drops the prior's two diagnostic blocks (~70% of its cost).
-        # Neither can move the fixed point: the loop compares FACTORS, which
-        # depend on r, which is fitted at the prior MEAN, while
-        # design_comparison feeds nothing and fold_spread only widens the std
-        # FLOOR. The final turn re-runs FULL, below, because init_posterior
-        # reads that std.
+        # --fast drops the prior's fold_spread diagnostic (most of its cost).
+        # It cannot move the fixed point: the loop compares FACTORS, which
+        # depend on r, which is fitted at the prior MEAN, while fold_spread
+        # only widens the std FLOOR. The final turn re-runs FULL, below,
+        # because init_posterior reads that std.
         step(f"loop turn {turn}: 4 prior (fast)",
              ["bootstrap.estimate_prior", "--input", PREPARED, "--fast"])
         step(f"loop turn {turn}: 5 dispersion",

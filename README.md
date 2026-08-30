@@ -23,8 +23,8 @@ randomized exploration.
 | `pipeline/tune.py` | 5.14 | Reads the reports and says what config should be, with the report field behind every recommendation. `--apply` pastes MEASURED values, backs up the config and records why in `artifacts/config_decisions.json`. |
 | `bootstrap/train_baseline.py` | 5.4, 9.2 | Frozen LightGBM/Tweedie `mu_ref`; price features overwritten to `d_ref` at inference; level-calibration factor fit. |
 | `bootstrap/fit_dispersion.py` | 5.5 | Frozen NB `r` by subcategory (censored MLE, fallback, clamp) and global `rho` vs fitted residuals. |
-| `bootstrap/estimate_prior.py` | 5.6 | The elasticity prior as a profile-likelihood density (censored Poisson, naive + controlled arms on entry rows, pooled shrinkage, no fallback constant); writes its own held-out and design comparisons into `prior.json`. |
-| `bootstrap/prior_density.py` | 5.6 | The estimator itself — curves, densities, wrong-sign and zero-width guards, `design_comparison`, `holdout_comparison`. Superseded designs: `docs/learnings.md`. |
+| `bootstrap/estimate_prior.py` | 5.6 | The elasticity prior as a profile-likelihood density (censored Poisson, naive + controlled arms on entry rows, pooled shrinkage, no fallback constant); writes its own held-out comparison into `prior.json`. |
+| `bootstrap/prior_density.py` | 5.6 | The estimator itself — curves, densities, wrong-sign and zero-width guards, `holdout_comparison`. Superseded designs: `docs/learnings.md`. |
 | `bootstrap/init_posterior.py` | 5.9 | One-time posterior initialisation from the prior artifact; refuses overwrite without `--force`. |
 | `bootstrap/derive_thresholds.py` | 5.3, 5.12, 11, 12 | Evidence for the owner decisions: empirical A/B duration vs MDE, 3σ guardrail noise floors. |
 | `pricing/demand.py` | 5.4, 5.7 | `mu(d) = mu_ref × ((1−d)/(1−d_ref))^ε`, truncated NB pmf. |
@@ -82,8 +82,7 @@ module directly. Agents: read `AGENTS.md` before touching the pipeline.)
    only if `baseline_model_version` matches across the two reports.
 2. **Prior acceptance gate (blocking, human, design 9.3)** — there is no reject flag
    in the artifact; the gate is a reading of `artifacts/prior.json`:
-   `design_comparison` (which rows × hour-control combination this extract
-   supports), `wrong_sign_categories` (own density discarded for the pooled
+   `wrong_sign_categories` (own density discarded for the pooled
    one), `std_basis` per category, and the `holdout_comparison` against
    `oracle` and `uniform`. A pooled or uniform prior is a designed outcome.
 3. Paste MEASURED values into `config.yaml` (`rho`,

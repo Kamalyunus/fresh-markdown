@@ -38,7 +38,7 @@ Then, in order:
    to separate wobble from trend — surfaced as WARN in `status`, never a
    launch blocker.
 2. **GATE — prior (owner).** Read `artifacts/prior.json` in this order:
-   `design_comparison` → `wrong_sign_categories` → per-category
+   `wrong_sign_categories` → per-category
    `mean/std/std_basis` → `holdout_comparison` (read
    `information_available_per_row` first). There is no pass flag; a pooled
    or uniform prior is a designed outcome, not a failure.

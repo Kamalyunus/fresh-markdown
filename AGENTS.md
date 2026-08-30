@@ -143,9 +143,8 @@ python3 -m bootstrap.run --check-only      # settle the loop against the
 ```
 
 The loop is tuned for the thing that dominates it: `estimate_prior --fast`
-drops the two diagnostic blocks that cannot move the fixed point (~70% of its
-cost — `design_comparison` feeds nothing, `fold_spread` only widens the std
-FLOOR, and factors follow the prior MEAN), and `--commit-convergence` keeps
+drops `fold_spread`, which cannot move the fixed point (it only widens the
+std FLOOR, and factors follow the prior MEAN), and `--commit-convergence` keeps
 the check's re-solve instead of recomputing it as the next turn's 3b. The
 artifact still gets a FULL prior once the loop settles.
 

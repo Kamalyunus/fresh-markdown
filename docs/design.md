@@ -744,11 +744,8 @@ by `bootstrap.estimate_prior`):
   cell fitted from a few observations absorbs the price response it is meant
   to control for and biases |ε| toward zero; `median_rows_per_time_cell` is
   reported so a reader can see whether the control is actually being applied.
-- **Read the artifact in this order:** `design_comparison` (every rows ×
-  hour-control combination, scored for sign, span and cell size — which
-  combination an extract supports is a property of the extract; rank fewest
-  wrong-signed first, then `median_span`, then `median_rows_per_time_cell`),
-  then `wrong_sign_categories` with `unconstrained_argmax`, then
+- **Read the artifact in this order:** `wrong_sign_categories` with
+  `unconstrained_argmax`, then
   `holdout_comparison` — `log ∫ p(y_hold|ε)π(ε)dε` per held-out row,
   bracketed by `oracle` and `uniform`, reading
   `information_available_per_row` (oracle − uniform) first; candidates below
@@ -2016,10 +2013,9 @@ discipline `report vintages` applies to reports.
 
 **The loop is the slowest thing in the pipeline** (production measured
 hours), so `bootstrap.run` cuts the two costs that buy nothing.
-`estimate_prior --fast` skips `design_comparison` and `fold_spread` on loop
-turns: the first feeds nothing and the second only widens the std FLOOR,
-while the loop compares FACTORS, which follow `r`, which is fitted at the
-prior MEAN — measured at 43.7s → 14.8s on the fixture. And
+`estimate_prior --fast` skips `fold_spread` on loop turns: it only widens
+the std FLOOR, while the loop compares FACTORS, which follow `r`, which is
+fitted at the prior MEAN — measured at 43.7s → 14.8s on the fixture. And
 `--commit-convergence` keeps the check's re-solve rather than discarding it,
 because turn *k*'s check computes bit-for-bit what turn *k+1*'s
 `--fit-calibration` would; 3b therefore runs on turn 1 only. Both are
@@ -2110,8 +2106,7 @@ drift/staleness reading, never a launch blocker):
 ### 9.3 Prior-acceptance gate (blocking) — is the prior honest?
 
 A human reading of `prior.json`, not a flag in it (section 5.6): the
-`design_comparison` (which rows × time-control combination this extract
-supports), `wrong_sign_categories` (likelihoods peaking at positive ε —
+`wrong_sign_categories` (likelihoods peaking at positive ε —
 discarded for the pooled density), `std_basis` per category (which measured
 floor set the width), and the `holdout_comparison` against `oracle` and
 `uniform`. A pooled or uniform prior is a designed outcome: history that

@@ -1092,22 +1092,21 @@ def test_the_loop_does_not_recompute_what_the_check_already_solved():
 
 
 def test_the_prior_fast_path_drops_only_what_cannot_move_the_fixed_point():
-    """`design_comparison` feeds nothing, and `fold_spread` only widens the
-    std FLOOR -- while the loop compares FACTORS, which follow `r`, which is
-    fitted at the prior MEAN. Skipping them is ~70% of the prior's cost."""
+    """`fold_spread` only widens the std FLOOR -- while the loop compares
+    FACTORS, which follow `r`, which is fitted at the prior MEAN. Skipping it
+    is most of the prior's in-loop cost, now that `design_comparison` (which
+    fed nothing at all) is gone rather than merely skipped."""
     import inspect
 
     from bootstrap import prior_density
 
     src = inspect.getsource(prior_density.estimate)
-    assert "fast=False" in inspect.signature(prior_density.estimate).__str__() \
-        or "fast" in inspect.signature(prior_density.estimate).parameters
-    # both diagnostics are behind the flag
-    assert "if fast else" in src
-    for skipped in ("design_comparison", "fold_spread"):
-        i = src.index(skipped)
-        assert "fast" in src[max(0, i - 260):i + 60], \
-            f"{skipped} must be behind the fast flag"
+    assert "fast" in inspect.signature(prior_density.estimate).parameters
+    assert "design_comparison" not in inspect.getsource(prior_density), \
+        "the alternative-design block was deleted, not made conditional"
+    i = src.index("fold_spread")
+    assert "fast" in src[max(0, i - 260):i + 60], \
+        "fold_spread must be behind the fast flag"
     # the wrong-sign search is NOT skipped: it decides which categories pool,
     # which moves the mean, which moves r
     assert "unconstrained_argmax(d, cfg, model" in src

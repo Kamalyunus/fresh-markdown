@@ -46,8 +46,8 @@ def estimate_prior(d, cfg, seed=0, fast=False):
     return {
         "source": "profile_density",
         "method": "profile_density",
-        "identifying_rows": pc.get("rows", "entry"),
-        "hour_control": pc.get("hour_control", "date_hour"),
+        "identifying_rows": "entry",           # hard rule 7; no alternative
+        "hour_control": "date_hour",           # the only cell (prior_density)
         "search_bounds": list(pc["search_bounds"]),
         "grid_step": float(grid[1] - grid[0]),
         "uniform_limit": {
@@ -120,40 +120,7 @@ def _print(prior):
               + ". Their own densities are discarded and they take the pooled "
                 "one. `peak` above is where the likelihood really wanted to "
                 "sit before search_bounds clipped it.")
-    rc = (prior.get("pooled") or {}).get("design_comparison") or {}
-    if isinstance(rc, str):                # skipped under --fast
-        print(f"\n  design: {rc}")
-        rc = {}
-    if rc:
-        print(f"\n  design (in use: {rc.get('in_use')}) -- fewer wrong-signed "
-              f"first, then span:")
-        print(f"    {'rows + control':34s} {'wrong':>7s} {'span':>8s} "
-              f"{'ident':>7s} {'rows/cell':>10s}")
-        for key, v in rc.items():
-            if not isinstance(v, dict):
-                continue
-            if "error" in v:
-                print(f"    {key:34s} unavailable: {v['error']}")
-                continue
-            mark = "  <- in use" if key == rc.get("in_use") else ""
-            print(f"    {key:34s} {v['wrong_signed_count']:>3}/"
-                  f"{v['categories']:<3} {v['median_span']:>8.2f} "
-                  f"{v['median_identifying_variation_share']:>7.3f} "
-                  f"{v['median_rows_per_time_cell']:>10.1f}{mark}")
-    c = prior.get("holdout_comparison", {})
-    if c.get("total_per_row"):
-        print(f"\n  held out on '{c['window']}' ({c['rows_scored']:,} rows), "
-              f"log marginal predictive per row -- higher is better:")
-        for k, v in sorted(c["total_per_row"].items(), key=lambda kv: -kv[1]):
-            print(f"    {k:18s} {v:>10.6f}")
-        print(f"  information available on this window (oracle - uniform): "
-              f"{c.get('information_available_per_row')} nats/row")
-        if c.get("worse_than_a_flat_prior"):
-            print(f"  !! {c['worse_than_a_flat_prior_note']}")
-        if c.get("verdict"):
-            print(f"  -> {c['verdict']}")
-        if c.get("warning"):
-            print(f"  !! {c['warning']}")
+
 
 
 def main():

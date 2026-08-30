@@ -312,7 +312,10 @@ def _solve_level_factors(calib, cfg, model, grain, k_shrink, min_anchor,
             return lo, base
         if predicted(hi) < sold:
             return hi, base
-        for _ in range(40):                    # monotone in f -> bisection
+        # 20 halvings of [0.1, 10] leaves ~1e-5, four orders finer than
+        # calibration_convergence_tol_log (0.02) can distinguish. 40 was
+        # computing 1e-12 precision nobody reads, in the loop's hot path.
+        for _ in range(20):                    # monotone in f -> bisection
             mid = (lo + hi) / 2
             if predicted(mid) < sold:
                 lo = mid

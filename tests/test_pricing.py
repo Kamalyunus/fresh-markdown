@@ -1088,7 +1088,7 @@ def test_a_likelihood_peaking_at_positive_elasticity_is_rejected():
         "inherits the confound the rejection exists to remove"
 
 
-def test_the_hour_control_can_be_keyed_on_the_day_not_just_the_clock():
+def test_the_hour_control_is_keyed_on_the_day_not_just_the_clock():
     """Design 5.6 says "same-hour CROSS-EPISODE", and a control pooled across
     dates is only an approximation to it: it removes the average evening lift
     and leaves a Tuesday storm or a rival's promotion in the residual, still
@@ -1096,19 +1096,26 @@ def test_the_hour_control_can_be_keyed_on_the_day_not_just_the_clock():
 
     `date_hour` compares the same clock hour of the SAME DAY across sku x fc,
     which absorbs everything shared by that moment. On the fixture it cut the
-    all-hours sign failures from four categories to two.
+    all-hours sign failures from four categories to two, which is why it is
+    now the ONLY control -- `hour_of_day` was carried as an alternative long
+    enough to lose the comparison, and a losing branch left in the code is a
+    config key that can silently un-fix the confound.
     """
+    import inspect
+
     import numpy as np
     import pandas as pd
 
     from bootstrap import prior_density as pdn
 
+    assert list(inspect.signature(pdn.time_cell).parameters) == ["g"], \
+        "the control is not selectable any more -- date_hour won"
+
     g = pd.DataFrame({
         "date": ["2026-03-01"] * 3 + ["2026-03-02"] * 3,
         "hour_of_day": [10, 11, 10, 10, 11, 10],
     })
-    assert list(pdn.time_cell(g, "hour_of_day")) == [10, 11, 10, 10, 11, 10]
-    cells = list(pdn.time_cell(g, "date_hour"))
+    cells = list(pdn.time_cell(g))
     assert len(set(cells)) == 4, cells
     # the same clock hour on two different days must NOT share a cell -- that
     # is the entire difference between the two controls

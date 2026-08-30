@@ -92,9 +92,11 @@ selection on the unobserved demand shock. Wrong-signed categories went from
 until the peak was searched *past* the search bound: a positive optimum was
 being clipped to −0.05 and reported as measured.
 
-**Now:** `rows: entry` (the original spec was right), with `design_comparison` in the
-artifact scoring all four rows × hour-control combinations every run, so the
-choice is re-evidenced on each extract rather than fixed forever.
+**Now:** entry rows only (the original spec was right). The all-hours arm and
+the `design_comparison` block that scored the four rows × hour-control
+combinations every run are both gone: the comparison had settled, and a
+losing branch kept alive as a config key is a way for the confound to come
+back silently. Re-open it by restoring the branch, not by flipping a key.
 
 ### Hour control: pooled `hour_of_day` → same `date_hour` across sku×fc
 **Was:** the controlled arm profiled out the clock hour pooled across dates —
@@ -110,8 +112,9 @@ parameters, biases |ε| toward zero), so cells under
 `min_rows_per_time_cell` fall back to 1.0 and the median cell size is
 reported.
 
-**Now:** `hour_control: date_hour` with the thin-cell guard; the pooled
-control remains available and the 2×2 is measured per run.
+**Now:** `date_hour` with the thin-cell guard, and it is the ONLY control —
+`time_cell(g)` takes no selector. The pooled arm was carried long enough to
+lose, then removed with the rest of the 2×2.
 
 ### Prior std: floor constant → zero-width bug → measured floors
 **Was:** `std_floor: 0.40`, a chosen constant. **Then:** the density method

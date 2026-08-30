@@ -1,12 +1,6 @@
 # Perishable Markdown MVP -- single tuning surface (design section 5.1).
 #
 # Every threshold, constant, window, and rate in the system lives here.
-# Code reads config; code contains no numeric literals for anything tunable.
-#
-# MEASURED      produced by the bootstrap pipeline; the system refuses to start
-#               while any runtime-required MEASURED value is null.
-# SET           business or design choice.
-# SET BY OWNER  blocking decision; null until the product owner supplies it.
 
 meta:
   config_version: "1.0.0"
@@ -19,98 +13,22 @@ data:
   exclusion_window:                    # SET  known demand-issue period
     start: "2026-04-25"
     end:   "2026-06-03"
-  split:                               # SET BY OWNER 2026-08-27  sized by the
-    # design 6 rules, from the dependency graph rather than taste: test and
-    # holdout are pure GRADING windows, and every residual-based quantity
-    # (r, rho, the level anchor, prior selection) must live in calib because
-    # in-train residuals are in-sample -- so calib, not train, is the scarce
-    # resource. calib = 4w satisfies calib >= 2 x
-    # calibration_fit_trailing_weeks: the back half is where the anchor is
-    # fit and where r/rho residuals sit under factors fit wholly
-    # out-of-train. test = 2w (one week carries the full weekly demand
-    # swing; longer only makes the frozen anchor staler). test_start is an
-    # ISO Monday so the anchor and the weekly schedule share one week grid.
-    # train takes the remainder and alone may straddle the exclusion gap.
-    #
-    # NOTE ON THE FIXTURE: the repo's synthetic extract ends 2026-08-03, so
-    # locally the test window is only half-covered and the holdout is EMPTY
-    # (shadow prints "no episodes"). The production extract (through
-    # 2026-08-28) fills both. Fixture verdicts on these windows are about
-    # the fixture only -- hard rule 19.
+  split:                               # SET BY OWNER  sized by the design 6 rules: calib >= 2W, test/holdout are pure GRADING windows, no window crosses the exclusion gap
     train_start: "2026-03-01"
     train_end:   "2026-06-28"
     calib_start: "2026-06-29"
     calib_end:   "2026-07-26"
     test_start:  "2026-07-27"
     test_end:    "2026-08-09"
-    # An episode is a maximal run of consecutive hourly rows for one sku x fc
-    # over which flc_window (hours_remaining) ticks down exactly one per
-    # elapsed hour -- see prepare_data.assign_episode_ids, which is the
-    # authoritative definition. NOT keyed by calendar date: 36-hour windows
-    # are common and a date key splits one economic episode into three.
-  holdout:                             # SET  a TRUE hold-out: no artifact is
-    start: "2026-08-10"                # fit on it and no gate was decided on
-    end:   "2026-08-28"                # it. Everything above stops at
-    # test_end, so standing at test_end and running this window forward is
-    # the only unrehearsed test the extract can give -- the shadow gate, the
-    # drift ratio and the tau derivation all report 1.00x or in-sample
-    # numbers on any window they were fitted against.
-    #
-    # ONE SHOT. The moment a value is tuned on this window and re-run, it
-    # stops being a hold-out and becomes a second calibration set. Decide
-    # what each run is for before running it.
-    #
-    # Episodes are assigned by the date their WINDOW OPENED
-    # (common.episodes.window_slice), so no episode straddles the seam.
-  # Extract-edge truncation is NOT a config switch any more. An episode the
-  # extract cut off mid-window is FLAGGED `edge_truncated` and kept: only its
-  # ENDING is unknown, its observed hours are ordinary demand data, and it is
-  # among the LARGEST episodes in the extract. Every scrap and IL consumer
-  # already excludes an unclosed ending on its own -- scrap_units returns NaN,
-  # backtest.replay zeroes scrap under outcome_known, shadow charges scrap
-  # only on COMPLETED -- so the drop was protecting a figure that was already
-  # protected while starving mu_ref and r of the slow, heavily-stocked
-  # windows. Read `share_of_unclosed_explained_by_edge` in the dp_eligible
-  # waterfall row beside m11.not_closed_by_month: near 1.0 and the unknown
-  # scrap was purely the extract boundary; well below, with months evenly
-  # loaded, and the feed has a standing problem no re-download will fix.
-  max_window_hours: 120                # SET  upper bound on a plausible FLC
-    # window. flc_window carries occasional very large values from upstream
-    # data issues; an episode claiming a window longer than this is FLAGGED
-    # window_too_long and excluded from dp_eligible -- not dropped. The bound
-    # is a DP-side safety rail, not an integrity test: episodes are extended
-    # to their full window before mu_ref PREDICTION, so an unbounded counter
-    # would generate unbounded synthetic rows, and extend_to_window raises
-    # rather than hanging above this bound. Only backtest and shadow extend,
-    # and both filter to dp_eligible first. The three artifact fits never
-    # extend and never read the counter, so a long window costs them nothing.
-    # Raised 48 -> 120 by the owner: 48 was cutting legitimate multi-day
-    # windows, not just defects. Note the cost -- this bound also sizes the
-    # synthetic tail, so the widest window drives DP horizon and prediction
-    # work per episode.
-  manufacturing_window_hours: 24       # SET  standard clearance window for
-    # SKUs whose flc_window enters ALREADY negative -- a large negative
-    # constant rather than a countdown. Episodes matching that pattern are
-    # recovered with a synthetic countdown from this value instead of being
-    # dropped; any that run LONGER than this are not the pattern and are
-    # dropped with their count reported. Verify the cap against the extract
-    # before trusting it: the recovery rests on it.
-    #
-    # NOT a dial anywhere: which episodes have an UNKNOWN outcome is decided
-    # by the source's own closure sentinel -- ending_inventory zeroed on the
-    # final row while stock remained -- in common.episodes.classify_last.
-    # There is no tolerance constant and never key that rule to
-    # hours_remaining: the counter is nominal and still positive on ~99.5% of
-    # final rows.
+  holdout:                             # SET  a TRUE hold-out -- no artifact is fit on it and no gate was decided on it. ONE SHOT: tune a value on it and it stops being one
+    start: "2026-08-10"
+    end:   "2026-08-28"
+  max_window_hours: 120                # SET  upper bound on a plausible FLC window; a longer one is FLAGGED window_too_long, not dropped
+  manufacturing_window_hours: 24       # SET  synthetic countdown for SKUs whose flc_window enters already negative
 
 reassessment_gates:                    # SET  phase-0 review gates (design 5.3)
-  max_share_non_explorable: 0.30       # above this, narrow the MVP to the
-    # explorable subset -- too many episodes have a cost floor so tight that
-    # fewer than min_feasible_tiers discounts exist, so exploration cannot buy
-    # evidence there at any price
-  max_share_cells_low_variation: 0.50  # above this, expect the prior's
-    # densities to degrade toward pooled/uniform (design 9.3's human gate):
-    # too few (category, hour) cells carry same-hour price variation
+  max_share_non_explorable: 0.30       # above this, narrow the MVP to the explorable subset
+  max_share_cells_low_variation: 0.50  # above this, expect the prior to degrade toward pooled/uniform (a designed outcome)
 
 baseline_model:
   objective: "tweedie"                 # SET
@@ -121,174 +39,23 @@ baseline_model:
   num_boost_round: 400                 # SET
   num_leaves: 63                       # SET
   min_data_in_leaf: 50                 # SET
-  train_population: "eligible"         # SET  which rows the FROZEN ARTIFACTS
-    # are fit on -- mu_ref, the dispersion r, rho, the elasticity prior and
-    # the level factors.
-    #
-    # "integrity"    every episode that survived the filter chain, including
-    #                those whose accounting does not close.
-    # "eligible"     the episode identity holds -- opening + restocked ==
-    #                sold + scrap -- AND the final hour is clean
-    #                (starting >= sold). DEFAULT.
-    # "dp_eligible"  "eligible" plus what the SOLVER additionally needs: a
-    #                feasible tier, a readable horizon, one inventory pool.
-    #
-    # Default "eligible", and the reason is the CENSORED LIKELIHOOD. The
-    # demand model cannot see the inventory chain -- FEATURES carries neither
-    # `cost` nor `hours_remaining` -- so for a while the argument was that
-    # every surviving episode is an ordinary demand observation to it. That
-    # is wrong in one place: the likelihood treats an hour as censored when
-    # the shelf ran out, and that call is read off the inventory. An episode
-    # whose units went missing, or whose final hour is ambiguous, has a
-    # censoring flag that cannot be trusted -- and a wrong censoring flag
-    # biases demand directly.
-    #
-    # Everything the DP additionally rejects IS invisible to the model, so
-    # those episodes stay in: a missing cost, an unreadable horizon and a
-    # mid-window restock all leave the sales and the censoring intact.
-    #
-    # Note a below-cost HOUR is not one of the three conditions. It is a
-    # price the legacy policy set and the agent is constrained never to set,
-    # so it is a property of the history rather than a defect: the backtest's
-    # DP arm is self-anchored and never sees it, and in shadow the refusal it
-    # causes from that hour onward is the cost floor working. Those episodes
-    # stay dp_eligible and carry `below_cost_hours` for the record -- which
-    # also means the widest price spread in the extract now reaches the
-    # elasticity prior, the quantity most starved of variation.
-    #
-    # The risk of "integrity" is covariate shift: the model is fit on a
-    # distribution wider than the one it serves. That is measurable, not
-    # arguable -- `fidelity.by_dp_eligibility` reports the anchor ratio on
-    # the DP-eligible subset either way. Run both, read that number, keep the
-    # winner.
-    #
-    # NOT a choice anywhere else. The DP, the calibration GATE, tau and the
-    # A/B always read dp_eligible: they act on, or grade, the priceable book
-    # only. The cost floor is unaffected either way -- it is structural in
-    # `pricing.dp.feasible_tiers`, not a filter.
+  train_population: "eligible"         # SET  rows the frozen artifacts are fit on: "integrity" | "eligible"
   freeze_at_launch: true               # SET  no retraining in MVP window
   model_path: "artifacts/baseline_model.txt"
   feature_schema_path: "artifacts/feature_schema.json"
-  calibration_gate_band: [0.90, 1.10]  # SET BY OWNER 2026-08-09. DIAGNOSTIC
-    # band, not a launch gate (owner, 2026-08-25): calibration is always
-    # applied, and an out-of-band anchor ratio is a drift/staleness reading
-    # to investigate, reported as WARN in pipeline.status. Weekly sold
-    # ratios swing +-8% around the level (measured, fidelity.by_week); a
-    # 3-week pooled gate therefore carries ~4.6% sigma, and the original
-    # [0.95, 1.05] band was ~1 sigma wide -- a coin flip on natural
-    # volatility. This band is ~2 sigma; the continuous guard is the daily
-    # realised_vs_predicted_sold_ratio in shadow and production.
+  calibration_gate_band: [0.90, 1.10]  # MEASURED by pipeline.tune from weekly volatility; DIAGNOSTIC, and may only TIGHTEN from here
   calibration_grain: "subcategory"     # SET  "subcategory" | "category".
-    # Factors are solved at every level of a subcategory -> category ->
-    # global hierarchy (mirroring dispersion.fallback_order) and each level
-    # is shrunk toward its parent by the evidence behind it, so thin cells
-    # inherit the parent rather than contributing noise -- no threshold
-    # cliff, and zero evidence lands exactly on the parent factor.
-  calibration_convergence_tol_log: 0.02  # SET  the chain is circular across
-    # runs (f needs r; r, rho and the prior read calibrated mu_ref) and is
-    # resolved by iteration. --check-convergence re-solves f with the
-    # prior/r now on disk; max |log(f_new/f_old)| above this means the fixed
-    # point has not settled -- run one more iteration. 0.02 ~= 2%, well under
-    # the [0.90, 1.10] gate band's half-width.
+  calibration_convergence_tol_log: 0.02  # SET  the f<->r chain is circular; above this max |log(f_new/f_old)| the fixed point has not settled
   calibration_shrinkage_units: 100     # SET  pseudo-count, in anchor units
-    # sold, pulling a cell toward its parent. A cell with this many units has
-    # equal weight on itself and its parent.
   calibration_min_anchor_rows: 200     # SET  anchor basis needs this many rows
-  mix_decomposition_min_unit_rows: 30  # SET  anchor rows before a SKU x FC
-    # ratio is trusted in the mix decomposition; thinner units fall back to
-    # their category ratio
-  calibration_gate_metric: "level_at_anchor"  # SET BY OWNER 2026-08-09
-    # ("pooled_ratio" | "level_at_anchor"). The model's only production job
-    # is predicting demand at the reference discount -- inference always
-    # overwrites price to d_ref and the parametric layer (mu_ref x ratio^e)
-    # handles every other price. The pooled ratio judges the model at
-    # ACTUAL, mostly deep-discount prices and is therefore hostage to the
-    # elasticity prior, the quantity the system exists to learn in
-    # production (measured: anchor ~1.0 on train+calib while pooled sat at
-    # 1.17 on slope alone). level_at_anchor gates the frozen artifact on
-    # its own responsibility; slope stays visible via
-    # slope_ratio_by_discount_gap and is validated by posterior movement
-    # and the A/B, with the daily drift ratio as the production guard.
-  calibration_window_sweep_weeks: [1, 2, 4, 8]  # SET  trailing-window lengths
-    # tested by the rolling-origin calibration sweep in the backtest report:
-    # fit factors on the trailing W weeks, apply to the next week, measure the
-    # anchor ratio that results. Under a trending level a LONGER window is
-    # more stale, not more accurate -- the sweep decides W with data.
-  calibration_fit_trailing_weeks: 2    # MEASURED  weeks in the
-    # trailing window, for both "trailing" and "rolling_trailing".
-    # PROVISIONAL until the production sweep under the 08-27 split is read.
-    #
-    # STRUCTURAL: the anchor is fit on [test_start - W, test_start), and the
-    # governing rule is calib >= 2 x W (design 6): the first W calib weeks
-    # carry point-in-time factors fit partly on train-period rows, where the
-    # model fits by construction and biases the factor LOW; only the back
-    # half has factors fit wholly out-of-train, and that is where the anchor
-    # is fit and where r/rho residuals are clean. With the 4-week calib,
-    # W=2 hits calib = 2W exactly. W=4 would need an 8-week calib this
-    # extract cannot afford -- if the production sweep insists on 4w, the
-    # split, not this key, is what to revisit.
-    #
-    # MEASURED (fixture): the rolling-origin sweep recommends trailing_2w.
-    # Under a trending level a longer window is more stale, not more
-    # accurate. Re-read the sweep on the production extract before locking.
-  calibration_gate_window: "test"      # SET  "test" | "calib+test". Must be
-    # DISJOINT from the fit window, or the gate grades its own fit. With
-    # fit_window "calib" the pairing is the split's intended design: train ->
-    # calib (fit factors, out-of-sample) -> test (gate, out-of-sample and
-    # later still), which is exactly production's fit-on-trailing,
-    # apply-forward protocol. test is 2 weeks (08-27 split) so the gate
-    # averages the weekly demand swing instead of riding one week of it.
-  calibration_fit_window: "rolling_trailing"  # SET BY OWNER 2026-08-26:
-    # POINT-IN-TIME calibration. Factors are re-fit every week on the trailing
-    # calibration_fit_trailing_weeks, ENDING STRICTLY BEFORE that week, and
-    # applied by ROW DATE -- so no row is ever priced by a factor fitted on
-    # its own week or later, and backtest and shadow grade the MECHANISM
-    # production runs rather than one frozen snapshot. The schedule lives in
-    # calibration.json -> schedule.by_week; `factors` remains the fallback for
-    # weeks before the first trailing window closes.
-    #
-    # The schedule STOPS AT THE GATE WINDOW (08-27): calibration is a
-    # post-processing step, so the anchor is solved on data ending where the
-    # graded window opens and held frozen across it, and every gate row takes
-    # `factors`. Scoping it to pre_launch() instead let a week inside the
-    # hold-out be fitted on a window made mostly of earlier hold-out days.
-    #
-    # Chosen on the rolling-origin evidence in
-    # backtest.fidelity.calibration_window_sweep, which fits on the trailing W
-    # and scores the NEXT week: calibrating at all beats not calibrating by a
-    # wide margin (uncalibrated scored 22.2% of weeks in band at a mean abs log
-    # error of 0.143 when the sweep was first read). W itself is set above and
-    # is the sweep's own recommendation. It supersedes the 2026-08-09 train+calib decision
-    # below, which was taken on gate-window evidence BEFORE the hold-out drift
-    # (realised/predicted 0.8459) showed the level had moved.
-    #
-    # Superseded, kept for the reasoning: "train+calib"  # SET BY OWNER 2026-08-09. The short
-    # windows were tried first and lost on production data: the calib
-    # fortnight was itself the most anomalous stretch in the five-month
-    # weekly series (1.06 against a 1.30 mean), so factors fit on it inherited
-    # that anomaly and pushed the gate the wrong way. train+calib passed
-    # (level_bias_at_anchor 1.0395). The level deficit being corrected is a
-    # systematic Tweedie sum-calibration artifact, not drift, so averaging
-    # more history targets the persistent component and lets no single week
-    # dominate. Still disjoint from the gate window (test).
-    # "trailing" | "calib" |
-    # "train+calib" | "all". "trailing" = the last
-    # calibration_fit_trailing_weeks of data ENDING WHERE THE GATE WINDOW
-    # BEGINS -- fit and evaluation never overlap, so the gate cannot grade
-    # its own fit, and the protocol mirrors production (fit on trailing data,
-    # apply forward). Longer windows average more history and are more stale
-    # when the level moves; calibration_window_sweep measures which wins.
-    # Measured weekly sold-ratios swing +-8% around a persistent level deficit;
-    # factors fit on one fortnight inherit that fortnight's anomaly (the 07-13
-    # calib week measured 1.06 against a five-month mean of 1.30). A long fit
-    # window targets the persistent component only.
+  mix_decomposition_min_unit_rows: 30  # SET  anchor rows before a SKU x FC unit gets its own ratio
+  calibration_gate_metric: "level_at_anchor"  # SET  grades the artifact's LEVEL only; pooled_ratio embeds the prior
+  calibration_window_sweep_weeks: [1, 2, 4, 8]  # SET  windows the rolling-origin sweep scores to choose W
+  calibration_fit_trailing_weeks: 2    # MEASURED by the sweep; W, and calib must be >= 2W (design 6)
+  calibration_gate_window: "test"      # SET  "test" | "calib+test"; must be DISJOINT from the fit window or the gate grades its own fit
+  calibration_fit_window: "rolling_trailing"  # SET  POINT-IN-TIME: factors re-fit weekly on the trailing W ending strictly before each week, applied by row date
   calibration_factor_path: "artifacts/calibration.json"   # per-category level correction
-  apply_level_calibration: true        # SET (owner, 2026-08-25): calibration is
-    # ALWAYS fitted and applied -- no gate decides it. Factors are fit on
-    # anchor rows only, so a slope error cannot contaminate them; the anchor
-    # ratio (level_bias_at_anchor, band below) stays a reported DIAGNOSTIC,
-    # and the daily realised_vs_predicted_sold_ratio is the continuous guard.
-    # With no calibration.json on disk every factor reads 1.0 (a no-op).
+  apply_level_calibration: true        # SET  always applied; the band is a reported diagnostic, not a gate
 
 reference_discount:                    # SET  category anchors
   MEAT: 0.25
@@ -302,243 +69,53 @@ dispersion:
   r_search_bounds: [0.05, 50.0]        # SET  MLE search range for r
   r_lookup_path: "artifacts/r_lookup.json"
   rho_path: "artifacts/rho.json"
-  rho: 0.2436                          # MEASURED  bootstrap.fit_dispersion,
-    # against FITTED mu_ref residuals -- NOT phase 0's m3, which is a
-    # category x hour proxy computed before any model exists and disclaims
-    # itself. Must equal artifacts/rho.json; strict mode refuses to start on
-    # divergence, because these two values set deff and deff deflates every
-    # posterior update. Re-paste after every retrain.
+  rho: 0.2436                          # MEASURED  fit_dispersion, on the calib window; mirrors artifacts/rho.json
   mean_forced_hours_per_episode: 5.909 # MEASURED  ditto -> deff = 2.196
 
-tuning:                                # SET  gates pipeline.tune applies before
-  # auto-pasting a DERIVED value. A value the pipeline can measure should not
-  # sit behind a human (owner, 2026-08-30) -- but two of them are only safe to
-  # paste when a second measurement agrees, and these are that second reading.
-  max_price_share_changed_for_auto_rail: 0.10   # SET  raising max_mean_step is
-    # auto-applied only when a cap-sized epsilon move re-prices at most this
-    # share of episodes in backtest.policy_deltas.step_sensitivity. Above it the
-    # rail change is a real price event and goes back to the owner.
-  max_il_delta_pct_for_auto_rail: 0.005         # SET  and only when the same
-    # sweep moves IL by at most this. Both gates must hold; either one failing
-    # downgrades the recommendation rather than suppressing it.
-  calibration_band_sigma_multiple: 3            # SET  the level band is sized
-    # from the MEASURED week-to-week anchor volatility -- the chosen window's
-    # `mean_abs_log_error` in fidelity.calibration_window_sweep, which is a
-    # rolling-origin out-of-sample deviation -- times this. A band tighter than
-    # the natural weekly swing cries wolf; a wider one is blind.
-  calibration_band_max_half_width: 0.10         # SET BY OWNER  and it may only
-    # ever TIGHTEN from here (owner, 2026-08-30). The derived band is clamped
-    # to this half-width in ratio space, so [0.90, 1.10] is the widest the
-    # diagnostic can become however volatile the extract looks. Widening is a
-    # decision about what level error the business tolerates, not a reading.
+tuning:                                # SET  gates pipeline.tune checks before auto-applying
+  max_price_share_changed_for_auto_rail: 0.10   # SET  auto-rail ceiling on price churn
+  max_il_delta_pct_for_auto_rail: 0.005         # SET  auto-rail ceiling on the IL move
+  calibration_band_sigma_multiple: 3            # SET  band = this many sigma of log f
+  calibration_band_max_half_width: 0.10         # SET BY OWNER  ceiling; tune may only tighten
 
 posterior:
-    # The cell map is frozen into artifacts/posterior.json by
-    # bootstrap.init_posterior and read from there at runtime; changing this
-    # string alone has no effect. Subcategory cells are phase 2 (design 14).
-  min_episodes_per_week_for_cell: 150  # SET  below this -> read the global cell
-    # Lowered from 250 (owner, 2026-08-26): a cell that reads the global one
-    # learns nothing of its own, and at 250 too many categories were pooled
-    # away. Re-run bootstrap.init_posterior for a change here to take effect --
-    # the cell map is frozen into artifacts/posterior.json.
+  min_episodes_per_week_for_cell: 150  # SET  below this, fall back to the global cell
   epsilon_min: -4.00                   # SET  grid bound
   epsilon_max: -0.05                   # SET  sign constraint
   grid_size: 801                       # SET
   min_std: 0.05                        # SET  floor on posterior std
   path: "artifacts/posterior.json"
   prior:
-    # THE PRIOR IS THE PROFILE LIKELIHOOD, read as a density (design 5.6,
-    # bootstrap.prior_density). A censored POISSON profile per category and
-    # arm, deff-deflated, 50/50 arm mixture, shrunk toward a POOLED density
-    # built from the right-signed categories. No fallback constant anywhere:
-    # a flat likelihood degrades to the uniform on the support, a wrong-signed
-    # one (unconstrained peak at or above zero) is discarded for the pooled
-    # density, and the reported std is the widest of three MEASURED floors
-    # (density width, grid resolution, fold spread), named in `std_basis`.
-    # Every run writes design_comparison (all rows x control combinations)
-    # and holdout_comparison (log marginal predictive vs oracle and uniform).
-    # Superseded designs: docs/learnings.md.
-    rows: "entry"                      # SET  "entry" | "all_stocked_hours"
-      # Which rows the profile scores. "entry" = one row per episode, before
-      # the legacy ramp starts -- no within-episode survivorship confound
-      # (a deep-discount row exists because earlier hours did not sell),
-      # little price variation. "all_stocked_hours" has the variation AND the
-      # confound. Read `design_comparison` in prior.json before changing:
-      # fewer wrong-signed categories first, then median span.
-    hour_control: "date_hour"          # SET  "date_hour" | "hour_of_day"
-      # What the controlled arm profiles out. "date_hour" compares the same
-      # clock hour of the SAME DAY across sku x fc -- absorbs every shock
-      # common to that moment (design 5.6's "same-hour cross-episode").
-      # "hour_of_day" pools across dates and removes only the average evening
-      # lift. Finer cells absorb more, so less variation survives to identify
-      # epsilon; thin cells fall back (below).
-    min_rows_per_time_cell: 5          # SET  a time cell with fewer uncensored
-      # rows gets no multiplier of its own (falls back to 1.0). A cell fitted
-      # from a few observations absorbs the price response it is meant to
-      # control for and biases |epsilon| toward zero.
-    own_information_saturation: 2.0    # SET  log-likelihood units across the
-      # support at which a category stops borrowing from the pool and stands
-      # on its own data (2.0 = the chi-square 95% cutoff). Tune ONCE against
-      # production's likelihood_span distribution; `own_information_weight`
-      # per category says which way it went.
-    stability_folds: 3                 # SET  disjoint train slices for
-      # fold_spread, the model-uncertainty width floor.
-    holdout_window: "calib"            # SET  split the holdout_comparison
-      # scores on. Must be one the prior did NOT see.
-    search_bounds: [-4.00, -0.05]      # SET  must equal [epsilon_min,
-      # epsilon_max]. A POLICY statement about the range the DP supports, not
-      # a belief about demand -- the wrong-sign check searches PAST it.
+    min_rows_per_time_cell: 5          # SET  thinner time cells are dropped
+    own_information_saturation: 2.0    # SET  log-lik units that count as informative
+    stability_folds: 3                 # SET  disjoint train slices for fold_spread
+    holdout_window: "calib"            # SET  window scored in holdout_comparison
+    search_bounds: [-4.00, -0.05]      # SET  must equal [epsilon_min, epsilon_max]
     search_grid_size: 159              # SET  profile resolution
     max_rows_per_category: 150000      # SET  row cap per category
     path: "artifacts/prior.json"
 
 pricing:
   tier_step: 0.025                     # SET  hourly discount grid granularity
-  entry_offsets: [-0.15, -0.10, -0.05, 0.0, 0.05]  # SET  the ENTRY action set,
-    # in discount percentage points RELATIVE TO the category reference: from
-    # 15pp shallower than reference to one 5pp step deeper. Sign convention:
-    # NEGATIVE = shallower discount = higher price.
-    #
-    # Spacing is a uniform 5pp on purpose. A +2.5pp arm was considered and
-    # rejected: information about epsilon scales as (log price ratio)^2, so an
-    # arm 2.5pp from the reference carries ~24% of the information of one 5pp
-    # away, while taking an equal share of the uniform exploration draw. Fine
-    # arms near the optimum dilute the evidence rather than adding to it. The
-    # hourly grid stays at tier_step; only ENTRY is coarse.
-    #
-    # The single deeper arm is the escape valve for the clearance/scrap trade
-    # (the pre-correction replay's -12.0% IL came with -3.25pp clearance;
-    # the corrected run measures -38.0% at -0.97pp). It is an option,
-    # not a default -- the DP takes it only when Q says so. Note the cost
-    # floor removes it for the _default categories at cost ratios above ~0.65,
-    # so it is available where margin allows and silently absent where not.
-    #
-    # Entry is a separate decision from the hourly one and deserves a
-    # different grid. Monotonicity makes it irreversible: price may only hold
-    # or deepen afterwards, so entry sets the ceiling on every later price in
-    # the episode. Entering deeper than reference would spend margin in hour
-    # one and forfeit the room to deepen later. And entry is where
-    # identification lives (the confound-free variation is entry-hour
-    # variation ACROSS episodes), so five well-separated arms give a far
-    # sharper elasticity read than sixteen 2.5pp arms whose demand
-    # differences sit inside the noise. Offsets are snapped to the tier grid
-    # and filtered by the cost floor.
+  entry_offsets: [-0.15, -0.10, -0.05, 0.0, 0.05]  # SET  the ENTRY action set
   negbin_max_k: 25                     # SET  demand truncation
   demand_floor: 0.01                   # SET
 
 exploration:
-  budget_share_of_il: 0.01             # SET BY OWNER  1% of markdown IL --
-    # RISK APPETITE, and the most business-owned number in this file (owner,
-    # 2026-08-30). Every other exploration quantity is measured: what a forced
-    # decision COSTS (the Q-spread), what it BUYS (NB Fisher information), how
-    # many the budget funds. None of them says how much margin the business is
-    # willing to spend to learn. Was mislabelled SET, which read as a design
-    # default rather than a decision someone made.
-  tau_initial: null                    # MEASURED  design 5.8. The PILOT's
-    # launch value, not shadow's: shadow DERIVES its own launch tau on the
-    # anchored path over the trailing budget_il_window_days before its
-    # window (reports/shadow.json -> tau_initial_derivation) and reads this
-    # paste only when that week is missing or too thin. Paste from shadow's
-    # derivation (preferred -- same decision path production runs; the
-    # backtest bisects on the EXPLOIT-ONLY path, whose affordable sets
-    # differ, measured ~1.66x apart) or, failing that, from
-    # `reports/backtest.json` written AFTER the entry-only scoping fix (its
-    # block carries `spread_decisions`; see docs/learnings.md).
-    # `pricing.explore.tau_provenance_error` enforces the source match:
-    # shadow's fallback refuses a stale paste and `pipeline.status` reports
-    # it. A CURRENCY amount compared against Q(p*) - Q(p), never a rate.
+  budget_share_of_il: 0.01             # SET BY OWNER  exploration spend, share of markdown IL
+  tau_initial: null                    # MEASURED  shadow derives the launch tau
   tau0_derivation_min_decisions: 500   # SET  floor for shadow's launch-tau
-    # derivation: fewer spread decisions than this in the pre-window week
-    # and the bisection is noise -- fall back to the tau_initial paste.
-  tau_adjust_clip: [0.5, 1.25]         # SET  max daily multiplicative change,
-    # ASYMMETRIC ON PURPOSE (owner, 2026-08-25). The two directions do
-    # different jobs and carry different risks.
-    #
-    # UP (1.25): raising tau is never urgent -- the only cost of raising it
-    # slowly is slower evidence. With the budget base now the smooth trailing
-    # 7-day IL, a large upward step could only be chasing noise in the SPEND
-    # side (which day's episodes happened to explore), so it is tightened
-    # from 2.0.
-    # DOWN (0.5): cutting tau IS urgent -- it is the safety direction. Its
-    # binding case is not steady-state noise but a mis-sized launch: the
-    # measured incident was an 8.7x overspend, which three days of halving
-    # walks inside the 2.0x stop condition. At a 0.75 floor the same walk
-    # takes ~8 days, all of them above the stop -- the suspension fires on a
-    # tau the controller was already correcting. So the floor stays 0.5.
-    #
-    # Read shadow's tau_controller_trace after each run: how often either
-    # bound binds is measured there, and a clip that never binds in steady
-    # state is this setting working.
+  tau_adjust_clip: [0.5, 1.25]         # SET  max daily multiplicative change in tau
   tau_spend_guard: 1.0                 # SET  divide-by-zero guard on realised cost, currency
   budget_il_window_days: 7             # SET  the IL base for a day's budget
-    # is the mean of REALISED daily markdown IL over this many trailing
-    # calendar days, ending yesterday. A day's realised IL is the IL --
-    # discount AND scrap -- of the episodes that CLOSED that day: only at
-    # close is an episode's IL settled, so the base is fully knowable at
-    # midnight when the day's tau is set, whatever today brings. Trailing, not same-day (unobservable
-    # until the day closes, and it funds exploration hardest on the worst
-    # days) and not a forecast (nothing here forecasts IL). 7 smooths the
-    # weekday cycle exactly once while still following drift in markdown
-    # volume. Zero-IL days count as zero -- the budget is a share of the
-    # actual run-rate.
   budget_scale_ref_std: 0.40           # SET  budget scales with std / this
   budget_scale_floor: 0.25             # SET  never below 25% of budget
   min_feasible_tiers: 2                # SET  below this: non-explorable
 
 learning:
-  information_increment: 12.0          # MEASURED  effective (deff-deflated) NB
-    # information per update. PASTE from `reports/thresholds.json` ->
-    # information_increment_recommendation.recommended, re-derived after any
-    # prior change (bootstrap.derive_thresholds).
-    #
-    # Why it is measured and not chosen: Fisher information adds to PRECISION,
-    # 1/s1^2 = 1/s0^2 + I, so the information that shrinks the std by exactly
-    # max_std_shrink is I* = (1/s0^2) * [1/(1-max_std_shrink)^2 - 1]. That is a
-    # CEILING, not a target -- `bounded_step` clips the update at the cap and
-    # the excess is DISCARDED (the outcomes are marked processed either way),
-    # so an increment above I* waits to gather evidence it then throws away.
-    # Under it, updates are simply smaller steps, which is safe.
-    #
-    # 12.0 has no recorded derivation and saturates the cap at a posterior std
-    # of ~0.25 -- a LATE-stage posterior. At launch-width priors the ceiling is
-    # an order of magnitude lower (0.15-0.61 on the current fixture), so 12.0
-    # runs ~20x over and discards most of what it waits for. This is NOT the
-    # Poisson->NB correction: that fixed a measurement that was 1.6-1.9x too
-    # LARGE, which pushes the same way. Re-derive on production before the
-    # pilot and paste; the report stamps TOO LARGE until you do.
-    #
-    # I* rises as 1/std^2 as the posterior narrows, so a launch-derived value
-    # becomes conservative later. That direction is safe; the other is not.
-  max_mean_step: 0.15                  # SET BY OWNER, gated  risk rail on the
-    # mean. derive_thresholds MEASURES the consistent value (both rails tripping
-    # at the same surprise); pipeline.tune pastes it automatically ONLY when
-    # backtest step_sensitivity says the re-price is small enough (tuning.*_for
-    # _auto_rail). Above that gate a rail change is a real price event and
-    # returns to the owner. Risk rail on the mean.
-    # Read `reports/thresholds.json` -> bounded_step_recommendation before
-    # moving it, and `backtest.step_sensitivity` (which re-solves the DP arm at
-    # eps +- this value on real episodes) for the PRICE consequence.
-    #
-    # It is not independent of max_std_shrink. A cap-sized update -- one
-    # carrying exactly the information that saturates the shrink cap -- moves
-    # the mean toward the batch's own estimate by
-    # [1-(1-max_std_shrink)^2] x |pull|, i.e. 0.4375 x |pull| at 25%. So the
-    # coherent question is whether the two rails trip at the SAME surprise.
-    # Measured on the current fixture they do not: 0.15 clips at a 0.30-std
-    # pull while the shrink cap needs a full cap-sized update, so the mean
-    # rail does all the work and `bound_clipped` fires routinely -- the
-    # RUNBOOK's "most updates clip -> mis-sized" condition by construction.
-    # Consistent value there would be ~0.50. Raising it is an OWNER call:
-    # price it in step_sensitivity first, since the deepening bar means a
-    # larger step can re-price a lot of episodes at once.
-  max_std_shrink: 0.25                 # SET BY OWNER  the PRIMARY rate limit:
-    # how fast a cell may converge. Set this one FIRST -- information_increment
-    # is derived from it (I* = (1/std^2)[1/(1-max_std_shrink)^2 - 1]) and
-    # max_mean_step is graded against it, so moving it moves both. At 25% with
-    # one human-gated update a day, a launch-width cell reaches min_std in ~11
-    # updates. Its symptom when too loose is `predictive_check`'s
-    # worse_than_a_flat_prior persisting: the posterior tightening faster than
-    # the evidence justifies.
+  information_increment: 12.0          # MEASURED  deff-deflated NB info per bounded update
+  max_mean_step: 0.15                  # SET BY OWNER, gated  cap on one update's mean move
+  max_std_shrink: 0.25                 # SET BY OWNER  the PRIMARY rate limit on learning
   use_exploitation_outcomes: false     # SET  do not change in MVP
 
 events:
@@ -546,24 +123,18 @@ events:
   shadow_store_dir: "events_store_shadow"  # SET  shadow-phase events kept separate
 
 assurance:                             # pipeline.assurance -- live-data checks
-  # 1 · reproduction: re-solve logged decisions from their own event payload
   reproduction_sample: 500             # SET  most RECENT decisions re-solved
   reproduction_discount_tol: 1.0e-9    # SET  tier grid is exact; this is float noise
   reproduction_il_tol_abs: 0.01        # SET  currency, absolute
   reproduction_il_tol_rel: 1.0e-6      # SET  relative, for large IL values
   reproduction_report_max: 10          # SET  failures listed in the report
-  # 2 · dispersion: is live demand as lumpy as the frozen r claims
   dispersion_min_outcomes: 500         # SET  below this the bins are noise
   dispersion_bins: 4                   # SET  predicted-mu quantile bins
   dispersion_min_bin: 100              # SET  bins thinner than this are skipped
   dispersion_alert_z: 3.0              # SET  |z| on the binomial null
-  # 3 · correlation: re-measure rho against the frozen artifact
   rho_min_episodes: 200                # SET  below this, do not re-measure
   rho_min_hours_per_episode: 3         # SET  matches bootstrap.fit_dispersion
   rho_drift_alert: 0.10                # SET  absolute drift in rho that alerts.
-    # rho 0.3103 -> 0.41 moves deff 3.35 -> 4.1, ~22% of the learning rate.
-    # Tighter than this fires on ordinary sampling noise at 200 episodes.
-  # 4 · exploration: is the applied price a uniform draw from the affordable set
   uniformity_bins: 5                   # SET  chi-square bins on the mapped rank
   uniformity_min_draws: 100            # SET  below this, report insufficient
   uniformity_alert_p: 0.01             # SET  chi-square p-value floor
@@ -573,103 +144,20 @@ monitoring:
   shadow_gate:                         # SET  the phase-1 exit gate (design 5.13)
     min_event_completeness: 0.99
     min_matched_decision_rate: 0.99
-    sample_episodes: 3000              # SET  0 = every episode. The gate reads
-      # three rates and a violation count; a uniform episode sample estimates
-      # all of them. Treating each EPISODE as one observation (conservative --
-      # decisions within an episode are correlated, so this understates the
-      # sample), the standard error on a rate near 0.99 is 0.18pp at 3,000 and
-      # 0.10pp at 10,000, against the 1.00pp the gate discriminates on. Both
-      # clear it by a wide margin, so 3,000 was chosen for run time: 10,000
-      # took long enough to discourage re-running after a change, and a gate
-      # nobody re-runs is worse than a slightly wider interval.
-      # Sampling happens BEFORE mu_ref prediction, so the cost scales with the
-      # sample, not the extract.
-      # What it does NOT buy: "zero cost-floor violations" becomes zero over
-      # the sample rather than over the window. That is acceptable because
-      # cost-floor safety is structural -- the feasible action set cannot
-      # express a below-cost price -- and separately unit-tested; the gate
-      # confirms the property end-to-end, it does not establish it. At 3,000
-      # the sample covers ~0.9% of the extract, so that caveat carries more
-      # weight than it did at 10,000 -- run `--max-episodes 0` once for the
-      # pre-launch record, where the full sweep is worth the wall clock.
+    sample_episodes: 3000              # SET  0 = every episode
   stop_conditions:
     duplicate_or_unmatched_rate: 0.01  # SET
     price_mismatch_rate: 0.01          # SET
     exploration_cost_vs_budget: 2.0    # SET
-    deterioration_basis:               # SET  how each guardrail compares to
+    deterioration_basis:               # SET  how each guardrail compares to baseline
       scrap: "relative"                # its baseline. Changes what the
       margin: "absolute_pp"            # threshold MEANS, so it is explicit.
-      # "relative"     t/c - 1. The right scale for a strictly positive rate
-      #                whose level drifts: 20% worse means the same thing
-      #                whatever this week's baseline is. Scrap works here --
-      #                measured 3-sigma 0.4156 against a mean level of 0.1814,
-      #                not outlier-dominated, worst observed 0.3789.
-      # "absolute_pp"  t - c, in percentage points of the rate. REQUIRED when
-      #                the metric can cross zero, because a ratio to a
-      #                near-zero denominator has no scale.
-      #
-      # Margin is absolute_pp because it MEASURABLY crosses zero: on the
-      # production extract the daily series runs mean 0.0308, min -0.0464, and
-      # 36 of 134 days are at or below zero. On the relative basis that gave a
-      # raw 3-sigma of 65.4497 (6,545%), robust 3.5853, worst observed 155.23
-      # -- no threshold can sit above a floor larger than the series' own
-      # level, so the stop condition was structurally impossible to set rather
-      # than merely mistuned. Smoothing does not help: averaging a series that
-      # changes sign averages across the crossing. On the absolute basis the
-      # same series has a daily sigma of 0.0374, so a 3-sigma floor lands near
-      # 11 percentage points -- and close to the 0.1363/0.15 recorded here
-      # before the population changed.
-      #
-      # derive_thresholds emits `unusable_floor` on any RELATIVE floor >= 1.0,
-      # so this failure announces itself next time instead of reading as
-      # "margin is volatile".
-    deterioration_smoothing_days:      # SET  days averaged BEFORE comparing,
+    deterioration_smoothing_days:      # SET  days averaged BEFORE comparing
       scrap: 7                         # per metric, chosen from measured noise
       margin: 1
-      # The scrap rate averages ~1.76% of units, so ordinary daily swing is
-      # enormous in RELATIVE terms: robust 3-sigma is 153%, which overlaps the
-      # 100-200% breach the guardrail exists to catch. A guardrail whose noise
-      # floor and failure mode are the same size is not a guardrail. Averaging
-      # 7 days before comparing cuts the floor to ~58% (sigma falls ~1/sqrt k)
-      # and separates them cleanly, at the cost of a few days' detection
-      # latency -- the right trade for a condition that should fire on
-      # sustained damage, not on one bad day.
-      #
-      # Margin needs none: its daily floor is 13.63% and it is not
-      # outlier-dominated, so smoothing would only cost detection speed.
-      # derive_thresholds measures each floor at ITS configured smoothing, so
-      # the floor and the monitor always use the same yardstick.
-    persistence_days: 2                # SET  a deterioration stop condition
-      # fires only after this many CONSECUTIVE days over threshold. This is
-      # what lets a threshold sit just above its measured noise floor without
-      # false-firing: one day past a 3-sigma floor happens about once a year
-      # per guardrail, two in a row essentially never. Load-bearing, not
-      # decoration -- the scrap threshold clears its floor by ~6%.
-    scrap_deterioration_pct: null      # MEASURED  set at or above the 3-sigma
-      # control-arm noise floor derive_thresholds reports; pipeline.tune pastes
-      # it. Below the floor the stop fires on noise. Blocks the stop conditions
-      # while null (design 5.12).
-      # Raw measured 3-sigma floor: 9.1386 -- these are RELATIVE deviations,
-      # so that is 914%, not 9.14%. A few low-volume days dominate the daily
-      # ratio series; no usable threshold sits above a floor larger than the
-      # level itself. derive_thresholds now reports a MAD-based robust floor
-      # and flags the series as outlier-dominated. Robust floor MEASURED on
-      # production: 1.5282 -- that is 153% RELATIVE, still above 1.0, so the
-      # daily scrap rate swings by more than its own level and NO threshold
-      # on this basis is both safe and useful. See design section 12: the
-      # trailing-mean basis is the wrong yardstick for this series; the
-      # control-arm basis (same-day, cancels the day effect) is what the
-      # monitor actually uses once the A/B is live, and is measured
-      # separately as scrap_rate_control_arm_basis.
-    margin_deterioration_pct: null     # MEASURED  set at or above the 3-sigma
-      # control-arm noise floor derive_thresholds reports; pipeline.tune pastes
-      # it. Blocks the stop conditions while null (design 5.12).
-      # Measured 3-sigma daily noise floor: 0.1363 (13.63%), robust 0.1494,
-      # NOT outlier-dominated -- this one is well behaved. Recommended 0.15,
-      # which clears the raw floor by ~10% but sits just UNDER the robust
-      # 0.1494; the 2-day persistence rule is what covers that gap. Anything
-      # at or under ~0.136 sits inside the noise band and will false-fire,
-      # silently suspending exploration.
+    persistence_days: 2                # SET  consecutive days before a stop fires
+    scrap_deterioration_pct: null      # MEASURED  3-sigma of the trailing noise
+    margin_deterioration_pct: null     # MEASURED  3-sigma of the trailing noise
   alert_posterior_std_flat_days: 21    # SET  learning-loop health
 
 ab_test:
@@ -678,4 +166,4 @@ ab_test:
   alpha: 0.05                          # SET  two-sided
   candidate_durations_weeks: [2, 3, 4, 5, 6, 8, 10, 12]  # SET  windows tested
   min_episodes_per_block: 100          # SET  blocks below this are skipped
-  min_detectable_effect_pct: null      # SET BY OWNER  relative on IL%
+  min_detectable_effect_pct: null      # SET BY OWNER  relative effect on IL%
