@@ -43,8 +43,6 @@ def _reports(root, **over):
             "window": {"date_min": "2026-08-10", "date_max": "2026-08-28",
                        "episodes": 111400},
         },
-        "phase0.json": {"config_values_measured": {
-            "ab_test.il_pct_ratio_se_clustered": 0.076918}},
         "thresholds.json": {
             "information_increment_recommendation": {
                 "recommended": 0.341, "verdict": "measured"},

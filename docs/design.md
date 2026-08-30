@@ -2036,11 +2036,16 @@ run steps 3b–5 once more and re-check.
 
 **Read the TRAJECTORY, not the turn count (owner, 2026-08-30).** This doc
 previously said a loop not settling in two iterations meant something was
-wrong; that was the fixture's behaviour mistaken for a rule, and production
-measured 3–4 turns from a bare chain with nothing wrong. The block carries a
-`history` of the last six readings, and a contracting series
-(2.29 → 0.4 → 0.06 → 0.006) simply needs another turn. What warrants stopping
-is a series that stalls or oscillates. `worst_cell_anchor_rows` sizes the
+wrong; that was the fixture's behaviour mistaken for a rule. The owner
+measures **8–9 turns** from a bare chain on the production extract with
+nothing wrong — the repo fixture settles in 3–4 because it is small, so the
+fixture is the wrong thing to size a cap or an impatience threshold against.
+The block carries a `history` of the last six readings, and a contracting
+series (2.29 → 0.4 → 0.06 → 0.006) simply needs another turn. What warrants
+stopping is a series that stalls or oscillates — `bootstrap.run` stops after
+three turns with no new best, deliberately loose, because a two-turn plateau
+inside a nine-turn settle is ordinary and an earlier test killed healthy
+runs at turn 3. `worst_cell_anchor_rows` sizes the
 evidence behind the worst cell for the same reason: the max is unweighted
 across cells and weeks, so a shrinkage-dominated cell on a few dozen anchor
 rows can set it — on the fixture the worst cell is the thinnest one — and

@@ -4,7 +4,9 @@
 
 The chain is NOT a line. The factor solve consumes `r`, while `r`, `rho` and
 the prior are all fitted against calibrated `mu_ref`, so steps 3b-5 are one
-turn of a fixed-point iteration that a bare chain needs three or four of.
+turn of a fixed-point iteration that a bare chain needs MANY of -- the owner
+measures 8-9 on the production extract; the repo fixture settles in 3-4, and
+being small is why. Size the cap for the former, never the latter.
 A linear script cannot express that: it ran the turn once, printed NOT
 CONVERGED, and left a human or an agent to repeat 3b-4-5-5b by hand. Worse,
 "re-run the script" then RETRAINED THE BASELINE at step 3, which moved every
@@ -63,6 +65,7 @@ def settle(cfg, max_turns):
     baseline is never retrained in here -- that is what makes this a loop
     rather than a restart.
     """
+    seen = []
     for turn in range(1, max_turns + 1):
         # 3b ONLY on the first turn. Every later turn's factors were already
         # solved by the previous turn's --check-convergence, under exactly
@@ -107,11 +110,27 @@ def settle(cfg, max_turns):
         # not settled: is it contracting, or stuck? A trajectory that is not
         # shrinking will not shrink by being run again, and saying so beats
         # burning turns on it.
-        hist = block.get("history") or []
-        if len(hist) > 2 and hist[-1] >= hist[-2] >= hist[-3]:
-            print(f"\nloop NOT CONTRACTING over {hist[-3:]} -- stopping at "
-                  f"turn {turn}. Another turn will not help; read "
-                  f"worst_cell / worst_cell_anchor_rows before continuing.")
+        #
+        # But the test has to be a STALL, not a bad turn. This once stopped on
+        # two consecutive non-improvements, which is ordinary noise in a loop
+        # that legitimately runs 8-9 turns -- and it read a plateau at turn 3
+        # of a 9-turn settle as "will not help", killing runs that were fine.
+        # So: stop only when the last three turns have all failed to beat the
+        # best reading that preceded them. One bounce or one flat pair is
+        # survivable; three turns of no new best is a fixed point that is not
+        # moving toward the tolerance.
+        #
+        # Read from THIS run's turns, not the artifact's `history`: that field
+        # is appended across runs, so a previous chain's readings survive into
+        # a fresh one, and a low reading from the old chain would read as a
+        # best this run can never beat -- a stall on the first turn.
+        if block.get("max_abs_dlog") is not None:
+            seen.append(float(block["max_abs_dlog"]))
+        if len(seen) >= 4 and min(seen[-3:]) >= min(seen[:-3]):
+            print(f"\nloop STALLED: no new best in 3 turns over "
+                  f"{[round(h, 5) for h in seen]} -- stopping at turn {turn}. "
+                  f"Another turn will not help; read worst_cell / "
+                  f"worst_cell_anchor_rows before continuing.")
             return False, turn, block
 
     return False, max_turns, (convergence(cfg) or {})
@@ -121,9 +140,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", help="raw FLC parquet (omit with --check-only)")
     ap.add_argument("--config", default="config.yaml")
-    ap.add_argument("--max-turns", type=int, default=6,
-                    help="cap on calibration<->dispersion turns (default 6; a "
-                         "bare chain typically needs 3-4)")
+    ap.add_argument("--max-turns", type=int, default=20,
+                    help="cap on calibration<->dispersion turns (default 20). "
+                         "The owner measures 8-9 on production; the fixture "
+                         "settles in 3-4. The cap is a runaway guard, not a "
+                         "budget -- the STALL test stops a loop that is not "
+                         "improving long before this")
     ap.add_argument("--mde", type=float, default=0.075,
                     help="A/B target for derive_thresholds")
     ap.add_argument("--check-only", action="store_true",

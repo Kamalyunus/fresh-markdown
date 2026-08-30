@@ -5,7 +5,9 @@ without looking anything up. The authoritative specification — including the
 rationale and the measured incident behind every rule below — is
 **`docs/design.md`** (§ numbers refer to it). Superseded approaches live in
 `docs/learnings.md`. When this guide and the design doc disagree, the design
-doc wins. Doc/chart tooling has its own guide: `docs/maintaining_docs.md`.
+doc wins. Doc/chart tooling: `docs/maintaining_docs.md` — note it still
+documents the walkthrough builder and EDA pages that the metrics trim
+deleted; treat its `tools.walkthrough` / `tools.eda` sections as history.
 
 ## Non-negotiables
 
@@ -18,6 +20,11 @@ statement and the incident that created the rule.
    `train_baseline` and `bootstrap.run` DO. (§5.4)
 1a. **Changing the elasticity prior invalidates `rho`, `deff` and the level
    factor** — re-run `fit_dispersion` onward and re-paste the mirrors. (§5.6)
+1b. **Bootstrap the chain with `python3 -m bootstrap.run`, never by hand-running
+   steps 3b–5b** — they are one turn of a fixed-point loop that needs 8–9 turns
+   on production data, and re-running the step list to settle it retrains the
+   baseline (rule 1). `--check-only` settles a config paste without retraining.
+   (§9.2)
 2. **`posterior.epsilon_max` (−0.05) is a sign constraint, never a bound to
    widen** — positive elasticity must remain unrepresentable. (§5.6)
 3. **A boundary solution is not an estimate** — a fit pinned at a search
@@ -70,7 +77,7 @@ statement and the incident that created the rule.
     `python3 -m pipeline.status` before quoting or pasting from any report
     and before ending a session that touched artifacts, config or reports;
     never use a report the `artifact bundle` / `artifact mirrors` /
-    `report vintages` / `walkthrough` lines call stale. Re-run map: §5.14.
+    `report vintages` lines call stale. Re-run map: §5.14.
 19. **The repo's data is SYNTHETIC; the owner's is real** — every number a
     local run prints is a fixture number and is evidence about the fixture
     only. Never state one as a finding about the owner's extract, and never
@@ -111,50 +118,70 @@ All commands run from the repo root — paths in `config.yaml` are relative to
 it, and running a module from elsewhere silently reads/writes the wrong
 artifacts.
 
-## Pipeline order
+## Running the bootstrap — use `bootstrap.run`, not the step list
+
+**Do not hand-run the steps in order. Run this:**
+
+```bash
+python3 -m bootstrap.download_flc            # step 0, only if you need a fresh extract
+python3 -m bootstrap.run --input data/flc_raw.parquet
+python3 -m bootstrap.init_posterior          # step 8, once
+python3 -m pipeline.shadow --input data/prepared.parquet --out reports/shadow.json
+```
+
+`bootstrap.run` is the whole bootstrap: it runs 1 and 3, then **iterates
+3b–5b until the fixed point CONVERGES**, then 6, 6b, 11 and `status`. It
+exits non-zero if the loop never settles.
+
+**Why this is not optional.** Steps 3b–5 are one TURN of a fixed-point
+iteration, not three steps in a line: the factor solve consumes `r`, while
+`r`, `rho` and the prior are all fitted against *calibrated* `mu_ref`. Run
+the list top-to-bottom once and you get one turn — artifacts that disagree
+with each other, and a `--check-convergence` that says NOT CONVERGED. **The
+owner measures 8–9 turns to settle on the production extract** (the repo
+fixture takes 3–4 because it is small — rule 19). Nobody is going to hand-run
+that correctly, and the obvious repair is the wrong one: re-running the step
+list restarts at 3, which RETRAINS THE BASELINE, moves every artifact, resets
+the fixed point and breaks rule 1. That loop is the one an agent cannot
+escape by trying harder; `bootstrap.run` trains once, outside the loop, and
+is the only supported way to reach a converged chain.
+
+After a **config paste**, settle without retraining:
+
+```bash
+python3 -m bootstrap.run --check-only      # loop against the artifacts on
+                                           # disk, NO retrain. What
+                                           # pipeline.tune tells you to run.
+```
+
+`--max-turns` (default 20) is a runaway guard, not a budget — the STALL test
+stops a loop that has gone three turns without a new best, long before the
+cap. Raise it only if the trajectory printed at exit is still contracting.
+
+Two details worth knowing when reading its output: on the first turn there is
+no `r_lookup` yet, so 3b uses the raw-mu basis and the second turn gets the
+censored one (early turns are expected to move a lot); and the loop runs
+`estimate_prior --fast`, which drops `fold_spread` — that only widens the std
+FLOOR while factors follow the prior MEAN, so it cannot move the fixed point.
+The artifact still gets a FULL prior once the loop settles. (§9.2)
+
+### The steps it runs — for debugging ONE step, not for driving the pipeline
 
 ```
 step                                          writes
 0. bootstrap.download_flc                     data/flc_raw.parquet   (Redshift; REDSHIFT_* from ~/.env)
 1. bootstrap.prepare_data --input <raw>       data/prepared.parquet, artifacts/split_manifest.json
 3. bootstrap.train_baseline --input prepared  artifacts/baseline_model.txt, feature_schema.json
-3b. bootstrap.train_baseline --fit-calibration artifacts/calibration.json    (BEFORE prior — see below)
-4. bootstrap.estimate_prior --input prepared  artifacts/prior.json           (BEFORE dispersion — §5.6)
-5. bootstrap.fit_dispersion --input prepared  artifacts/r_lookup.json, rho.json
-5b. bootstrap.train_baseline --check-convergence  (dry run; asserts the f<->r loop settled)
+3b. bootstrap.train_baseline --fit-calibration artifacts/calibration.json    ┐
+4. bootstrap.estimate_prior --input prepared  artifacts/prior.json           │ ONE TURN
+5. bootstrap.fit_dispersion --input prepared  artifacts/r_lookup.json, rho.json │ of a loop —
+5b. bootstrap.train_baseline --check-convergence  (dry run: did it settle?)  ┘ 8-9 of these
 6. backtest --input prepared                  reports/backtest.json
 6b. bootstrap.derive_thresholds               reports/thresholds.json  (pipeline.tune reads it)
 8. bootstrap.init_posterior                   artifacts/posterior.json       (once; --force to overwrite)
 9. pipeline.shadow --input prepared           reports/shadow.json            (holdout by default)
 11. bootstrap.seal                            artifacts/bundle.json
 ```
-
-**The order above is a LOOP, not a line, and 3b is where it turns.** The
-factor solve consumes `r`, while `r`, `rho` and the prior are all fitted
-against *calibrated* `mu_ref` — so 3b–5 is one TURN of a fixed-point
-iteration, and a bare chain typically needs three or four. `bootstrap.run`
-drives that loop itself:
-
-```bash
-python3 -m bootstrap.run --input <raw>     # 1, 3, then 3b–5b until CONVERGED,
-                                           # then 6, 6b, 11, status
-python3 -m bootstrap.run --check-only      # settle the loop against the
-                                           # artifacts on disk, NO retrain
-```
-
-The loop is tuned for the thing that dominates it: `estimate_prior --fast`
-drops `fold_spread`, which cannot move the fixed point (it only widens the
-std FLOOR, and factors follow the prior MEAN), and `--commit-convergence` keeps
-the check's re-solve instead of recomputing it as the next turn's 3b. The
-artifact still gets a FULL prior once the loop settles.
-
-It trains the baseline **once, outside the loop**. Retraining to settle
-calibration moves every artifact, resets the fixed point and breaks rule 1 —
-which is exactly what a linear script invited. On a first turn there is no
-`r_lookup` yet and 3b silently uses the raw-mu basis; the second turn gets
-the censored one. The module stops early if the trajectory is not
-contracting, and exits non-zero if the loop never settles — the reports it
-still writes are not decision-grade. (§9.2)
 
 Daily production loop (Lane C — full operator guidance in `RUNBOOK.md`):
 
@@ -182,7 +209,6 @@ is dropped (rule 14). Resolve via `prepare_data.population(d, cfg, which)`:
 The waterfall (13 rows, `artifacts/split_manifest.json`) records rows,
 episodes and COGS after every stage; `kind: hard_drop` drops, the two
 `population_gate` rows (`eligible`, `dp_eligible`) only flag.
-`python3 -m tools.export_waterfall --input <raw>` writes the full workbook.
 The chain, the inventory convention, the flow identity and the close rules
 are specified in §5.2 and §12a.
 
@@ -195,7 +221,6 @@ Every paste has one source and one checker:
 | --- | --- | --- |
 | `dispersion.rho`, `mean_forced_hours_per_episode` | `artifacts/rho.json`, after EVERY retrain | `artifact mirrors` (strict start-up refuses drift) |
 | `exploration.tau_initial` | `reports/shadow.json` → `tau_initial_derivation` (backtest = cross-check only) | `tau_provenance_error` — shadow refuses a stale paste |
-| `ab_test.il_pct_ratio_se_clustered` | `reports/phase0.json` → `config_values_measured` | `artifact mirrors` |
 | `scrap/margin_deterioration_pct`, `min_detectable_effect_pct` | OWNER, from `reports/thresholds.json` — `TOO TIGHT` and `LIKELY INERT` are blocking | `guardrail floors` |
 
 ## Where to look
@@ -212,7 +237,7 @@ Every paste has one source and one checker:
 | monitoring, guardrails, stop conditions, A/B | §5.12, §11, §12 |
 | events, integration, quarantine | `docs/event_contract.html`; `events/store.py` |
 | provenance, seal, freshness | §5.14; rule 18 |
-| docs, charts, walkthrough, EDA, metrics index | `docs/maintaining_docs.md` |
+| docs and charts | `docs/maintaining_docs.md` (partly stale — see header) |
 | operator runbook, review tiers | `RUNBOOK.md`, `REVIEW_GUIDE.md` |
 | why is it not done the other way? | `docs/learnings.md` |
 

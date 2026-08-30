@@ -1034,9 +1034,9 @@ def test_convergence_carries_its_trajectory_and_the_worst_cell_s_evidence():
     """A single reading cannot tell a contracting loop from a stuck one, and
     an unweighted max cannot tell an unsettled chain from one thin cell.
 
-    Production measured 3-4 turns from a bare chain with nothing wrong, after
-    this doc had claimed two was the limit -- the fixture's behaviour mistaken
-    for a rule. The trajectory is what distinguishes them.
+    Production measures 8-9 turns from a bare chain with nothing wrong, after
+    this doc had claimed two was the limit -- the fixture (3-4, because it is
+    small) mistaken for a rule. The trajectory is what distinguishes them.
     """
     import copy
 
@@ -1089,6 +1089,67 @@ def test_the_loop_does_not_recompute_what_the_check_already_solved():
     assert "full re-run for the artifact" in loop
     # and re-stamp, because that full re-run moves prior.json after the check
     assert "re-check against the full prior" in loop
+
+
+def test_the_loop_is_sized_for_production_not_for_the_fixture():
+    """Both halves of "give up" were calibrated on the fixture, and both were
+    wrong for the extract that matters (owner: production settles in 8-9
+    turns; the fixture takes 3-4 because it is small -- rule 19).
+
+      * `--max-turns` defaulted to 6. A production run would hit the cap
+        mid-contraction and exit non-zero having never settled.
+      * the stall test stopped on two consecutive non-improvements, which is
+        ordinary inside a nine-turn settle: a plateau at turn 3 killed runs
+        that were fine.
+
+    The cap is now a runaway guard, and the stall test needs THREE turns with
+    no new best -- loose enough to ride out a bounce, tight enough to refuse
+    to iterate on something that is not moving.
+    """
+    import inspect
+
+    import bootstrap.run as br
+
+    ap = [a for a in _run_parser_actions() if a.dest == "max_turns"][0]
+    assert ap.default >= 20, "a cap below the measured 8-9 settles nothing"
+
+    loop = inspect.getsource(br.settle)
+    assert "seen" in loop and "block.get(\"history\")" not in loop, \
+        "the stall test must read THIS run's turns -- `history` is appended " \
+        "across runs, so an old chain's low reading is a best this run can " \
+        "never beat, and the loop would stall on turn 1"
+
+    def stalls_at(seen):
+        for i in range(4, len(seen) + 1):
+            s = seen[:i]
+            if min(s[-3:]) >= min(s[:-3]):
+                return i
+        return None
+
+    # a healthy production-shaped trajectory, plateau included, must survive
+    assert stalls_at([2.29, .9, .9, .4, .35, .2, .09, .02, .005]) is None
+    # the old two-in-a-row rule would have stopped that one at turn 3
+    assert [2.29, .9, .9][-1] >= [2.29, .9, .9][-2]
+    # genuinely stuck, and oscillating, must both stop
+    assert stalls_at([.31, .30, .305, .30, .31, .30]) == 5
+    assert stalls_at([.5, .2, .5, .2, .5, .2]) == 5
+
+
+def _run_parser_actions():
+    """bootstrap.run builds its parser inside main(); read the actions without
+    running the pipeline."""
+    import argparse
+    import inspect
+    import textwrap
+
+    import bootstrap.run as br
+
+    src = inspect.getsource(br.main)
+    body = "    " + src[src.index("ap = argparse"):
+                        src.index("args = ap.parse_args()")]
+    ns = {"argparse": argparse}
+    exec(textwrap.dedent(body), ns)
+    return ns["ap"]._actions
 
 
 def test_the_prior_fast_path_drops_only_what_cannot_move_the_fixed_point():
