@@ -536,7 +536,7 @@
         <tr><th>Field</th><th>Type</th><th>Example</th><th>What it is, and the trap in it</th></tr>
       </thead>
       <tbody>
-        <tr><td class="f">episode_id</td><td class="t">string</td><td class="ex">"EP-88213-4471"</td><td>Stable for the whole clearance window. <strong>Not keyed by date</strong> — windows commonly run past midnight, and a date-keyed id splits one episode into two.</td></tr>
+        <tr><td class="f">episode_id</td><td class="t">string</td><td class="ex">"EP-88213-4471"</td><td><strong>You assign this, and it is the one field with a construction rule</strong> — see the box below. One id per clearance window, stable across midnight.</td></tr>
         <tr><td class="f">sku_id</td><td class="t">string</td><td class="ex">"SKU-88213"</td><td>—</td></tr>
         <tr><td class="f">fc</td><td class="t">string</td><td class="ex">"FC-04"</td><td>Fulfilment centre. Episodes are per SKU × FC, not per SKU.</td></tr>
         <tr><td class="f">category</td><td class="t">string</td><td class="ex">"vegetables"</td><td>Selects the reference discount and the learning cell.</td></tr>
@@ -550,6 +550,41 @@
         <tr><td class="f">current_discount</td><td class="t">float | null</td><td class="ex null">null</td><td><strong>The discount already in force.</strong> <code>null</code> on the episode's first decision, and a fraction (0.15, not 15) on every later one. It constrains the action set — prices never move back up within an episode.</td></tr>
       </tbody>
     </table>
+  </div>
+
+  <div class="note risk">
+    <h4><code>episode_id</code>: what it means, and how to assign it</h4>
+    <p>
+      An <em>episode</em> is <strong>one clearance window</strong> of one SKU at one FC: the
+      run of consecutive selling hours from the hour the window opens until the listing
+      closes. The id's job is to say "these hours are the same window", and the pricing logic
+      leans on it through <code>current_discount</code>: prices may only hold or deepen
+      <em>within</em> an episode, and a new episode is a fresh entry decision.
+    </p>
+    <p>How to assign it:</p>
+    <ul class="plain">
+      <li><b>Open a new id when a new window starts</b> — the first hour a SKU × FC comes on
+          clearance, recognisable in the source by the window counter resetting upward (a new
+          <code>flc_window</code> value larger than the previous hour's would decrement to).
+          Any scheme is fine as long as it is unique per window; ours is
+          <code>sku | fc | first hour of the window</code>.</li>
+      <li><b>Keep that id for every subsequent hour of the window</b>, however many calendar
+          days it spans. Windows of 36 hours are common; midnight is an ordinary hour.</li>
+      <li><b>Never derive it from the calendar date.</b> A date-keyed id splits one window
+          into two at midnight. The second "episode" then starts with
+          <code>current_discount = null</code>, the service treats it as a fresh entry, and
+          the price can move back UP mid-window — breaking the one guarantee (prices never
+          rise within an episode) the system treats as structural. The horizon and the
+          learning evidence for those hours are wrong too.</li>
+      <li><b>Two windows back-to-back are two ids</b>, even with no gap between them: the
+          close of one listing and the open of the next each carry their own entry
+          decision.</li>
+    </ul>
+    <p>
+      Consistency check worth building in: within one <code>episode_id</code>,
+      <code>hours_remaining</code> should decrement by exactly one per elapsed hour. If it
+      does not, the id is stitching two windows together or a feed hour is missing.
+    </p>
   </div>
 
   <div class="note risk">
@@ -1021,10 +1056,10 @@
       <span class="sev hard">hard</span>
       <b>Is <code>episode_id</code> stable across midnight?</b>
       <p>
-        An episode is a maximal run of consecutive hourly rows for one SKU × FC where the window
-        counter ticks down one per elapsed hour. Thirty-six-hour windows are common. If your
-        episode key is derived from a date, it will split one episode into two and every
-        horizon in it will be wrong.
+        The full assignment rule is in the box under §02. Thirty-six-hour windows are common;
+        a date-derived key splits one window into two, resets the price anchor mid-window
+        (the price can then rise — the one guarantee the system treats as structural), and
+        makes every horizon in the second half wrong.
       </p>
     </li>
     <li>
