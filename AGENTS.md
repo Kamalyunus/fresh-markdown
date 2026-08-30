@@ -147,6 +147,38 @@ disagree, the script is right. **It retrains the baseline every time**
 (rule 1) — iterate on single modules, not the script. After a later
 standalone `--fit-calibration`, **re-run `bootstrap.seal`**.
 
+## Tuning loop — before production
+
+`python3 -m pipeline.tune` reads the four reports and says what config should
+be, with the report field behind every recommendation. Run it after any
+bootstrap; it changes nothing without `--apply`.
+
+```bash
+scripts/run_bootstrap.sh <raw>          # 1–6, charts, seal, status
+python3 -m pipeline.shadow --input data/prepared.parquet   # writes shadow.json
+python3 -m pipeline.tune                # what to change, and on what evidence
+python3 -m pipeline.tune --apply        # pastes MEASURED values only
+scripts/run_bootstrap.sh <raw>          # re-measure under the new config
+```
+
+Four classes, and the class decides who may act. **PASTE** — a MEASURED value
+the pipeline computed; `--apply` writes it. **OWNER** — a SET BY OWNER value;
+never auto-applied (see the prohibitions), reported with the evidence needed
+to decide. **READ** — a finding with no config key (which constraint binds
+learning; whether the weekly calibration cron is worth running). **BLOCK** —
+an invariant that must hold first: reports from one model, a settled `f<->r`
+loop, `calib >= 2W`, no graded window across the exclusion gap. A BLOCK
+suppresses everything else and `--apply` refuses, because tuning against a
+report that graded a different model is worse than not tuning (rule 1).
+
+`--apply` copies `config.yaml` to `artifacts/config_backup_<stamp>.yaml` and
+appends to `artifacts/config_decisions.json`: what was written, the report
+field it came from, and every owner decision still outstanding. That file is
+the record of WHY the config is what it is — read it before changing a value
+by hand. **Iterate until `tune` reports no PASTE and no BLOCK**; a changed
+increment or rail changes what the next run measures, so one pass is rarely
+enough. Full rationale for each rule: §5.14, §6, §9.2.
+
 Daily production loop (Lane C — full operator guidance in `RUNBOOK.md`):
 
 ```bash

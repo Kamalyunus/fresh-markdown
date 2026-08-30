@@ -1765,6 +1765,40 @@ prevents, and it is the same discipline as §12a's velocity features.
 Both harnesses get it through `BaselineModel.predict_mu_ref` alone; neither
 has factor-selection code of its own, because a second copy would drift.
 
+**The tuning loop is a program, not a procedure (owner, 2026-08-30).** Every
+config decision in this project is reached the same way — run the bootstrap,
+read a named field in a named report, compare it against `config.yaml`, and
+either paste a MEASURED value or record an owner decision with the evidence
+beside it. That loop was being carried between a human and two agents by
+copy-paste, and it failed exactly where hand-carried loops fail: a shadow run
+was analysed at `information_increment: 12.0` after the measured value had
+already been pasted, and nothing noticed the report was describing a config
+that no longer existed.
+
+`pipeline.tune` is that loop as code. Each check names the report field it
+reads, so a disagreement is traceable to a file rather than to someone's
+memory, and the CLASS decides who may act: **PASTE** (a MEASURED value —
+`--apply` writes it), **OWNER** (a SET BY OWNER value — never auto-applied,
+reported with the evidence needed to decide), **READ** (a finding with no
+config key: which constraint binds learning, whether the weekly calibration
+cron is worth running), and **BLOCK** (an invariant that must hold before any
+of the rest is meaningful — reports from one model, a settled `f<->r` loop,
+`calib >= 2W`, no graded window across the exclusion gap). A BLOCK suppresses
+every other finding and `--apply` refuses outright, because tuning against a
+report that graded a different model is worse than not tuning at all
+(hard rule 1).
+
+`--apply` copies the config to `artifacts/config_backup_<stamp>.yaml` and
+appends to `artifacts/config_decisions.json`: what was written, the report
+field it came from, and every owner decision still outstanding. That file is
+the answer to "why is this value what it is", which previously lived only in
+a chat log. Edits are targeted line replacements rather than a YAML
+round-trip, because in this config the comment beside each value IS the
+reasoning for it and a round-trip drops them all; an anchor matching zero or
+several lines refuses rather than guessing. The loop is iterated until `tune`
+reports no PASTE and no BLOCK — a changed increment or rail changes what the
+next run measures, so one pass is rarely enough.
+
 **Shadow reports both calibration regimes (owner, 2026-08-28).** The 08-27
 change moved the freeze into the backtest gate and left the artifact's
 schedule running weekly — but that schedule is built over `pre_launch` data
