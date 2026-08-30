@@ -46,7 +46,7 @@ def test_every_required_outcome_field_is_documented():
     missing = [f for f in OUTCOME_REQUIRED if f not in documented_fields()]
     assert not missing, (
         f"docs/event_contract.html does not mention {missing}. The outcome "
-        "event is the part engineering actually produces -- it must be whole.")
+        "event is what the feed ingester stores -- it must be whole.")
 
 
 def test_the_doc_invents_no_fields():

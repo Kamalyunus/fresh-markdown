@@ -558,7 +558,11 @@ renames atomically, two cannot.
 
 Validation checks nine invariants and **rejects the state rather than
 returning any price** — the worst failure is a confidently wrong price, not
-"no answer". Every decision emits ~30 fields: the full pricing context, the
+"no answer". Outcomes are constructed by `pipeline.ingest_outcomes` from
+the hourly FLC feed (matched by SKU, FC, date, hour; `adjustment_reason`,
+`is_stockout` and the offered price derived), so the integration surface is
+the price request, applying the price, and a failed-push report. Every
+decision emits ~30 fields: the full pricing context, the
 exact prediction, posterior moments, exploration flags and cost, and the
 versions of model, posterior, config. Learning replays evidence from
 events, never recomputation, and any decision must be reproducible from its
@@ -1189,9 +1193,9 @@ zero ending with stock owed is shrink), and `unexplained_shortfall`
 (shrink — named, not quarantined: quarantine is for what the system cannot
 interpret, and a quarantined outcome never lands, so leaving shrink unnamed
 failed the shadow completeness gate at the feed's whole shrink rate).
-`common.episodes.adjustment_reason` is the one implementation; an
-integration that omits `episode_close_write_off` quarantines every episode
-that ends holding stock.
+`common.episodes.adjustment_reason` is the one implementation, and
+`pipeline.ingest_outcomes` runs it when it builds outcomes from the hourly
+feed — the classification is derived, never asked of an integration.
 
 **Restocked episodes are kept and gate nothing**: `ending[t] ==
 starting[t+1]`, so the arrival is carried forward and the solver meets a

@@ -12,7 +12,7 @@ import os
 
 DECISION_REQUIRED = [
     "decision_id", "episode_id", "is_entry", "sku_id", "fc", "category",
-    "subcategory", "hour_of_day", "hours_remaining", "q_remaining",
+    "subcategory", "date", "hour_of_day", "hours_remaining", "q_remaining",
     "original_price", "cost", "d_max", "feasible_tier_count",
     # actions allowed at THIS decision -- what explorability is judged on, and
     # distinct from the grid size. Required, because a decision that did not

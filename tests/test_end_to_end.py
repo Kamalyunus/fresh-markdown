@@ -289,6 +289,7 @@ def test_decision_loop_and_exactly_once_update(workspace):
             evt = decide({
                 "episode_id": eid, "sku_id": int(row.sku_id), "fc": row.fc,
                 "category": row.category, "subcategory": row.subcategory,
+                "date": str(row.date),
                 "hour_of_day": int(row.hour_of_day),
                 "hours_remaining": len(g) - t, "q": q,
                 "original_price": float(row.original_price),
@@ -708,7 +709,8 @@ def test_state_rejected_not_priced(workspace):
     with pytest.raises(StateRejected):
         decide({
             "episode_id": "x", "sku_id": 1, "fc": "F", "category": "MEAT",
-            "subcategory": "PORK", "hour_of_day": 12, "hours_remaining": 2,
+            "subcategory": "PORK", "date": "2026-08-01", "hour_of_day": 12,
+            "hours_remaining": 2,
             "q": 3, "original_price": -5.0, "cost": 10.0, "r": 1.0,
             "mu_ref_path": [1.0, 1.0], "current_discount": None,
         }, None, None, cfg, np.random.default_rng(0), 100.0, "v")

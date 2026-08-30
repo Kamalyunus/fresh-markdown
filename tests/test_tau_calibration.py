@@ -31,7 +31,7 @@ def _decision(i, discount, exploration_cost, date="2026-08-19"):
         "event": "decision", "decision_id": f"D{i}", "episode_id": f"EP{i}",
         "is_entry": True, "sku_id": f"S{i}", "fc": "FC-04",
         "category": "vegetables", "subcategory": "leafy_greens",
-        "hour_of_day": 17, "hours_remaining": 1, "q_remaining": 2,
+        "date": date, "hour_of_day": 17, "hours_remaining": 1, "q_remaining": 2,
         "original_price": P0, "cost": COST, "d_max": 0.6,
         "feasible_tier_count": 25, "action_set_size": 5,
         "optimal_price": P0 * 0.85, "optimal_discount": 0.15,

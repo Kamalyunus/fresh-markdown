@@ -26,7 +26,7 @@ itself is learned in production from IL-budgeted randomized exploration.
 | `pricing/` | 5.7–5.9 | `demand.py` (mu(d), censored expectation), `dp.py` (monotone DP, absolute-IL reward), `explore.py` (uniform draw from the tau-affordable set; budget and tau calibration), `posterior.py` (bounded step, atomic exactly-once commit). |
 | `inference/decide.py` | 5.10 | State validation (reject, never an unsafe price), decision event emission. |
 | `events/store.py` | 5.10 | Append-only JSONL: dedup, quarantine with reasons, replay. |
-| `pipeline/` | 5.11–5.15 | `update.py` (censored NB grid update, operator gate), `monitor.py`, `shadow.py` (phase-1 harness), `assurance.py` (frozen artifacts vs the live world), `status.py` (exit 1 on FAIL), `tune.py` (the config loop as code). |
+| `pipeline/` | 5.11–5.15 | `update.py` (censored NB grid update, operator gate), `monitor.py`, `shadow.py` (phase-1 harness), `assurance.py` (frozen artifacts vs the live world), `status.py` (exit 1 on FAIL), `tune.py` (the config loop as code), `ingest_outcomes.py` (outcome events built from the hourly feed — the minimal integration). |
 | `common/metrics.py` | 2.3 | `il_pct` and `fidelity_decomposition`, shared by their two consumers. |
 | `common/parallel.py` | — | `--workers N` for backtest/shadow; reports byte-identical serial or parallel. |
 | `tools/make_dummy_flc.py` | 6 | Synthetic FLC generator (legacy + randomized policies, known ground-truth elasticity); span defaults to covering `data.split`. |

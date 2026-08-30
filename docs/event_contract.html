@@ -451,17 +451,18 @@
   <p class="standfirst">
     The system writes <strong>two event streams</strong>: a decision event when it sets a price,
     and an outcome event when that hour closes. The decision event is written by the pricing
-    service and needs nothing from you beyond the state you already send to ask for a price.
-    <strong>The outcome event is the real integration ask</strong> — nine required fields per
-    priced hour, one per decision, with inventory that reconciles or says why it doesn't.
-    Every field below carries a real example value, and §05 walks one episode end to end in
-    payloads captured from the running system.
+    service and needs nothing from you beyond the state you send to ask for a price. The
+    outcome event is <strong>built on our side from the hourly FLC feed</strong>
+    (<code>pipeline.ingest_outcomes</code>), matched to decisions by SKU, FC, date and hour —
+    so your whole integration is: <strong>call the API, apply the returned price, and tell us
+    when a price push fails</strong>. Every field below carries a real example value, and §05
+    walks one episode end to end in payloads captured from the running system.
   </p>
 
   <div class="ataglance">
-    <div><b>11</b><span>fields you send to request a price</span></div>
-    <div><b>36</b><span>fields the service logs per decision</span></div>
-    <div><b>9</b><span>fields you return per outcome</span></div>
+    <div><b>12</b><span>fields you send to request a price</span></div>
+    <div><b>37</b><span>fields the service logs per decision</span></div>
+    <div><b>0</b><span>outcome fields you produce — built from the hourly feed</span></div>
     <div><b>1:1</b><span>outcomes per decision, hourly, exactly once</span></div>
   </div>
 </header>
@@ -472,7 +473,8 @@
     <p>
       One SKU in one fulfilment centre inside a clearance window is an <em>episode</em>. Every
       hour of that episode is a <em>decision interval</em>: the service is asked for a price,
-      it logs what it decided, the price goes live, the hour ends, and you report what happened.
+      it logs what it decided, the price goes live, the hour ends, and the outcome is read
+      back from the hourly feed.
     </p>
     <p>
       Both streams are append-only JSONL with durable writes and duplicate detection. Nothing is
@@ -485,7 +487,7 @@
     <div>
       <span class="step">You</span>
       <b>Price request</b>
-      <span class="d">11 fields of state: what the item is, how much is left, how long it has, what price is in force now.</span>
+      <span class="d">12 fields of state: what the item is, how much is left, how long it has, what price is in force now.</span>
     </div>
     <div>
       <span class="step">Service</span>
@@ -495,12 +497,12 @@
     <div>
       <span class="step">You</span>
       <b>Price goes live</b>
-      <span class="d">The applied price must be the one the service returned, or the mismatch rate climbs.</span>
+      <span class="d">The applied price must be the one the service returned, or the mismatch rate climbs. A failed push is reported — that is the one outcome fact only you know.</span>
     </div>
     <div>
-      <span class="step">You</span>
+      <span class="step">Us</span>
       <b>Outcome event</b>
-      <span class="d">9 fields when the hour closes: units sold, inventory in and out, the price that was actually in force.</span>
+      <span class="d">Built from the hourly feed: units sold, inventory in and out, the price in force — matched to the decision by SKU, FC, date, hour.</span>
     </div>
   </div>
 
@@ -512,7 +514,7 @@
       price back. That is how a drifted model artifact or a bad config deploy is caught in
       production — but it only works if the event carries the full demand forecast
       (<code>mu_ref_path</code>) and the price already in force (<code>anchor_discount</code>),
-      not just this hour's summary. None of those 36 fields is yours to produce.
+      not just this hour's summary. None of those 37 fields is yours to produce.
     </p>
   </div>
 </section>
@@ -521,7 +523,7 @@
   <h2><span class="num">02</span>What you send to request a price</h2>
   <div class="prose">
     <p>
-      Eleven fields, once per SKU × FC per hour. The service resolves everything else itself —
+      Twelve fields, once per SKU × FC per hour. The service resolves everything else itself —
       the demand forecast from the frozen model, the dispersion parameter from its lookup table,
       the reference discount from config.
     </p>
@@ -539,6 +541,7 @@
         <tr><td class="f">fc</td><td class="t">string</td><td class="ex">"FC-04"</td><td>Fulfilment centre. Episodes are per SKU × FC, not per SKU.</td></tr>
         <tr><td class="f">category</td><td class="t">string</td><td class="ex">"vegetables"</td><td>Selects the reference discount and the learning cell.</td></tr>
         <tr><td class="f">subcategory</td><td class="t">string</td><td class="ex">"leafy_greens"</td><td>Selects the dispersion parameter and the level factor.</td></tr>
+        <tr><td class="f">date</td><td class="t">string</td><td class="ex">"2026-08-19"</td><td>The pricing hour's calendar date. With <code>hour_of_day</code> it is the key the outcome ingester matches feed rows to decisions on.</td></tr>
         <tr><td class="f">hour_of_day</td><td class="t">int</td><td class="ex">17</td><td>—</td></tr>
         <tr><td class="f">hours_remaining</td><td class="t">int ≥ 1</td><td class="ex">4</td><td>Hours left in the window, this one included. Drives the planning horizon; see the trap in §07.</td></tr>
         <tr><td class="f">q</td><td class="t">int ≥ 0</td><td class="ex">3</td><td>Units on hand at the top of the hour.</td></tr>
@@ -564,8 +567,8 @@
   <h2><span class="num">03</span>What the service logs per decision</h2>
   <div class="prose">
     <p>
-      Thirty-six required fields, all written by the pricing service. Listed here so you can size
-      storage and know what you can query later — not because you produce any of it. Three more
+      Thirty-seven required fields, all written by the pricing service. Listed here so you can
+      size storage and know what you can query later — not because you produce any of it. Three more
       diagnostic fields (<code>event</code>, <code>solver_latency_s</code>,
       <code>nb_tail_mass_max</code>) are written but not required.
     </p>
@@ -573,7 +576,7 @@
 
   <div class="tscroll">
     <table>
-      <caption>Grouped by what the field is for. All 36 are mandatory — an event missing any one of them is quarantined, not written. Examples are the same 17:00 entry decision.</caption>
+      <caption>Grouped by what the field is for. All 37 are mandatory — an event missing any one of them is quarantined, not written. Examples are the same 17:00 entry decision.</caption>
       <thead>
         <tr><th>Field</th><th>Example</th><th>Purpose</th></tr>
       </thead>
@@ -588,7 +591,8 @@
         <tr><td class="f">sku_id · fc</td><td class="ex">"SKU-88213" · "FC-04"</td><td>As supplied.</td></tr>
         <tr><td class="f">category · subcategory</td><td class="ex">"vegetables" · "leafy_greens"</td><td>As supplied.</td></tr>
 
-        <tr class="grouphead"><td colspan="3">State at decision time — 5</td></tr>
+        <tr class="grouphead"><td colspan="3">State at decision time — 6</td></tr>
+        <tr><td class="f">date</td><td class="ex">"2026-08-19"</td><td>As supplied; the feed-matching key with <code>hour_of_day</code>.</td></tr>
         <tr><td class="f">hour_of_day · hours_remaining</td><td class="ex">17 · 4</td><td>As supplied.</td></tr>
         <tr><td class="f">q_remaining</td><td class="ex">3</td><td>As supplied (your <code>q</code>).</td></tr>
         <tr><td class="f">original_price · cost</td><td class="ex">10000.0 · 4000.0</td><td>As supplied.</td></tr>
@@ -628,12 +632,16 @@
 </section>
 
 <section id="outcome">
-  <h2><span class="num">04</span>What you send back per outcome</h2>
+  <h2><span class="num">04</span>The outcome event — built from your feed</h2>
   <div class="prose">
     <p>
-      This is the integration. Nine required fields, <strong>exactly one finalized outcome per
-      decision interval</strong>. Two further fields are conditional — omitted normally, required
-      in the specific cases below.
+      <strong>You do not produce this event.</strong> <code>pipeline.ingest_outcomes</code>
+      constructs exactly one finalized outcome per decision from the hourly FLC feed — the
+      same snapshot the bootstrap already ingests — matched by (SKU, FC, date, hour). The
+      fields are listed so you know what gets stored and what the feed must carry. The only
+      per-hour fact that must come from you is a <strong>failed price push</strong>: one JSONL
+      row (<code>sku_id</code>, <code>fc</code>, <code>date</code>, <code>hour_of_day</code>,
+      <code>reason</code>). Absent means the push succeeded.
     </p>
   </div>
 
@@ -644,33 +652,28 @@
         <tr><th>Field</th><th>Source</th><th>Type</th><th>Example</th><th>Rule</th></tr>
       </thead>
       <tbody>
-        <tr><td class="f">outcome_id</td><td><span class="tag you">you</span></td><td class="t">string</td><td class="ex">"OC-88213-4471-18"</td><td>Immutable and unique. A repeat is counted as a duplicate and ignored, not an error. Yours to shape — ours are UUIDs, but any stable scheme works.</td></tr>
-        <tr><td class="f">decision_id</td><td><span class="tag you">you</span></td><td class="t">string</td><td class="ex">"faf79b6c-fde0-…"</td><td>Must match a decision we wrote. An outcome with no matching decision counts against the safety gate.</td></tr>
-        <tr><td class="f">units_sold</td><td><span class="tag you">you</span></td><td class="t">int ≥ 0</td><td class="ex">0</td><td><strong>Zero-sale hours must be sent.</strong> They are roughly three quarters of all hours and they are evidence, not noise.</td></tr>
-        <tr><td class="f">starting_inventory</td><td><span class="tag you">you</span></td><td class="t">int ≥ 0</td><td class="ex">2</td><td>Units at the top of the hour. Should equal the decision's <code>q_remaining</code>.</td></tr>
-        <tr><td class="f">ending_inventory</td><td><span class="tag you">you</span></td><td class="t">int ≥ 0</td><td class="ex">2</td><td>Units at the close. Must equal <code>starting − sold</code> unless <code>adjustment_reason</code> is set.</td></tr>
-        <tr><td class="f">applied_price</td><td><span class="tag you">you</span></td><td class="t">float</td><td class="ex">5500.0</td><td><strong>The price actually in force</strong> for the hour, not the one we recommended. The gap between the two is a monitored number — see §06.</td></tr>
-        <tr><td class="f">is_stockout</td><td><span class="tag you">you</span></td><td class="t">bool</td><td class="ex">false</td><td>Whether demand hit the inventory ceiling. Derivable as <code>sold ≥ starting</code>, but the field must be present: <em>any</em> missing rate above zero fires a stop condition.</td></tr>
-        <tr><td class="f">execution_status</td><td><span class="tag you">you</span></td><td class="t">string</td><td class="ex">"ok"</td><td>Only <code>"ok"</code>, <code>"success"</code> or absent make the outcome eligible for learning. Anything else is stored and excluded — which is the correct handling of an hour where the price never went live.</td></tr>
-        <tr><td class="f">finalized_at</td><td><span class="tag you">you</span></td><td class="t">timestamp</td><td class="ex">"2026-08-19T19:00:00+00:00"</td><td>UTC with offset.</td></tr>
-        <tr class="groupsep"><td class="f">adjustment_reason</td><td><span class="tag cond">conditional</span></td><td class="t">string</td><td class="ex">"episode_close_write_off"</td><td>Required whenever inventory does not reconcile — omitted entirely otherwise, as in this example. Exactly three values are legitimate; see the box below.</td></tr>
-        <tr><td class="f">execution_failure_reason</td><td><span class="tag cond">conditional</span></td><td class="t">string</td><td class="ex">"price_push_timeout"</td><td>Free text, when <code>execution_status</code> is not a success value.</td></tr>
+        <tr><td class="f">outcome_id</td><td><span class="tag">derived</span></td><td class="t">string</td><td class="ex">"feed-faf79b6c-…"</td><td>Derived from the decision id, so re-ingesting the same feed dedups instead of double-counting.</td></tr>
+        <tr><td class="f">decision_id</td><td><span class="tag">derived</span></td><td class="t">string</td><td class="ex">"faf79b6c-fde0-…"</td><td>The decision the feed row matched on (SKU, FC, date, hour).</td></tr>
+        <tr><td class="f">units_sold</td><td><span class="tag you">feed</span></td><td class="t">int ≥ 0</td><td class="ex">0</td><td><strong>Zero-sale hours count.</strong> They are roughly three quarters of all hours and they are evidence, not noise — the feed carries them already.</td></tr>
+        <tr><td class="f">starting_inventory</td><td><span class="tag you">feed</span></td><td class="t">int ≥ 0</td><td class="ex">2</td><td>The feed's inventory at the top of the hour. Should equal the decision's <code>q_remaining</code>.</td></tr>
+        <tr><td class="f">ending_inventory</td><td><span class="tag you">feed</span></td><td class="t">int ≥ 0</td><td class="ex">2</td><td>The feed's close-of-hour count. When it does not equal <code>starting − sold</code>, the ingester derives <code>adjustment_reason</code> from the break.</td></tr>
+        <tr><td class="f">applied_price</td><td><span class="tag">derived</span></td><td class="t">float</td><td class="ex">5500.0</td><td>The OFFERED price from the feed: <code>normal_asp × (1 − discount)</code> — never the realised-price column, which is zeroed on no-sale rows. The gap to our recommendation is a monitored number — see §06.</td></tr>
+        <tr><td class="f">is_stockout</td><td><span class="tag">derived</span></td><td class="t">bool</td><td class="ex">false</td><td><code>sold ≥ starting</code>.</td></tr>
+        <tr><td class="f">execution_status</td><td><span class="tag you">you</span></td><td class="t">string</td><td class="ex">"ok"</td><td><code>"ok"</code> unless the hour appears in your failures file — then <code>"failed"</code>, and the outcome is stored but excluded from learning, which is the correct handling of an hour where the price never went live.</td></tr>
+        <tr><td class="f">finalized_at</td><td><span class="tag">derived</span></td><td class="t">timestamp</td><td class="ex">"2026-08-19T19:00:00+00:00"</td><td>The hour's close, UTC.</td></tr>
+        <tr class="groupsep"><td class="f">adjustment_reason</td><td><span class="tag">derived</span></td><td class="t">string</td><td class="ex">"episode_close_write_off"</td><td>Derived by <code>common.episodes.adjustment_reason</code> whenever inventory does not reconcile — omitted otherwise. Exactly three values; see the box below for what they mean in the feed.</td></tr>
+        <tr><td class="f">execution_failure_reason</td><td><span class="tag cond">conditional</span></td><td class="t">string</td><td class="ex">"price_push_timeout"</td><td>Your failures file's <code>reason</code>, when the push failed.</td></tr>
       </tbody>
     </table>
   </div>
 
   <div class="note risk">
-    <h4>The one that will bite: <code>episode_close_write_off</code></h4>
+    <h4>The inventory breaks, and what the ingester does with them</h4>
     <p>
-      When a clearance window closes with stock still on hand, the source system writes the
-      remainder off and reports <code>ending_inventory = 0</code>. That is not a reconciling
-      outcome, so it needs <code>adjustment_reason</code> set or it quarantines. On the
-      corrected extract <strong>about 13.5% of episodes end holding stock</strong> — an
-      integration that omits the reason quarantines every one of those final-hour outcomes and
-      fails the event-completeness gate for what will look like a pipeline defect on our side.
-    </p>
-    <p>
-      The three legitimate values, and how to decide between them, given
+      When a clearance window closes with stock still on hand, the source writes the remainder
+      off and reports <code>ending_inventory = 0</code> — about 13.5% of episodes end that way.
+      The ingester classifies every non-reconciling hour itself, with the same rule the offline
+      chain uses, so nothing here is yours to implement. For reference, given
       <code>leftover = max(starting − sold, 0)</code>:
     </p>
     <ul class="plain">
@@ -683,15 +686,9 @@
           reason no integration work can fix.</li>
     </ul>
     <p style="margin-top:12px">
-      <strong>Recognise the write-off by the zero, never by position in the episode.</strong> The
-      source zeroes at <em>its own</em> window boundary; once a window is merged across midnight
-      that row sits in the middle of ours. Two earlier implementations keyed it to "the last hour"
-      and quarantined real outcomes in bulk.
-    </p>
-    <p>
-      Anything matching none of the three quarantines with the reason attached. Please don't
-      add a catch-all reason to drive the quarantine count to zero — that file is where a
-      genuinely uninterpretable outcome stays visible.
+      The write-off is recognised by the zero itself, never by position in the episode.
+      Anything matching none of the three quarantines with the reason attached — the
+      quarantine file is where a genuinely uninterpretable feed hour stays visible.
     </p>
   </div>
 </section>
@@ -902,7 +899,8 @@
   <h3>The three outcomes</h3>
   <div class="prose">
     <p>
-      This is the part you build. Nine fields each; the third one carries the tenth.
+      What the ingester constructs from the feed for those three hours; the third one carries
+      the derived <code>adjustment_reason</code>.
     </p>
   </div>
 
@@ -958,13 +956,12 @@
   </div>
 
   <div class="note">
-    <h4>What the third one costs if you get it wrong</h4>
+    <h4>The write-off shape</h4>
     <p>
-      Drop <code>adjustment_reason</code> from that last payload and the store writes it to
-      quarantine with <em>"ending_inventory does not reconcile and no adjustment_reason
-      documented"</em>. It never reaches learning, event completeness falls, and — because this
-      shape occurs at the close of every episode that ends holding stock (~13.5% of episodes)
-      — the shadow gate will not pass.
+      That last payload is why the classification exists: the source zeroes the field at close,
+      so 2 − 1 = 1 expected against 0 reported. The ingester names it
+      <code>episode_close_write_off</code>; unnamed, the store would quarantine it and event
+      completeness would fall by the ~13.5% of episodes that end holding stock.
     </p>
     <p>
       Note also that <code>is_stockout</code> is <code>false</code> on all three, including the
@@ -990,10 +987,10 @@
         <tr><th>Gate</th><th class="n">Threshold</th><th>What breaches it</th></tr>
       </thead>
       <tbody>
-        <tr><td class="f">event completeness</td><td class="t n">≥ 99%</td><td>Outcomes landing per decision. Quarantined outcomes don't land, so a missing <code>adjustment_reason</code> shows up here first.</td></tr>
+        <tr><td class="f">event completeness</td><td class="t n">≥ 99%</td><td>Outcomes landing per decision. A priced hour missing from the feed, or a feed hour the ingester cannot interpret, shows up here first.</td></tr>
         <tr><td class="f">matched decision rate</td><td class="t n">≥ 99%</td><td>Decisions that got an outcome back.</td></tr>
         <tr><td class="f">duplicate or unmatched</td><td class="t n">≤ 1%</td><td>Repeated ids plus outcomes with no matching decision, over finalized outcomes.</td></tr>
-        <tr><td class="f">price mismatch</td><td class="t n">≤ 1%</td><td>Outcomes whose <code>applied_price</code> differs from the decision's by more than <code>1e-6</code>. This is the "did our price actually go live" check.</td></tr>
+        <tr><td class="f">price mismatch</td><td class="t n">≤ 1%</td><td>Outcomes whose offered price (from the feed) differs from the decision's by more than <code>1e-6</code>. This is the "did our price actually go live" check — it catches silent push failures your failures file missed.</td></tr>
         <tr><td class="f">missing stockout field</td><td class="t n">exactly 0</td><td>Any outcome at all without <code>is_stockout</code>.</td></tr>
       </tbody>
     </table>
@@ -1002,11 +999,10 @@
   <div class="note">
     <h4>Exactly-once, on our side</h4>
     <p>
-      Learning consumes each <code>outcome_id</code> once and records that it did, so a retry
-      that re-sends an outcome is safe: it is counted as a duplicate and ignored. You do not need
-      exactly-once delivery — you need <strong>stable ids</strong>. Re-sending the same outcome
-      under a fresh <code>outcome_id</code> is the failure mode to avoid, because that is
-      indistinguishable from a second real observation.
+      Outcome ids derive from decision ids, so re-running the ingester over the same feed
+      dedups instead of double-counting, and learning consumes each <code>outcome_id</code>
+      once. Nothing on your side needs exactly-once delivery — the feed just needs to keep
+      carrying every hour.
     </p>
   </div>
 </section>
@@ -1016,21 +1012,11 @@
   <div class="prose">
     <p>
       Ranked by how much trouble they have caused in replay and shadow. If your team can answer
-      these six, the rest of the contract is routine field plumbing.
+      these five, the rest of the contract is routine field plumbing.
     </p>
   </div>
 
   <ol class="check">
-    <li>
-      <span class="sev hard">hard</span>
-      <b>Can you emit the episode-close write-off?</b>
-      <p>
-        Every closed episode's final row carries the zeroed field, and ~13.5% of episodes end
-        with stock still on hand — the case that needs the reason. If it can't be produced,
-        every one of those final-hour outcomes quarantines and the shadow gate never passes.
-        This is the single most likely blocker.
-      </p>
-    </li>
     <li>
       <span class="sev hard">hard</span>
       <b>Is <code>episode_id</code> stable across midnight?</b>
@@ -1053,20 +1039,22 @@
     </li>
     <li>
       <span class="sev med">medium</span>
-      <b>Can you guarantee one finalized outcome per priced hour, including zero-sale hours?</b>
+      <b>Does the hourly feed keep carrying every priced hour — zero-sale hours included?</b>
       <p>
-        Roughly three quarters of hours sell nothing. Those are the observations that identify
-        demand at a price, so a pipeline that only reports sales silently discards most of the
-        evidence and completeness collapses.
+        Outcomes are built from the feed, so a priced hour the feed drops is a completeness
+        miss. Roughly three quarters of hours sell nothing, and those rows are the evidence —
+        the feed carries them today; it must keep doing so for the pilot SKUs.
       </p>
     </li>
     <li>
       <span class="sev med">medium</span>
-      <b>Is the applied price observable after the fact?</b>
+      <b>Can you report a failed price push?</b>
       <p>
-        The outcome must carry the price that was genuinely in force, which is not always the one
-        we returned — a failed push, a manual override, a promotion stacked downstream. Reporting
-        our recommendation back to us hides exactly the discrepancy this field exists to surface.
+        The one outcome fact only you know. One JSONL row per failed hour (<code>sku_id</code>,
+        <code>fc</code>, <code>date</code>, <code>hour_of_day</code>, <code>reason</code>);
+        silence means the push succeeded. The feed's own discount column backstops this — a
+        price that never went live shows up as a mismatch — but the explicit report is what
+        separates "push failed" from "feed skew".
       </p>
     </li>
     <li>
@@ -1085,16 +1073,14 @@
     Field lists are read directly from the running system — <code>events/store.py</code>
     (<code>DECISION_REQUIRED</code>, <code>OUTCOME_REQUIRED</code>),
     <code>inference/decide.py</code> for what the service emits,
-    <code>pipeline/shadow.py</code> for the reference outcome producer, and
-    <code>config.yaml</code> for every threshold quoted in §06. The shadow harness is a working
-    implementation of the outcome side, including <code>adjustment_reason</code>, and is worth
-    reading before writing a new one.
+    <code>pipeline/ingest_outcomes.py</code> for how outcomes are built from the feed, and
+    <code>config.yaml</code> for every threshold quoted in §06.
   </p>
   <p>
     Every payload in §05 was generated by running the real decision path against the frozen
-    artifacts and capturing what it emitted — including the write-off, which was produced by
-    the same <code>adjustment_reason</code> function a production integration should call. The
-    long unrounded floats are shown as they arrive, not tidied.
+    artifacts and capturing what it emitted — including the write-off, classified by the same
+    <code>adjustment_reason</code> function the ingester runs. The long unrounded floats are
+    shown as they arrive, not tidied.
   </p>
 </footer>
 

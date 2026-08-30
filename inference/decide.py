@@ -115,6 +115,9 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
         "is_entry": entry,
         "sku_id": s["sku_id"], "fc": s["fc"],
         "category": s["category"], "subcategory": s["subcategory"],
+        # the pricing hour's calendar date: with hour_of_day it is the key
+        # pipeline.ingest_outcomes matches feed rows to decisions on
+        "date": str(s["date"]),
         "hour_of_day": int(s["hour_of_day"]),
         "hours_remaining": int(s["hours_remaining"]),
         "q_remaining": int(s["q"]),

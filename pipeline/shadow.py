@@ -405,6 +405,7 @@ def _shadow_one(ep, ctx):
             "episode_id": ep["episode_id"], "sku_id": int(ep["sku_id"][t]),
             "fc": ep["fc"][t], "category": ep["category"][t],
             "subcategory": ep["subcategory"][t],
+            "date": row_day,
             "hour_of_day": int(ep["hour_of_day"][t]),
             "hours_remaining": n - t, "q": q,
             "original_price": float(ep["original_price"][t]),

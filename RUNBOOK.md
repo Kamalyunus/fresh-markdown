@@ -87,16 +87,21 @@ The engine is `inference.decide`: state in, price + decision event out, or
 validate. Engineering owns everything on the other side of the event
 contract:
 
-- the hourly scheduler and transport that call `decide` per SKU × FC;
+- the hourly scheduler and transport that call `decide` per SKU × FC
+  (the 12-field request in `docs/event_contract.html` §02);
 - applying the returned price (the applied price must be the returned one —
   the mismatch rate is gated at 1%);
-- producing **exactly one finalized outcome per priced hour**, including
-  zero-sale hours (~3 in 4), per `docs/event_contract.html` — the 11-field
-  request, the 9-field outcome, and the three `adjustment_reason` values.
-  §07 of that page is the pre-build feasibility checklist; the shadow
-  harness (`pipeline/shadow.py`) is a working reference producer;
+- reporting **failed price pushes** — one JSONL row per failed hour
+  (`sku_id`, `fc`, `date`, `hour_of_day`, `reason`); silence means the push
+  succeeded;
 - a defined fallback for `StateRejected` (hold the current price; alert on
   rate).
+
+Outcomes are NOT engineering's to produce: `pipeline.ingest_outcomes`
+(Lane C) builds them from the hourly FLC feed, matched to decisions by
+(SKU, FC, date, hour), deriving `adjustment_reason`, `is_stockout` and the
+offered price itself. §07 of the contract page is the pre-build
+feasibility checklist.
 
 The caller reads `tau` from `PosteriorStore.tau(cfg)` — **not** from
 `config.exploration.tau_initial`, which is only the launch value and never
@@ -111,6 +116,8 @@ in the caller.
 Run after midnight, in this order:
 
 ```bash
+python3 -m pipeline.ingest_outcomes --feed <hourly parquet> \
+    [--failures failures.jsonl]        # outcomes from the feed, idempotent
 python3 -m pipeline.update             # monitor only -- always safe
 python3 -m pipeline.update --apply     # OPERATOR GATE -- see below
 python3 -m pipeline.monitor            # business / learning / safety series
@@ -181,7 +188,7 @@ outcomes stay visible.
 | Prior gate verdict; level-diagnostic review | run & present | **A** |
 | MEASURED pastes into config | **R** (from named report fields only) | informed |
 | `SET BY OWNER` thresholds, MDE, gate band | — | **A** |
-| Lane B service, outcome producer, SLA | **R/A** | — |
+| Lane B service, push-failure feed, SLA | **R/A** | — |
 | Daily `--apply` approval | **R** (pilot: owner may retain) | consulted on escalations |
 | Guardrail breach response, A/B readout | informed | **A** (decision table in design §11.2) |
 | A/B duration & no-early-reads | enforce | **A** |
