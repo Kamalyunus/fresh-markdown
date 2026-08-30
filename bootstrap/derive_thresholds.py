@@ -20,7 +20,7 @@ from common.ab import arm
 from common.config import load_config
 from common import episodes
 from common import guardrail
-from bootstrap.measure import m6_il_pct
+from common.metrics import il_pct
 
 
 # ------------------------------------------------------------- A/B duration
@@ -43,7 +43,7 @@ def empirical_se_by_duration(d, cfg):
             t = t + span
             if block.episode_id.nunique() < ab["min_episodes_per_block"]:
                 continue
-            m6 = m6_il_pct(block)
+            m6 = il_pct(block)
             if m6["il_pct_ratio_se_clustered"] is None:
                 continue
             blocks += 1

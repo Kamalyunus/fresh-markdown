@@ -119,26 +119,6 @@ def test_vintages_without_a_bundle_read_not_run_never_pass(cfg):
     assert row["verdict"] == status.NONE
 
 
-def test_the_ab_power_se_paste_is_mirrored_against_phase0(cfg):
-    """The MEASURED A/B power SE is pasted from phase 0 and consumed nowhere
-    at runtime, so a stale paste is silent forever without this mirror."""
-    c = dict(cfg, ab_test=dict(cfg["ab_test"],
-                               il_pct_ratio_se_clustered=0.000875))
-    stale = {"config_values_measured":
-             {"ab_test.il_pct_ratio_se_clustered": 0.002915}}
-    row = status._mirrors(c, stale)
-    assert row["verdict"] == status.FAIL
-    assert "0.002915" in row["detail"] and "0.000875" in row["detail"]
-    # a matching paste adds no drift line, and a missing phase0 report is
-    # not drift (measure has not run yet). Assert on THIS mirror's line, not
-    # the row verdict -- the artifact mirrors may drift independently in a
-    # local checkout
-    fresh = {"config_values_measured":
-             {"ab_test.il_pct_ratio_se_clustered": 0.000875}}
-    assert "il_pct_ratio_se_clustered" not in status._mirrors(c, fresh)["detail"]
-    assert "il_pct_ratio_se_clustered" not in status._mirrors(c, None)["detail"]
-
-
 def test_overall_verdict_and_render(cfg, tmp_path):
     report = status.collect(cfg, str(tmp_path))
     assert report["verdict"] in (status.PASS, status.FAIL)

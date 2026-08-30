@@ -44,8 +44,6 @@ def workspace(tmp_path_factory):
         "--seed", "3", "--out", "data/flc.parquet")
     run("-m", "bootstrap.prepare_data", "--input", "data/flc.parquet",
         "--out", "data/prepared.parquet")
-    run("-m", "bootstrap.measure", "--input", "data/flc.parquet",
-        "--out", "reports/phase0.json")
     run("-m", "bootstrap.train_baseline", "--input", "data/prepared.parquet")
     run("-m", "bootstrap.fit_dispersion", "--input", "data/prepared.parquet")
     run("-m", "bootstrap.estimate_prior", "--input", "data/prepared.parquet")
@@ -58,171 +56,6 @@ def _chdir(ws):
     os.chdir(ws)
     if REPO not in sys.path:
         sys.path.insert(0, REPO)
-
-
-def test_filter_chain_waterfall(workspace):
-    _chdir(workspace)
-    with open("artifacts/split_manifest.json") as f:
-        manifest = json.load(f)
-    wf = manifest["data_quality_waterfall"]
-    rows = [s["rows"] for s in wf if s["step"] != "contiguous_episodes_built"]
-    assert rows == sorted(rows, reverse=True)
-    # every stage is named and counted -- 7 drops, the raw row, the
-    # negative-window recovery, the re-segmentation guard, and the TWO
-    # population-gate rows. The count is asserted so that adding or
-    # removing a filter has to be a deliberate edit here, and so the figure
-    # quoted in the walkthrough and design doc has something holding it to
-    # the code.
-    assert wf[0]["step"] == "raw"
-    assert wf[-1]["step"] == "dp_eligible"
-    assert len(wf) == 13, [s["step"] for s in wf]
-
-    # EVERY ROW SAYS WHAT IT IS AND WHO READS IT. Counts alone never answered
-    # the question a reader brings to this report -- "is this the population my
-    # number came from?" -- and the two gate rows are the only place the
-    # consumers differ, everything above being gone for everyone.
-    assert all("kind" in s and "used_by" in s for s in wf)
-    gates = [s["step"] for s in wf if s["kind"] == "population_gate"]
-    assert gates == ["eligible", "dp_eligible"], gates
-    # ...and the demand-model side must be visible on its own row, not folded
-    # into the solver's. Reporting only dp_eligible attributed the cost of the
-    # eligibility gate to the DP, which did not cause it.
-    elig = next(s for s in wf if s["step"] == "eligible")
-    dp = next(s for s in wf if s["step"] == "dp_eligible")
-    assert "DEMAND MODEL" in elig["used_by"] and "IL" in elig["used_by"]
-    assert "DP SOLVER" in dp["used_by"] and "backtest" in dp["used_by"]
-    # nested, so the exclusions must never be added together
-    assert dp["episodes"] <= elig["episodes"]
-    # a fragment of a gap-split window is not an episode, and both halves go
-    assert "gap_split_windows_dropped" in [x["step"] for x in wf]
-    # Everything that is not an integrity or scope rule is a FLAG. None of
-    # these may come back as a drop: each one removes population from every
-    # frozen artifact while the thing it protects (the DP's state space, or a
-    # scrap figure) reads the flag anyway.
-    for gone in ("below_cost_dropped", "non_priceable_dropped",
-                 "window_too_long_dropped", "cost_missing_dropped",
-                 "negative_window_dropped", "restocked_episodes_dropped",
-                 "edge_truncated_episodes_dropped",
-                 "units_gt_inventory_dropped"):
-        assert gone not in [x["step"] for x in wf], \
-            f"{gone} is back to dropping -- it must flag, or every frozen " \
-            "artifact loses that population again"
-    d = pd.read_parquet("data/prepared.parquet")
-    assert d.category.notna().all()
-    assert d.total_discount.between(0, 1).all()      # percent -> fraction once
-    assert (d.original_price > 0).all()
-    # `sold <= starting` is NOT an invariant anywhere any more. An hour
-    # selling more than it opened with is a RESTOCK -- the source reports the
-    # final count in `ending_inventory` -- and restocked episodes are
-    # dp_eligible, because the replay applies the same per-hour adjustment
-    # the real episode had. What must hold instead is that every such hour is
-    # accounted for as an arrival.
-    over = d.units_sold > d.starting_inventory
-    assert (d.loc[over, "units_restocked"] > 0).all(), \
-        "an hour sold more than it opened with and no arrival was recorded"
-
-
-def test_waterfall_reports_the_money_each_filter_removes(workspace):
-    """Rows are not the unit the business cares about.
-
-    IL is discount given away plus scrap at cost, so what a filter costs is
-    measured in exposure -- unit cost x SUPPLY, opening stock plus gross
-    arrivals -- not in rows. The two
-    diverge: a stage can take a small share of rows and a large share of the
-    money, and only the second says whether the surviving population still
-    represents the business.
-    """
-    _chdir(workspace)
-    with open("artifacts/split_manifest.json") as f:
-        wf = json.load(f)["data_quality_waterfall"]
-
-    raw = wf[0]["cogs_at_risk"]
-    assert raw > 0
-    assert "cogs_dropped" not in wf[0]              # nothing precedes raw
-    for prev, row in zip(wf, wf[1:]):
-        assert row["cogs_dropped"] == pytest.approx(
-            prev["cogs_at_risk"] - row["cogs_at_risk"], abs=0.2)
-        assert row["cogs_dropped_pct_of_raw"] == pytest.approx(
-            row["cogs_dropped"] / raw, abs=1e-5)
-        assert row["cogs_pct_of_raw"] == pytest.approx(
-            row["cogs_at_risk"] / raw, abs=1e-5)
-
-    # every stage removes money or leaves it alone -- except re-segmentation,
-    # which splits windows so one opening row becomes two and the same stock
-    # is counted twice. That stage ADDS, in episodes and in money alike.
-    for row in wf[1:]:
-        if row["step"] == "contiguous_episodes_built":
-            continue
-        assert row["cogs_dropped"] >= -0.2, row["step"]
-
-    # and the measure is per EPISODE, not per row: summing cost x inventory
-    # over hours would multiply the same stock by the window length
-    d = pd.read_parquet("data/prepared.parquet")
-    per_row = float((d.cost * d.starting_inventory).sum())
-    assert wf[-1]["cogs_at_risk"] < per_row
-
-
-def test_edge_truncation_is_flagged_and_split_from_the_feed_residue(workspace):
-    """Unclosed episodes stay, and the two reasons stay told apart.
-
-    Two things make an episode's outcome unknown. The extract cutting a window
-    mid-flight is unavoidable and a longer extract is the only fix. Everything
-    else is a feed problem a longer extract will NOT fix. Neither is dropped
-    -- the observed hours are good demand data either way, and every scrap
-    figure already excludes an unclosed ending on its own -- so what this test
-    protects is the SPLIT: `edge_truncated` must mark exactly the
-    boundary-explained ones, leaving m11's not_closed residue readable.
-    """
-    _chdir(workspace)
-    from common import episodes as E
-    with open("artifacts/split_manifest.json") as f:
-        wf = json.load(f)["data_quality_waterfall"]
-    steps = [s["step"] for s in wf]
-    stage = wf[steps.index("dp_eligible")]["edge_truncated"]
-    assert 0.0 <= stage["share_of_unclosed_explained_by_edge"] <= 1.0
-
-    d = pd.read_parquet("data/prepared.parquet")
-    kind = E.classify(d)
-    unknown_ids = set(kind.index[kind == E.NOT_CLOSED])
-    flagged = set(d.loc[d.edge_truncated, "episode_id"].unique())
-
-    assert stage["episodes_unclosed"] == len(unknown_ids)
-    assert stage["episodes_edge_truncated"] == len(flagged)
-    assert stage["episodes_unclosed_not_edge"] == len(unknown_ids - flagged)
-    assert flagged <= unknown_ids, \
-        "a CLOSED episode was flagged edge_truncated -- the flag has stopped " \
-        "meaning 'outcome missing because the extract stopped'"
-    # nothing was removed for being unclosed: the frame still carries both
-    # kinds, and the flag does not gate the DP
-    assert stage["still_dp_eligible"] > 0 or not flagged, \
-        "edge-truncated episodes are being kept out of dp_eligible -- only " \
-        "their ENDING is unknown, and replay zeroes that scrap already"
-
-    # the flag is exactly the boundary test: an episode NOT flagged has a
-    # window that ended before the extract's last hour
-    last = E.last_rows(d)
-    ts = pd.to_datetime(last.date) + pd.to_timedelta(last.hour_of_day, unit="h")
-    ends = ts + pd.to_timedelta(last.hours_remaining.clip(lower=0), unit="h")
-    residue = last.episode_id.isin(unknown_ids - flagged).to_numpy()
-    if residue.any():
-        assert (ends[residue] <= ts.max()).all()
-        assert (ts[residue] < ts.max()).all()
-
-
-def test_m11_still_reports_where_the_unknown_scrap_sits(workspace):
-    """The whole point of keeping the non-edge ones: they stay countable."""
-    _chdir(workspace)
-    with open("reports/phase0.json") as f:
-        m11 = json.load(f)["m11_episode_endings"]
-    by_month = m11["not_closed_by_month"]
-    assert isinstance(by_month, dict)
-    if m11["shares"]["not_closed"] > 0:
-        assert by_month, "not_closed episodes exist but are not broken out"
-        assert sum(v["episodes"] for v in by_month.values()) == \
-            round(m11["shares"]["not_closed"] * m11["episodes"])
-        assert sum(v["leftover_units"] for v in by_month.values()) == \
-            m11["scrap_units_unknown_not_closed"]
-        assert list(by_month) == sorted(by_month)       # chronological
 
 
 def test_prepared_data_is_priceable_and_self_consistent(workspace):
@@ -316,20 +149,6 @@ def test_every_episode_has_a_monotone_window_counter(workspace):
     assert (first >= n - 1).all()
     assert not d.duplicated(
         subset=["sku_id", "fc", "date", "hour_of_day"]).any()
-
-
-def test_phase0_report_complete(workspace):
-    _chdir(workspace)
-    with open("reports/phase0.json") as f:
-        res = json.load(f)
-    for key in ["m1_cost_ratio", "m2_same_hour_variation",
-                "m3_intra_episode_correlation", "m4_demand_density",
-                "m5_censoring", "m6_il_pct", "m7_learning_rate",
-                "m8_entry_hour", "reassessment_gates"]:
-        assert key in res
-    assert res["m5_censoring"]["episodes_reaching_zero_inventory"] < 1.0
-    m3 = res["m3_intra_episode_correlation"]
-    assert m3["implied_deff"] >= 1.0
 
 
 def test_prior_artifact_within_bounds(workspace):
@@ -1358,13 +1177,18 @@ def test_the_episode_identity_holds_on_every_episode(workspace):
 def test_the_manifest_reports_the_identity(workspace):
     """It is checked on every run, not only in the test suite."""
     _chdir(workspace)
-    with open("artifacts/split_manifest.json") as f:
-        wf = json.load(f)["data_quality_waterfall"]
-    ident = [s for s in wf if s["step"] == "dp_eligible"][0]["flow_identity"]
-    assert ident["holds"] is True
-    assert ident["violations"] == 0
-    assert ident["episodes_checked"] > 0
-    assert "opening + restocked" in ident["rule"]
+    # asserted on episode_flow itself now that the published waterfall (which
+    # used to carry this block) is gone. The identity is the property; the
+    # report was only where it happened to be printed.
+    import pandas as pd
+
+    from common import episodes as E
+    d = pd.read_parquet("data/prepared.parquet")
+    flow = E.episode_flow(d)
+    elig = flow[flow.eligible]
+    assert len(elig) > 0
+    residual = (elig.supply - elig.sold - elig.leftover - elig.vanished).abs()
+    assert float(residual.max()) < 1e-6, "the flow identity does not close"
 
 
 def test_re_segmentation_is_a_no_op_and_says_so_if_it_stops_being_one(workspace):
@@ -1378,14 +1202,15 @@ def test_re_segmentation_is_a_no_op_and_says_so_if_it_stops_being_one(workspace)
     """
     _chdir(workspace)
     from bootstrap.prepare_data import load_and_filter, assign_episode_ids
+    from common.config import load_config as _lc
 
-    with open("artifacts/split_manifest.json") as f:
-        wf = json.load(f)["data_quality_waterfall"]
-    steps = [s["step"] for s in wf]
+    _, wf = load_and_filter("data/flc.parquet", _lc())
+    steps = [t[0] for t in wf]
     i = steps.index("contiguous_episodes_built")
-    assert wf[i]["rows"] == wf[i - 1]["rows"]
-    assert wf[i]["episodes"] == wf[i - 1]["episodes"]
-    assert wf[i]["cogs_dropped"] == pytest.approx(0.0, abs=0.2)
+    assert wf[i][1] == wf[i - 1][1], "re-segmentation must not drop rows"
+    # episodes MAY rise here (one source window splits into two); the point is
+    # that no row leaves the frame
+    assert wf[i][2] >= wf[i - 1][2]
 
     # and the ids on the output are their own fixed point
     d = pd.read_parquet("data/prepared.parquet")
@@ -1497,91 +1322,3 @@ def test_a_new_window_is_not_mistaken_for_a_gap(workspace):
     ids, detail = gap_split_windows(
         frame([(10, 3), (11, 2), (12, 1), (13, 9), (14, 8)]))
     assert len(ids) == 0
-
-
-def test_backtest_episode_units_reconcile_with_the_hourly_sheet(workspace):
-    """The episode sheet and the hourly sheet must be the same numbers.
-
-    An owner reading a per-episode scrap figure will check it against the
-    hours, and if the two sheets disagree the workbook is worse than useless --
-    it looks authoritative and is not. Two identities per arm:
-
-        hourly sum of units == the episode's *_sold_units
-        supply             == sold + leftover + shrink
-
-    The second holds by construction for the simulated arms (the replay loop
-    moves every unit it starts with) and by `accounting_closes` for the
-    observed one, so a non-zero residual is a real defect rather than rounding.
-    """
-    from common.config import load_config
-    from tools import export_backtest as ex
-
-    _chdir(workspace)
-    cfg = load_config()
-    ep, hourly = ex.build("data/prepared.parquet", cfg, 40)
-    rec = ex._reconciliation(ep, hourly)
-    assert len(rec) == len(ep)
-    bad = rec[~rec.reconciles]
-    assert bad.empty, bad[["episode_id", "note"]].to_string()
-
-    # and the units must actually be exported, not merely computed
-    view = ex._episode_view(ep)
-    for arm in ("actual", "legacy_model", "dp"):
-        for field in ("sold_units", "leftover_units", "scrap_units"):
-            assert f"{arm}_{field}" in view, f"{arm}_{field} missing"
-        # scrap is leftover PLUS shrink, the same definition common.episodes
-        # uses -- not the leftover alone
-        assert np.allclose(view[f"{arm}_scrap_units"],
-                           view[f"{arm}_leftover_units"]
-                           + np.where(view.outcome_known if arm == "actual"
-                                      else True, view.shrink, 0))
-    # shrink is EXOGENOUS: no policy prices away stock that went missing, so
-    # the arms may differ in leftover but never in shrink
-    assert np.allclose(view.dp_scrap_units - view.dp_leftover_units,
-                       view.legacy_model_scrap_units
-                       - view.legacy_model_leftover_units)
-
-
-def test_the_waterfall_export_shows_real_removed_episodes(workspace):
-    """The examples must come from the filter chain itself, not be re-derived.
-
-    An exporter with its own copy of the chain would disagree with the real one
-    the first time either changed -- silently, in the document whose whole
-    purpose is to establish that the removals were justified.
-    """
-    import inspect
-    from common.config import load_config
-    from bootstrap import prepare_data as pdm
-    from tools import export_waterfall as ew
-
-    # the ids are recorded where the drop happens
-    assert "examples" in inspect.signature(pdm.load_and_filter).parameters
-    src = inspect.getsource(ew)
-    assert "load_and_filter(" in src
-    for banned in ("hours_remaining < 0", "cost <= 0", "starting_inventory"):
-        assert f"{banned} " not in src.replace("RAW_COLS", ""), \
-            f"the exporter is re-deriving a filter predicate ({banned})"
-
-    _chdir(workspace)
-    cfg = load_config()
-    sheets = ew.build("data/flc.parquet", cfg, 3)
-    wf, ex, defs = sheets["waterfall"], sheets["examples"], sheets["definitions"]
-
-    assert wf.step.iloc[0] == "raw" and wf.step.iloc[-1] == "dp_eligible"
-    assert set(wf[wf.kind == "population_gate"].step) == {"eligible",
-                                                          "dp_eligible"}
-    assert not len(ex) or ex.groupby("removed_at_step").episode_id.nunique().max() <= 3
-
-    # WHOLE episodes, not sampled rows -- a fragment cannot show a defect in
-    # context, which is the entire reason this sheet exists
-    for (_, eid), g in ex.groupby(["removed_at_step", "episode_id"]):
-        assert len(g) == g.hours_present.iloc[0]
-    # ...and no episode is shown twice under two headings: the gates overlap by
-    # construction, and printing the same rows again teaches nothing
-    assert ex.episode_id.nunique() == len(
-        ex.groupby(["removed_at_step", "episode_id"]))
-
-    # every reason shown must be defined, and every definition must be prose a
-    # reader who has not seen the code can act on
-    assert set(ex.removed_at_step) <= set(defs.name)
-    assert (defs.definition.str.len() > 40).all()

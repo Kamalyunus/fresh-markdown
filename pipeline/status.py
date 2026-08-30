@@ -65,26 +65,16 @@ def _bundle(cfg, state):
                 "python3 -m bootstrap.seal" if not state["sealed_bundle"] else "")
 
 
-def _mirrors(cfg, phase0=None):
+def _mirrors(cfg):
     """A stale paste mis-weights every posterior step, silently. The remedy
     is NOT automatically "re-paste": the check says the two disagree, not
     which is right -- read the bundle line first."""
     drift = artifact_mirror_drift(cfg)
-    # report-sourced paste, same class as the artifact mirrors: the A/B power
-    # SE is measured in phase 0 (m6) and pasted; relative tolerance, because
-    # the value is ~1e-3 and the artifact mirrors' absolute one cannot see it
-    src = (phase0 or {}).get("config_values_measured", {}).get(
-        "ab_test.il_pct_ratio_se_clustered")
-    pasted = cfg["ab_test"]["il_pct_ratio_se_clustered"]
-    if src is not None and pasted is not None \
-            and abs(float(pasted) - float(src)) > 1e-3 * abs(float(src)):
-        drift.append(f"ab_test.il_pct_ratio_se_clustered={pasted} but "
-                     f"phase0 measured {src}")
     if drift:
         return _row("artifact mirrors", FAIL, "; ".join(drift),
                     "check the bundle line first, then align the stale side")
     return _row("artifact mirrors", PASS,
-                "config matches the frozen artifacts and phase 0")
+                "config matches the frozen artifacts")
 
 
 def _calibration(cfg, backtest):
@@ -250,26 +240,6 @@ def _tau(cfg, backtest, shadow=None):
                    if derived is not None else ""))
 
 
-def _walkthrough(root):
-    """Do the figures on docs/system_walkthrough.html still hold? A report
-    from a DIFFERENT model version cannot be compared at all (hard rule 1) ->
-    WARN; a disagreement within the same run is a contradiction -> FAIL."""
-    from tools.walkthrough import figures
-    # figures.check resolves "reports/..." paths, so it wants the directory
-    # ABOVE the reports root status was given
-    base = os.path.dirname(os.path.abspath(root))
-    rows = []
-    for tab in figures.SOURCES:
-        verdict, detail, problems = figures.check(tab, root=base)
-        status = {"ok": PASS, "drift": FAIL, "stale": WARN,
-                  "pending": NONE, "no report": NONE}[verdict]
-        where = ("tools/walkthrough/figures.py, then rebuild"
-                 if verdict in ("drift", "stale") else "")
-        rows.append(_row(f"walkthrough · {tab}", status,
-                         "; ".join(problems) if problems else detail, where))
-    return rows
-
-
 def _guardrails(thresholds):
     if not thresholds:
         return _row("guardrail floors", NONE, "no thresholds report",
@@ -334,7 +304,7 @@ def collect(cfg, root="reports"):
     rows = [
         _launch_blockers(cfg),
         _bundle(cfg, state),
-        _mirrors(cfg, _read(os.path.join(root, "phase0.json"))),
+        _mirrors(cfg),
         _vintages(cfg, state, backtest, shadow),
         _calibration(cfg, backtest),
         _calibration_convergence(cfg),
@@ -344,7 +314,6 @@ def collect(cfg, root="reports"):
         _guardrails(_read(os.path.join(root, "thresholds.json"))),
         _stops(_read(os.path.join(root, "monitor.json"))),
         _assurance(_read(os.path.join(root, "assurance.json"))),
-        *_walkthrough(root),
     ]
     return {
         "checks": rows,

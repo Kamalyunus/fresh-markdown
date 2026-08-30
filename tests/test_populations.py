@@ -369,21 +369,11 @@ def test_the_artifact_fits_read_the_config_and_the_dp_side_does_not():
         assert 'population(d, cfg, "dp_eligible")' in src, fn.__qualname__
 
 
-def test_gate_one_reads_the_integrity_population():
-    """The whole reason for the change: measured on dp_eligible this gate is
-    0.0 by construction and can never fire."""
-    from bootstrap import measure
-    doc = inspect.getdoc(measure.m1_cost_ratio)
-    assert "INTEGRITY population" in doc
-    src = inspect.getsource(measure.gates)
-    assert "measured_on" in src
-
-
 def test_il_is_reported_on_both_bases():
     """One is what the business loses; the other is what the MVP can address.
     Quoting either alone was how a sub-population figure became the headline."""
-    from bootstrap import measure
-    src = inspect.getsource(measure.m6_il_pct)
+    from common import metrics
+    src = inspect.getsource(metrics.il_pct)
     assert '"integrity"' in src and '"dp_eligible"' in src
     assert "population_note" in src
 
@@ -694,7 +684,6 @@ def test_an_unfinished_episode_has_no_clearance_to_report(cfg):
     to 0.45 before it was excluded.
     """
     from common import episodes as E
-    from tools.eda import p_clearance
     d = _closed_and_unclosed()
 
     assert E.classify(d)["B"] == E.NOT_CLOSED
@@ -707,11 +696,14 @@ def test_an_unfinished_episode_has_no_clearance_to_report(cfg):
     assert not flow.loc["B", "closed"]
     assert not flow.loc["B", "eligible"]
 
-    out = p_clearance(d, cfg)
-    assert out["mean_clearance"] == pytest.approx(0.70), \
+    # the property, asserted on episode_flow itself now that the descriptive
+    # layer that used to report it is gone: clearance is only meaningful on a
+    # CLOSED episode, and never exceeds 1 by construction
+    closed = flow[flow.closed]
+    assert float(closed.clearance.mean()) == pytest.approx(0.70), \
         "an unfinished episode is being averaged into clearance again"
-    assert out["supply"]["episodes_excluded_unclosed"] == 1
-    assert out["supply"]["max_clearance"] <= 1.0
+    assert int((~flow.closed).sum()) == 1
+    assert float(flow.clearance.max()) <= 1.0
 
 
 def test_the_backtest_grades_on_known_outcomes_only(cfg):
@@ -731,33 +723,6 @@ def test_the_backtest_grades_on_known_outcomes_only(cfg):
         "the backtest is aggregating over unfinished episodes again"
     assert "episodes_excluded_unclosed" in src, \
         "the exclusion must be counted, not silent"
-
-
-def test_the_hourly_export_reads_the_replay_rather_than_reimplementing_it():
-    """Design 5.14: "No parallel implementation."
-
-    An exporter that re-ran the DP and legacy arms to produce its own hourly
-    rows would be exactly that, and it would drift the first time either arm
-    changed -- silently, because nothing compares the two. So the per-hour
-    trace lives in `backtest.replay._replay_one` beside the loops it records,
-    and `tools.export_backtest` only reads it.
-    """
-    import inspect
-    from backtest import replay
-    from tools import export_backtest as ex
-
-    src = inspect.getsource(ex)
-    assert "policy_replay(" in src and "trace=True" in src, \
-        "the exporter must obtain its rows from the traced replay"
-    for banned in ("dp_mod.solve(", "expected_min_demand_inventory(", "mu_at("):
-        assert banned not in src, (
-            f"{banned} in the exporter means it is re-running the pricing "
-            "path instead of reading the replay's trace")
-
-    # tracing is OFF by default, so the report path is unaffected
-    assert "trace=False" in inspect.signature(
-        replay.policy_replay).__str__().replace(" ", "") or \
-        inspect.signature(replay.policy_replay).parameters["trace"].default is False
 
 
 def test_tracing_changes_no_reported_number():

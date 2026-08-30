@@ -12,7 +12,7 @@ import pandas as pd
 
 from bootstrap.prepare_data import split_frames
 from bootstrap.fit_dispersion import lookup_r
-from bootstrap.measure import m10_fidelity_decomposition
+from common.metrics import fidelity_decomposition
 from common import episodes
 from common.parallel import map_episodes
 from pricing import dp as dp_mod
@@ -255,7 +255,7 @@ def fidelity(d, cfg, model, prior, r_lookup):
     block["by_week"] = {
         str(w): round(float(g.units_sold.sum() / g.predicted_units.sum()), 4)
         for w, g in d.groupby(week) if g.predicted_units.sum() > 0}
-    block["measurement_10"] = m10_fidelity_decomposition(gate_d, cfg)
+    block["measurement_10"] = fidelity_decomposition(gate_d, cfg)
 
     # trend triage: an anchor-level climb driven by new-assortment SKUs (no
     # rate history -> low prediction) is assortment, not a macro demand trend
@@ -341,7 +341,7 @@ def fidelity(d, cfg, model, prior, r_lookup):
     refit_splits = split_frames(refit, cfg)
     refit_gate = (refit_splits["test"] if gate_window == "test"
                   else pd.concat([refit_splits["calib"], refit_splits["test"]]))
-    refit_m10 = (m10_fidelity_decomposition(refit_gate, cfg)
+    refit_m10 = (fidelity_decomposition(refit_gate, cfg)
                  if len(refit_gate) else {})
     (model._cal_rows_scheduled, model._cal_rows_fallback,
      model._cal_rows_frozen, model._cal_rows_static,

@@ -54,7 +54,6 @@ ANCHORS = {
     ("dispersion", "rho"): "  rho:",
     ("dispersion", "mean_forced_hours_per_episode"):
         "  mean_forced_hours_per_episode:",
-    ("ab_test", "il_pct_ratio_se_clustered"): "  il_pct_ratio_se_clustered:",
     ("baseline_model", "calibration_fit_trailing_weeks"):
         "  calibration_fit_trailing_weeks:",
     ("monitoring", "stop_conditions", "scrap_deterioration_pct"):
@@ -170,7 +169,7 @@ def _blocks(cfg, backtest, shadow, calibration, root):
     return out
 
 
-def _measured(cfg, phase0, shadow, rho_art, thresholds):
+def _measured(cfg, shadow, rho_art, thresholds):
     """MEASURED values the pipeline computed and config must mirror."""
     out = []
 
@@ -197,15 +196,6 @@ def _measured(cfg, phase0, shadow, rho_art, thresholds):
                 "mis-weights every posterior step, silently",
                 f"artifacts/rho.json {art_key}"))
 
-    se = ((phase0 or {}).get("config_values_measured") or {}).get(
-        "ab_test.il_pct_ratio_se_clustered")
-    cur = _get(cfg, ("ab_test", "il_pct_ratio_se_clustered"))
-    if se is not None:
-        out.append(_finding(("ab_test", "il_pct_ratio_se_clustered"), PASTE,
-                            OK if _close(cur, se) else ACT, cur, se,
-                            "measured in phase 0 (m6); not consumed for power, "
-                            "but a stale paste is silent forever",
-                            "phase0.config_values_measured"))
 
     tau = ((shadow or {}).get("tau_initial_derivation") or {}).get("tau_initial")
     cur = _get(cfg, ("exploration", "tau_initial"))
@@ -457,24 +447,23 @@ def _readings(cfg, backtest, shadow):
 def collect(cfg, root="reports"):
     backtest = _read(os.path.join(root, "backtest.json"))
     shadow = _read(os.path.join(root, "shadow.json"))
-    phase0 = _read(os.path.join(root, "phase0.json"))
     thresholds = _read(os.path.join(root, "thresholds.json"))
     calibration = _read(cfg["baseline_model"]["calibration_factor_path"])
     rho_art = _read(cfg["dispersion"]["rho_path"])
 
     missing = [n for n, r in (("backtest", backtest), ("shadow", shadow),
-                              ("thresholds", thresholds), ("phase0", phase0))
+                              ("thresholds", thresholds))
                if r is None]
     blocks = _blocks(cfg, backtest, shadow, calibration, root)
     if missing:
         blocks.insert(0, _finding(
             "reports present", BLOCK, ACT, f"missing: {', '.join(missing)}",
-            "all four", "run the pipeline before tuning: a missing report is "
+            "all three", "run the pipeline before tuning: a missing report is "
             "not a passing check", "reports/"))
 
     findings = list(blocks)
     if not blocks:
-        findings += _measured(cfg, phase0, shadow, rho_art, thresholds)
+        findings += _measured(cfg, shadow, rho_art, thresholds)
         findings += _derived(cfg, backtest, thresholds)
         findings += _business(cfg, thresholds)
         findings += _readings(cfg, backtest, shadow)

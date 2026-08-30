@@ -455,74 +455,6 @@ def pre_launch(d, cfg):
 
 
 
-# WATERFALL_STEPS: the single wording of every step, exported verbatim to the
-# workbook for readers who have never seen the code. DP_INELIGIBLE below is
-# the same idea for the gates -- modelling limits invisible to the demand
-# model's FEATURES, ordered most-fundamental-first (episodes are labelled with
-# the FIRST reason tripped, so the column reads as a cause).
-WATERFALL_STEPS = (
-    ("raw", "--",
-     "the starting count, before anything is removed. Every percentage in the "
-     "report is a share of this row's COGS at risk"),
-    ("duplicate_hour_rows_dropped", "rows, BOTH copies",
-     "two different states recorded for one sku x fc x hour. There is no "
-     "principled way to choose between them, and keeping both collides two "
-     "runs into a single episode id"),
-    ("gap_split_windows_dropped", "episode, EVERY fragment",
-     "a hole in the hourly feed splits one source window into two, and neither "
-     "half is an episode: the first ends with no write-off sentinel so its "
-     "scrap is unknown, and the second opens MID-window with the wrong "
-     "starting stock and a first row that reads as an entry row. Detected from "
-     "the window counter, which across a gap keeps falling in step with the "
-     "clock instead of resetting upward"),
-    ("exclusion_window_removed", "episode",
-     "any episode with ANY hour inside the known demand-issue period. This is "
-     "a SCOPE rule, not an integrity one -- the rows are fine, the period is "
-     "not representative of normal trading"),
-    ("discount_out_of_range_dropped", "episode",
-     "a discount outside [0, 1], which means the percent-to-fraction "
-     "conversion was applied twice or not at all"),
-    ("negative_quantities_dropped", "episode",
-     "impossible quantities: negative inventory or negative sales. NOT "
-     "`cost <= 0`, which is a flag rather than a drop -- see cost_missing"),
-    ("episode_universe", "episode",
-     "the three conditions that make an episode's inventory readable, checked "
-     "once and before any filter with an opinion about price, category or "
-     "cost. Only CONTINUITY drops (ending[t] must equal starting[t+1]); the "
-     "accounting identity and a clean final hour are flagged instead. Note "
-     "`units_sold > starting_inventory` is a RESTOCK, not an impossible "
-     "quantity"),
-    ("null_category_dropped", "episode",
-     "no category or subcategory, so there is no reference discount and no "
-     "dispersion cell to put the episode in. Episode-scoped on purpose: "
-     "dropping single ROWS punched holes mid-window and manufactured chain "
-     "breaks the feed never had"),
-    ("zero_base_price_dropped", "episode",
-     "`original_price` still null or zero after filling forward and backward "
-     "within the episode, so there is no price to discount from"),
-    ("contiguous_episodes_built", "--",
-     "not a filter. Re-segmentation, and now a no-op that RAISES if it ever "
-     "stops being one, since every drop after the ids are assigned is "
-     "episode-scoped and so nothing can punch a hole in a window"),
-    ("negative_window_recovered", "episode",
-     "not a drop. A counter that enters ALREADY negative is a known source "
-     "pattern for manufactured goods, not a defect; where the episode runs no "
-     "longer than the manufacturing window its counter is rewritten as a "
-     "synthetic countdown. Changes no counts, so the row reports what it "
-     "recovered. This is the last hard-drop row, so its counts ARE the "
-     "`integrity` population"),
-    ("eligible", "GATE -- flags, drops nothing",
-     "the accounting identity holds, the final hour is clean, and the episode "
-     "CLOSED. What a frozen artifact needs: a censored likelihood is only "
-     "correct if we know which hours ran out. Read by the demand model and the "
-     "artifact fits, and by every scrap / IL / clearance figure -- "
-     "`scrap_units` returns NaN outside this set"),
-    ("dp_eligible", "GATE -- flags, drops nothing",
-     "everything `eligible` requires PLUS what the solver needs: a feasible "
-     "price tier, a horizon it can read, and one inventory pool. Read by the "
-     "DP, the backtest, shadow mode, the calibration gate and the A/B. The six "
-     "reasons are listed separately below"),
-)
 
 DP_INELIGIBLE = (
     ("cost_missing",
@@ -577,24 +509,6 @@ BELOW_COST_HOURS = (
     "on the ~78% of rows that sold nothing")
 
 
-# WHO READS EACH ROW'S POPULATION. Hard drops leave the frame for everyone;
-# the last two rows are flags, and they are where the consumers split.
-HARD_DROP_USED_BY = (
-    "everything downstream -- the rows are gone, no consumer can see them")
-
-GATE_USED_BY = {
-    "eligible": (
-        "the DEMAND MODEL and the frozen artifacts (baseline mu_ref, the "
-        "elasticity prior, r and rho) when baseline_model.train_population is "
-        "'eligible', plus every scrap / IL / clearance figure -- `scrap_units` "
-        "returns NaN outside this set, so an ineligible episode cannot enter "
-        "an IL number even by accident"),
-    "dp_eligible": (
-        "the DP SOLVER, the backtest, shadow mode, the calibration gate and "
-        "the A/B. These callers pass 'dp_eligible' explicitly because for them "
-        "it is not a configurable choice -- an episode here is one the solver "
-        "can actually price"),
-}
 
 
 def eligible_detail(d):
@@ -856,40 +770,9 @@ def split_frames(d, cfg):
     }
 
 
-def waterfall_rows(waterfall, cfg=None):
-    """The waterfall as JSON rows -- one definition for both writers (split
-    manifest and phase 0). Stages are (label, rows, episodes, cogs_at_risk)
-    plus an optional detail dict merged into the row; rows carry kind/used_by
-    and COGS cost. `cogs_dropped` is correctly NEGATIVE at re-segmentation."""
-    train_pop = (cfg or {}).get("baseline_model", {}).get("train_population")
-    raw = waterfall[0][3] if waterfall else 0.0
-    out, prev = [], None
-    for t in waterfall:
-        label, rows, eps, cogs = t[:4]
-        gate = label in GATE_USED_BY
-        used_by = GATE_USED_BY[label] if gate else HARD_DROP_USED_BY
-        if label == "eligible" and train_pop is not None:
-            used_by += (
-                f". baseline_model.train_population is {train_pop!r}, so the "
-                + ("artifact fits DO read this population"
-                   if train_pop == "eligible" else
-                   f"artifact fits read {train_pop!r} instead"))
-        row = {"step": label, "rows": rows, "episodes": eps,
-               "cogs_at_risk": round(cogs, 1),
-               "cogs_pct_of_raw": round(cogs / raw, 6) if raw else None,
-               "kind": "population_gate" if gate else "hard_drop",
-               "used_by": used_by}
-        if prev is not None:
-            row["cogs_dropped"] = round(prev - cogs, 1)
-            row["cogs_dropped_pct_of_raw"] = (
-                round((prev - cogs) / raw, 6) if raw else None)
-        row.update(t[4] if len(t) > 4 else {})
-        out.append(row)
-        prev = cogs
-    return out
 
 
-def write_manifest(path, cfg, waterfall):
+def write_manifest(path, cfg):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
         json.dump(stamp({
@@ -898,7 +781,6 @@ def write_manifest(path, cfg, waterfall):
             "holdout": cfg["data"].get("holdout"),
             "exclusion_window": cfg["data"]["exclusion_window"],
             "config_version": cfg["meta"]["config_version"],
-            "data_quality_waterfall": waterfall_rows(waterfall, cfg),
         }, cfg, None, "bootstrap.prepare_data"), f, indent=2)
 
 
@@ -915,54 +797,15 @@ def main():
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     d.to_parquet(args.out, index=False)
-    write_manifest(args.manifest, cfg, wf)
+    write_manifest(args.manifest, cfg)
 
-    # Money beside counts on every line, because they disagree and the
-    # disagreement is the point: a stage taking 1% of rows and 15% of the
-    # exposure has changed what the surviving population represents.
-    fixed = ("step", "rows", "episodes", "cogs_at_risk", "cogs_pct_of_raw",
-             "cogs_dropped", "cogs_dropped_pct_of_raw", "kind", "used_by")
-    rows = waterfall_rows(wf, cfg)
-    # The two GATE rows are marked in the margin. Without it the last rows read
-    # as more drops, and the reader cannot see that the population splits there
-    # rather than shrinking.
-    for row in rows:
-        pct = row.get("cogs_dropped_pct_of_raw")
-        gate = row["kind"] == "population_gate"
-        print(f"{'GATE ' if gate else '     '}{row['step']:29s} "
-              f"rows {row['rows']:>10,}  "
-              f"episodes {row['episodes']:>9,}  "
-              f"cogs {row['cogs_at_risk']:>16,.0f}"
-              + (f"  dropped {pct:>7.2%}" if pct is not None else ""))
-        if gate:
-            print(f"{'':34s}   read by: {row['used_by']}")
-        for k, v in row.items():
-            if k not in fixed:
-                print(f"{'':34s}   {k}: {v}")
-    if rows:
-        kept = rows[-1]["cogs_pct_of_raw"]
-        print(f"\nCOGS at risk surviving: {rows[-1]['cogs_at_risk']:,.0f} of "
-              f"{rows[0]['cogs_at_risk']:,.0f} raw"
-              + (f" ({kept:.2%})" if kept is not None else ""))
-        # WHICH NUMBER TO QUOTE FOR WHICH CLAIM. The unmarked rows shrink one
-        # population; the two GATE rows split it three ways, and the three are
-        # NESTED -- their exclusions must never be added together.
-        by_step = {r["step"]: r for r in rows}
-        hard = [r for r in rows if r["kind"] == "hard_drop"]
-        integrity = hard[-1] if hard else None
-        print("\nThree populations come out of this, NESTED -- never add their "
-              "exclusions together:")
-        for name, r, what in (
-                ("integrity", integrity,
-                 "everything that survived the hard drops above"),
-                ("eligible", by_step.get("eligible"),
-                 "demand model, prior, dispersion; every scrap / IL / "
-                 "clearance figure"),
-                ("dp_eligible", by_step.get("dp_eligible"),
-                 "DP solver, backtest, shadow, calibration gate, A/B")):
-            if r:
-                print(f"  {name:14s} episodes {r['episodes']:>9,}  "
-                      f"cogs {r['cogs_pct_of_raw']:>7.2%} of raw   {what}")
+    # The filter chain's own counts, printed compactly. The published
+    # waterfall (a 13-row report with COGS at every stage) was removed with
+    # the descriptive layer -- `wf` remains as the chain's internal audit,
+    # which the filter tests read.
+    for stage in wf:                       # some carry a 5th detail dict
+        label, rows, eps = stage[0], stage[1], stage[2]
+        print(f"  {label:32s} rows {rows:>10,}  episodes {eps:>9,}")
     print(f"wrote {args.out} and {args.manifest}")
 
 

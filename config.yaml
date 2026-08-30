@@ -679,8 +679,3 @@ ab_test:
   candidate_durations_weeks: [2, 3, 4, 5, 6, 8, 10, 12]  # SET  windows tested
   min_episodes_per_block: 100          # SET  blocks below this are skipped
   min_detectable_effect_pct: null      # SET BY OWNER  relative on IL%
-  il_pct_ratio_se_clustered: 0.076918  # MEASURED  phase 0 on the FIXTURE
-    # extract under the 08-27 split -- re-paste from your production phase 0
-    # (hard rule 19: fixture numbers are not production numbers).
-    # Not consumed for power: derive_thresholds re-measures the SE on actual
-    # T-week blocks, since sqrt-T scaling is optimistic under clustering.
