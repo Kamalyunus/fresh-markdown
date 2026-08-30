@@ -1775,6 +1775,22 @@ was analysed at `information_increment: 12.0` after the measured value had
 already been pasted, and nothing noticed the report was describing a config
 that no longer existed.
 
+**A value the data can decide does not wait on a human (owner, 2026-08-30).**
+SET BY OWNER is for tolerances, not for facts: the guardrail stop thresholds
+are 3σ of the control arm's own measured noise, the fit window W is what the
+rolling-origin sweep scores best (subject to `calib >= 2W`), and
+`max_mean_step` has a derived value that makes both rails trip at the same
+surprise. All four now PASTE. `max_mean_step` carries a GATE, because raising
+a rail re-prices real episodes: it is auto-applied only when
+`backtest.policy_deltas.step_sensitivity` says a cap-sized epsilon move
+re-prices at most `tuning.max_price_share_changed_for_auto_rail` of episodes
+and moves IL by at most `tuning.max_il_delta_pct_for_auto_rail`; above either,
+the finding downgrades to OWNER with the measured reason attached rather than
+disappearing. What remains genuinely OWNER is
+`ab_test.min_detectable_effect_pct` — the reports say what effect is
+DETECTABLE, never what size of effect is worth detecting, and setting it to
+the achievable number would make the power check pass by construction.
+
 `pipeline.tune` is that loop as code. Each check names the report field it
 reads, so a disagreement is traceable to a file rather than to someone's
 memory, and the CLASS decides who may act: **PASTE** (a MEASURED value —

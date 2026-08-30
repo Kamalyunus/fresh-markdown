@@ -214,7 +214,7 @@ baseline_model:
     # fit factors on the trailing W weeks, apply to the next week, measure the
     # anchor ratio that results. Under a trending level a LONGER window is
     # more stale, not more accurate -- the sweep decides W with data.
-  calibration_fit_trailing_weeks: 2    # SET BY OWNER 2026-08-27  weeks in the
+  calibration_fit_trailing_weeks: 2    # MEASURED  weeks in the
     # trailing window, for both "trailing" and "rolling_trailing".
     # PROVISIONAL until the production sweep under the 08-27 split is read.
     #
@@ -309,6 +309,18 @@ dispersion:
     # divergence, because these two values set deff and deff deflates every
     # posterior update. Re-paste after every retrain.
   mean_forced_hours_per_episode: 5.909 # MEASURED  ditto -> deff = 2.196
+
+tuning:                                # SET  gates pipeline.tune applies before
+  # auto-pasting a DERIVED value. A value the pipeline can measure should not
+  # sit behind a human (owner, 2026-08-30) -- but two of them are only safe to
+  # paste when a second measurement agrees, and these are that second reading.
+  max_price_share_changed_for_auto_rail: 0.10   # SET  raising max_mean_step is
+    # auto-applied only when a cap-sized epsilon move re-prices at most this
+    # share of episodes in backtest.policy_deltas.step_sensitivity. Above it the
+    # rail change is a real price event and goes back to the owner.
+  max_il_delta_pct_for_auto_rail: 0.005         # SET  and only when the same
+    # sweep moves IL by at most this. Both gates must hold; either one failing
+    # downgrades the recommendation rather than suppressing it.
 
 posterior:
     # The cell map is frozen into artifacts/posterior.json by
@@ -481,7 +493,12 @@ learning:
     #
     # I* rises as 1/std^2 as the posterior narrows, so a launch-derived value
     # becomes conservative later. That direction is safe; the other is not.
-  max_mean_step: 0.15                  # SET BY OWNER  risk rail on the mean.
+  max_mean_step: 0.15                  # SET BY OWNER, gated  risk rail on the
+    # mean. derive_thresholds MEASURES the consistent value (both rails tripping
+    # at the same surprise); pipeline.tune pastes it automatically ONLY when
+    # backtest step_sensitivity says the re-price is small enough (tuning.*_for
+    # _auto_rail). Above that gate a rail change is a real price event and
+    # returns to the owner. Risk rail on the mean.
     # Read `reports/thresholds.json` -> bounded_step_recommendation before
     # moving it, and `backtest.step_sensitivity` (which re-solves the DP arm at
     # eps +- this value on real episodes) for the PRICE consequence.
@@ -612,7 +629,10 @@ monitoring:
       # false-firing: one day past a 3-sigma floor happens about once a year
       # per guardrail, two in a row essentially never. Load-bearing, not
       # decoration -- the scrap threshold clears its floor by ~6%.
-    scrap_deterioration_pct: null      # SET BY OWNER -- blocks the stop conditions (design 5.12).
+    scrap_deterioration_pct: null      # MEASURED  set at or above the 3-sigma
+      # control-arm noise floor derive_thresholds reports; pipeline.tune pastes
+      # it. Below the floor the stop fires on noise. Blocks the stop conditions
+      # while null (design 5.12).
       # Raw measured 3-sigma floor: 9.1386 -- these are RELATIVE deviations,
       # so that is 914%, not 9.14%. A few low-volume days dominate the daily
       # ratio series; no usable threshold sits above a floor larger than the
@@ -625,7 +645,9 @@ monitoring:
       # control-arm basis (same-day, cancels the day effect) is what the
       # monitor actually uses once the A/B is live, and is measured
       # separately as scrap_rate_control_arm_basis.
-    margin_deterioration_pct: null     # SET BY OWNER -- blocks the stop conditions (design 5.12).
+    margin_deterioration_pct: null     # MEASURED  set at or above the 3-sigma
+      # control-arm noise floor derive_thresholds reports; pipeline.tune pastes
+      # it. Blocks the stop conditions while null (design 5.12).
       # Measured 3-sigma daily noise floor: 0.1363 (13.63%), robust 0.1494,
       # NOT outlier-dominated -- this one is well behaved. Recommended 0.15,
       # which clears the raw floor by ~10% but sits just UNDER the robust

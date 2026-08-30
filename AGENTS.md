@@ -161,11 +161,20 @@ python3 -m pipeline.tune --apply        # pastes MEASURED values only
 scripts/run_bootstrap.sh <raw>          # re-measure under the new config
 ```
 
-Four classes, and the class decides who may act. **PASTE** — a MEASURED value
-the pipeline computed; `--apply` writes it. **OWNER** — a SET BY OWNER value;
-never auto-applied (see the prohibitions), reported with the evidence needed
-to decide. **READ** — a finding with no config key (which constraint binds
-learning; whether the weekly calibration cron is worth running). **BLOCK** —
+Four classes, and the class decides who may act. **PASTE** — the pipeline
+measured it, so it does not wait on a human; `--apply` writes it. That
+includes values that used to be SET BY OWNER but are decided by data: the
+guardrail stop thresholds (3σ of the control arm's own noise), the fit window
+W (the rolling-origin sweep, when `calib >= 2W` allows it), and
+`max_mean_step` — the last **gated**, pasted only when `step_sensitivity`
+says the re-price is small (`tuning.*_for_auto_rail`), and returned to the
+owner when it is not. **OWNER** — what data cannot decide: a tolerance, not a
+fact. `min_detectable_effect_pct` is the case — the reports say what effect is
+DETECTABLE, never what size is worth detecting, and pasting the achievable
+number would make the power check pass by construction. Never auto-applied
+(see the prohibitions). **READ** — a finding with no config key (which
+constraint binds learning; whether the weekly calibration cron is worth
+running). **BLOCK** —
 an invariant that must hold first: reports from one model, a settled `f<->r`
 loop, `calib >= 2W`, no graded window across the exclusion gap. A BLOCK
 suppresses everything else and `--apply` refuses, because tuning against a

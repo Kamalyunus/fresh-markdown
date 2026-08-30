@@ -217,47 +217,81 @@ def _measured(cfg, phase0, shadow, rho_art, thresholds):
     return out
 
 
-def _owner(cfg, backtest, thresholds):
-    """SET BY OWNER decisions. Reported with evidence, never auto-applied."""
+def _derived(cfg, backtest, thresholds):
+    """Values the pipeline MEASURES, which used to sit behind a human.
+
+    A value the data can decide should not wait on a decision (owner,
+    2026-08-30). Two of these carry a GATE -- a second measurement that must
+    agree before the paste is safe -- and a failing gate downgrades the
+    finding to OWNER with the reason, rather than hiding it.
+    """
     out = []
 
+    # the rail: `consistent_max_mean_step` is derived from the launch prior
+    # std so both rails trip at the same surprise instead of one clipping
+    # every batch. The threshold note says to read the PRICE consequence
+    # first, so that read is the gate rather than a human's recollection.
     bs = (thresholds or {}).get("bounded_step_recommendation") or {}
     cur = _get(cfg, ("learning", "max_mean_step"))
     rec = bs.get("consistent_max_mean_step")
     if rec is not None:
-        # the price consequence the threshold note tells the owner to read
-        # FIRST -- surfaced here so the decision does not need two files
         ss = (((backtest or {}).get("policy_deltas") or {})
               .get("step_sensitivity") or {})
-        cost = []
-        for arm in ("deeper_belief", "shallower_belief"):
-            a = ss.get(arm) or {}
-            if a.get("share_prices_changed") is not None:
-                cost.append(f"{arm.split('_')[0]} {a['share_prices_changed']:.1%} "
-                            f"of prices, IL {a.get('il_delta_pct', 0):+.4%}")
-        rails_agree = _close(cur, rec, 1e-2)
+        arms = [a for a in (ss.get("deeper_belief"), ss.get("shallower_belief"))
+                if isinstance(a, dict)]
+        share = max((a.get("share_prices_changed") or 0) for a in arms) if arms else None
+        il = max((abs(a.get("il_delta_pct") or 0)) for a in arms) if arms else None
+        g = cfg.get("tuning") or {}
+        max_share = g.get("max_price_share_changed_for_auto_rail")
+        max_il = g.get("max_il_delta_pct_for_auto_rail")
+        cost = "; ".join(
+            f"{k.split('_')[0]} {a.get('share_prices_changed', 0):.1%} of prices, "
+            f"IL {a.get('il_delta_pct', 0):+.4%}"
+            for k, a in (("deeper_belief", ss.get("deeper_belief") or {}),
+                         ("shallower_belief", ss.get("shallower_belief") or {}))
+            if a)
+        gated = (share is None or il is None
+                 or share > max_share or il > max_il)
+        why = (f"price consequence at the current step: {cost}"
+               if cost else "no step_sensitivity in the backtest report")
         out.append(_finding(
-            ("learning", "max_mean_step"), OWNER, OK if rails_agree else ACT,
-            cur, rec,
-            (bs.get("verdict", "").split(". OWNER")[0]
-             + (f" · price consequence at the CURRENT step: {'; '.join(cost)}"
-                if cost else " · no step_sensitivity in the backtest report")),
-            "thresholds.bounded_step_recommendation + backtest.step_sensitivity"))
+            ("learning", "max_mean_step"), OWNER if gated else PASTE,
+            OK if _close(cur, rec, 1e-2) else ACT, cur, rec,
+            bs.get("verdict", "").split(". OWNER")[0] + " · " + why
+            + (f" -- EXCEEDS the auto-apply gate ({max_share:.0%} of prices, "
+               f"{max_il:.1%} IL), so this rail change is a real price event "
+               "and stays an owner decision" if gated and cost else
+               "" if gated else " -- inside the auto-apply gate"),
+            "thresholds.bounded_step_recommendation + backtest.policy_deltas."
+            "step_sensitivity"))
 
+    # guardrail stops: the floor IS the measurement -- 3-sigma of the control
+    # arm's own noise. Setting them at it is what the report recommends.
     gr = (thresholds or {}).get("guardrail_threshold_recommendation") or {}
     for name, block in gr.items():
         if not isinstance(block, dict):
             continue
         path = tuple(block.get("config_key", "").split("."))
-        cur = _get(cfg, path) if path and path[0] else None
+        if not path or not path[0]:
+            continue
+        cur = _get(cfg, path)
         floor = block.get("binding_floor")
         if floor is None:
             continue
         ok = cur is not None and float(cur) >= float(floor)
-        out.append(_finding(path or name, OWNER, OK if ok else ACT, cur, floor,
-                            block.get("verdict", ""),
-                            f"thresholds.guardrail_threshold_recommendation.{name}"))
+        out.append(_finding(
+            path, PASTE, OK if ok else ACT, cur, floor,
+            f"{block.get('binding_label', '3-sigma')} "
+            f"{block.get('binding_basis', 'control_arm')} noise floor -- a "
+            "stop below it fires on noise. Raise it later if the pilot wants "
+            "a looser trip, but never below this",
+            f"thresholds.guardrail_threshold_recommendation.{name}"))
+    return out
 
+
+def _business(cfg, thresholds):
+    """The values data cannot decide, because they are tolerances, not facts."""
+    out = []
     ab = (thresholds or {}).get("ab_duration") or {}
     by = ab.get("by_duration") or {}
     passing = [k for k, v in by.items()
@@ -269,11 +303,14 @@ def _owner(cfg, backtest, thresholds):
              if v.get("detectable_mde_rel") is not None), default=None)
         out.append(_finding(
             ("ab_test", "min_detectable_effect_pct"), OWNER,
-            OK if cur is not None else ACT, cur,
-            ab.get("target_mde_rel"),
+            OK if cur is not None else ACT, cur, ab.get("target_mde_rel"),
             (f"no duration reaches the {ab.get('target_mde_rel')} target; the "
              f"best any window achieves is {best}" if not passing else
-             f"durations meeting the target: {', '.join(sorted(passing))}"),
+             f"durations meeting the target: {', '.join(sorted(passing))}")
+            + ". NOT measurable: the data says what is DETECTABLE, never what "
+              "size of effect is worth detecting -- setting this to the "
+              "achievable number would make the power check pass by "
+              "construction",
             "thresholds.ab_duration.by_duration"))
     return out
 
@@ -334,11 +371,17 @@ def _readings(cfg, backtest, shadow):
         calib_weeks = ((pd.Timestamp(s["calib_end"])
                         - pd.Timestamp(s["calib_start"])).days + 1) / 7.0
         feasible = want and calib_weeks >= 2 * want
+        # MEASURED by the sweep (fit on trailing W, score the NEXT week), so
+        # it pastes -- but only when the split can hold it. calib >= 2W is the
+        # dependency rule, and a W the split cannot support is a SPLIT
+        # decision, which is the owner's.
         out.append(_finding(
-            ("baseline_model", "calibration_fit_trailing_weeks"), OWNER,
+            ("baseline_model", "calibration_fit_trailing_weeks"),
+            PASTE if feasible else OWNER,
             OK if want == cur else ACT, cur, want,
             f"the rolling-origin sweep prefers {rec}"
-            + ("" if feasible else
+            + (f"; calib is {calib_weeks:.1f}w so calib >= 2W holds"
+               if feasible else
                f", but calib is {calib_weeks:.1f}w and the rule is calib >= 2W "
                f"({2*want}w needed) -- move the SPLIT, not this key"),
             "backtest.fidelity.calibration_window_sweep.recommended_fit_window"))
@@ -366,7 +409,8 @@ def collect(cfg, root="reports"):
     findings = list(blocks)
     if not blocks:
         findings += _measured(cfg, phase0, shadow, rho_art, thresholds)
-        findings += _owner(cfg, backtest, thresholds)
+        findings += _derived(cfg, backtest, thresholds)
+        findings += _business(cfg, thresholds)
         findings += _readings(cfg, backtest, shadow)
     return {"findings": findings,
             "blocked": bool(blocks),

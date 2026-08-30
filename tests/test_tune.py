@@ -27,7 +27,7 @@ def _reports(root, **over):
         "backtest.json": {
             "artifact_versions": {"baseline_model_version": "m1"},
             "fidelity": {"calibration_window_sweep": {
-                "recommended_fit_window": "trailing_2w"}},
+                "recommended_fit_window": "trailing_1w"}},
             "policy_deltas": {"step_sensitivity": {
                 "deeper_belief": {"share_prices_changed": 0.02,
                                   "il_delta_pct": -0.0004}}},
@@ -50,8 +50,14 @@ def _reports(root, **over):
             "bounded_step_recommendation": {
                 "consistent_max_mean_step": 0.485,
                 "verdict": "MEAN RAIL BINDS FIRST"},
-            "guardrail_threshold_recommendation": {},
-            "ab_duration": {"target_mde_rel": 0.075, "by_duration": {}},
+            "guardrail_threshold_recommendation": {
+                "scrap_rate": {
+                    "config_key": "monitoring.stop_conditions.scrap_deterioration_pct",
+                    "binding_floor": 0.2656, "binding_label": "3-sigma",
+                    "binding_basis": "control_arm", "verdict": "null"}},
+            "ab_duration": {"target_mde_rel": 0.075, "by_duration": {
+                "4w": {"detectable_mde_rel": 0.241,
+                       "meets_target": "False"}}},
         },
     }
     base.update(over)
@@ -106,8 +112,60 @@ def test_an_unconverged_loop_blocks(cfg, tmp_path):
     assert any("NOT CONVERGED" in f["evidence"] for f in rep["findings"])
 
 
-def test_measured_values_are_recommended_and_owner_values_are_not_written(
-        cfg, tmp_path):
+def test_a_measurable_value_is_pasted_not_left_to_a_human(cfg, tmp_path):
+    """A value the data can decide should not wait on a decision (owner,
+    2026-08-30). The guardrail stops are 3-sigma of the control arm's own
+    noise -- a measurement, not a preference -- so they paste."""
+    reports = tmp_path / "r"
+    reports.mkdir()
+    _reports(reports)
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports))
+    pasted = {f["key"] for f in rep["to_paste"]}
+    assert "monitoring.stop_conditions.scrap_deterioration_pct" in pasted
+    assert "baseline_model.calibration_fit_trailing_weeks" in pasted
+
+
+def test_the_rail_paste_is_gated_on_the_price_consequence(cfg, tmp_path):
+    """`consistent_max_mean_step` is measured, but raising the rail re-prices
+    real episodes -- so it pastes only when step_sensitivity agrees, and
+    returns to the owner when the re-price is large."""
+    reports = tmp_path / "r"
+    reports.mkdir()
+    _reports(reports)                     # deeper arm: 2% of prices -> inside
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports))
+    rail = [f for f in rep["findings"] if f["key"] == "learning.max_mean_step"][0]
+    assert rail["class"] == "PASTE" and "inside the auto-apply gate" in rail["evidence"]
+
+    bt = json.loads((reports / "backtest.json").read_text())
+    bt["policy_deltas"]["step_sensitivity"]["deeper_belief"][
+        "share_prices_changed"] = 0.40     # a real price event
+    (reports / "backtest.json").write_text(json.dumps(bt))
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports))
+    rail = [f for f in rep["findings"] if f["key"] == "learning.max_mean_step"][0]
+    assert rail["class"] == "OWNER" and "EXCEEDS the auto-apply gate" in rail["evidence"]
+    assert rail["key"] not in {f["key"] for f in rep["to_paste"]}
+
+
+def test_a_tolerance_stays_with_the_owner(cfg, tmp_path):
+    """The one value the data genuinely cannot decide: it says what effect is
+    DETECTABLE, never what size of effect is worth detecting."""
+    reports = tmp_path / "r"
+    reports.mkdir()
+    _reports(reports, **{"thresholds.json": {
+        "information_increment_recommendation": {"recommended": 0.341},
+        "bounded_step_recommendation": {},
+        "guardrail_threshold_recommendation": {},
+        "ab_duration": {"target_mde_rel": 0.075, "by_duration": {
+            "4w": {"detectable_mde_rel": 0.241, "meets_target": "False"}}}}})
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports))
+    mde = [f for f in rep["findings"]
+           if f["key"] == "ab_test.min_detectable_effect_pct"][0]
+    assert mde["class"] == "OWNER"
+    assert "NOT measurable" in mde["evidence"]
+    assert mde["key"] not in {f["key"] for f in rep["to_paste"]}
+
+
+def test_owner_values_are_never_written(cfg, tmp_path):
     reports = tmp_path / "r"
     reports.mkdir()
     _reports(reports)
@@ -127,8 +185,9 @@ def test_measured_values_are_recommended_and_owner_values_are_not_written(
     res = tune.apply(c, rep, str(work), out_dir=str(tmp_path / "out"))
     written = yaml.safe_load(work.read_text())
     assert written["exploration"]["tau_initial"] == 1234.5
-    assert written["learning"]["max_mean_step"] == cfg["learning"]["max_mean_step"], \
-        "the owner rail must be untouched"
+    assert (written["ab_test"]["min_detectable_effect_pct"]
+            == cfg["ab_test"]["min_detectable_effect_pct"]), \
+        "a tolerance the data cannot decide must be left untouched"
     assert os.path.exists(res["backup"])
     log = json.load(open(res["log"]))["runs"][-1]
     assert log["applied"] and log["pending_owner_decisions"]
