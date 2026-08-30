@@ -2008,10 +2008,19 @@ Committing the re-solve while they lag it would create the very
 inconsistency being tested for. The verdict lands in
 `calibration.json → convergence` and the `calibration convergence` status
 row (WARN, not FAIL — chain health, not a launch gate); NOT CONVERGED means
-run steps 3b–5 once more and re-check. On production, a loop that does not
-settle in two iterations means the couplings are stronger on that extract
-than the fixture measured — stop and understand why before trusting either
-artifact.
+run steps 3b–5 once more and re-check.
+
+**Read the TRAJECTORY, not the turn count (owner, 2026-08-30).** This doc
+previously said a loop not settling in two iterations meant something was
+wrong; that was the fixture's behaviour mistaken for a rule, and production
+measured 3–4 turns from a bare chain with nothing wrong. The block carries a
+`history` of the last six readings, and a contracting series
+(2.29 → 0.4 → 0.06 → 0.006) simply needs another turn. What warrants stopping
+is a series that stalls or oscillates. `worst_cell_anchor_rows` sizes the
+evidence behind the worst cell for the same reason: the max is unweighted
+across cells and weeks, so a shrinkage-dominated cell on a few dozen anchor
+rows can set it — on the fixture the worst cell is the thinnest one — and
+that reads identically to an unsettled loop unless the row count is shown.
 
 **The prior side is untestable on the fixture and remains open.** The
 fixture is the `--policy legacy` build, made to reproduce the production

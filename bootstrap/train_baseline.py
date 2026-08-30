@@ -637,9 +637,26 @@ def check_calibration_convergence(d, cfg):
         if isinstance(node, str) and os.path.exists(node):
             checked_against[name] = file_digest(node)
 
+    # HOW MANY ANCHOR ROWS THE WORST CELL HAD. A cell whose factor is
+    # shrinkage-dominated can post a large dlog on thin evidence, which reads
+    # identically to an unsettled loop. Reported so the two can be told apart.
+    worst_rows = None
+    if worst[1]:
+        cell = worst[1].split(":", 1)[1]
+        worst_rows = ((old.get("detail") or {}).get(cell) or {}).get("anchor_rows")
+
+    # THE TRAJECTORY, not just this turn. A contracting loop (2.3 -> 0.4 ->
+    # 0.06 -> 0.006) is healthy and simply needs another turn; one that stalls
+    # or oscillates is a different problem, and a single number cannot tell
+    # them apart. Prior runs' readings are carried forward here.
+    prior = ((old.get("convergence") or {}).get("history") or [])
+    history = (prior + [round(worst[0], 6)])[-6:]
+
     converged = not missing and worst[0] <= tol
     block = {
         "tol_log": tol,
+        "history": history,
+        "worst_cell_anchor_rows": worst_rows,
         "checked_against": checked_against,
         "max_abs_dlog": round(worst[0], 6),
         "worst_cell": worst[1],
@@ -652,8 +669,17 @@ def check_calibration_convergence(d, cfg):
             "tolerance; the calibration <-> dispersion loop has settled"
             if converged else
             "NOT CONVERGED -- the factors move {:.1%} (> {:.1%}) under the "
-            "current prior/r. Run --fit-calibration, estimate_prior and "
-            "fit_dispersion once more, then re-check.".format(worst[0], tol)),
+            "current prior/r{}. Run --fit-calibration, estimate_prior and "
+            "fit_dispersion once more, then re-check.{}".format(
+                worst[0], tol,
+                f", worst cell on {worst_rows:,} anchor rows"
+                if worst_rows else "",
+                (" Trajectory " + " -> ".join(f"{h:.4f}" for h in history)
+                 + (" is contracting: keep going, several turns is normal."
+                    if len(history) > 1 and history[-1] < history[-2] else
+                    " is NOT contracting -- investigate before iterating again."))
+                if len(history) > 1 else
+                " Several turns from a bare chain is normal.")),
     }
     old["convergence"] = block
     with open(path, "w") as f:
@@ -681,7 +707,12 @@ def main():
     if args.check_convergence:
         block = check_calibration_convergence(d, cfg)
         print(f"max |dlog f| = {block['max_abs_dlog']:.4f} "
-              f"(tol {block['tol_log']}) at {block['worst_cell']}")
+              f"(tol {block['tol_log']}) at {block['worst_cell']}"
+              + (f" ({block['worst_cell_anchor_rows']:,} anchor rows)"
+                 if block.get("worst_cell_anchor_rows") else ""))
+        if len(block.get("history") or []) > 1:
+            print("trajectory   : "
+                  + " -> ".join(f"{h:.4f}" for h in block["history"]))
         if block["cells_appeared_or_gone"]:
             print(f"cells appeared/disappeared: "
                   f"{block['cells_appeared_or_gone']}")

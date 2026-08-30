@@ -135,8 +135,11 @@ against *calibrated* `mu_ref` — so calibration comes **before** prior and
 dispersion, and they are re-fitted against it. On a first run there is no
 `r_lookup` yet and 3b silently uses the raw-mu basis; the second pass gets
 the censored one. Step 5b asserts the fixed point settled: **NOT CONVERGED
-means run 3b → 4 → 5 → 5b again**, which is normal after a retrain or a
-split change. (§9.2)
+means run 3b → 4 → 5 → 5b again** — normal after a retrain or a split change,
+and a bare chain often needs **3–4 turns**. Judge it by the block's
+`history`: a contracting series just needs another turn; one that stalls or
+oscillates does not. Check `worst_cell_anchor_rows` before concluding the
+chain is broken — the max is unweighted, so a thin cell can set it. (§9.2)
 
 `scripts/run_bootstrap.sh <raw>` runs 1–6b and 11 and prints `status`, in
 exactly this order — it is the executable copy of the table above; if the two

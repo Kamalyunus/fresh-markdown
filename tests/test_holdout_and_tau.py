@@ -1028,3 +1028,33 @@ def test_shadow_refits_calibration_forward_only_and_reports_both_regimes():
     # both ratios are computed on the SAME rows -- only the factor differs
     assert "mu_arr * scale" in run, \
         "the re-fit reading must rescale mu, not re-predict it"
+
+
+def test_convergence_carries_its_trajectory_and_the_worst_cell_s_evidence():
+    """A single reading cannot tell a contracting loop from a stuck one, and
+    an unweighted max cannot tell an unsettled chain from one thin cell.
+
+    Production measured 3-4 turns from a bare chain with nothing wrong, after
+    this doc had claimed two was the limit -- the fixture's behaviour mistaken
+    for a rule. The trajectory is what distinguishes them.
+    """
+    import copy
+
+    import bootstrap.train_baseline as tb
+
+    cfg = copy.deepcopy(load_config())
+    cfg["baseline_model"]["calibration_convergence_tol_log"] = 0.02
+    path = cfg["baseline_model"]["calibration_factor_path"]
+    if not os.path.exists(path):
+        pytest.skip("no calibration artifact on disk")
+    block = (json.load(open(path)).get("convergence") or {})
+    if not block:
+        pytest.skip("convergence never run")
+
+    assert isinstance(block.get("history"), list) and block["history"]
+    assert len(block["history"]) <= 6, "the history is bounded"
+    assert block["history"][-1] == block["max_abs_dlog"], \
+        "the last reading must be this run's"
+    # the worst cell's evidence is reported, so a shrinkage-dominated cell is
+    # distinguishable from a genuinely unsettled loop
+    assert "worst_cell_anchor_rows" in block
