@@ -579,11 +579,20 @@
       <li><b>Two windows back-to-back are two ids</b>, even with no gap between them: the
           close of one listing and the open of the next each carry their own entry
           decision.</li>
+      <li><b>A restock does NOT open a new id.</b> Stock arriving mid-window — even one that
+          <em>extends</em> the window, so <code>hours_remaining</code> jumps UP — is the same
+          listing and keeps its id; just send the new, larger counter and the service re-plans
+          over the longer horizon. The id changes only when the listing actually closed and a
+          new one opened. This is the case that matters: a new id here resets the price
+          anchor, and the price could rise on shoppers who saw yesterday's — the one move the
+          system guarantees never happens within a listing.</li>
     </ul>
     <p>
       Consistency check worth building in: within one <code>episode_id</code>,
-      <code>hours_remaining</code> should decrement by exactly one per elapsed hour. If it
-      does not, the id is stitching two windows together or a feed hour is missing.
+      <code>hours_remaining</code> should decrement by exactly one per elapsed hour, with one
+      allowed exception — it may step UP on an hour where stock also arrived (a
+      window-extending restock). Any other jump means the id is stitching two windows
+      together or a feed hour is missing.
     </p>
   </div>
 
