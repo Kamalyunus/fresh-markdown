@@ -59,15 +59,7 @@ def _chdir(ws):
 
 
 def test_prepared_data_is_priceable_and_self_consistent(workspace):
-    """Postconditions of the filter chain.
-
-    Two tiers now, and the split is the point. INTEGRITY properties hold on
-    every surviving row -- a discount in range, non-negative quantities, a
-    real category. PRICEABILITY properties hold only on `dp_eligible`, because
-    an episode the DP cannot price is deliberately still in the population:
-    the demand model cannot see cost or hours_remaining, so it is an ordinary
-    observation to every frozen artifact.
-    """
+    """Postconditions of the filter chain."""
     _chdir(workspace)
     from common import episodes as episodes_mod
     full = pd.read_parquet("data/prepared.parquet")
@@ -130,13 +122,7 @@ def test_every_episode_has_a_monotone_window_counter(workspace):
     """The episode rule's own postcondition: inside an episode, flc_window
     (hours_remaining) steps down exactly one per row, and the window is at
     least as long as the rows we hold. A violation means two runs collided
-    into one id -- which is what duplicate (sku, fc, date, hour) rows did.
-
-    The STEP is asserted on everything, because episode identification rests
-    on it. The window LENGTH is asserted on `dp_eligible` only: an episode
-    entering with an already-negative counter that recovery could not repair
-    is kept and flagged `negative_window`, and its counter is exactly the
-    thing that cannot be trusted."""
+    into one id -- which is what duplicate (sku, fc, date, hour) rows did."""
     _chdir(workspace)
     d = pd.read_parquet("data/prepared.parquet")
     g = d.sort_values(["date", "hour_of_day"]).groupby("episode_id")
@@ -203,13 +189,7 @@ def test_prior_artifact_within_bounds(workspace):
 def test_the_density_prior_has_no_constant_in_it(workspace):
     """The objection that motivated the method: -1.00 +- 0.60 is a config
     constant nothing measured produced, and it was overwriting measured
-    brackets. Under `profile_density` it must not appear at all.
-
-    A category the data says nothing about must land on the UNIFORM over the
-    support -- mean (lo+hi)/2, std (hi-lo)/sqrt(12) -- which is reached by
-    construction from a flat likelihood, not configured. That is the property
-    that makes "no fallback" true rather than merely renamed.
-    """
+    brackets. Under `profile_density` it must not appear at all."""
     _chdir(workspace)
     with open("artifacts/prior.json") as f:
         prior = json.load(f)
@@ -605,12 +585,7 @@ def test_shadow_phase_harness(workspace):
 
 
 def test_shadow_defaults_to_the_holdout_window(workspace):
-    """No flag, no window arguments -- it must land on the hold-out.
-
-    The honest run was opt-in until now, which is the wrong way round: every
-    artifact is fit up to test_end, so a run including that data grades the
-    pipeline on rows it already saw.
-    """
+    """No flag, no window arguments -- it must land on the hold-out."""
     _chdir(workspace)
     env = {**os.environ, "PYTHONPATH": REPO}
     r = subprocess.run(
@@ -664,12 +639,7 @@ def test_shadow_derives_tau0_when_the_week_is_thick_enough(workspace):
 
 
 def test_parallel_and_serial_produce_the_same_reports(workspace):
-    """The only claim parallelism is allowed to make: it is faster.
-
-    Run both harnesses each way and compare the JSON. Anything that differs
-    is a shared-state leak -- an accumulator folded in completion order, a
-    draw that depended on position, an event committed by a worker.
-    """
+    """The only claim parallelism is allowed to make: it is faster."""
     _chdir(workspace)
     env = {**os.environ, "PYTHONPATH": REPO}
 
@@ -856,18 +826,7 @@ def test_true_leftover_on_the_production_worked_example():
 
 
 def test_zero_cost_episodes_are_flagged_whole_not_dropped(workspace, tmp_path):
-    """A zero cost is a MISSING cost -- nobody gives perishable stock away.
-
-    It is fatal to exactly two consumers and harmless to the rest, which is
-    why it FLAGS rather than drops. Fatal to the action set (`d_max` reads
-    1.0, i.e. maximally priceable, which raised ZeroDivisionError out of the
-    demand model on the first full-population shadow run) and to IL (scrap is
-    `cost x leftover`, so it contributes discount cost and no scrap). Harmless
-    to every frozen artifact, because FEATURES carries no `cost` at all.
-
-    Flagged WHOLE, at episode grain: one bad hour poisons the window, since
-    the monotonicity anchor carries its price into every later hour.
-    """
+    """A zero cost is a MISSING cost -- nobody gives perishable stock away."""
     _chdir(workspace)
     from bootstrap.prepare_data import load_and_filter
 
@@ -909,14 +868,7 @@ def test_zero_cost_episodes_are_flagged_whole_not_dropped(workspace, tmp_path):
 
 
 def test_a_restock_is_detected_from_the_source_convention():
-    """The detector, and the fact that its output only ever sets a flag.
-
-    A restock breaks the DP's state transition -- one pool draining
-    monotonically -- and nothing else. The hours themselves are honest demand
-    observations, each censored against its own opening stock, so dropping
-    them cost the demand fit 2.7% of the extract's COGS to protect a solver
-    that reads `dp_eligible` anyway.
-    """
+    """The detector, and the fact that its output only ever sets a flag."""
     from common.episodes import episode_flow
 
     clean = _observed_episode()
@@ -953,14 +905,7 @@ def test_a_restock_is_detected_from_the_source_convention():
 
 def test_a_restock_survives_the_real_chain_and_stays_dp_eligible(
         workspace, tmp_path):
-    """The flag through the whole pipeline, not just the detector.
-
-    Two things have to hold together and only an end-to-end run shows both:
-    the episode is STILL THERE for the demand fit, and it is OUT of the subset
-    the DP acts on. A restock is also the one break `adjustment_reason` names
-    (`intraday_restock`), so the chain-break stage must let it through -- if
-    that stage took it first, the flag would be measuring an empty set.
-    """
+    """The flag through the whole pipeline, not just the detector."""
     _chdir(workspace)
     from bootstrap.prepare_data import load_and_filter
 
@@ -1017,19 +962,7 @@ def test_a_restock_survives_the_real_chain_and_stays_dp_eligible(
 
 def test_negative_entry_window_is_recovered_not_dropped(workspace, tmp_path):
     """A window counter that enters ALREADY negative is a known source
-    pattern, not a defect, and dropping it is not neutral.
-
-    Those episodes concentrate in a handful of categories, so dropping them
-    selects on category and biases every per-category figure -- the prior, the
-    per-subcategory `r`, the category IL split. They behave like a standard
-    short window, so they are recovered with a synthetic countdown instead.
-
-    The claim is CHECKED, not trusted: an episode entering negative that runs
-    LONGER than the assumed window is not the pattern, is not recovered, and
-    is flagged `negative_window` -- kept in the population, out of
-    `dp_eligible`, since the counter it cannot supply is a DP input and not a
-    demand feature.
-    """
+    pattern, not a defect, and dropping it is not neutral."""
     _chdir(workspace)
     from bootstrap.prepare_data import load_and_filter
 
@@ -1072,19 +1005,7 @@ def test_negative_entry_window_is_recovered_not_dropped(workspace, tmp_path):
 
 
 def test_an_unreconciled_hour_becomes_shrink_not_a_drop(workspace, tmp_path):
-    """Stock that vanishes is COUNTED, not deleted with its episode.
-
-    A partial shortfall -- `0 < ending < starting - sold` -- is stock that
-    left unsold and unwritten-off. It used to drop the whole window, which on
-    the production extract took 33.6pp of COGS and selected the largest
-    episodes 4.5 to 1, because a sale is likelier to straddle an hour boundary
-    the more the SKU sells.
-
-    It now settles into the episode identity: scrap is the last hour's
-    leftover PLUS the shrink, so `supply == sold + scrap` still closes and the
-    units are on the books instead of in a deleted episode. Only the DP is
-    shut out, its state transition assuming stock leaves solely by sale.
-    """
+    """Stock that vanishes is COUNTED, not deleted with its episode."""
     _chdir(workspace)
     from bootstrap.prepare_data import load_and_filter
     from common import episodes as E
@@ -1121,18 +1042,7 @@ def test_an_unreconciled_hour_becomes_shrink_not_a_drop(workspace, tmp_path):
     assert len(E.flow_identity_violations(d)) == 0
 
 def test_the_episode_identity_holds_on_every_episode(workspace):
-    """opening + restocked == sold + shrink + leftover_at_last_hour.
-
-    The whole specification for episode-level data quality, in one line. Every
-    unit an episode ever had ends up sold, shrunk, or still on the shelf at
-    the last hour -- there is no fourth option, so this is not a heuristic
-    with a tolerance.
-
-    Asserted on the REAL prepared frame rather than a fixture, because what it
-    protects is the arithmetic: chain continuity makes the two sides provably
-    equal, so a violation means the supply accounting is broken, and a silent
-    break there moves every scrap, clearance and IL figure at once.
-    """
+    """opening + restocked == sold + shrink + leftover_at_last_hour."""
     _chdir(workspace)
     from common import episodes as E
     d = pd.read_parquet("data/prepared.parquet")
@@ -1190,14 +1100,7 @@ def test_the_manifest_reports_the_identity(workspace):
 
 
 def test_re_segmentation_is_a_no_op_and_says_so_if_it_stops_being_one(workspace):
-    """`contiguous_episodes_built` guards an invisible invariant.
-
-    It used to split windows that row-scoped drops had holed. Nothing drops
-    rows after the ids are assigned any more, so it must change nothing -- and
-    `episode_universe` runs BEFORE it, so if a future row-scoped filter did
-    re-split an episode, the continuity check and every flag keyed to those
-    ids would be stale with no error. The stage raises instead.
-    """
+    """`contiguous_episodes_built` guards an invisible invariant."""
     _chdir(workspace)
     from bootstrap.prepare_data import load_and_filter, assign_episode_ids
     from common.config import load_config as _lc
@@ -1241,15 +1144,7 @@ def test_a_row_scoped_drop_is_caught_rather_than_silently_re_segmenting(
 
 def test_a_missing_hour_drops_the_whole_window_not_just_a_fragment(
         workspace, tmp_path):
-    """A fragment is not an episode, and neither fragment is usable.
-
-    `assign_episode_ids` starts a new episode when the clock breaks step, so a
-    hole in the hourly feed turns one source window into two. The first ends
-    with no closure sentinel -- `not_closed`, scrap unknown, clearance a
-    partial figure. The second opens MID-WINDOW: wrong starting stock, counter
-    part-way down, and its first row reads as an ENTRY row, which
-    `estimate_prior` fits elasticity on. Both go.
-    """
+    """A fragment is not an episode, and neither fragment is usable."""
     _chdir(workspace)
     from bootstrap.prepare_data import load_and_filter
 
@@ -1286,13 +1181,7 @@ def test_a_missing_hour_drops_the_whole_window_not_just_a_fragment(
 
 
 def test_a_new_window_is_not_mistaken_for_a_gap(workspace):
-    """The counter is what tells them apart, and it must.
-
-    Across a feed gap the clock jumps `n` hours and `hours_remaining` falls by
-    the same `n` -- the window kept running unobserved. A genuinely new window
-    RESETS the counter upward instead. Confusing the two would delete every
-    back-to-back pair of windows in the extract.
-    """
+    """The counter is what tells them apart, and it must."""
     _chdir(workspace)
     from bootstrap.prepare_data import gap_split_windows, assign_episode_ids
 

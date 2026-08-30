@@ -1,32 +1,4 @@
-"""Two populations, and which consumer is entitled to which.
-
-The distinction this file defends: an INTEGRITY defect is a row that cannot
-be believed; everything else is a row that is perfectly believable and merely
-hard to PRICE. Conflating them cost most of the COGS in the extract -- every
-frozen artifact was fit on the priceable subset, including the elasticity
-prior, for which below-cost hours are the widest price variation the data
-contains.
-
-And it made gate 1 undecidable. `share_non_explorable` counts episodes whose
-cost floor leaves too few tiers to explore against, and the chain deleted
-exactly those before `m1` looked, so the gate read 0.0 and could not fail.
-
-What gates `dp_eligible` is now only what the SOLVER cannot do -- no feasible
-tier (`cost_missing`, `non_priceable`) and no trustable horizon
-(`negative_window`, `window_too_long`) -- plus `final_hour_restock`, which
-makes the CLOSE ambiguous and so gates `eligible` too.
-
-Nothing about the inventory PATH gates any more. A restock or a shrink used to,
-on the grounds that the DP's transition assumes one pool draining
-monotonically. That confused the solve with the replay: within one solve the DP
-does assume it, and must, because production cannot see a future delivery
-either -- but the replay re-solves hourly against the stock on hand and applies
-the episode's own per-hour adjustment, so the DP learns of an arrival at the
-next hour exactly as it does live.
-
-`below_cost_hours`, `edge_truncated`, `restocked` and `shrink` are all reported
-and gate nothing.
-"""
+"""Two populations, and which consumer is entitled to which."""
 
 import inspect
 
@@ -51,14 +23,7 @@ def cfg():
 
 
 def _frame(**over):
-    """One clean two-hour episode; keyword overrides break it one way.
-
-    Per-hour lists (`hours_remaining`, `starting_inventory`, `units_sold`,
-    `ending_inventory`) are laid down as given; scalars are broadcast. The
-    inventory chain is closed by the write-off sentinel on the final row --
-    `ending_inventory == 0` while stock remained -- so `classify_last` reads
-    the episode as COMPLETED and it is not swept up by `edge_truncated`.
-    """
+    """One clean two-hour episode; keyword overrides break it one way."""
     per_hour = ("hours_remaining", "starting_inventory", "units_sold",
                 "ending_inventory")
     base = dict(episode_id="e", cost=4000.0, original_price=10_000.0,
@@ -113,13 +78,7 @@ def test_the_flag_is_episode_scoped_not_row_scoped(cfg):
 def test_below_cost_is_reported_but_does_not_gate(cfg):
     """A below-cost price is one the LEGACY policy set, and the agent is
     already constrained never to set one -- so it is a property of the
-    history, not a defect in it.
-
-    The backtest's DP arm is self-anchored and never sees the legacy price.
-    Shadow uses it as the anchor and therefore refuses every hour from the
-    crossing onward -- which is the cost floor working, and the hours BEFORE
-    the crossing are good decisions the old chain deleted with the episode.
-    """
+    history, not a defect in it."""
     d = _frame()
     d.loc[1, "total_discount"] = 0.95
     d["offered_price"] = d.original_price * (1 - d.total_discount)
@@ -134,28 +93,7 @@ def test_below_cost_is_reported_but_does_not_gate(cfg):
 
 
 def test_an_unfinished_episode_is_kept_but_gated_out_of_everything(cfg):
-    """This reverses an earlier decision in this file, deliberately.
-
-    The old argument: an unclosed episode's OBSERVED hours are ordinary
-    priced demand, `scrap_units` already returns NaN, and these are the
-    LARGEST episodes in the extract -- so gating buys nothing and costs the
-    demand fit its best-observed windows.
-
-    True, and not enough. TWO consumers met one and silently mis-weighted it:
-    the clearance panel averaged in "sold so far", and the backtest graded a
-    truncated actual arm against two full-horizon simulated ones. A category
-    that needs special-casing at every consumer belongs excluded at the
-    source, not defended at each one.
-
-    And the count should be tiny. Only the EXTRACT's last hours can leave an
-    episode unfinished -- split boundaries cannot, because `window_slice`
-    assigns episodes whole by opening date -- so on a 175-day extract of ~36h
-    windows this is under 1% of episodes if the feed is healthy. Production
-    measured 3.38%, which is the feed problem `edge_truncated` splits out,
-    not a population worth protecting.
-
-    KEPT in `integrity`, so m11 can still count the residue.
-    """
+    """This reverses an earlier decision in this file, deliberately."""
     from bootstrap.prepare_data import population
     unclosed = _frame(episode_id="u", ending_inventory=[9, 7])
     d = pd.concat([_frame(), unclosed], ignore_index=True)
@@ -182,22 +120,7 @@ def test_an_unfinished_episode_is_kept_but_gated_out_of_everything(cfg):
 
 def test_edge_truncation_survives_a_counter_of_millions_of_hours(cfg):
     """The source emits counters in the MILLIONS, and this ran before the flag
-    that gates them.
-
-    `edge_truncated` asks "would this window still be running at the extract's
-    last hour?". The obvious way to ask -- `ts + pd.to_timedelta(hr, unit="h")
-    > extract_end` -- builds a timedelta out of the source counter, and
-    `timedelta64[ns]` tops out near 2.56 million hours (292 years). On a
-    ns-resolution pandas that overflows: it either raises or silently wraps and
-    decides the flag on a garbage timestamp. Not hypothetical -- it stopped a
-    production run.
-
-    `window_too_long` is what gates these rows, but it is set AFTER this, so
-    this has to survive them rather than assume they are gone. Asking the
-    question numerically -- `hr > (extract_end - ts)` in hours -- is the same
-    rule with no timedelta built from the counter, and `extract_end - ts` is
-    bounded by the extract's own span.
-    """
+    that gates them."""
     absurd = _frame(episode_id="huge", ending_inventory=[9, 7],
                     hours_remaining=[9_000_000.0, 8_999_999.0])
     d = pd.concat([_frame(), absurd], ignore_index=True)
@@ -248,25 +171,7 @@ def test_every_condition_carries_a_stated_reason():
 
 
 def test_recovery_cannot_merge_a_negative_episode_into_its_neighbour():
-    """`negative_window_recovered` rewrites the field the ids are derived from.
-
-    Episode identification differences `hours_remaining` hour to hour, and
-    recovery replaces it with a synthetic countdown from
-    `manufacturing_window_hours`. Those two facts collide: an episode entering
-    negative and rewritten to 23, 22, 21 sitting one hour before a genuine
-    window that opens at 20 now looks like one continuous run, and the two
-    merge into a single episode with a fabricated boundary.
-
-    It is not hypothetical -- it moved 165 rows on the production extract, and
-    the `contiguous_episodes_built` assertion caught it and reported it as "a
-    filter is dropping rows", which was the one explanation that was NOT true.
-    No filter drops rows; the pipeline was grading the invariant against a
-    counter it had just invented.
-
-    The fix is ordering: re-segmentation is verified against the SOURCE
-    counter, and recovery runs afterwards, mutating values inside boundaries
-    that are already settled. This test pins the shape that broke it.
-    """
+    """`negative_window_recovered` rewrites the field the ids are derived from."""
     from bootstrap.prepare_data import assign_episode_ids
 
     rows = ([dict(sku_id=1, fc="X", date="2026-03-01", hour_of_day=h,
@@ -307,19 +212,7 @@ def test_recovery_runs_after_the_resegmentation_check(cfg):
 
 
 def test_every_eligible_episode_is_closed_but_not_the_reverse():
-    """Closure is NECESSARY for eligibility and not SUFFICIENT.
-
-    The one-way implication is the whole point of keeping them as separate
-    columns. `closed` is a fact about the source -- it zeroed
-    `ending_inventory`, so the listing ended. `eligible` additionally asks
-    whether what the episode reports about itself can be believed, and a
-    closed episode can still fail that: the final hour may have taken a
-    restock, or the flow identity may not balance.
-
-    An `eligible` episode that is not `closed` would be a contradiction --
-    a complete accounting of a window that had not finished -- so it is
-    asserted rather than left to the reader.
-    """
+    """Closure is NECESSARY for eligibility and not SUFFICIENT."""
     from common import episodes as E
 
     d = _closed_and_unclosed()
@@ -389,12 +282,7 @@ def test_the_cost_floor_is_not_a_population_choice():
 def test_an_unknown_outcome_reaches_the_harnesses_and_is_not_charged_scrap(cfg):
     """`edge_truncated` staying in `dp_eligible` sends unclosed episodes into
     the backtest and shadow for the first time. Both already had the branch;
-    nothing had exercised it, because the filter chain deleted the subject.
-
-    What must hold is that the observed-world baseline does NOT book scrap it
-    never saw. Charging an unfinished episode's leftover to scrap inflates the
-    number the policy is compared against, which flatters the policy.
-    """
+    nothing had exercised it, because the filter chain deleted the subject."""
     from backtest.replay import _episode_frame, _replay_one
 
     g = pd.DataFrame({
@@ -428,13 +316,7 @@ def test_an_unknown_outcome_reaches_the_harnesses_and_is_not_charged_scrap(cfg):
 # ------------------------------------- supply, and who is allowed to see it
 
 def test_supply_not_opening_stock_is_the_clearance_denominator():
-    """A restocked episode has more to sell than it opened with.
-
-    Against opening stock the ratio is nonsense in a specific and embarrassing
-    way: opened with 3, took 10 mid-flight, sold 9, scrapped 4 -- and the EDA
-    panel reported 300% cleared, counted it in `share_fully_cleared`, and hid
-    the overflow behind a histogram clipped at 1.0.
-    """
+    """A restocked episode has more to sell than it opened with."""
     from common.episodes import episode_flow
     d = pd.DataFrame({
         "episode_id": ["R"] * 3, "date": ["2026-03-01"] * 3,
@@ -464,19 +346,7 @@ def test_stock_that_genuinely_vanishes_does_not_net_away():
 
 
 def test_a_restocked_episode_does_reach_the_backtest(cfg):
-    """It used to be excluded, and that was wrong.
-
-    The exclusion rested on the DP's transition assuming one pool draining
-    monotonically -- which confuses the SOLVE with the REPLAY. Within a single
-    solve the DP does assume that, and it should: production cannot see a
-    future delivery either. But the replay re-solves every hour against the
-    stock on hand and applies the episode's own per-hour adjustment, so the DP
-    learns about an arrival at the next hour, exactly as it does live because
-    `ending[t]` IS `starting[t+1]`.
-
-    Excluding them also selected against precisely the fast-moving SKUs that
-    get replenished, which is the bias this whole chain has been unwinding.
-    """
+    """It used to be excluded, and that was wrong."""
     from bootstrap.prepare_data import population
     restocked = _frame(episode_id="R", starting_inventory=[12, 20],
                        ending_inventory=[20, 0])
@@ -494,16 +364,7 @@ def test_a_restocked_episode_does_reach_the_backtest(cfg):
 
 
 def test_the_flow_identity_is_what_decides_a_trustworthy_episode(cfg):
-    """supply = sold + remaining, computed two ways that must agree.
-
-    `remaining` from the flow is `supply - sold`. `remaining_from_last_row` is
-    read off the final hour -- `ending_inventory`, or `starting - sold` where
-    the write-off zeroed it. Two arithmetic paths over different fields, so
-    agreement is evidence and no tolerance has to be invented.
-
-    The consequences the owner asked for fall straight out of it: clearance
-    can never exceed 1, and a fully cleared episode cannot carry scrap.
-    """
+    """supply = sold + remaining, computed two ways that must agree."""
     from common.episodes import episode_flow
     cases = {
         # sold everything: clearance 1, nothing left to scrap
@@ -585,17 +446,7 @@ def test_units_restocked_is_on_the_prepared_frame(cfg):
 
 
 def test_shrink_and_restock_in_one_episode_are_both_counted(cfg):
-    """The owner's real episode, and the correction that produced this test.
-
-    Hours 12 and 18 each take a unit in; hours 11 and 17 each lose one. An
-    earlier version NETTED those to zero on the theory that each pair was one
-    sale bucketed an hour late -- an inference dressed as arithmetic. It read
-    a window with 2 units restocked and 2 units shrunk as having neither,
-    which let a restocked episode into the DP-side population and priced its
-    clearance against a supply short by the 2 that arrived.
-
-    Gross, both of them, and the episode is flagged on both counts.
-    """
+    """The owner's real episode, and the correction that produced this test."""
     rows = [(0, 24, 12, 0, 12), (1, 23, 12, 0, 12), (2, 22, 12, 0, 12),
             (3, 21, 12, 0, 12), (4, 20, 12, 0, 12), (5, 19, 12, 0, 12),
             (6, 18, 12, 0, 12), (7, 17, 12, 0, 12), (8, 16, 12, 1, 11),
@@ -674,14 +525,7 @@ def _closed_and_unclosed():
 
 
 def test_an_unfinished_episode_has_no_clearance_to_report(cfg):
-    """"Sold so far" is not clearance, and averaging it in biases ONE way.
-
-    A window that has not ended has by definition sold less than it will, and
-    unclosed episodes are the LARGEST in the extract -- 3.38% of the count
-    holding 78.6% of at-risk leftover units on production. So the drag is far
-    bigger than the share. Here one unclosed episode pulled the mean from 0.70
-    to 0.45 before it was excluded.
-    """
+    """"Sold so far" is not clearance, and averaging it in biases ONE way."""
     from common import episodes as E
     d = _closed_and_unclosed()
 
@@ -706,15 +550,7 @@ def test_an_unfinished_episode_has_no_clearance_to_report(cfg):
 
 
 def test_the_backtest_grades_on_known_outcomes_only(cfg):
-    """The same bias, and worse, because the two arms are asymmetric.
-
-    For an unfinished episode the ACTUAL arm carries only the observed sales
-    -- synthetic extension rows carry `units_sold = 0` -- and no scrap, since
-    `outcome_known` zeroes it. Both SIMULATED arms run the full extended
-    horizon and book scrap at the end. So the actual arm is truncated while
-    the arms it is graded against are not, and the DP looks better by exactly
-    the tail the extract did not cover.
-    """
+    """The same bias, and worse, because the two arms are asymmetric."""
     import inspect
     from backtest import replay
     src = inspect.getsource(replay.policy_replay)
@@ -728,14 +564,7 @@ def test_the_learning_yield_reports_the_terms_behind_it():
     """A disappointing yield has two causes with OPPOSITE remedies -- too few
     forced decisions, or forced prices sitting too close to the reference --
     and the per-episode aggregate cannot tell them apart. So the report
-    carries the decomposition, and the identity that makes it checkable:
-
-        information_per_forced_decision x forced_decisions
-            == effective_information_total x deff
-
-    Information is QUADRATIC in the log price ratio and only LINEAR in mu,
-    which is why the mean move is the term to read first.
-    """
+    carries the decomposition, and the identity that makes it checkable:"""
     import inspect
     from pipeline import shadow
 

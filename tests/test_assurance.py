@@ -1,10 +1,4 @@
-"""Tests for pipeline.assurance.
-
-A check that only ever passes is decoration. Every check here is tested twice:
-once on clean data, and once on data carrying exactly the corruption the check
-exists to catch -- because the failure modes are silent, so "it returned PASS"
-is not evidence that it would have said anything else.
-"""
+"""Tests for pipeline.assurance."""
 import copy
 import uuid
 
@@ -28,11 +22,7 @@ def cfg():
 
 def _decision(cfg, q, path, eps=-1.0, anchor=0.0, tau=None, rng=None,
               episode="ep", entry=False):
-    """A decision event built the way inference.decide builds one.
-
-    anchor 0.0 is the ordinary hourly case -- nothing discounted yet, so every
-    tier is still reachable. Entry decisions carry no anchor at all.
-    """
+    """A decision event built the way inference.decide builds one."""
     anchor = None if entry else anchor
     res = dp_mod.solve(P0, COST, q, path, D_REF, eps, R, cfg,
                        anchor_discount=anchor, entry=entry)

@@ -1,16 +1,4 @@
-"""The integration contract handed to engineering must match the code.
-
-`docs/event_contract.html` is what an integrating team builds against: it lists
-every field they send and every field they return. Nothing else in the repo
-would notice if a field were added to `DECISION_REQUIRED` and never written
-down -- the doc would simply be quietly wrong, and the first symptom would be a
-partner integration failing validation on a field nobody told them about.
-
-So the doc is checked against the schema in both directions: every required
-field appears in it, and every field name it prints is one the system actually
-knows. It is hand-authored, unlike the walkthrough, which is exactly why it
-needs a guard the walkthrough does not.
-"""
+"""The integration contract handed to engineering must match the code."""
 
 import os
 import re

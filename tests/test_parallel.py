@@ -1,16 +1,4 @@
-"""Parallelism must change speed and nothing else.
-
-Two properties carry that, and both were violated by the code this replaces:
-
-  1. **Order-independence.** The serial loop drew every exploration from one
-     shared generator, so the draw an episode got depended on how many
-     episodes preceded it. Split that across processes and the run stops
-     reproducing. Each episode now seeds from its own id.
-  2. **Workers compute, the parent commits.** The shadow gate MEASURES the
-     event store -- completeness, matched rate, dedup, quarantine. Per-worker
-     stores merged afterwards would mean the gate no longer tests the path
-     production runs.
-"""
+"""Parallelism must change speed and nothing else."""
 
 import inspect
 import time

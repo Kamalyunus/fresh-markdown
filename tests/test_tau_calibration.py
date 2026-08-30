@@ -1,13 +1,4 @@
-"""tau moves on spend, at the operator gate (design 5.8).
-
-`explore.tau_next` existed, was unit-tested, and had no caller: tau was pasted
-from config at launch and never moved again. The proportional controller the
-design specifies was therefore absent, and the only response to overspending
-was the monitor's stop condition -- which does not spend less, it stops
-exploring altogether. These tests hold the controller in place and, more
-importantly, hold it on the SAME basis the stop condition uses, so the two
-cannot drift into disagreeing about what "over budget" means.
-"""
+"""tau moves on spend, at the operator gate (design 5.8)."""
 
 import numpy as np
 import pytest
@@ -189,14 +180,7 @@ def test_tau_moves_even_when_no_cell_reaches_the_information_threshold(cfg, tmp_
 
 def test_the_posterior_carries_no_information_since_update_counter(cfg, tmp_path):
     """The original spec carried a running information counter and it was carried in
-    the artifact for a while, always reset and never incremented.
-
-    Adding it back would be a bug, not a schema restoration: the trigger reads
-    the UNCONSUMED BATCH, and nothing consumes a sub-threshold one, so a
-    counter incremented while the same outcomes are re-read next run double
-    counts them. A field that is permanently zero also reads as "no evidence
-    has accrued", which is the opposite of what a growing batch means.
-    """
+    the artifact for a while, always reset and never incremented."""
     posterior = _posterior(cfg, tmp_path)
     for rec in posterior.state["cells"].values():
         assert "information_since_update" not in rec
@@ -223,17 +207,7 @@ def test_a_null_tau_initial_is_reported_not_crashed(cfg, tmp_path):
 
 
 def test_a_window_with_no_exploration_holds_tau_still(cfg, tmp_path):
-    """The bug this exists for is positive feedback, not a rounding error.
-
-    With no forced decisions the realised cost is 0. `tau_next` floors the
-    denominator at `tau_spend_guard` (1 won), so `budget / 1` is enormous and
-    clips to the 2x ceiling -- tau DOUBLES. And the window where exploration
-    is absent is exactly the one where the stop condition suspended it for
-    OVERSPENDING, so tau would grow every day it was switched off and return
-    further over budget than it went away: 448 -> 896 -> 1792 -> 3584.
-
-    An absence of spend is an absence of signal. Hold tau still.
-    """
+    """The bug this exists for is positive feedback, not a rounding error."""
     store = EventStore(cfg, root=str(tmp_path / "events"))
     for i in range(20):                       # exploitation only: cost 0, no draws
         d = _decision(i, 0.30, exploration_cost=0.0)

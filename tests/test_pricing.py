@@ -29,16 +29,7 @@ def test_feasible_tiers_respect_cost_floor():
 
 def test_zero_cost_never_offers_a_zero_price():
     """A zero-cost row put d_max at 1.0, which put a 100% discount in the
-    action set, which crashed the solver.
-
-    mu(d) = mu_ref * ((1 - d)/(1 - d_ref))^eps with eps negative is
-    0 ** negative at d = 1 -- a ZeroDivisionError out of pricing.demand, from
-    inside pipeline.shadow, on the full-population run. The 3,000-episode
-    sample never drew a zero-cost episode, so the gate passed and the crash
-    waited for --max-episodes 0. Nothing upstream rejects a zero cost:
-    non_priceable tests `cost >= original_price`, so zero reads as maximally
-    priceable.
-    """
+    action set, which crashed the solver."""
     step = CFG["pricing"]["tier_step"]
     tiers, d_max = dp_mod.feasible_tiers(10000.0, 0.0, step)
     assert d_max == 1.0                      # the true cost floor, unchanged
@@ -375,18 +366,7 @@ def test_scrap_is_keyed_to_the_closure_sentinel_not_the_nominal_counter():
 
 
 def test_a_feed_with_no_closure_sentinel_reads_unclosed_and_says_so():
-    """Closure is `ending_inventory == 0` on the last row and NOTHING else.
-
-    This used to have a frame-wide fallback: no sentinel anywhere, so treat
-    every episode as closed. It was removed because it failed in the one
-    direction that cannot be noticed -- a feed that STOPS emitting the
-    sentinel, and a synthetic fixture that never emitted one, both read as
-    perfectly healthy while every scrap figure came from an episode nobody had
-    established was over. The fallback hid a stale fixture for months.
-
-    The replacement is loud: unclosed everywhere, plus a flag that names the
-    cause so the number is not mistaken for a finding about the business.
-    """
+    """Closure is `ending_inventory == 0` on the last row and NOTHING else."""
     from common import episodes
 
     honest = _last_row_frame([("a", 3, 9, 4, 5), ("b", 2, 6, 6, 0)])
@@ -677,15 +657,7 @@ def test_a_relative_floor_above_one_is_reported_as_blocked_not_as_a_number():
     """A floor at or above 1.0 means the series' ordinary daily swing exceeds
     its own level. No threshold can clear it without also clearing the failure
     the guardrail exists to catch -- so it is BLOCKED, and the report has to
-    say the word.
-
-    This went unsaid for a whole production run. `margin_rate` came back with a
-    robust 3-sigma of 3.5853 (raw 65.4497, worst observed 155.23) and it read
-    as "margin is volatile" rather than as "this guardrail cannot be set". The
-    cause was that margin CROSSES ZERO -- 36 of 134 production days at or below
-    it -- and a ratio to a near-zero mean has no scale. Smoothing cannot fix a
-    sign change; the basis has to change.
-    """
+    say the word."""
     import copy
     from bootstrap import derive_thresholds as dt
     from common import guardrail
@@ -720,14 +692,7 @@ def test_a_relative_floor_above_one_is_reported_as_blocked_not_as_a_number():
 def test_the_information_increment_is_derived_from_the_posterior_arithmetic(
         tmp_path):
     """`information_increment` is the evidence a bounded update may USE, and
-    that is fixed by the posterior's own algebra rather than judgment.
-
-    Fisher information adds to precision, so shrinking the std by exactly
-    `max_std_shrink` costs I* = (1/s^2)[1/(1-shrink)^2 - 1]. Above I* the
-    update clips and `bounded_step` DISCARDS the excess -- the outcomes are
-    marked processed either way -- so I* is a ceiling. It scales as 1/s^2,
-    which is why a wide launch prior is cheap to move and a narrow one is not.
-    """
+    that is fixed by the posterior's own algebra rather than judgment."""
     import copy
     import json
     import numpy as np
@@ -841,11 +806,7 @@ def test_the_floor_and_the_trigger_compute_the_same_quantity():
 
 
 def _bracket_verdict(naive, ctrl, cfg, lo=-4.0, hi=-0.05, step=0.025):
-    """The acceptance decision from bootstrap.estimate_prior, in isolation.
-
-    Mirrors the three checks so a rule change has to be a deliberate edit in
-    two places rather than a silent drift in one.
-    """
+    """The acceptance decision from bootstrap.estimate_prior, in isolation."""
     pc = cfg["posterior"]["prior"]
     boundary = any(abs(e - b) <= step + 1e-12 for e in (naive, ctrl)
                    for b in (lo, hi))
@@ -861,15 +822,7 @@ def _bracket_verdict(naive, ctrl, cfg, lo=-4.0, hi=-0.05, step=0.025):
 
 def test_a_censored_entry_row_is_a_one_hour_episode():
     """Which is why dropping them is cheap -- and why the cost is a selection
-    bias, not a coverage one.
-
-    Censoring is decided at the LAST row (`episodes.censored_hours`), so an
-    entry row can only be censored when entry IS the last row. Those are the
-    fastest sellers, so removing them truncates the top of the demand
-    distribution and pulls |epsilon| TOWARD ZERO -- the direction this estimate
-    is already fighting. `entry_rows_censored_share` is reported so the trade
-    stays visible rather than assumed small forever.
-    """
+    bias, not a coverage one."""
     from common import episodes
 
     d = pd.DataFrame({
@@ -893,18 +846,7 @@ def test_a_censored_entry_row_is_a_one_hour_episode():
 
 def test_the_bounded_step_holds_in_the_REPORT_not_just_in_the_store(): # noqa: N802
     """`max_mean_step` is a safety bound, and something checks it on the
-    REPORT rather than on the posterior file.
-
-    `proposed_mean` was rounded to 4dp while `mean_before` was not, so the step
-    between the two fields could read up to 5e-5 over the cap even though the
-    stored value was correct. It stayed invisible while every cell's prior was
-    exactly -1.0 -- round numbers minus 0.15 are still round -- and appeared
-    the moment per-category brackets landed: -0.76098 - 0.15 = -0.91098, which
-    rounds to -0.911, and |-0.911 - -0.76098| = 0.15002.
-
-    A bound that holds in the store but not in the artifact people read is not
-    a bound anyone can verify, so both fields are now unrounded.
-    """
+    REPORT rather than on the posterior file."""
     import inspect
     from pipeline import update as up
 
@@ -925,19 +867,7 @@ def test_the_bounded_step_holds_in_the_REPORT_not_just_in_the_store(): # noqa: N
 
 
 def test_an_under_dispersed_group_is_exempt_from_the_clamp():
-    """The clamp must not make the steadiest cells claim variance they lack.
-
-    An r at the search ceiling has two entirely different causes. A THIN group
-    whose MLE wandered there wants clamping. A group that is genuinely steadier
-    than Poisson also lands there -- because no negative binomial can represent
-    it at all, Var = mu + mu^2/r being at least mu for every finite r -- and
-    clamping THAT one down inflates the variance the model claims for the cell
-    that has least. Everything reading `r` inherits it: the censored demand
-    expectation the DP maximises, the posterior likelihood, the exploration
-    cost of a tier.
-
-    Pearson dispersion tells the two apart, and this asserts it does.
-    """
+    """The clamp must not make the steadiest cells claim variance they lack."""
     from bootstrap.fit_dispersion import pearson_dispersion
 
     rng = np.random.default_rng(4)
@@ -963,14 +893,8 @@ def test_an_under_dispersed_group_is_exempt_from_the_clamp():
 
 
 def test_cogs_at_risk_counts_supply_not_opening_stock():
-    """A window that opens with 3 and takes 10 mid-flight has 13 units of cost
-    at risk. Counting 3 understates the exposure of every restocked episode in
-    every waterfall row -- and `tools.eda`'s clearance panel already used
-    supply for its own denominator, so the two disagreed by design.
-
-    Shrink is NOT subtracted: units that went missing were still paid for and
-    were still at risk, which is why `scrap` counts them.
-    """
+    """A window that opens with 3 and takes 10 mid-flight has 13 units of
+    cost at risk; counting 3 understates every restocked episode."""
     from bootstrap.prepare_data import cogs_at_risk
 
     # one episode: opens with 3, 10 arrive in hour 2, sells 9, loses 1
@@ -1021,18 +945,7 @@ def test_the_fixture_generator_covers_the_configured_splits():
 
 
 def test_a_prior_std_can_never_be_zero():
-    """A zero-width prior is not confidence, it is a frozen posterior.
-
-    Production surfaced it: BAKERY & PASTRY on 125,749 rows produced a
-    likelihood span of 9,402 log-likelihood units, which across a 159-point
-    grid is 59 nats per step -- every point but one at exp(-59), a delta
-    function, `std: 0.0`. `bounded_step` cannot move a prior of zero width, so
-    the posterior would have been frozen before the first outcome arrived.
-
-    Curvature measures SAMPLING precision. What is uncertain at that scale is
-    the MODEL -- confounded history, imperfect mu_ref, non-stationary demand --
-    and none of it is visible in the within-sample curve.
-    """
+    """A zero-width prior is not confidence, it is a frozen posterior."""
     import numpy as np
 
     from bootstrap import prior_density as pdn
@@ -1055,12 +968,7 @@ def test_a_likelihood_peaking_at_positive_elasticity_is_rejected():
     """`search_bounds` is a policy statement, not a belief about demand, so a
     peak outside it gets CLIPPED to the nearest bound and reported as measured.
     That is how a category whose likelihood prefers demand RISING with price
-    came back as a confident -0.05 with four decimals.
-
-    Not a rare pathology on this data: three of five fixture categories had
-    their unconstrained optimum above zero, because the legacy ramp puts deep
-    discounts on stock that is not selling.
-    """
+    came back as a confident -0.05 with four decimals."""
     import inspect
 
     from bootstrap import prior_density as pdn
@@ -1084,15 +992,7 @@ def test_the_hour_control_is_keyed_on_the_day_not_just_the_clock():
     """Design 5.6 says "same-hour CROSS-EPISODE", and a control pooled across
     dates is only an approximation to it: it removes the average evening lift
     and leaves a Tuesday storm or a rival's promotion in the residual, still
-    correlated with how far the legacy ramp has run.
-
-    `date_hour` compares the same clock hour of the SAME DAY across sku x fc,
-    which absorbs everything shared by that moment. On the fixture it cut the
-    all-hours sign failures from four categories to two, which is why it is
-    now the ONLY control -- `hour_of_day` was carried as an alternative long
-    enough to lose the comparison, and a losing branch left in the code is a
-    config key that can silently un-fix the confound.
-    """
+    correlated with how far the legacy ramp has run."""
     import inspect
 
     import numpy as np
@@ -1130,16 +1030,7 @@ def test_the_hour_control_is_keyed_on_the_day_not_just_the_clock():
 
 def test_dispersion_drift_separates_a_failed_fit_from_a_moved_parameter():
     """The measurement that says whether freezing r and rho is defensible --
-    and the trap it has to avoid.
-
-    Under-dispersed data (Pearson < 1) cannot be expressed by ANY negative
-    binomial, since Var = mu + mu^2/r >= mu. The MLE then runs to the search
-    ceiling, and a naive spread reads that pinned value as a huge drift. On
-    the fixture 14 of 17 weekly windows are like this, so the spread over all
-    windows is ~49 while the spread over the fittable ones is ~0.3. Reporting
-    the first would argue for re-fitting r weekly on the strength of failed
-    fits.
-    """
+    and the trap it has to avoid."""
     import json
     import os
 

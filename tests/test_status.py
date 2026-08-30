@@ -1,9 +1,4 @@
-"""Tests for pipeline.status.
-
-The whole point of a status view is that a green line means something. So the
-invariant worth testing hardest is the one that would quietly destroy that: a
-check that did not run must never render as a check that passed.
-"""
+"""Tests for pipeline.status."""
 import json
 
 import pytest

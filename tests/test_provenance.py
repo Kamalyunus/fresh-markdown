@@ -1,10 +1,4 @@
-"""Tests for common.provenance and bootstrap.seal.
-
-The failure this machinery exists to catch is a MIXED bundle: artifacts fitted
-against different models, sitting in one directory, describing worlds that no
-longer line up. Nothing errors when that happens, so every test here checks
-that the detector actually fires -- not merely that it returns a dict.
-"""
+"""Tests for common.provenance and bootstrap.seal."""
 import copy
 import json
 

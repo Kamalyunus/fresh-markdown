@@ -1,12 +1,4 @@
-"""The extract query is a contract with step 1.
-
-`bootstrap.prepare_data` renames source columns exactly once, at load. If the
-query stops emitting one of them -- a dropped alias, a renamed source column
--- nothing notices until `read_parquet(...).rename(...)` produces a frame with
-a missing column, minutes and one network round-trip into the run. These tests
-compare the query's own SELECT list against the two places that define the
-source schema, so the break shows up here instead.
-"""
+"""The extract query is a contract with step 1."""
 
 import re
 
@@ -50,25 +42,7 @@ def test_declared_columns_match_the_source_schema():
 
 
 def test_the_generator_emits_both_source_inventory_conventions():
-    """A fixture missing one of these does not FAIL. It passes, quietly.
-
-    Two conventions carry the whole of episode-level DQ, and each is read by
-    code that has no other trigger:
-
-      write-off sentinel   `ending == 0` while stock remained. The ONLY test
-                           for closure.
-      shrink               `0 < ending < starting - sold`. The reason scrap is
-                           leftover PLUS shrink rather than just leftover.
-
-    `data/flc_synth.parquet` was once generated before the write-off block
-    existed and carried ZERO sentinel rows. Nothing failed -- `classify_last`
-    had a fallback that read the absence as "every episode closed" -- so the
-    closure path went unexercised for months while the suite stayed green.
-    The fallback is gone, but the fixture could still drift the other way, and
-    shrink has no fallback at all to make its absence visible.
-
-    So the generator is asserted to produce both, on its own output, here.
-    """
+    """A fixture missing one of these does not FAIL. It passes, quietly."""
     import numpy as np
     from tools.make_dummy_flc import generate
 
@@ -94,19 +68,7 @@ def test_the_generator_emits_both_source_inventory_conventions():
 
 
 def test_the_negative_window_dirt_lands_on_WHOLE_windows(): # noqa: N802
-    """A negative counter is a property of a window, not of one row.
-
-    It used to be written onto random rows, and `assign_episode_ids`
-    differences the counter hour to hour -- so one bad value read as a window
-    BOUNDARY and shredded a clean window into fragments (3, 2, [-1], 0). The
-    fragments that did not carry the closing row came out `not_closed`, which
-    manufactured 62 of the fixture's 65 unclosed episodes and drove
-    `share_of_unclosed_explained_by_edge` to 0: the diagnostic meant to say
-    "the extract boundary explains these" was answering an injection artifact.
-
-    The real pattern is an episode ENTERING already negative and staying an
-    episode, so the counter must still decrement by exactly one per hour.
-    """
+    """A negative counter is a property of a window, not of one row."""
     import pandas as pd
     from tools.make_dummy_flc import generate
 

@@ -1,19 +1,4 @@
-"""The docs describe a filter chain. This checks it is THIS filter chain.
-
-Prose rots quietly. Over one long session the chain gained a stage, lost two,
-and reclassified four flags -- and `AGENTS.md` kept up while `design.md`
-was left describing `restocked` as a DP gate months after it stopped
-being one. Nobody reading it would have known.
-
-So the names are cross-checked against the code that defines them. This cannot
-verify that the PROSE is true -- only a human can -- but it can guarantee that
-every stage and every flag is at least MENTIONED wherever the chain is
-documented, and that nothing removed is still being described as live. Those
-are the two failures that actually happened.
-
-`tools.metrics_glossary` has its own cross-check for the report fields; this is
-the same idea for the population chain.
-"""
+"""The docs describe a filter chain. This checks it is THIS filter chain."""
 
 import pathlib
 

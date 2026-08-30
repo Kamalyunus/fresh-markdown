@@ -22,11 +22,9 @@ the owner reads the verdicts.
 ```bash
 pip install -r requirements.txt
 python3 -m bootstrap.download_flc --days 120          # -> data/flc_raw.parquet
-python3 -m bootstrap.run --input data/flc_raw.parquet   # chain + calibration loop
-                                                      # -> train -> calibrate
-                                                      # (always) -> prior ->
-                                                      # dispersion -> backtest
-                                                      # -> charts -> seal
+python3 -m bootstrap.run --input data/flc_raw.parquet
+# trains ONCE, iterates calibration -> prior -> dispersion to CONVERGED,
+# then backtest, thresholds, seal, status. Production settles in ~8-9 turns.
 ```
 
 Then, in order:
@@ -161,7 +159,7 @@ exactly once per day — a second run in the same day is a no-op, not a bug.
 | --- | --- |
 | stop condition fired (overspend >2×, mismatch, duplicates, missing stockout field) | exploration suspends for the cohort automatically; **exploitation pricing continues**. Investigate, don't restart blindly |
 | `assurance · reproduction` FAIL | something moved under the solver (config edit, artifact swap, deploy, library). Diff the bundle first: `artifact bundle` line, then `artifact mirrors` |
-| `artifact mirrors` FAIL | config paste and its source disagree (rho, forced hours, or the phase-0 A/B power SE). Read the **bundle** line before re-pasting — the stale side is not always config |
+| `artifact mirrors` FAIL | config paste and its source disagree (rho, forced hours). Read the **bundle** line before re-pasting — the stale side is not always config |
 | `report vintages` FAIL | backtest/shadow report was produced against a model no longer on disk — its gate rows grade a ghost. Re-run that report; do not launch on it |
 | `calibration_coverage` says `STALE FACTORS IN USE` | the weekly re-fit was missed: the schedule ran out and rows were priced on frozen factors. Re-run `--fit-calibration`, re-seal, re-run the report |
 | posterior std flat ≥ alert days | the loop is dead: no committed update. Check batch age, tau, volumes — in that order |
@@ -188,5 +186,4 @@ outcomes stay visible.
 | Guardrail breach response, A/B readout | informed | **A** (decision table in design §11.2) |
 | A/B duration & no-early-reads | enforce | **A** |
 
-Diagnostics (`tools/`, `docs/` pages beyond the two named above) are
-optional reading — useful, never required, never load-bearing in production.
+

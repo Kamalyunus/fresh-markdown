@@ -1,24 +1,5 @@
 """A mid-episode restock in PRODUCTION, which is a different path from the one
-`bootstrap.prepare_data` guards.
-
-Offline, a restocked episode is FLAGGED `restocked` and gates nothing. It used
-to be excluded from `dp_eligible` on the grounds that the DP rests on a single
-pool draining monotonically -- which confused the solve with the replay. The
-replay re-solves hourly against the stock on hand and applies the episode's
-own per-hour adjustment, so the DP learns of an arrival at the next hour,
-exactly as it does live. That rule is tested in
-`test_end_to_end.test_a_restock_is_detected_from_the_source_convention`
-and `test_populations`.
-
-Live, a restock simply happens, and dropping it is not an option. The claim
-this file exists to hold up is that production ABSORBS it -- the agent is a
-policy re-solved every hour rather than a plan, and the monitor never assumes a
-single pool -- so nothing quarantines and IL stays correct. That claim was made
-to a reviewer; it needs a test behind it rather than an argument.
-
-The second test pins the one place a restock genuinely degrades something, so
-that a future change to it is deliberate rather than accidental.
-"""
+`bootstrap.prepare_data` guards."""
 
 import numpy as np
 import pytest
@@ -77,19 +58,7 @@ def _outcome(i, sold, start, end):
 
 def test_a_restocked_episode_lands_and_its_il_is_right(cfg, tmp_path):
     """Three hours: 3 units, one sells, FIVE ARRIVE mid-episode, then the
-    window closes with four written off.
-
-    Inventory does not reconcile twice over -- once upward at the restock and
-    once downward at the close -- and both are legitimate, so both must be
-    named and both must land. IL is then checked against the arithmetic done
-    by hand, because "it produced a number" is not the same as "it produced
-    the right number":
-
-        discount given away  4 sold x (10000 - 7000) = 12,000
-        scrap                4 left x 4,000          = 16,000
-        IL                                             28,000
-        denominator          4 sold x 10,000         = 40,000
-    """
+    window closes with four written off."""
     store = EventStore(cfg, root=str(tmp_path / "events"))
     #        i, hours, q,  sold, start, end
     plan = [(0, 3, 3, 1, 3, 2),
@@ -114,22 +83,7 @@ def test_a_restocked_episode_lands_and_its_il_is_right(cfg, tmp_path):
 
 
 def test_a_shrink_hour_is_named_and_lands_rather_than_quarantining(cfg, tmp_path):
-    """Shrink is the THIRD legitimate break, and it used to be the odd one out.
-
-    `adjustment_reason` returned None for a partial shortfall on purpose, so
-    every shrink hour quarantined. That was the last place the live path
-    treated shrink as an anomaly while the offline chain treated it as an
-    ordinary event -- counted gross, booked into scrap, gating nothing.
-
-    The cost was not theoretical. A quarantined outcome never lands, so
-    `event_completeness` fell by the feed's whole shrink rate and the shadow
-    gate (`min_event_completeness`, 0.99) failed for a reason no integration
-    work could fix: it was measuring the source, not the integration. With
-    shrink at ~2.8% of decision hours the harness read 0.9718 and failed.
-
-    Quarantine is for what the system cannot interpret. A shrink is
-    interpreted -- so it is NAMED, and the units stay visible as scrap.
-    """
+    """Shrink is the THIRD legitimate break, and it used to be the odd one out."""
     store = EventStore(cfg, root=str(tmp_path / "events"))
     #        i, hours, q, sold, start, end
     plan = [(0, 3, 6, 1, 6, 5),     # ordinary: 6 - 1 = 5
@@ -151,17 +105,7 @@ def test_a_shrink_hour_is_named_and_lands_rather_than_quarantining(cfg, tmp_path
 
 
 def test_the_quarantine_count_is_a_property_of_the_run_not_the_file(cfg, tmp_path):
-    """`quarantined_event_count` was read off the whole quarantine FILE.
-
-    Ids are minted per run, so nothing dedups across runs and the file grows
-    every time. Shadow reported that cumulative figure as if it described the
-    run the gate was judging, so two runs over identical input disagreed --
-    26 and 19 -- and it looked like a parallelism defect. It was not: with a
-    clean store the serial and parallel harnesses agree exactly.
-
-    Hidden for as long as it was because the fixture had no shrink. Nothing
-    quarantined, and 0 does not accumulate.
-    """
+    """`quarantined_event_count` was read off the whole quarantine FILE."""
     root = str(tmp_path / "events")
     bad = {"outcome_id": "o1", "decision_id": "d1", "units_sold": -2,
            "starting_inventory": 5, "ending_inventory": 3,
@@ -180,22 +124,7 @@ def test_the_quarantine_count_is_a_property_of_the_run_not_the_file(cfg, tmp_pat
 
 
 def test_stock_arriving_mid_hour_is_an_exact_count_not_a_lower_bound(cfg):
-    """The degradation this file used to pin is now fixed, on purpose.
-
-    `grid_update` decided censoring with `units_sold >= starting_inventory`.
-    That is right for an ordinary stockout and wrong for an hour that sold
-    more than it opened with because stock arrived during it: nothing ran out,
-    demand was observed EXACTLY, and the likelihood was using "at least
-    starting_inventory" instead. The old version of this test asserted the two
-    treatments differed and said in as many words that whoever made the
-    over-sell an exact count would see it change and know it was deliberate.
-    This is that change.
-
-    Censoring now reads `starting == sold AND no restock`
-    (`common.episodes.censored_hours`), which is the source's own convention:
-    `ending_inventory` is the final count after any arrival, so an hour that
-    ends holding stock did not run out however much it sold.
-    """
+    """The degradation this file used to pin is now fixed, on purpose."""
     cell = {"mean": -1.0, "std": 0.6}
     dec = _decision(0, 1, 1)
     dec["applied_discount"] = 0.45          # away from the 0.30 reference, so

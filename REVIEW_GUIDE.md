@@ -1,10 +1,8 @@
 # Review guide — what to review, how deeply, and why
 
-The repo is ~17k lines including tests, tools and docs. The part that can
-touch a live price is ~1,800 lines. This guide scopes a code review to risk,
-so the whole exercise is about two sittings. Roughly a third of the core is
-comments — they are written for reviewers and operators; read them, they are
-the fastest path through.
+The part of the repo that can touch a live price is ~1,800 lines. This
+guide scopes a code review to risk, so the whole exercise is about two
+sittings.
 
 ## Tier 1 — review line by line (~1,100 lines; prices real money, hourly)
 
@@ -34,9 +32,9 @@ than its bounds?* `test_tau_calibration.py` and the exactly-once tests in
 
 ## Tier 3 — skim; the gates and suite carry it (~5,500 lines, offline)
 
-`bootstrap/` (data preparation, measurement, model/prior/dispersion fits)
-and `backtest/` run before launch, produce frozen artifacts, and sit behind
-two human gate readings plus a 300-test suite. A defect here cannot touch a
+`bootstrap/` (data preparation, model/prior/dispersion fits) and
+`backtest/` run before launch, produce frozen artifacts, and sit behind
+human gate readings plus the test suite. A defect here cannot touch a
 shelf without first passing a gate whose inputs a human reads. Skim for
 structure; audit only if a gate behaves surprisingly. The one file worth a
 real read is `bootstrap/prepare_data.py`'s waterfall — it defines the
@@ -49,15 +47,9 @@ inventory — it is the single source of closure/scrap/censoring truth.
 
 ## Out of review scope
 
-`tools/` (diagnostics, exports, doc builders), `docs/` pages, and the deck.
-Optional reading, never load-bearing in production. The test suite is the
+`tools/` (the fixture generator) and `docs/` pages. The test suite is the
 reviewers' asset, not their burden: every non-obvious rule named above has a
 test whose docstring states it in prose.
 
-## Suggested process
-
-Hand over as staged PRs so each is reviewable in one sitting and your
-tooling drives the record: **PR 1** Tier 1 + its tests (GTM-gating),
-**PR 2** Tier 2 + its tests (GTM-gating), **PR 3** bootstrap/backtest +
-RUNBOOK, **PR 4** tools/docs. CI runs `python3 -m pytest tests/` (~3 min)
-and `python3 -m pipeline.status` on deploy (exit code 1 on any FAIL).
+CI runs `python3 -m pytest tests/` (~3 min) and `python3 -m pipeline.status`
+on deploy (exit code 1 on any FAIL).

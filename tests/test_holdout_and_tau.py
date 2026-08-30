@@ -1,16 +1,4 @@
-"""The hold-out slice, the shared tau derivation, and the controller trace.
-
-Three properties, each of which was violated by the code these tests replace:
-
-  1. A date cut must take whole episodes. Row-level slicing kept the tail of
-     a cross-midnight window as its own episode -- no entry decision, wrong
-     opening inventory, a countdown starting mid-window.
-  2. tau must be solved on every decision hour. The replay collected spreads
-     at entry only, funding ~1 exploration per episode against a system that
-     explores every hour -- and its own bisection reported 1.00x regardless.
-  3. A single spend-over-budget multiple cannot say whether a pilot survives
-     its first day. The controller only ever sees yesterday.
-"""
+"""The hold-out slice, the shared tau derivation, and the controller trace."""
 
 import json
 import os
@@ -144,12 +132,7 @@ def test_empty_ledger_is_not_a_crash():
 
 
 def test_entry_only_collection_understates_the_funded_tau():
-    """The bug this class exists to prevent, reproduced.
-
-    Funding one decision per episode buys a much larger tau than funding
-    every hour of it, because the same daily budget is spread over ~8x fewer
-    decisions. Solve on entry only, measure on all hours: over budget.
-    """
+    """The bug this class exists to prevent, reproduced."""
     rng = np.random.default_rng(4)
     entry_only, all_hours = SpreadLedger(), SpreadLedger()
     for ep in range(300):
@@ -214,12 +197,7 @@ def test_shadow_budget_uses_the_production_budget_function():
 # --------------------------------------------- shadow defaults to holdout
 
 def test_shadow_runs_on_the_holdout_unless_told_otherwise():
-    """The default matters more than the flag.
-
-    Every frozen artifact is fit on data up to test_end, so a shadow run that
-    includes that data grades the pipeline on rows it already saw. Making the
-    hold-out opt-IN meant the honest run was the one someone had to remember.
-    """
+    """The default matters more than the flag."""
     import inspect
     from pipeline import shadow
 
@@ -254,13 +232,7 @@ def test_missing_holdout_config_is_an_error_not_a_silent_full_run():
 
 
 def test_the_trace_says_when_a_sample_is_too_thin_to_read_daily():
-    """Sampling degrades exactly one figure, and it has to name itself.
-
-    The gate reads rates; tau_recommended equates two quantities that both
-    scale with the sample, so the tau solving them is invariant. The
-    day-by-day trace is the exception -- it divides the sample across the
-    window's days, so the controller looks jumpier than it is.
-    """
+    """Sampling degrades exactly one figure, and it has to name itself."""
     import inspect
     from pipeline import shadow
     src = inspect.getsource(shadow._controller_trace)
@@ -291,12 +263,7 @@ def test_pre_launch_stops_at_the_gate_window():
 
 
 def test_the_backtest_cannot_reach_past_the_gate_window():
-    """Two paths reached the hold-out and neither announced itself.
-
-    `policy_replay` and `derive_tau_initial` ran on the whole frame, so
-    tau_initial -- a MEASURED launch value -- was being fitted on the window
-    reserved for grading it.
-    """
+    """Two paths reached the hold-out and neither announced itself."""
     import inspect
     from backtest import __main__ as bt
     from bootstrap import train_baseline
@@ -473,14 +440,7 @@ def test_holdout_is_disjoint_from_every_fitting_window():
 def test_the_budget_base_is_the_trailing_realised_il():
     """The IL base for a day's budget is the mean of REALISED daily IL over
     the trailing budget_il_window_days, ending YESTERDAY -- never the same
-    day's own IL.
-
-    Same-day IL is unobservable when the budget is needed (scrap lands only
-    at episode close), and it funds exploration hardest on exactly the days
-    already losing most, since IL is discount plus scrap. The trace and the
-    aggregate gate must grade against the budget production would actually
-    apply, or the stop condition tests a counterfactual.
-    """
+    day's own IL."""
     import inspect
 
     from pricing.explore import trailing_daily_il
@@ -544,17 +504,7 @@ def test_the_first_shadow_day_carries_the_pre_window_trailing_base():
 
 
 def test_the_pre_window_seed_is_scaled_to_the_sample():
-    """The seed and the spend must describe the SAME slice of the business.
-
-    The pre-window IL has to be measured on the full frame -- those episodes
-    are outside the window and are never sampled -- while the window's own IL
-    and the exploration spend it is graded against are measured on the sample.
-    Left unscaled the first `budget_il_window_days` of budget come in at
-    1/sample_fraction too large, and `spend_over_budget` reads near zero on
-    any sampled run: a 2.9% sample inflated the reported budget ~14x and
-    turned a ~0.7x into 0.05x. The bug is invisible at --max-episodes 0,
-    which is exactly why it needs a test.
-    """
+    """The seed and the spend must describe the SAME slice of the business."""
     import inspect
     from pipeline import shadow
 
@@ -599,14 +549,7 @@ def test_the_controller_holds_tau_on_a_zero_budget():
 
 def test_calibration_factors_never_see_their_own_week_or_later():
     """The whole point of the rolling schedule: week W's factors are fit on
-    the trailing window ENDING STRICTLY BEFORE W.
-
-    This is the same discipline as the point-in-time velocity features (design
-    12a) and it fails the same way -- silently, flattering every downstream
-    number, with no error anywhere. So it is asserted on the ARTIFACT rather
-    than trusted to the code that wrote it: for every fitted week, the window
-    the factors claim to come from must end before that week begins.
-    """
+    the trailing window ENDING STRICTLY BEFORE W."""
     import json
     import os
 
@@ -664,15 +607,7 @@ def test_both_harnesses_get_point_in_time_factors_without_their_own_code():
 
 
 def test_a_level_shift_does_not_leak_into_its_own_weeks_factor(tmp_path):
-    """The functional half of the point-in-time guarantee.
-
-    A schedule built by hand where demand jumps during the week of 07-13. The
-    factor APPLIED during that week must be the one fit BEFORE it -- if the
-    jump leaked into its own week's factor the model would appear to have
-    tracked a shift it could not have seen, and every backtest and shadow
-    figure downstream would be flattered by hindsight. The same failure mode
-    as the point-in-time velocity features (design 12a), and just as silent.
-    """
+    """The functional half of the point-in-time guarantee."""
     import json
 
     import pandas as pd
@@ -820,14 +755,7 @@ def test_the_calibration_gate_is_wired_into_the_apply_refusal():
 
 
 def test_a_partial_trailing_window_is_counted_not_passed_off_as_full():
-    """`trailing_weeks: 4` does not mean every week HAS four behind it.
-
-    Two places have less: the start of the extract, and the weeks just after
-    the exclusion window, where the gap leaves only post-gap history. Those
-    weeks still fit -- a large extract clears min_anchor on one week -- but a
-    factor fit on 1 of 4 intended weeks is noisier than its label claims, and
-    the second group sits mid-extract rather than harmlessly at the start.
-    """
+    """`trailing_weeks: 4` does not mean every week HAS four behind it."""
     import json
     import os
 
@@ -848,18 +776,7 @@ def test_a_partial_trailing_window_is_counted_not_passed_off_as_full():
 
 
 def test_the_gate_freezes_calibration_even_though_the_schedule_runs_past_it():
-    """Two questions, one artifact, and they must not be confused.
-
-    The schedule re-fits every week and runs through the whole extract,
-    because production re-fits weekly and a forward-time replay (shadow, the
-    DP walk) should see exactly that -- at week k only weeks < k were read, so
-    there is no look-ahead. But the LAUNCH GATE grades a frozen artifact, and
-    a factor re-fit inside the hold-out has read the rows it is graded on. So
-    fidelity calls `freeze_calibration_from(gate_start)` and prices the gate
-    window off the anchor, while `weekly_refit` reports the mechanism reading
-    beside it. Freezing the ARTIFACT instead would answer the gate correctly
-    and silently stop shadow mirroring production.
-    """
+    """Two questions, one artifact, and they must not be confused."""
     import json
     import os
 
@@ -989,16 +906,7 @@ def test_rho_is_fit_on_the_calib_window_not_the_full_frame():
 
 def test_shadow_refits_calibration_forward_only_and_reports_both_regimes():
     """Shadow must answer BOTH calibration questions, and the re-fit one must
-    not cheat.
-
-    The artifact's schedule is built over pre-launch data and stops at
-    test_end, so every hold-out row falls back to the anchor -- shadow alone
-    measures "launch and never re-calibrate". Production re-fits weekly, so
-    the report carries that reading too. It is fitted in SHADOW, not in the
-    artifact, so the pre-launch bundle stays clean of hold-out rows (rule 16),
-    and each week may read only weeks STRICTLY BEFORE it -- a forward replay
-    has no later data, and borrowing it would make the comparison meaningless.
-    """
+    not cheat."""
     import inspect
 
     from pipeline import shadow
@@ -1023,12 +931,7 @@ def test_shadow_refits_calibration_forward_only_and_reports_both_regimes():
 
 def test_convergence_carries_its_trajectory_and_the_worst_cell_s_evidence():
     """A single reading cannot tell a contracting loop from a stuck one, and
-    an unweighted max cannot tell an unsettled chain from one thin cell.
-
-    Production measures 8-9 turns from a bare chain with nothing wrong, after
-    this doc had claimed two was the limit -- the fixture (3-4, because it is
-    small) mistaken for a rule. The trajectory is what distinguishes them.
-    """
+    an unweighted max cannot tell an unsettled chain from one thin cell."""
     import copy
 
     import bootstrap.train_baseline as tb
@@ -1055,13 +958,7 @@ def test_the_loop_does_not_recompute_what_the_check_already_solved():
     """Turn k's --check-convergence solves the factors under exactly the prior
     and r that turn k+1's --fit-calibration would use. Discarding that solve
     doubled the calibration work in every turn, and the loop is the slowest
-    thing in the pipeline (production measured hours).
-
-    `--commit-convergence` keeps it, and bootstrap.run runs 3b on turn 1 only.
-    The DEFAULT must stay a dry run: outside the loop the artifact must not
-    move under a prior and dispersion fitted against the old one -- that
-    inconsistency is what the check exists to detect.
-    """
+    thing in the pipeline (production measured hours)."""
     import inspect
 
     import bootstrap.run as br
@@ -1085,18 +982,7 @@ def test_the_loop_does_not_recompute_what_the_check_already_solved():
 def test_the_loop_is_sized_for_production_not_for_the_fixture():
     """Both halves of "give up" were calibrated on the fixture, and both were
     wrong for the extract that matters (owner: production settles in 8-9
-    turns; the fixture takes 3-4 because it is small -- rule 19).
-
-      * `--max-turns` defaulted to 6. A production run would hit the cap
-        mid-contraction and exit non-zero having never settled.
-      * the stall test stopped on two consecutive non-improvements, which is
-        ordinary inside a nine-turn settle: a plateau at turn 3 killed runs
-        that were fine.
-
-    The cap is now a runaway guard, and the stall test needs THREE turns with
-    no new best -- loose enough to ride out a bounce, tight enough to refuse
-    to iterate on something that is not moving.
-    """
+    turns; the fixture takes 3-4 because it is small -- rule 19)."""
     import inspect
 
     import bootstrap.run as br

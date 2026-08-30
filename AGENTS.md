@@ -5,9 +5,7 @@ without looking anything up. The authoritative specification — including the
 rationale and the measured incident behind every rule below — is
 **`docs/design.md`** (§ numbers refer to it). Superseded approaches live in
 `docs/learnings.md`. When this guide and the design doc disagree, the design
-doc wins. Doc/chart tooling: `docs/maintaining_docs.md` — note it still
-documents the walkthrough builder and EDA pages that the metrics trim
-deleted; treat its `tools.walkthrough` / `tools.eda` sections as history.
+doc wins. Doc maintenance: `docs/maintaining_docs.md`.
 
 ## Non-negotiables
 
@@ -237,7 +235,7 @@ Every paste has one source and one checker:
 | monitoring, guardrails, stop conditions, A/B | §5.12, §11, §12 |
 | events, integration, quarantine | `docs/event_contract.html`; `events/store.py` |
 | provenance, seal, freshness | §5.14; rule 18 |
-| docs and charts | `docs/maintaining_docs.md` (partly stale — see header) |
+| docs | `docs/maintaining_docs.md` |
 | operator runbook, review tiers | `RUNBOOK.md`, `REVIEW_GUIDE.md` |
 | why is it not done the other way? | `docs/learnings.md` |
 

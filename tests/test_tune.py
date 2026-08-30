@@ -1,10 +1,4 @@
-"""Tests for pipeline.tune.
-
-The tuner exists to end a copy-paste loop between a human and two agents, so
-its failure mode is not a crash: it is confidently recommending a number read
-off a stale report, or silently writing a SET BY OWNER value. Both are tested
-here, because both are silent in production.
-"""
+"""Tests for pipeline.tune."""
 import json
 import os
 
@@ -297,14 +291,7 @@ def test_max_std_shrink_is_suggested_with_its_alternative_never_written(
 
 def test_apply_names_the_minimum_rerun_and_never_asks_for_a_retrain(
         cfg, tmp_path):
-    """The bug this prevents put an agent in a loop.
-
-    --apply used to print "RE-RUN THE BOOTSTRAP" after any paste. The agent
-    obeyed, run_bootstrap.sh RETRAINED THE BASELINE, every artifact moved, the
-    calibration <-> dispersion fixed point reset, and the convergence check it
-    was trying to close went red again -- on values that touch no artifact at
-    all. A retrain also breaks hard rule 1 outright.
-    """
+    """The bug this prevents put an agent in a loop."""
     reports = tmp_path / "r"
     reports.mkdir()
     _reports(reports)
