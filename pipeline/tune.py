@@ -43,6 +43,40 @@ from common.config import load_config
 PASTE, OWNER, INFO, BLOCK = "PASTE", "OWNER", "INFO", "BLOCK"
 OK, ACT = "OK", "ACT"
 
+# WHAT A PASTE ACTUALLY INVALIDATES. Getting this wrong sent an agent into a
+# loop: --apply said "re-run the bootstrap", the script RETRAINED THE BASELINE
+# (step 3), every artifact moved, the fixed point reset, and the convergence
+# check the agent was trying to close went red again -- on values that touch no
+# artifact at all. A retrain also breaks hard rule 1 outright.
+#
+#   "none"        read at runtime, or a mirror of a value the artifact already
+#                 holds. Nothing to re-fit; status re-reads config directly.
+#   "calibration" changes what --fit-calibration solves, so the loop turns:
+#                 3b -> 4 -> 5 -> 5b, then backtest and shadow to refresh the
+#                 reports. The BASELINE IS NOT RETRAINED.
+#   "retrain"     changes what the model is fitted on. Only data.split does
+#                 this, and it is SET BY OWNER, so --apply never writes one.
+RERUN = {
+    ("baseline_model", "calibration_fit_trailing_weeks"): "calibration",
+}
+
+RERUN_STEPS = {
+    "none": ("nothing to re-run: every value written is read at runtime or "
+             "mirrors an artifact that already holds it"),
+    "calibration": (
+        "the calibration loop turned -- run, WITHOUT retraining the baseline:\n"
+        "    python3 -m bootstrap.train_baseline --input data/prepared.parquet "
+        "--fit-calibration\n"
+        "    python3 -m bootstrap.estimate_prior  --input data/prepared.parquet\n"
+        "    python3 -m bootstrap.fit_dispersion  --input data/prepared.parquet\n"
+        "    python3 -m bootstrap.train_baseline --input data/prepared.parquet "
+        "--check-convergence      # repeat until CONVERGED\n"
+        "  then refresh the reports: backtest, derive_thresholds, seal, shadow"),
+    "retrain": ("the model's own training data changed -- a full "
+                "scripts/run_bootstrap.sh is required (hard rule 1: nothing "
+                "from before is comparable)"),
+}
+
 # config path -> the unique line anchor that carries its scalar. Targeted line
 # edits rather than a YAML round-trip: every value in config.yaml carries the
 # reasoning for it in a comment, and a round-trip would drop them all.
@@ -555,8 +589,14 @@ def apply(cfg, report, config_path="config.yaml", out_dir="artifacts"):
     })
     with open(log_path, "w") as f:
         json.dump(history, f, indent=2)
-    return {"backup": backup, "log": log_path,
-            "applied": applied, "failed": failed}
+    order = ["none", "calibration", "retrain"]
+    needed = max((RERUN.get(tuple(f_["key"].split(".")), "none")
+                  for f_ in applied), key=order.index, default="none")
+    history["runs"][-1]["rerun_required"] = needed
+    with open(log_path, "w") as f:
+        json.dump(history, f, indent=2)
+    return {"backup": backup, "log": log_path, "applied": applied,
+            "failed": failed, "rerun": needed}
 
 
 # --------------------------------------------------------------- rendering
@@ -609,8 +649,10 @@ def main():
         for f_ in res["failed"]:
             print(f"  SKIPPED   {f_['key']}: {f_['error']}")
         if res["applied"]:
-            print("\nRE-RUN THE BOOTSTRAP: a changed increment or rail changes "
-                  "what the next run measures (AGENTS pipeline order).")
+            # the MINIMUM sufficient re-run, computed from what was written.
+            # Saying "re-run the bootstrap" for a runtime-only paste retrains
+            # the baseline, resets the fixed point and breaks hard rule 1.
+            print(f"\n{RERUN_STEPS[res['rerun']]}")
     return 0
 
 

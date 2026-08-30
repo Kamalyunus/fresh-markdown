@@ -1831,6 +1831,21 @@ every other finding and `--apply` refuses outright, because tuning against a
 report that graded a different model is worse than not tuning at all
 (hard rule 1).
 
+**`--apply` names the MINIMUM sufficient re-run, and that is load-bearing.**
+It first printed "re-run the bootstrap" after any paste; an agent obeyed,
+`run_bootstrap.sh` retrained the baseline, every artifact moved, the
+calibration↔dispersion fixed point reset, and the convergence check it was
+trying to close went red again — on values that touch no artifact at all. A
+retrain also breaks hard rule 1 outright. Each config key now carries what a
+paste to it actually invalidates: **none** for anything read at runtime or
+mirroring an artifact that already holds the value (the increment, τ, the
+rails, the stop thresholds, `rho`), **calibration** for
+`calibration_fit_trailing_weeks`, which changes what `--fit-calibration`
+solves and so turns the loop (3b → 4 → 5 → 5b, then the reports) *without
+retraining the baseline*, and **retrain** only for `data.split` — which is
+SET BY OWNER, so `--apply` never writes one. The required class is printed
+and recorded in the decision log as `rerun_required`.
+
 `--apply` copies the config to `artifacts/config_backup_<stamp>.yaml` and
 appends to `artifacts/config_decisions.json`: what was written, the report
 field it came from, and every owner decision still outstanding. That file is

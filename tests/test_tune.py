@@ -295,3 +295,53 @@ def test_max_std_shrink_is_suggested_with_its_alternative_never_written(
     assert abs(f["recommended"] - 0.0701) < 1e-3
     assert "SAFETY POSTURE" in f["evidence"] and "0.485" in f["evidence"]
     assert f["key"] not in {x["key"] for x in rep["to_paste"]}
+
+
+def test_apply_names_the_minimum_rerun_and_never_asks_for_a_retrain(
+        cfg, tmp_path):
+    """The bug this prevents put an agent in a loop.
+
+    --apply used to print "RE-RUN THE BOOTSTRAP" after any paste. The agent
+    obeyed, run_bootstrap.sh RETRAINED THE BASELINE, every artifact moved, the
+    calibration <-> dispersion fixed point reset, and the convergence check it
+    was trying to close went red again -- on values that touch no artifact at
+    all. A retrain also breaks hard rule 1 outright.
+    """
+    reports = tmp_path / "r"
+    reports.mkdir()
+    _reports(reports)
+    c = _cfg_with(cfg, tmp_path)
+    work = tmp_path / "config.yaml"
+    work.write_text(open(os.path.join(ROOT, "config.yaml")).read())
+
+    rep = tune.collect(c, str(reports))
+    res = tune.apply(c, rep, str(work), out_dir=str(tmp_path / "out"))
+
+    # runtime-only values require nothing; the message must not send anyone
+    # back to the bootstrap
+    assert res["rerun"] in ("none", "calibration")
+    # only the "retrain" class may send anyone to the full script, and only
+    # data.split reaches it -- which is SET BY OWNER, so --apply never writes
+    # one. The calibration text mentions retraining solely to forbid it.
+    assert "run_bootstrap" not in tune.RERUN_STEPS[res["rerun"]]
+    assert res["rerun"] != "retrain"
+
+    # the fit window is the ONE paste that turns the loop -- and even it does
+    # not retrain the baseline
+    assert tune.RERUN[("baseline_model", "calibration_fit_trailing_weeks")] \
+        == "calibration"
+    steps = tune.RERUN_STEPS["calibration"]
+    assert "--fit-calibration" in steps and "--check-convergence" in steps
+    assert "WITHOUT retraining" in steps
+
+    # nothing that only production reads may claim to need a re-fit
+    for key in (("learning", "information_increment"),
+                ("learning", "max_mean_step"),
+                ("exploration", "tau_initial"),
+                ("dispersion", "rho"),
+                ("monitoring", "stop_conditions", "scrap_deterioration_pct")):
+        assert tune.RERUN.get(key, "none") == "none", key
+
+    # and the decision log records which re-run the run required
+    log = json.load(open(res["log"]))["runs"][-1]
+    assert log["rerun_required"] == res["rerun"]

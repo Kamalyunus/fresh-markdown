@@ -186,13 +186,20 @@ loop, `calib >= 2W`, no graded window across the exclusion gap. A BLOCK
 suppresses everything else and `--apply` refuses, because tuning against a
 report that graded a different model is worse than not tuning (rule 1).
 
+**Do what `--apply` prints, and nothing more.** It computes the MINIMUM
+sufficient re-run from what it wrote. Most pastes need **nothing** — they are
+read at runtime or mirror an artifact that already holds the value. Only
+`calibration_fit_trailing_weeks` turns the loop (3b → 4 → 5 → 5b, then the
+reports), and **that does not retrain the baseline**. A full
+`run_bootstrap.sh` retrains, which resets the fixed point and breaks rule 1 —
+never reach for it because a config value moved.
+
 `--apply` copies `config.yaml` to `artifacts/config_backup_<stamp>.yaml` and
 appends to `artifacts/config_decisions.json`: what was written, the report
 field it came from, and every owner decision still outstanding. That file is
 the record of WHY the config is what it is — read it before changing a value
-by hand. **Iterate until `tune` reports no PASTE and no BLOCK**; a changed
-increment or rail changes what the next run measures, so one pass is rarely
-enough. Full rationale for each rule: §5.14, §6, §9.2.
+by hand. **Iterate until `tune` reports no PASTE and no BLOCK** — following the
+re-run each `--apply` names, not a blanket bootstrap. Full rationale for each rule: §5.14, §6, §9.2.
 
 Daily production loop (Lane C — full operator guidance in `RUNBOOK.md`):
 

@@ -76,8 +76,11 @@ Bootstrap complete. Next:
   2. Let the reports decide the config, and record why:
        python3 -m pipeline.tune            # what to change, on what evidence
        python3 -m pipeline.tune --apply    # pastes the MEASURED values
-     Then re-run this script: a changed increment or rail changes what the
-     next run measures. Iterate until `tune` reports no PASTE and no BLOCK.
+     Then do EXACTLY what --apply prints -- it names the minimum re-run for
+     what it wrote, which is usually NOTHING. Do not re-run this script for a
+     config paste: it retrains the baseline, resets the convergence fixed
+     point and breaks hard rule 1. Iterate until tune reports no PASTE and
+     no BLOCK.
   3. Review artifacts/prior.json -- the prior-acceptance gate is BLOCKING and
      HUMAN; a pooled or uniform prior is a designed outcome.
   4. python3 -m pipeline.status -- every check green is the entry condition
