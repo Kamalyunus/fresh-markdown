@@ -64,16 +64,13 @@ RERUN_STEPS = {
     "none": ("nothing to re-run: every value written is read at runtime or "
              "mirrors an artifact that already holds it"),
     "calibration": (
-        "the calibration loop turned -- run, WITHOUT retraining the baseline:\n"
-        "    python3 -m bootstrap.train_baseline --input data/prepared.parquet "
-        "--fit-calibration\n"
-        "    python3 -m bootstrap.estimate_prior  --input data/prepared.parquet\n"
-        "    python3 -m bootstrap.fit_dispersion  --input data/prepared.parquet\n"
-        "    python3 -m bootstrap.train_baseline --input data/prepared.parquet "
-        "--check-convergence      # repeat until CONVERGED\n"
-        "  then refresh the reports: backtest, derive_thresholds, seal, shadow"),
+        "the calibration loop turned -- settle it WITHOUT retraining:\n"
+        "    python3 -m bootstrap.run --check-only\n"
+        "  (iterates 3b -> 4 -> 5 -> 5b to CONVERGED and refreshes the "
+        "reports), then re-run pipeline.shadow"),
     "retrain": ("the model's own training data changed -- a full "
-                "scripts/run_bootstrap.sh is required (hard rule 1: nothing "
+                "full `python3 -m bootstrap.run --input <raw>` is required "
+                "(hard rule 1: nothing "
                 "from before is comparable)"),
 }
 

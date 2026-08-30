@@ -33,11 +33,12 @@ def _episodes_per_week(d, cfg):
     return {str(k): round(float(v), 1) for k, v in per.items()}
 
 
-def estimate_prior(d, cfg, seed=0):
+def estimate_prior(d, cfg, seed=0, fast=False):
     """The prior as a density per category, with its own evidence attached."""
     pc = cfg["posterior"]["prior"]
     model = BaselineModel(cfg)
-    grid, per_category, densities, pooled = prior_density.estimate(d, cfg, model)
+    grid, per_category, densities, pooled = prior_density.estimate(
+        d, cfg, model, fast=fast)
 
     comparison = prior_density.holdout_comparison(
         d, cfg, model, grid, {"profile_density": densities})
@@ -120,6 +121,9 @@ def _print(prior):
                 "one. `peak` above is where the likelihood really wanted to "
                 "sit before search_bounds clipped it.")
     rc = (prior.get("pooled") or {}).get("design_comparison") or {}
+    if isinstance(rc, str):                # skipped under --fast
+        print(f"\n  design: {rc}")
+        rc = {}
     if rc:
         print(f"\n  design (in use: {rc.get('in_use')}) -- fewer wrong-signed "
               f"first, then span:")
@@ -157,11 +161,17 @@ def main():
     ap.add_argument("--input", required=True)
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--fast", action="store_true",
+                    help="skip the diagnostics that cannot move the "
+                         "calibration<->dispersion fixed point (~70% of the "
+                         "cost). For LOOP TURNS only -- the final run must be "
+                         "full, since init_posterior reads the std this "
+                         "widens.")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     d = pd.read_parquet(args.input)
-    prior = estimate_prior(d, cfg, seed=args.seed)
+    prior = estimate_prior(d, cfg, seed=args.seed, fast=args.fast)
 
     stamp(prior, cfg, BaselineModel(cfg).version, "bootstrap.estimate_prior")
     path = cfg["posterior"]["prior"]["path"]

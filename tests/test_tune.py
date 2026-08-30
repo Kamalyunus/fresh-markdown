@@ -331,7 +331,8 @@ def test_apply_names_the_minimum_rerun_and_never_asks_for_a_retrain(
     assert tune.RERUN[("baseline_model", "calibration_fit_trailing_weeks")] \
         == "calibration"
     steps = tune.RERUN_STEPS["calibration"]
-    assert "--fit-calibration" in steps and "--check-convergence" in steps
+    assert "bootstrap.run --check-only" in steps, \
+        "the loop is driven by the module, not hand-iterated"
     assert "WITHOUT retraining" in steps
 
     # nothing that only production reads may claim to need a re-fit

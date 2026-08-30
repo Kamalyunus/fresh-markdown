@@ -564,7 +564,7 @@ def fit_level_calibration(d, cfg):
     return factors
 
 
-def check_calibration_convergence(d, cfg):
+def check_calibration_convergence(d, cfg, commit=False):
     """Has the calibration <-> dispersion fixed point settled?
 
     The chain is circular across runs: the factor solve consumes `r` (the
@@ -594,8 +594,9 @@ def check_calibration_convergence(d, cfg):
         with open(path) as f:
             new = json.load(f)
     finally:
-        with open(path, "w") as f:             # dry run: restore iteration k
-            json.dump(old, f, indent=2)
+        if not commit:
+            with open(path, "w") as f:         # dry run: restore iteration k
+                json.dump(old, f, indent=2)
 
     def compare(a, b, scope):
         worst, missing = (0.0, None), []
@@ -681,9 +682,17 @@ def check_calibration_convergence(d, cfg):
                 if len(history) > 1 else
                 " Several turns from a bare chain is normal.")),
     }
-    old["convergence"] = block
+    # THE RE-SOLVE IS THE NEXT TURN'S CALIBRATION. `--commit` keeps it instead
+    # of throwing it away: the check already solved the factors under the
+    # prior and r now on disk, which is bit-for-bit what the next turn's
+    # --fit-calibration would compute. Discarding it doubled the cost of every
+    # loop turn. Default stays a DRY RUN -- outside the loop the artifact must
+    # not move under a prior and dispersion that were fitted against the old
+    # one (that inconsistency is the thing the check exists to detect).
+    keep = new if commit else old
+    keep["convergence"] = block
     with open(path, "w") as f:
-        json.dump(old, f, indent=2)
+        json.dump(keep, f, indent=2)
     return block
 
 
@@ -695,6 +704,11 @@ def main():
                     help="fit the section 9.3 per-category level-calibration "
                          "factors from the already-trained baseline and the "
                          "section 9.5 prior, instead of training")
+    ap.add_argument("--commit-convergence", action="store_true",
+                    help="with --check-convergence, KEEP the re-solved "
+                         "factors instead of restoring. Only inside the loop, "
+                         "where prior and dispersion are re-fitted straight "
+                         "after: it saves a full re-solve per turn.")
     ap.add_argument("--check-convergence", action="store_true",
                     help="dry-run re-solve of the calibration factors with "
                          "the prior/r now on disk; verifies the calibration "
@@ -705,7 +719,8 @@ def main():
     d = pd.read_parquet(args.input)
 
     if args.check_convergence:
-        block = check_calibration_convergence(d, cfg)
+        block = check_calibration_convergence(
+            d, cfg, commit=args.commit_convergence)
         print(f"max |dlog f| = {block['max_abs_dlog']:.4f} "
               f"(tol {block['tol_log']}) at {block['worst_cell']}"
               + (f" ({block['worst_cell_anchor_rows']:,} anchor rows)"

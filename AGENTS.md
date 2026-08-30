@@ -15,7 +15,7 @@ statement and the incident that created the rule.
 1. **Never retrain the baseline between two runs you intend to compare** —
    a comparison is valid only when `artifact_versions.baseline_model_version`
    matches in both reports. `--fit-calibration` does NOT retrain; plain
-   `train_baseline` and `run_bootstrap.sh` DO. (§5.4)
+   `train_baseline` and `bootstrap.run` DO. (§5.4)
 1a. **Changing the elasticity prior invalidates `rho`, `deff` and the level
    factor** — re-run `fit_dispersion` onward and re-paste the mirrors. (§5.6)
 2. **`posterior.epsilon_max` (−0.05) is a sign constraint, never a bound to
@@ -131,75 +131,31 @@ step                                          writes
 
 **The order above is a LOOP, not a line, and 3b is where it turns.** The
 factor solve consumes `r`, while `r`, `rho` and the prior are all fitted
-against *calibrated* `mu_ref` — so calibration comes **before** prior and
-dispersion, and they are re-fitted against it. On a first run there is no
-`r_lookup` yet and 3b silently uses the raw-mu basis; the second pass gets
-the censored one. Step 5b asserts the fixed point settled: **NOT CONVERGED
-means run 3b → 4 → 5 → 5b again** — normal after a retrain or a split change,
-and a bare chain often needs **3–4 turns**. Judge it by the block's
-`history`: a contracting series just needs another turn; one that stalls or
-oscillates does not. Check `worst_cell_anchor_rows` before concluding the
-chain is broken — the max is unweighted, so a thin cell can set it. (§9.2)
-
-`scripts/run_bootstrap.sh <raw>` runs 1–6b and 11 and prints `status`, in
-exactly this order — it is the executable copy of the table above; if the two
-disagree, the script is right. **It retrains the baseline every time**
-(rule 1) — iterate on single modules, not the script. After a later
-standalone `--fit-calibration`, **re-run `bootstrap.seal`**.
-
-## Tuning loop — before production
-
-`python3 -m pipeline.tune` reads the four reports and says what config should
-be, with the report field behind every recommendation. Run it after any
-bootstrap; it changes nothing without `--apply`.
+against *calibrated* `mu_ref` — so 3b–5 is one TURN of a fixed-point
+iteration, and a bare chain typically needs three or four. `bootstrap.run`
+drives that loop itself:
 
 ```bash
-scripts/run_bootstrap.sh <raw>          # 1–6, charts, seal, status
-python3 -m pipeline.shadow --input data/prepared.parquet   # writes shadow.json
-python3 -m pipeline.tune                # what to change, and on what evidence
-python3 -m pipeline.tune --apply        # pastes MEASURED values only
-scripts/run_bootstrap.sh <raw>          # re-measure under the new config
+python3 -m bootstrap.run --input <raw>     # 1, 3, then 3b–5b until CONVERGED,
+                                           # then 6, 6b, 11, status
+python3 -m bootstrap.run --check-only      # settle the loop against the
+                                           # artifacts on disk, NO retrain
 ```
 
-Four classes, and the class decides who may act. **PASTE** — the pipeline
-measured it, so it does not wait on a human; `--apply` writes it. That
-includes values that used to be SET BY OWNER but are decided by data: the
-guardrail stop thresholds (3σ of the control arm's own noise), the fit window
-W (the rolling-origin sweep, when `calib >= 2W` allows it), and
-`max_mean_step` — the last **gated**, pasted only when `step_sensitivity`
-says the re-price is small (`tuning.*_for_auto_rail`), and returned to the
-owner when it is not. **OWNER** — what data cannot decide: a preference, not
-a fact. Four qualify, and they are the whole list: `budget_share_of_il` (how
-much margin learning is worth), `min_detectable_effect_pct` (what effect size
-is worth detecting — the reports say what is DETECTABLE, and pasting that
-would make the power check pass by construction), `max_std_shrink` (how fast
-the system may become confident — `tune` supplies both ways to settle the
-rail mismatch and takes neither), and `data.split` (how much history still
-represents the business). Reported with the evidence, never auto-applied
-(see the prohibitions). The test: **SET BY OWNER is for a number that encodes
-what you are willing to lose, wait for, or risk — everything else is
-measurable.** **READ** — a finding with no config key (which
-constraint binds learning; whether the weekly calibration cron is worth
-running). **BLOCK** —
-an invariant that must hold first: reports from one model, a settled `f<->r`
-loop, `calib >= 2W`, no graded window across the exclusion gap. A BLOCK
-suppresses everything else and `--apply` refuses, because tuning against a
-report that graded a different model is worse than not tuning (rule 1).
+The loop is tuned for the thing that dominates it: `estimate_prior --fast`
+drops the two diagnostic blocks that cannot move the fixed point (~70% of its
+cost — `design_comparison` feeds nothing, `fold_spread` only widens the std
+FLOOR, and factors follow the prior MEAN), and `--commit-convergence` keeps
+the check's re-solve instead of recomputing it as the next turn's 3b. The
+artifact still gets a FULL prior once the loop settles.
 
-**Do what `--apply` prints, and nothing more.** It computes the MINIMUM
-sufficient re-run from what it wrote. Most pastes need **nothing** — they are
-read at runtime or mirror an artifact that already holds the value. Only
-`calibration_fit_trailing_weeks` turns the loop (3b → 4 → 5 → 5b, then the
-reports), and **that does not retrain the baseline**. A full
-`run_bootstrap.sh` retrains, which resets the fixed point and breaks rule 1 —
-never reach for it because a config value moved.
-
-`--apply` copies `config.yaml` to `artifacts/config_backup_<stamp>.yaml` and
-appends to `artifacts/config_decisions.json`: what was written, the report
-field it came from, and every owner decision still outstanding. That file is
-the record of WHY the config is what it is — read it before changing a value
-by hand. **Iterate until `tune` reports no PASTE and no BLOCK** — following the
-re-run each `--apply` names, not a blanket bootstrap. Full rationale for each rule: §5.14, §6, §9.2.
+It trains the baseline **once, outside the loop**. Retraining to settle
+calibration moves every artifact, resets the fixed point and breaks rule 1 —
+which is exactly what a linear script invited. On a first turn there is no
+`r_lookup` yet and 3b silently uses the raw-mu basis; the second turn gets
+the censored one. The module stops early if the trajectory is not
+contracting, and exits non-zero if the loop never settles — the reports it
+still writes are not decision-grade. (§9.2)
 
 Daily production loop (Lane C — full operator guidance in `RUNBOOK.md`):
 

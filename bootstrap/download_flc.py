@@ -167,7 +167,7 @@ def main():
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     df.to_parquet(args.out, index=False)
-    print(f"\nwrote {args.out}\nnext: scripts/run_bootstrap.sh {args.out}")
+    print(f"\nwrote {args.out}\nnext: python3 -m bootstrap.run --input {args.out}")
 
 
 if __name__ == "__main__":

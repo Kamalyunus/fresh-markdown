@@ -1007,7 +1007,7 @@ def test_cogs_at_risk_counts_supply_not_opening_stock():
 
 
 def test_the_fixture_generator_covers_the_configured_splits():
-    """`scripts/run_bootstrap.sh <fixture>` must run end to end from a clean
+    """`bootstrap.run --input <fixture>` must run end to end from a clean
     checkout. It could not: the generator started at a hardcoded date for 90
     days, the exclusion window removed the tail, and the data ended in April
     while config's calib window began in July -- so `fit_dispersion` died with

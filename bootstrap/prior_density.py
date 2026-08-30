@@ -276,8 +276,17 @@ def design_comparison(d, cfg, model, lo, hi, n):
     return out
 
 
-def estimate(d, cfg, model):
-    """The prior, as a density per category. No constant anywhere in it."""
+def estimate(d, cfg, model, fast=False):
+    """The prior, as a density per category. No constant anywhere in it.
+
+    `fast` skips the two blocks that cost most and feed NOTHING the
+    calibration<->dispersion loop reads: `design_comparison` is evidence for
+    the identification choice, and `fold_spread` only widens the std FLOOR.
+    The loop compares FACTORS, which depend on `r`, which is fitted at the
+    prior MEAN -- so neither can move the fixed point, and re-computing them
+    on every turn was ~70% of the prior's cost. The final turn must run FULL:
+    the artifact's std is what `init_posterior` reads.
+    """
     pc = cfg["posterior"]["prior"]
     lo, hi = pc["search_bounds"]
     grid = np.linspace(lo, hi, pc["search_grid_size"])
@@ -287,10 +296,13 @@ def estimate(d, cfg, model):
     fit = build_curves(d, cfg, model, grid, "train")
     unconstrained = unconstrained_argmax(d, cfg, model, lo, hi,
                                          pc["search_grid_size"])
-    design_cmp = design_comparison(d, cfg, model, lo, hi,
-                                   pc["search_grid_size"])
-    folds = fold_spread(d, cfg, model, grid,
-                        int(pc.get("stability_folds", 3)))
+    design_cmp = ("SKIPPED (--fast): identification evidence, not a loop input"
+                  if fast else
+                  design_comparison(d, cfg, model, lo, hi,
+                                    pc["search_grid_size"]))
+    folds = ({} if fast else
+             fold_spread(d, cfg, model, grid,
+                         int(pc.get("stability_folds", 3))))
     if not fit:
         raise SystemExit("no rows to profile epsilon on in the train window")
 

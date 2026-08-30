@@ -123,7 +123,7 @@ EXCLUSION_END = dt.date(2026, 6, 3)
 # from a clean checkout. Both were silent about the cause.
 #
 # `--start` now defaults to whatever reaches split.train_start, and `--days` to
-# whatever reaches split.test_end, so `scripts/run_bootstrap.sh <fixture>` runs
+# whatever reaches split.test_end, so `bootstrap.run --input <fixture>` runs
 # end to end. Pass either explicitly to override.
 DEFAULT_START = dt.date(2026, 3, 1)
 

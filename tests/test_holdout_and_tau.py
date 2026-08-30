@@ -1058,3 +1058,56 @@ def test_convergence_carries_its_trajectory_and_the_worst_cell_s_evidence():
     # the worst cell's evidence is reported, so a shrinkage-dominated cell is
     # distinguishable from a genuinely unsettled loop
     assert "worst_cell_anchor_rows" in block
+
+
+def test_the_loop_does_not_recompute_what_the_check_already_solved():
+    """Turn k's --check-convergence solves the factors under exactly the prior
+    and r that turn k+1's --fit-calibration would use. Discarding that solve
+    doubled the calibration work in every turn, and the loop is the slowest
+    thing in the pipeline (production measured hours).
+
+    `--commit-convergence` keeps it, and bootstrap.run runs 3b on turn 1 only.
+    The DEFAULT must stay a dry run: outside the loop the artifact must not
+    move under a prior and dispersion fitted against the old one -- that
+    inconsistency is what the check exists to detect.
+    """
+    import inspect
+
+    import bootstrap.run as br
+    from bootstrap import train_baseline as tb
+
+    src = inspect.getsource(tb.check_calibration_convergence)
+    assert "if not commit:" in src, "the dry run must be conditional"
+    assert "keep = new if commit else old" in src
+
+    loop = inspect.getsource(br.settle)
+    assert "if turn == 1:" in loop, "3b belongs to the first turn only"
+    assert "--commit-convergence" in loop
+    # the prior's diagnostics cannot move the fixed point, so the loop skips
+    # them -- but the ARTIFACT must carry the full one
+    assert "--fast" in loop
+    assert "full re-run for the artifact" in loop
+    # and re-stamp, because that full re-run moves prior.json after the check
+    assert "re-check against the full prior" in loop
+
+
+def test_the_prior_fast_path_drops_only_what_cannot_move_the_fixed_point():
+    """`design_comparison` feeds nothing, and `fold_spread` only widens the
+    std FLOOR -- while the loop compares FACTORS, which follow `r`, which is
+    fitted at the prior MEAN. Skipping them is ~70% of the prior's cost."""
+    import inspect
+
+    from bootstrap import prior_density
+
+    src = inspect.getsource(prior_density.estimate)
+    assert "fast=False" in inspect.signature(prior_density.estimate).__str__() \
+        or "fast" in inspect.signature(prior_density.estimate).parameters
+    # both diagnostics are behind the flag
+    assert "if fast else" in src
+    for skipped in ("design_comparison", "fold_spread"):
+        i = src.index(skipped)
+        assert "fast" in src[max(0, i - 260):i + 60], \
+            f"{skipped} must be behind the fast flag"
+    # the wrong-sign search is NOT skipped: it decides which categories pool,
+    # which moves the mean, which moves r
+    assert "unconstrained_argmax(d, cfg, model" in src

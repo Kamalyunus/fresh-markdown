@@ -22,7 +22,7 @@ the owner reads the verdicts.
 ```bash
 pip install -r requirements.txt
 python3 -m bootstrap.download_flc --days 120          # -> data/flc_raw.parquet
-scripts/run_bootstrap.sh data/flc_raw.parquet         # prepare -> eda -> measure
+python3 -m bootstrap.run --input data/flc_raw.parquet   # chain + calibration loop
                                                       # -> train -> calibrate
                                                       # (always) -> prior ->
                                                       # dispersion -> backtest

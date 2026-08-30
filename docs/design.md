@@ -2014,6 +2014,19 @@ digests of the artifacts it was checked against so `pipeline.status` reports
 the verdict as STALE rather than green once any of them moves — the same
 discipline `report vintages` applies to reports.
 
+**The loop is the slowest thing in the pipeline** (production measured
+hours), so `bootstrap.run` cuts the two costs that buy nothing.
+`estimate_prior --fast` skips `design_comparison` and `fold_spread` on loop
+turns: the first feeds nothing and the second only widens the std FLOOR,
+while the loop compares FACTORS, which follow `r`, which is fitted at the
+prior MEAN — measured at 43.7s → 14.8s on the fixture. And
+`--commit-convergence` keeps the check's re-solve rather than discarding it,
+because turn *k*'s check computes bit-for-bit what turn *k+1*'s
+`--fit-calibration` would; 3b therefore runs on turn 1 only. Both are
+loop-only: the artifact gets a full prior once settled, and the default
+`--check-convergence` stays a dry run, where not moving the artifact is the
+safety property.
+
 `train_baseline --check-convergence` (pipeline step 5b) is that check — a
 **dry run** that re-solves the factors with the prior and `r` now on disk,
 compares per cell and per schedule week in log space against
@@ -2066,7 +2079,7 @@ over-predicts at the anchor — investigate before applying, never apply
 blindly. A comparison across two backtests is valid only when
 `artifact_versions.baseline_model_version` matches in **both** reports;
 `--fit-calibration` does not retrain, while plain `train_baseline` and
-`run_bootstrap.sh` do.
+`bootstrap.run` do.
 
 **The triage order when the level diagnostic is out of band** (this is a
 drift/staleness reading, never a launch blocker):
@@ -2733,7 +2746,7 @@ The pipeline, step by step — what each module writes and reads:
 step                                          writes                                  reads
 0. bootstrap.download_flc                     data/flc_raw.parquet                    sb_scm.fresh_flc_detail
    (Redshift extract; REDSHIFT_* from ~/.env, never config.yaml. Outside
-   run_bootstrap.sh on purpose — the script takes the parquet as its argument)
+   bootstrap.run on purpose — it takes the parquet as --input)
 1. bootstrap.prepare_data --input <raw>       data/prepared.parquet,                  raw FLC parquet
                                               artifacts/split_manifest.json
 1b. tools.eda --input prepared                reports/eda.json, docs/eda.html         prepared + config
@@ -2758,7 +2771,7 @@ step                                          writes                            
 # run ends with where it stands. RETRAINS THE MODEL EVERY TIME (§9.2's
 # comparison rule) — iterate on single modules, never the script. It stops
 # at the calibration and prior gates' evidence: those are human reviews.
-scripts/run_bootstrap.sh data/flc_filtered.parquet
+python3 -m bootstrap.run --input data/flc_filtered.parquet
 #   after --fit-calibration (step 7), re-run bootstrap.seal (§5.14a)
 
 # evidence for the three owner thresholds
