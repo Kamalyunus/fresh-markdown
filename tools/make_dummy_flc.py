@@ -328,7 +328,12 @@ def main():
     try:
         from common.config import load_config
         cfg = load_config(args.config)
-    except Exception:                                   # noqa: BLE001
+    except Exception as exc:                            # noqa: BLE001
+        # loud: the 90-day fallback does NOT cover data.split, and the
+        # failure then surfaces deep in the pipeline as an empty calib window
+        print(f"WARNING: config unreadable ({exc}); generating the 90-day "
+              "fallback span, which does not cover data.split. Run as "
+              "`python3 -m tools.make_dummy_flc` from the repo root.")
         cfg = {}
     auto_start, auto_days = span_covering_splits(cfg)
     start = (dt.date.fromisoformat(args.start) if args.start else auto_start)

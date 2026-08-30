@@ -78,8 +78,9 @@ python3 -m pipeline.status
 ## Validating against synthetic data
 
 ```bash
-python3 tools/make_dummy_flc.py --skus 300 --days 160 --policy randomized \
-    --out data/flc_synth.parquet
+python3 -m tools.make_dummy_flc --skus 300 --policy randomized \
+    --out data/flc_synth.parquet     # module form: script form cannot read
+                                     # config and falls back to a 90-day span
 python3 -m bootstrap.run --input data/flc_synth.parquet
 python3 -m pytest tests/
 ```
