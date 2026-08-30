@@ -321,6 +321,16 @@ tuning:                                # SET  gates pipeline.tune applies before
   max_il_delta_pct_for_auto_rail: 0.005         # SET  and only when the same
     # sweep moves IL by at most this. Both gates must hold; either one failing
     # downgrades the recommendation rather than suppressing it.
+  calibration_band_sigma_multiple: 3            # SET  the level band is sized
+    # from the MEASURED week-to-week anchor volatility -- the chosen window's
+    # `mean_abs_log_error` in fidelity.calibration_window_sweep, which is a
+    # rolling-origin out-of-sample deviation -- times this. A band tighter than
+    # the natural weekly swing cries wolf; a wider one is blind.
+  calibration_band_max_half_width: 0.10         # SET BY OWNER  and it may only
+    # ever TIGHTEN from here (owner, 2026-08-30). The derived band is clamped
+    # to this half-width in ratio space, so [0.90, 1.10] is the widest the
+    # diagnostic can become however volatile the extract looks. Widening is a
+    # decision about what level error the business tolerates, not a reading.
 
 posterior:
     # The cell map is frozen into artifacts/posterior.json by
@@ -417,7 +427,13 @@ pricing:
   demand_floor: 0.01                   # SET
 
 exploration:
-  budget_share_of_il: 0.01             # SET  1% of markdown IL
+  budget_share_of_il: 0.01             # SET BY OWNER  1% of markdown IL --
+    # RISK APPETITE, and the most business-owned number in this file (owner,
+    # 2026-08-30). Every other exploration quantity is measured: what a forced
+    # decision COSTS (the Q-spread), what it BUYS (NB Fisher information), how
+    # many the budget funds. None of them says how much margin the business is
+    # willing to spend to learn. Was mislabelled SET, which read as a design
+    # default rather than a decision someone made.
   tau_initial: null                    # MEASURED  design 5.8. The PILOT's
     # launch value, not shadow's: shadow DERIVES its own launch tau on the
     # anchored path over the trailing budget_il_window_days before its

@@ -27,7 +27,8 @@ def _reports(root, **over):
         "backtest.json": {
             "artifact_versions": {"baseline_model_version": "m1"},
             "fidelity": {"calibration_window_sweep": {
-                "recommended_fit_window": "trailing_1w"}},
+                "recommended_fit_window": "trailing_1w",
+                "trailing_2w": {"mean_abs_log_error": 0.02}}},
             "policy_deltas": {"step_sensitivity": {
                 "deeper_belief": {"share_prices_changed": 0.02,
                                   "il_delta_pct": -0.0004}}},
@@ -234,3 +235,58 @@ def test_the_calibration_cadence_reading_prefers_whichever_is_nearer_one(
     line = [f for f in rep["findings"] if f["key"] == "calibration cadence"][0]
     assert line["status"] == "OK"            # frozen 1.0002 beats weekly 0.9762
     assert "frozen anchor" in line["evidence"]
+
+
+def test_the_level_band_may_tighten_but_never_widen(cfg, tmp_path):
+    """The band is sized from measured week-to-week anchor volatility, but a
+    band WIDER than the current one is a decision about tolerated level error,
+    not a reading (owner, 2026-08-30). The clamp is in RATIO space on purpose:
+    exp(0.10) is 1.1052, so clamping the log half-width would widen the upper
+    edge past the ceiling it is meant to enforce."""
+    reports = tmp_path / "r"
+    reports.mkdir()
+    _reports(reports)
+    c = _cfg_with(cfg, tmp_path)
+    cap = c["tuning"]["calibration_band_max_half_width"]
+
+    # a quiet extract tightens
+    rep = tune.collect(c, str(reports))
+    band = [f for f in rep["findings"]
+            if f["key"] == "baseline_model.calibration_gate_band"][0]
+    lo, hi = band["recommended"]
+    assert lo > 1 - cap and hi < 1 + cap, "quiet weeks should tighten the band"
+
+    # a volatile one is clamped, and never wider than the ceiling on EITHER side
+    bt = json.loads((reports / "backtest.json").read_text())
+    bt["fidelity"]["calibration_window_sweep"]["trailing_2w"][
+        "mean_abs_log_error"] = 0.5
+    (reports / "backtest.json").write_text(json.dumps(bt))
+    rep = tune.collect(c, str(reports))
+    band = [f for f in rep["findings"]
+            if f["key"] == "baseline_model.calibration_gate_band"][0]
+    lo, hi = band["recommended"]
+    assert (lo, hi) == (round(1 - cap, 4), round(1 + cap, 4))
+    assert hi <= 1 + cap, "clamping in log space would have produced 1.1052"
+    assert "may only tighten" in band["evidence"]
+
+
+def test_max_std_shrink_is_suggested_with_its_alternative_never_written(
+        cfg, tmp_path):
+    """Both rails resolve the same mismatch; WHICH one moves is a safety
+    posture. The tool supplies both numbers and takes neither decision."""
+    reports = tmp_path / "r"
+    reports.mkdir()
+    _reports(reports, **{"thresholds.json": {
+        "information_increment_recommendation": {"recommended": 0.341},
+        "bounded_step_recommendation": {"median_launch_std": 1.1088,
+                                        "consistent_max_mean_step": 0.485},
+        "guardrail_threshold_recommendation": {},
+        "ab_duration": {"target_mde_rel": 0.075, "by_duration": {}}}})
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports))
+    f = [x for x in rep["findings"] if x["key"] == "learning.max_std_shrink"][0]
+    assert f["class"] == "OWNER"
+    # 1 - sqrt(1 - 0.15/1.1088) = 0.0701: the shrink that makes the CURRENT
+    # mean step consistent, i.e. the other way to settle the same mismatch
+    assert abs(f["recommended"] - 0.0701) < 1e-3
+    assert "SAFETY POSTURE" in f["evidence"] and "0.485" in f["evidence"]
+    assert f["key"] not in {x["key"] for x in rep["to_paste"]}

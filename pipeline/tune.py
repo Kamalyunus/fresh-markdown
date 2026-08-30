@@ -35,6 +35,7 @@ import os
 import re
 import shutil
 
+import numpy as np
 import pandas as pd
 
 from common.config import load_config
@@ -286,12 +287,77 @@ def _derived(cfg, backtest, thresholds):
             "stop below it fires on noise. Raise it later if the pilot wants "
             "a looser trip, but never below this",
             f"thresholds.guardrail_threshold_recommendation.{name}"))
+
+    # the level band: sized from the MEASURED week-to-week anchor volatility,
+    # and allowed to TIGHTEN ONLY. A band wider than the current one is a
+    # decision about tolerated level error, not a reading (owner, 2026-08-30).
+    g = cfg.get("tuning") or {}
+    sweep = (((backtest or {}).get("fidelity") or {})
+             .get("calibration_window_sweep") or {})
+    chosen = f"trailing_{cfg['baseline_model']['calibration_fit_trailing_weeks']}w"
+    mae = ((sweep.get(chosen) or {}).get("mean_abs_log_error")
+           if isinstance(sweep.get(chosen), dict) else None)
+    cap = g.get("calibration_band_max_half_width")
+    if mae and cap:
+        k = g.get("calibration_band_sigma_multiple", 3)
+        half = k * float(mae)
+        # clamp in RATIO space, not log: exp(0.10) is 1.1052, so clamping the
+        # log half-width would WIDEN the upper edge past the ceiling. Each
+        # side is pulled in independently, so the result can never be wider
+        # than [1-cap, 1+cap] on either side -- tighten only.
+        cap = float(cap)
+        band = [round(max(1 - cap, float(np.exp(-half))), 4),
+                round(min(1 + cap, float(np.exp(half))), 4)]
+        cur_band = list(cfg["baseline_model"]["calibration_gate_band"])
+        clamped = band == [round(1 - cap, 4), round(1 + cap, 4)]
+        out.append(_finding(
+            ("baseline_model", "calibration_gate_band"), PASTE,
+            OK if [round(x, 4) for x in cur_band] == band else ACT,
+            cur_band, band,
+            f"{k}x the rolling-origin mean_abs_log_error of {chosen} "
+            f"({mae}) = half-width {k * float(mae):.4f} in log space"
+            + (f", CLAMPED to the {cap} ceiling -- the band may only tighten"
+               if clamped else
+               " -- inside the ceiling, so the measured volatility sets it"),
+            f"backtest.fidelity.calibration_window_sweep.{chosen}."
+            "mean_abs_log_error"))
     return out
 
 
 def _business(cfg, thresholds):
-    """The values data cannot decide, because they are tolerances, not facts."""
+    """The values data cannot decide, because they are tolerances, not facts.
+
+    Each one is reported with the number the data DOES supply, so the owner
+    decides against evidence rather than against nothing -- but the tool never
+    writes them, and `--apply` never touches them.
+    """
     out = []
+
+    # the two rails resolve the same mismatch, and WHICH one moves is a safety
+    # posture: raising max_mean_step lets prices move faster, lowering
+    # max_std_shrink makes the system slower to become confident. The tool
+    # supplies both numbers and takes neither decision (owner, 2026-08-30).
+    bs = (thresholds or {}).get("bounded_step_recommendation") or {}
+    std0 = bs.get("median_launch_std")
+    step = _get(cfg, ("learning", "max_mean_step"))
+    cur = _get(cfg, ("learning", "max_std_shrink"))
+    if std0 and step and float(std0) > 0:
+        frac = float(step) / float(std0)
+        alt = (round(1.0 - (1.0 - frac) ** 0.5, 4) if frac < 1 else None)
+        out.append(_finding(
+            ("learning", "max_std_shrink"), OWNER,
+            OK if _close(cur, alt, 5e-2) else ACT, cur, alt,
+            (f"the rails disagree: max_mean_step {step} against a consistent "
+             f"{bs.get('consistent_max_mean_step')}. Two ways to fix it, and "
+             f"the choice is a SAFETY POSTURE, not a reading -- raise "
+             f"max_mean_step to {bs.get('consistent_max_mean_step')} (prices "
+             f"move faster) or lower max_std_shrink to {alt} (the system "
+             f"becomes confident more slowly). Suggestion only; nothing is "
+             f"written")
+            if alt is not None else
+            "max_mean_step exceeds the launch prior std, so no shrink value "
+            "makes the rails agree -- the step itself is the thing to revisit",
+            "thresholds.bounded_step_recommendation.median_launch_std"))
     ab = (thresholds or {}).get("ab_duration") or {}
     by = ab.get("by_duration") or {}
     passing = [k for k, v in by.items()

@@ -168,11 +168,17 @@ guardrail stop thresholds (3σ of the control arm's own noise), the fit window
 W (the rolling-origin sweep, when `calib >= 2W` allows it), and
 `max_mean_step` — the last **gated**, pasted only when `step_sensitivity`
 says the re-price is small (`tuning.*_for_auto_rail`), and returned to the
-owner when it is not. **OWNER** — what data cannot decide: a tolerance, not a
-fact. `min_detectable_effect_pct` is the case — the reports say what effect is
-DETECTABLE, never what size is worth detecting, and pasting the achievable
-number would make the power check pass by construction. Never auto-applied
-(see the prohibitions). **READ** — a finding with no config key (which
+owner when it is not. **OWNER** — what data cannot decide: a preference, not
+a fact. Four qualify, and they are the whole list: `budget_share_of_il` (how
+much margin learning is worth), `min_detectable_effect_pct` (what effect size
+is worth detecting — the reports say what is DETECTABLE, and pasting that
+would make the power check pass by construction), `max_std_shrink` (how fast
+the system may become confident — `tune` supplies both ways to settle the
+rail mismatch and takes neither), and `data.split` (how much history still
+represents the business). Reported with the evidence, never auto-applied
+(see the prohibitions). The test: **SET BY OWNER is for a number that encodes
+what you are willing to lose, wait for, or risk — everything else is
+measurable.** **READ** — a finding with no config key (which
 constraint binds learning; whether the weekly calibration cron is worth
 running). **BLOCK** —
 an invariant that must hold first: reports from one model, a settled `f<->r`

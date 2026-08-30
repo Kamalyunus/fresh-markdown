@@ -1786,10 +1786,31 @@ a rail re-prices real episodes: it is auto-applied only when
 re-prices at most `tuning.max_price_share_changed_for_auto_rail` of episodes
 and moves IL by at most `tuning.max_il_delta_pct_for_auto_rail`; above either,
 the finding downgrades to OWNER with the measured reason attached rather than
-disappearing. What remains genuinely OWNER is
-`ab_test.min_detectable_effect_pct` — the reports say what effect is
-DETECTABLE, never what size of effect is worth detecting, and setting it to
-the achievable number would make the power check pass by construction.
+disappearing. The level band is measured the same way — sized from the rolling-origin
+`mean_abs_log_error` of the chosen window times
+`tuning.calibration_band_sigma_multiple` — but it may only ever **tighten**:
+the result is clamped to `tuning.calibration_band_max_half_width` in RATIO
+space, not log space, because `exp(0.10)` is 1.1052 and clamping the log
+half-width would widen the upper edge past the very ceiling it enforces. A
+band wider than today's is a decision about what level error the business
+tolerates, not a reading.
+
+**What remains OWNER, and the test that decides it.** *SET BY OWNER is for a
+number that encodes what you are willing to lose, wait for, or risk;
+everything else is measurable.* Four survive that test.
+`budget_share_of_il` — risk appetite, and the most business-owned number in
+the config; the pipeline measures what a forced decision costs, what it buys,
+and how many the budget funds, but nothing says how much margin learning is
+worth. `ab_test.min_detectable_effect_pct` — the reports say what effect is
+DETECTABLE, never what size is worth detecting, and setting it to the
+achievable number would make the power check pass by construction.
+`learning.max_std_shrink` — the two rails resolve the same mismatch and WHICH
+one moves is a safety posture: raising `max_mean_step` lets prices move
+faster, lowering `max_std_shrink` makes the system slower to become
+confident. `tune` computes both numbers (the shrink that makes the current
+step consistent is `1 - sqrt(1 - max_mean_step/median_launch_std)`) and takes
+neither decision. And `data.split` — §6 gives its sizing rules, but how much
+history still represents the business is a judgment about the market.
 
 `pipeline.tune` is that loop as code. Each check names the report field it
 reads, so a disagreement is traceable to a file rather than to someone's
