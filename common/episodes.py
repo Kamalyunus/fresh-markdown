@@ -402,25 +402,11 @@ def ending_summary(d):
             ((kind == COMPLETED) & (hr > 0)).mean()), 4),
         "last_row_ending_inventory_ever_positive": bool(
             (last.ending_inventory > 0).any()),
-        "note": ("Scrap is max(0, starting_inventory - units_sold) on the last "
-                 "row, NOT ending_inventory, which the source zeroes when it "
-                 "writes off the remainder. An episode ends when its listing "
-                 "ends, NOT when hours_remaining reaches zero -- the counter is "
-                 "nominal and usually still positive, so "
-                 "share_completed_with_counter_still_positive is expected to be "
-                 "large. Closure is read from the source's own sentinel -- "
-                 "ending_inventory zeroed on the final row -- so an episode "
-                 "whose final row still reports honest inventory is the only "
-                 "kind with an unknown outcome. Unclosed episodes are KEPT in "
-                 "the population -- their observed hours are good demand data "
-                 "and only the ending is missing -- so not_closed here counts "
-                 "both kinds: the ones the extract boundary cut off, and the "
-                 "ones unclosed for a reason a longer extract will not fix "
-                 "(a gap in the hourly feed, or a subset whose feed never "
-                 "writes off). The split is edge_truncated."
-                 "share_of_unclosed_explained_by_edge in the dp_eligible "
-                 "waterfall row; not_closed_by_month and "
-                 "not_closed_by_category say where the residue sits."),
+        "note": ("Scrap = max(0, starting - sold) on the last row, never "
+                 "ending_inventory (zeroed at write-off). Closure is the "
+                 "source's own sentinel, never hours_remaining. Unclosed "
+                 "episodes are KEPT; edge_truncated splits boundary cases "
+                 "from feed problems."),
     }
 
 

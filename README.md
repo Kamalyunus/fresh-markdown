@@ -39,7 +39,6 @@ randomized exploration.
 | `backtest/` | 5.14 | Fidelity gate, policy deltas, `Q(p*) − Q(p)` spread and `tau_initial` derivation. |
 | `common/parallel.py` | — | Runs the per-episode work across CPUs (`--workers N`, `0` = all but one). Results in submission order, never completion order; workers compute and the parent commits, so the event path the shadow gate measures is unchanged. Reports are identical either way. |
 | `tools/make_dummy_flc.py` | — | Synthetic FLC generator (legacy + randomized policies, known ground-truth elasticity). The generated span defaults to whatever covers `data.split` (`--start`/`--days` override), so `bootstrap.run --input <fixture>` runs end to end — it previously stopped at `fit_dispersion` with an empty calibration window. |
-| `docs/stockout_gap.html` | 5.4, 12a | Business-facing explainer for the one backtest question that always gets asked: why `*_units` comes in under `*_mu`. Answer — it is lost sales, not model shrinkage. HAND-AUTHORED against the fitted dispersion (r = 0.70) and the current extract's median shelf of 2 units; regenerate the figures if a retrain moves `r` materially. |
 
 ## Running the bootstrap
 

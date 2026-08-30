@@ -449,7 +449,6 @@ def test_fit_calibration_cli(workspace):
     from common.config import load_config
     from bootstrap.train_baseline import BaselineModel
     cfg = load_config("config.yaml")
-    cfg["baseline_model"]["apply_level_calibration"] = True
     d = pd.read_parquet("data/prepared.parquet").head(50)
     mu = BaselineModel(cfg).predict_mu_ref(d)
     assert (mu >= cfg["pricing"]["demand_floor"]).all()
@@ -485,7 +484,6 @@ def test_shadow_phase_harness(workspace):
     # shadow needs the section 9.3 decision and a tau; supply them in config
     with open("config.yaml") as f:
         cfg_raw = yaml.safe_load(f)
-    cfg_raw["baseline_model"]["apply_level_calibration"] = False
     # Paste tau the way an operator has to: from the backtest's own
     # derivation. A hand-typed number is now refused -- see
     # pricing.explore.tau_provenance_error.

@@ -57,20 +57,11 @@ def validate_state(s, tiers, anchor_discount, mu_ref_path):
 
 def decide(state, posterior_store, event_store, cfg, rng, tau_current,
            baseline_version, spread_sink=None):
-    """Price one decision interval and emit the section 16.1 decision event.
-
-    `state` carries: episode_id, sku_id, fc, category, subcategory,
-    hour_of_day, hours_remaining, q, original_price, cost, r, mu_ref_path
-    (mu_ref per remaining hour, index 0 = now), and current_discount
-    (None for the entry decision).
-
-    `spread_sink`, if given, is called with this decision's
-    Q(p_star) - Q(p) costs (the optimum excluded). Deliberately OUT OF BAND
-    rather than a field on the event: the vector is one float per feasible
-    tier on every decision, the event log is the production audit trail, and
-    `pricing.explore.SpreadLedger` is the only consumer. It is called before
-    the draw, so what it records does not depend on the tau in force.
-    """
+    """Price one decision interval and emit the 16.1 decision event.
+    `state` carries the episode context (mu_ref_path index 0 = now;
+    current_discount None at entry). `spread_sink` receives the
+    Q(p_star)-Q(p) costs out of band, before the draw, so the record is
+    tau-independent."""
     s = state
     d_ref = reference_discount(cfg, s["category"])
     entry = s["current_discount"] is None
@@ -151,12 +142,8 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
         "epsilon_posterior_std": float(cell["std"]),
         "reference_discount": float(d_ref),
         "reference_mu": float(s["mu_ref_path"][0]),
-        # The FULL forecast path and the anchor, not just this hour's mu. Q at
-        # every tier depends on the whole remaining path, and the action set
-        # depends on the anchor, so without these two an event records what was
-        # decided but not enough to recompute it -- and pipeline.assurance
-        # exists to recompute it. Keep them: they are the difference between a
-        # log and an audit trail.
+        # the FULL path and anchor: without them the event cannot be
+        # re-solved, and pipeline.assurance exists to re-solve it
         "mu_ref_path": [float(m) for m in s["mu_ref_path"]],
         "anchor_discount": None if entry else float(anchor),
         "dispersion_r": float(s["r"]),

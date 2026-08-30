@@ -111,12 +111,8 @@ def _calibration_convergence(cfg):
                     "not asserted",
                     "python3 -m bootstrap.train_baseline --input "
                     "data/prepared.parquet --check-convergence")
-    # STALE BEATS CONVERGED. The verdict is only about the artifacts in force
-    # when it ran: re-fit the prior or the dispersion and the loop has turned
-    # again, so a green line would describe a chain that no longer exists.
-    # Production re-fits calibration weekly against a FROZEN r and rho, which
-    # does not turn the loop -- but a retrain of either does, and this is what
-    # notices (assurance watches the live drift; this watches the artifacts).
+    # STALE BEATS CONVERGED: a verdict is only about the artifacts in force
+    # when it ran; a moved prior/r/rho means the loop has turned again.
     from common.provenance import file_digest
     moved = []
     for name, path in (("prior", (cfg["posterior"]["prior"] or {}).get("path")),

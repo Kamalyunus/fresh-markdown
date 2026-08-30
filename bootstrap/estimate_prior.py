@@ -48,12 +48,12 @@ def estimate_prior(d, cfg, seed=0, fast=False):
         "method": "profile_density",
         "identifying_rows": "entry",           # hard rule 7; no alternative
         "hour_control": "date_hour",           # the only cell (prior_density)
-        "search_bounds": list(pc["search_bounds"]),
+        "search_bounds": [cfg["posterior"]["epsilon_min"],
+                          cfg["posterior"]["epsilon_max"]],
         "grid_step": float(grid[1] - grid[0]),
         "uniform_limit": {
-            "mean": round(float(np.mean(pc["search_bounds"])), 4),
-            "std": round(float((pc["search_bounds"][1] - pc["search_bounds"][0])
-                               / np.sqrt(12)), 4),
+            "mean": round(float(np.mean(grid)), 4),
+            "std": round(float((grid[-1] - grid[0]) / np.sqrt(12)), 4),
             "note": ("what a category with a FLAT likelihood gets, by "
                      "construction rather than by configuration. A "
                      "per-category mean and std at these values means the "

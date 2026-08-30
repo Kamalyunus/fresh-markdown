@@ -39,23 +39,16 @@ baseline_model:
   num_boost_round: 400                 # SET
   num_leaves: 63                       # SET
   min_data_in_leaf: 50                 # SET
-  train_population: "eligible"         # SET  rows the frozen artifacts are fit on: "integrity" | "eligible"
-  freeze_at_launch: true               # SET  no retraining in MVP window
   model_path: "artifacts/baseline_model.txt"
   feature_schema_path: "artifacts/feature_schema.json"
   calibration_gate_band: [0.90, 1.10]  # MEASURED by pipeline.tune from weekly volatility; DIAGNOSTIC, and may only TIGHTEN from here
-  calibration_grain: "subcategory"     # SET  "subcategory" | "category".
   calibration_convergence_tol_log: 0.02  # SET  the f<->r chain is circular; above this max |log(f_new/f_old)| the fixed point has not settled
   calibration_shrinkage_units: 100     # SET  pseudo-count, in anchor units
   calibration_min_anchor_rows: 200     # SET  anchor basis needs this many rows
   mix_decomposition_min_unit_rows: 30  # SET  anchor rows before a SKU x FC unit gets its own ratio
-  calibration_gate_metric: "level_at_anchor"  # SET  grades the artifact's LEVEL only; pooled_ratio embeds the prior
   calibration_window_sweep_weeks: [1, 2, 4, 8]  # SET  windows the rolling-origin sweep scores to choose W
   calibration_fit_trailing_weeks: 2    # MEASURED by the sweep; W, and calib must be >= 2W (design 6)
-  calibration_gate_window: "test"      # SET  "test" | "calib+test"; must be DISJOINT from the fit window or the gate grades its own fit
-  calibration_fit_window: "rolling_trailing"  # SET  POINT-IN-TIME: factors re-fit weekly on the trailing W ending strictly before each week, applied by row date
   calibration_factor_path: "artifacts/calibration.json"   # per-category level correction
-  apply_level_calibration: true        # SET  always applied; the band is a reported diagnostic, not a gate
 
 reference_discount:                    # SET  category anchors
   MEAT: 0.25
@@ -63,7 +56,6 @@ reference_discount:                    # SET  category anchors
   _default: 0.30
 
 dispersion:
-  fallback_order: ["subcategory", "category", "global"]
   clamp_percentile: 0.90               # SET  clamp high converged r
   min_rows_per_group: 200              # SET  below this: fall back one level
   r_search_bounds: [0.05, 50.0]        # SET  MLE search range for r
@@ -89,8 +81,6 @@ posterior:
     min_rows_per_time_cell: 5          # SET  thinner time cells are dropped
     own_information_saturation: 2.0    # SET  log-lik units that count as informative
     stability_folds: 3                 # SET  disjoint train slices for fold_spread
-    holdout_window: "calib"            # SET  window scored in holdout_comparison
-    search_bounds: [-4.00, -0.05]      # SET  must equal [epsilon_min, epsilon_max]
     search_grid_size: 159              # SET  profile resolution
     max_rows_per_category: 150000      # SET  row cap per category
     path: "artifacts/prior.json"
@@ -116,7 +106,6 @@ learning:
   information_increment: 12.0          # MEASURED  deff-deflated NB info per bounded update
   max_mean_step: 0.15                  # SET BY OWNER, gated  cap on one update's mean move
   max_std_shrink: 0.25                 # SET BY OWNER  the PRIMARY rate limit on learning
-  use_exploitation_outcomes: false     # SET  do not change in MVP
 
 events:
   store_dir: "events_store"            # SET  decision/outcome event log location
@@ -149,9 +138,6 @@ monitoring:
     duplicate_or_unmatched_rate: 0.01  # SET
     price_mismatch_rate: 0.01          # SET
     exploration_cost_vs_budget: 2.0    # SET
-    deterioration_basis:               # SET  how each guardrail compares to baseline
-      scrap: "relative"                # its baseline. Changes what the
-      margin: "absolute_pp"            # threshold MEANS, so it is explicit.
     deterioration_smoothing_days:      # SET  days averaged BEFORE comparing
       scrap: 7                         # per metric, chosen from measured noise
       margin: 1

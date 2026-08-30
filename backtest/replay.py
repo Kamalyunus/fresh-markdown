@@ -68,10 +68,8 @@ def _fidelity_metrics(d, cfg):
 
 
 def level_mix_decomposition(d, cfg):
-    """Splits weekly anchor-level movement into demand drift vs SKU mix: each
-    SKU x FC ratio is fit ONCE over all history, then every week is recomputed
-    holding ratios fixed so only composition varies (mix_expected tracks raw ->
-    composition; raw climbs above it -> drift). Also reports per-SKU feasibility."""
+    """Weekly anchor-level movement split into demand drift vs SKU mix
+    (ratios fit once over all history; mix_expected varies composition only)."""
     tier_step = cfg["pricing"]["tier_step"]
     min_unit_rows = cfg["baseline_model"]["mix_decomposition_min_unit_rows"]
 
@@ -132,11 +130,8 @@ def level_mix_decomposition(d, cfg):
                 round(float(np.percentile(trusted.ratio, 90)), 3)]
                 if len(trusted) > 10 else None,
         },
-        "note": ("mix_explained_share near 1 means the level movement is "
-                 "composition, not demand -- the remedy is a mix-robust gate "
-                 "metric, not a finer calibration grain. Per-SKU factors are "
-                 "only viable where units carry enough anchor rows to fit "
-                 "them on signal rather than noise."),
+        "note": ("mix_explained_share near 1 = composition, not demand "
+                 "drift; per-SKU factors need enough anchor rows per unit."),
     }
 
 
@@ -204,9 +199,8 @@ def calibration_window_sweep(d, cfg):
         result["recommended_fit_window"] = best
         result["note"] = (
             "Rolling-origin: factors fit on the trailing window, applied to "
-            "the NEXT week. If shorter windows score better, the demand level "
-            "is trending and recency beats sample size; if longer windows win, "
-            "the variation is noise and averaging helps.")
+            "the NEXT week. Shorter windows winning = the level is trending; "
+            "longer winning = the variation is noise.")
     return result
 
 
@@ -215,18 +209,12 @@ def fidelity(d, cfg, model, prior, r_lookup):
     sales at actual historical prices. The gate reads the calib+test windows
     -- the launch-adjacent regime the 9.3 level factors are fit on; the
     all-history ratio is diagnostic only (dominated by in-sample rows)."""
-    # THE GATE GRADES A FROZEN ARTIFACT. The calibration schedule re-fits
-    # every week (production does, and the DP replay below should see that),
-    # but a factor fit inside the graded window has read the rows it is being
-    # graded on -- so fidelity prices the gate window off the anchor instead,
-    # fit on the trailing window ending where the gate opens. The weekly-refit
-    # reading is reported next to it as `weekly_refit`, because the two answer
-    # different questions: "does the artifact as frozen hold up" and "does
-    # frozen model + weekly re-fit track demand".
+    # THE GATE GRADES A FROZEN ARTIFACT: a factor fit inside the graded
+    # window has read the rows it is graded on, so fidelity freezes at the
+    # gate start; the weekly-refit mechanism reading sits beside it.
     split = cfg["data"]["split"]
-    gate_window = cfg["baseline_model"]["calibration_gate_window"]
-    gate_start = pd.Timestamp(split["test_start"] if gate_window == "test"
-                              else split["calib_start"])
+    gate_window = "test"
+    gate_start = pd.Timestamp(split["test_start"])
     # predict over the FULL window (the DP plans over it); every ratio below
     # sees observed rows only -- synthetic rows would read as under-prediction
     d_in = d                      # unextended; the refit pass below re-reads it
@@ -302,18 +290,16 @@ def fidelity(d, cfg, model, prior, r_lookup):
     # how long should the level factor's fit window be? measured, not assumed
     block["calibration_window_sweep"] = calibration_window_sweep(d, cfg)
 
-    # gate metric: pooled ratio judges the model at actual prices (embeds the
-    # prior); level_at_anchor judges only the artifact's level at reference price
-    metric = cfg["baseline_model"]["calibration_gate_metric"]
+    # gate metric: level_at_anchor judges only the artifact's LEVEL at the
+    # reference price (pooled_ratio embeds the prior; fallback only)
     m10 = block["measurement_10"]
     anchor_val = (m10.get("level_bias_at_anchor")
                   if isinstance(m10, dict) else None)
-    if metric == "level_at_anchor" and anchor_val:
+    if anchor_val:
         gate_value, gate_metric = anchor_val, "level_bias_at_anchor"
     else:
-        gate_value, gate_metric = sold_ratio, "pooled_ratio"
-        if metric == "level_at_anchor":
-            gate_metric += " (no anchor rows -- fell back from level_at_anchor)"
+        gate_value = sold_ratio
+        gate_metric = "pooled_ratio (no anchor rows -- fell back)"
     band = cfg["baseline_model"]["calibration_gate_band"]
     block["calibration_gate_band"] = band
     block["calibration_gate_metric"] = gate_metric
@@ -325,13 +311,9 @@ def fidelity(d, cfg, model, prior, r_lookup):
                                       "investigate drift (design 9.2)")
     block["calibration_frozen_at"] = str(gate_start.date())
 
-    # THE MECHANISM READING, next to the frozen one. Re-prices the same gate
-    # window with the weekly schedule in force -- what production actually
-    # runs. It is NOT the gate (its factors read the graded rows), but the
-    # spread between the two IS the value of re-fitting weekly: how much of
-    # the frozen artifact's level error a weekly re-fit would have removed.
-    # counters belong to the GATE pass -- artifact_versions reports that one,
-    # so this second pass must not be folded into its coverage
+    # mechanism reading: same gate window under the weekly schedule. NOT the
+    # gate; the spread to it is what weekly re-fitting is worth. Coverage
+    # counters belong to the gate pass, so save/restore them.
     counters = (model._cal_rows_scheduled, model._cal_rows_fallback,
                 model._cal_rows_frozen, model._cal_rows_static,
                 set(model._cal_fallback_weeks))
@@ -355,13 +337,10 @@ def fidelity(d, cfg, model, prior, r_lookup):
                     else bool(band[0] <= refit_anchor <= band[1])),
         "vs_frozen": (None if (refit_anchor is None or not anchor_val)
                       else round(refit_anchor - anchor_val, 4)),
-        "note": "the same gate window re-priced with the weekly schedule in "
-                "force -- production's mechanism, not a gate. Its factors "
-                "read the graded rows, so it cannot grade the launch; the "
-                "gap to calibration_gate_value is what weekly re-fitting "
-                "buys. Both moving together = the level moved and re-fitting "
-                "cannot catch it; only the frozen one out of band = the "
-                "anchor went stale and the weekly re-fit is doing its job.",
+        "note": "the gate window under the weekly schedule -- production's "
+                "mechanism, not a gate (its factors read the graded rows). "
+                "The gap to calibration_gate_value is what weekly re-fitting "
+                "buys.",
     }
     return block, d_full
 
@@ -407,29 +386,17 @@ def _episode_frame(g, unfinished=frozenset()):
         "mu_ref_path": g.mu_ref_hat.to_numpy(),
         "r": float(g.r.iloc[0]),
         "eps": float(g.eps.iloc[0]),
-        # LABELS for traced replays only -- no economics reads them; tolerant
-        # of missing columns so a diagnostic label can never break the replay
+        # labels; tolerant of missing columns
         "episode_id": str(g.episode_id.iloc[0]) if "episode_id" in g else "",
         "sku_id": (int(g.sku_id.iloc[0]) if "sku_id" in g else None),
         "fc": str(g.fc.iloc[0]) if "fc" in g else "",
         "category": str(g.category.iloc[0]) if "category" in g else "",
-        "hour_dates": ([str(x) for x in g.date] if "date" in g
-                       else [""] * len(g)),
-        "hours_of_day": ([int(x) for x in g.hour_of_day]
-                         if "hour_of_day" in g else list(range(len(g)))),
-        "is_observed": obs.astype(bool),
-        "starting_inventory": g.starting_inventory.to_numpy(),
-        # the SOURCE's own close-of-hour count, carried for the trace only:
-        # zeroed on the last row of a closed episode whatever remained, which
-        # is the write-off and is meant to be visible (design 12a)
-        "ending_inventory": g.ending_inventory.to_numpy(),
     }
 
 
 def _replay_one(e, cfg):
     """One episode's replay: actual path, legacy-under-model arm, DP arm.
-    Pure -- reads only `e` and `cfg` -- so it runs in-process or in a worker.
-    Returns (row, [(date, q_spread_costs), ...]) or None."""
+    Pure. Returns (row, [(date, q_spread_costs), ...]) or None."""
     pcfg = cfg["pricing"]
     max_k = pcfg["negbin_max_k"]
     p0, cost = e["original_price"], e["cost"]
@@ -437,14 +404,6 @@ def _replay_one(e, cfg):
     if not tiers:
         return None
     spreads = []
-
-    # PER-HOUR TRACE, off by default, read only by tools.export_backtest; it
-    # lives here because design 5.14 forbids a parallel implementation
-    tr = {} if e.get("trace") else None
-
-    def rec(t, **kw):
-        if tr is not None:
-            tr.setdefault(t, {}).update(kw)
 
     # ---- actual path economics (observed world, legacy prices)
     a_sold = e["actual_sold"]
@@ -472,25 +431,10 @@ def _replay_one(e, cfg):
             lg_disc_weighted += d_t * sold
             lg_sold_total += sold
             q -= sold
-            rec(t, legacy_start_inv=q_int, legacy_discount=d_t,
-                legacy_price=p0 * (1 - d_t), legacy_mu=float(mu),
-                legacy_units=float(sold))
-        else:
-            rec(t, legacy_start_inv=0, legacy_discount=None, legacy_price=None,
-                legacy_mu=None, legacy_units=0.0)
         # a negative adjustment can only take what the SIMULATED shelf still
-        # holds -- units this arm already sold cannot also shrink. The clipped
-        # remainder is shrink that never happened in this world, and charging
-        # it anyway broke the supply identity by exactly the clipped amount.
-        lg_clip_t = max(0.0, -(q + adj[t]))
-        lg_clip += lg_clip_t
+        # holds -- units this arm already sold cannot also shrink
+        lg_clip += max(0.0, -(q + adj[t]))
         q = max(q + adj[t], 0.0)
-        # close of hour = after sales AND after the adjustment, the source's
-        # own convention -- so end[t] == start[t+1] and the sheet self-checks.
-        # Shrink APPLIED this hour is what the shelf still held to lose: the
-        # requested loss less the part clipped away.
-        rec(t, legacy_end_inv=float(q),
-            legacy_shrink=float(max(0.0, -adj[t]) - lg_clip_t))
         if q <= 0 and not adj[t + 1:].any():
             break
     # captured before the DP loop reuses `q`
@@ -507,13 +451,8 @@ def _replay_one(e, cfg):
         # empty shelf ends the episode only if nothing more is coming; the DP
         # never anticipates a delivery -- it learns next hour, as production does
         if q_int <= 0:
-            rec(t, dp_start_inv=0, dp_discount=None, dp_price=None, dp_mu=None,
-                dp_units=0.0)
-            dp_clip_t = max(0.0, -(q + adj[t]))
-            dp_clip += dp_clip_t
+            dp_clip += max(0.0, -(q + adj[t]))
             q = max(q + adj[t], 0.0)
-            rec(t, dp_end_inv=float(q),
-                dp_shrink=float(max(0.0, -adj[t]) - dp_clip_t))
             if q <= 0 and not adj[t + 1:].any():
                 break
             continue
@@ -536,15 +475,8 @@ def _replay_one(e, cfg):
         dp_disc_cost += p0 * d_t * sold
         dp_disc_weighted += d_t * sold
         dp_sold_total += sold
-        rec(t, dp_start_inv=q_int, dp_discount=d_t, dp_price=p0 * (1 - d_t),
-            dp_mu=float(mu), dp_units=float(sold),
-            dp_is_entry=bool(t == 0),
-            dp_feasible_tiers=len(res.tiers))
-        dp_clip_t = max(0.0, -(q - sold + adj[t]))
-        dp_clip += dp_clip_t
+        dp_clip += max(0.0, -(q - sold + adj[t]))
         q = max(q - sold + adj[t], 0.0)
-        rec(t, dp_end_inv=float(q),
-            dp_shrink=float(max(0.0, -adj[t]) - dp_clip_t))
     dp_shrink = max(e["shrink"] - dp_clip, 0.0)
     dp_scrap = cost * (max(q, 0.0) + dp_shrink)
 
@@ -608,69 +540,6 @@ def _replay_one(e, cfg):
         "n_observed": e["n_observed"], "r": e["r"],
         "original_price": p0, "cost": cost, "d_ref": e["d_ref"],
     }
-    if tr is not None:
-        # one row per hour, all three arms side by side; legacy and DP share
-        # the same demand model, so the comparison stays like-for-like
-        hours = []
-        for t in range(e["hours"]):
-            rt = tr.get(t, {})
-            a_d = float(e["actual_discounts"][t])
-            hours.append({
-                "episode_id": e["episode_id"], "sku_id": e["sku_id"],
-                "fc": e["fc"], "category": e["category"],
-                "date": e["hour_dates"][t], "hour_of_day": e["hours_of_day"][t],
-                "t": t, "is_observed": bool(e["is_observed"][t]),
-                "original_price": p0, "cost": cost, "d_ref": e["d_ref"],
-                "mu_ref": float(e["mu_ref_path"][t]),
-                "hour_adjustment": float(e["adjustment"][t]),
-                # observed world. `actual_end_inv` is the SOURCE's own count,
-                # so on a closed episode's last row it is 0 whatever remained
-                # -- that zero IS the write-off, not a broken chain (12a)
-                "actual_start_inv": int(e["starting_inventory"][t]),
-                "actual_end_inv": int(e["ending_inventory"][t]),
-                "actual_discount": a_d,
-                "actual_price": p0 * (1 - a_d),
-                "actual_units": float(e["actual_sold"][t]),
-                # the observed world absorbs the whole exogenous loss: it IS
-                # where the shrink was measured
-                "actual_shrink": float(max(0.0, -e["adjustment"][t])),
-                # legacy prices under the MODEL's demand
-                "legacy_start_inv": rt.get("legacy_start_inv"),
-                "legacy_end_inv": rt.get("legacy_end_inv"),
-                "legacy_discount": rt.get("legacy_discount"),
-                "legacy_price": rt.get("legacy_price"),
-                "legacy_mu": rt.get("legacy_mu"),
-                "legacy_units": rt.get("legacy_units"),
-                "legacy_shrink": rt.get("legacy_shrink"),
-                # the DP's own choice, same demand model
-                "dp_start_inv": rt.get("dp_start_inv"),
-                "dp_end_inv": rt.get("dp_end_inv"),
-                "dp_discount": rt.get("dp_discount"),
-                "dp_price": rt.get("dp_price"),
-                "dp_mu": rt.get("dp_mu"),
-                "dp_units": rt.get("dp_units"),
-                "dp_shrink": rt.get("dp_shrink"),
-                "dp_is_entry": rt.get("dp_is_entry", False),
-                "dp_feasible_tiers": rt.get("dp_feasible_tiers"),
-            })
-            h = hours[-1]
-            h["dp_minus_actual_discount"] = (
-                None if h["dp_discount"] is None
-                else h["dp_discount"] - h["actual_discount"])
-        # scrap is a TERMINAL event, not an hourly one: the leftover is
-        # disposed when the listing closes. It lands on the episode's final
-        # row so the hourly sheet still accounts for every unit --
-        # sum(*_shrink) + sum(*_scrap_at_close) == the episode's *_scrap_units.
-        # An unfinished episode disposes of nothing: its stock is still on
-        # the shelf when the extract ends.
-        last = hours[-1]
-        last["actual_scrap_at_close"] = float(a_left)
-        last["legacy_scrap_at_close"] = float(lg_left)
-        last["dp_scrap_at_close"] = float(dp_left)
-        for h in hours[:-1]:
-            for arm in ("actual", "legacy", "dp"):
-                h[f"{arm}_scrap_at_close"] = 0.0
-        row["hours_trace"] = hours
     return row, spreads
 
 
@@ -734,12 +603,9 @@ def step_sensitivity(frames, cfg, seed=0, sample=300):
 
     shifts = {"deeper_belief": -step, "shallower_belief": +step}
     out = {"step": step, "episodes_swept": take,
-           "note": ("DP arm re-solved at eps +- learning.max_mean_step on a "
-                    "sample of the replayed episodes, same demand model. "
-                    "share_prices_changed near 0 below the deepening bar is "
-                    "the measured insensitivity that makes a wrong step "
-                    "cheap; crossers (bar within one step of |eps|) are "
-                    "where the cap is actually load-bearing.")}
+           "note": ("DP arm re-solved at eps +- max_mean_step, world held "
+                    "at base eps; crossers are where the cap is "
+                    "load-bearing.")}
     base = {id(e): _dp_arm(e, cfg, e["eps"]) for e in picked}
     for label, shift in shifts.items():
         changed = il_base = il_shift = 0.0
@@ -778,12 +644,10 @@ def step_sensitivity(frames, cfg, seed=0, sample=300):
     return out
 
 
-def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None,
-                  trace=False):
+def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
     """Section 17.3 policy block plus the q-spread distribution for
-    tau_initial; replays the same pricing.dp path production uses, and every
-    aggregate is over outcome_known episodes only. `trace=True` (for
-    tools.export_backtest) adds a per-hour frame, changing the return arity to 4."""
+    tau_initial; replays the same pricing.dp path production uses. Every
+    aggregate is over outcome_known episodes only."""
     rng = np.random.default_rng(seed)
     pcfg = cfg["pricing"]
     max_k = pcfg["negbin_max_k"]
@@ -803,7 +667,6 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None,
     for _, g in sub.groupby("episode_id"):
         e = _episode_frame(g, unfinished)
         if e["q0"] > 0 and e["hours"] >= 1:
-            e["trace"] = trace
             frames.append(e)
 
     results = map_episodes(_replay_one, frames, cfg, workers)
@@ -820,13 +683,6 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None,
     ep_all = pd.DataFrame(rows)
     if not len(ep_all):
         raise RuntimeError("no episodes replayed")
-
-    # pulled out before aggregation: a lists column would break every groupby
-    hourly = None
-    if trace:
-        hourly = pd.DataFrame(
-            [h for r in rows for h in r.get("hours_trace", [])])
-        ep_all = ep_all.drop(columns=["hours_trace"], errors="ignore")
 
     # aggregates are over outcome_known episodes only (exclusions counted): an
     # unclosed episode truncates the actual arm while the simulated arms run
@@ -846,11 +702,8 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None,
         "episodes_replayed": int(len(ep)),
         "episodes_excluded_unclosed": int(len(ep_all) - len(ep)),
         "share_outcome_known": round(float(ep_all.outcome_known.mean()), 4),
-        "basis_note": ("every figure below is over episodes with a KNOWN "
-                       "outcome. An unfinished one gives the actual arm only "
-                       "the hours the extract covered while both simulated "
-                       "arms run the full window, which flatters the DP by "
-                       "exactly the missing tail."),
+        "basis_note": ("figures are over KNOWN-outcome episodes only: an "
+                       "unfinished one flatters the DP by its missing tail."),
         "actual_il": money("actual_il"),
         "actual_discount_cost": money("actual_discount_cost"),
         "actual_scrap_cost": money("actual_scrap_cost"),
@@ -884,13 +737,9 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None,
             "median_abs_eps_in_use": round(float(ep.eps.abs().median()), 3),
             "share_episodes_eps_above_threshold": round(float(
                 (ep.eps.abs() > ep.deepening_threshold).mean()), 4),
-            "note": ("share near 0 means the DP is structurally an "
-                     "enter-and-hold policy at the current elasticity: the "
-                     "deeper tiers are available every hour and decline to "
-                     "pay for themselves. Only a posterior moving past the "
-                     "threshold changes that -- widening the action set "
-                     "cannot. Threshold ignores censoring and is therefore "
-                     "optimistic."),
+            "note": ("share near 0 = enter-and-hold at the current "
+                     "elasticity; only the posterior moving past the bar "
+                     "changes that, widening the action set cannot."),
         },
         # like-for-like: both policies under the SAME demand model, so bias
         # cancels; actual_* vs model figures are fidelity, not policy
@@ -903,16 +752,12 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None,
             "basis": "legacy prices vs DP prices, demand generated by the "
                      "same frozen model + prior for both arms",
         },
-        "note": ("Policy comparison is legacy-under-model vs DP-under-model "
-                 "(same demand generator both arms). actual_* figures are the "
-                 "observed world and belong to fidelity, not policy. Replay "
-                 "output is never evidence the policy works; the A/B is that "
-                 "evidence (design 5.14)."),
+        "note": ("legacy-under-model vs DP-under-model, same demand "
+                 "generator both arms; actual_* is fidelity, not policy. "
+                 "Replay output is never evidence the policy works (5.14)."),
     }
     block["q_spread_distribution"] = ledger.distribution()
     block["step_sensitivity"] = step_sensitivity(frames, cfg, seed=seed)
-    if trace:
-        return block, ep, ledger, hourly
     return block, ep, ledger
 
 

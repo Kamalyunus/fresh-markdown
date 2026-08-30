@@ -38,8 +38,7 @@ HOLDOUT_BASIS = "holdout"
 
 def _require_shadow_config(cfg, backtest_path="reports/backtest.json",
                            shadow_path="reports/shadow.json", why=None):
-    """Fallback path only: when the run cannot derive its own launch tau
-    (`why` says why), the config paste must exist and match its source."""
+    """Fallback only: the config-paste tau must exist and match its source."""
     prefix = f"tau derivation unavailable ({why}); " if why else ""
     if cfg["exploration"]["tau_initial"] is None:
         raise ConfigError(
@@ -63,11 +62,8 @@ def _require_shadow_config(cfg, backtest_path="reports/backtest.json",
 
 
 def pre_window_il_history(d, cfg, before):
-    """Realised legacy IL by close day for episodes that CLOSED before the
-    window -- the trailing budget base production holds at launch. Without it
-    the window's first day reads budget 0 (empty history), which is an
-    ABSENCE OF SIGNAL, not an overspend. Only the budget_il_window_days
-    before `before` matter."""
+    """Realised legacy IL by close day for episodes that CLOSED in the
+    budget_il_window_days before the window -- the day-one budget base."""
     if before is None or d.empty:
         return {}
     start = pd.Timestamp(str(before))
@@ -105,26 +101,15 @@ EP_COLS = ("hour_of_day", "sku_id", "fc", "category", "subcategory",
 
 
 def weekly_refit_schedule(d_full, cfg, model, r_lookup, start, end):
-    """Re-fit the level factors for each week of the shadow window, the way
-    production's weekly cron would.
-
-    THIS IS WHAT THE ARTIFACT CANNOT CARRY. The calibration schedule is built
-    over pre-launch data and stops at `split.test_end`, so every hold-out row
-    falls back to the frozen anchor -- shadow therefore measures "launch and
-    never re-calibrate". Production does re-calibrate weekly, and the honest
-    comparison needs both. Fitting it HERE rather than in the artifact keeps
-    the pre-launch bundle clean of hold-out rows (hard rule 16): shadow is a
-    forward replay, so at week k it may fit on weeks < k, which is exactly
-    what the cron has available on that Monday.
-
-    Returns {week_start: {cell: factor}} for the weeks the window spans.
-    """
+    """Re-fit the level factors per shadow week, as production's cron would.
+    Fit HERE, not in the artifact, so the pre-launch bundle stays clean of
+    hold-out rows (rule 16); at week k it reads only weeks < k.
+    Returns ({week_start: {cell: factor}}, coverage)."""
     from bootstrap.train_baseline import _solve_level_factors
     from bootstrap.prepare_data import population
 
     bm = cfg["baseline_model"]
     weeks_back = bm["calibration_fit_trailing_weeks"]
-    grain = model.calibration_grain
     scope = population(d_full, cfg).copy()
     dates = pd.to_datetime(scope.date)
     wk = dates.dt.to_period("W")
@@ -142,7 +127,7 @@ def weekly_refit_schedule(d_full, cfg, model, r_lookup, start, end):
         weeks_seen = int(wk[(wk.dt.start_time >= lo)
                             & (wk.dt.start_time < w0)].nunique())
         fitted = _solve_level_factors(
-            window.copy(), cfg, model, grain, bm["calibration_shrinkage_units"],
+            window.copy(), cfg, model, bm["calibration_shrinkage_units"],
             bm["calibration_min_anchor_rows"], cfg["pricing"]["tier_step"],
             cfg["pricing"]["negbin_max_k"], r_lookup) if len(window) else None
         if fitted is None:                 # too thin: that week keeps the anchor
@@ -175,13 +160,9 @@ def _prepare_items(d, cfg, model, r_lookup):
 
 def derive_tau0(d_full, cfg, start, model, posterior, r_lookup, il_history,
                 seed=0, max_episodes=None, workers=None):
-    """Launch tau for THIS run: the run's own anchored decision path over the
-    trailing budget_il_window_days before the window -- the same span the
-    day-one budget base comes from. Replaces the config paste, which carried
-    two staleness modes: an old backtest's number, and the exploit-vs-anchored
-    path mismatch (different affordable sets, so the same tau buys a
-    different spend). Returns the report block; tau_initial is None when the
-    week is too thin to bisect on, and the caller falls back to the paste."""
+    """Launch tau derived on THIS run's anchored path over the trailing
+    pre-window week (same span as the day-one budget base). tau_initial is
+    None when the week is too thin; the caller falls back to the paste."""
     from bootstrap.prepare_data import population
     window = int(cfg["exploration"]["budget_il_window_days"])
     floor = int(cfg["exploration"]["tau0_derivation_min_decisions"])
@@ -271,10 +252,8 @@ def derive_tau0(d_full, cfg, start, model, posterior, r_lookup, il_history,
 def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None,
                       sampled_episodes=None, population_episodes=None,
                       max_days=60):
-    """Day-by-day tau-controller walk: does the pilot survive its first week?
-    The controller reads only the day just closed, so a too-generous launch
-    tau cannot be corrected before day one's spend is on the books. Spend per
-    day is EXPECTED spend at the tau in force (a counterfactual tau path)."""
+    """Day-by-day tau-controller walk: does the pilot survive its first
+    week? Spend per day is EXPECTED spend at the tau in force."""
     stop_at = cfg["monitoring"]["stop_conditions"]["exploration_cost_vs_budget"]
     days = ledger.days
     order = sorted(range(len(days)), key=lambda i: days[i])
@@ -380,10 +359,8 @@ def _episode_seed(seed, episode_id):
 
 
 def _shadow_one(ep, ctx):
-    """Price one episode's hours. Pure: no store, no shared generator.
-    Returns everything the parent folds in, including events to commit.
-    `ep` carries rows as arrays, not a DataFrame (per-hour .iloc was the
-    second-largest cost after the DP)."""
+    """Price one episode's hours. Pure (no store, no shared RNG); returns
+    everything the parent folds in. `ep` carries arrays, not a DataFrame."""
     cfg, tau = ctx["cfg"], ctx["tau"]
     posterior = _FrozenCells(ctx["cells"])
     store = _BufferStore()
@@ -394,16 +371,12 @@ def _shadow_one(ep, ctx):
         "events": [], "rejected": {}, "spreads": [],
         "cost_floor_violations": 0, "n_forced": 0, "empty_affordable": 0,
         "would_be_cost": 0.0, "raw_information": 0.0,
-        # the two factors behind raw_information, kept apart: how FAR a forced
-        # price moved from the reference, and how much demand was there to
-        # measure it on. Information is quadratic in the first.
+        # info is quadratic in the log price move, linear in demand
         "abs_log_ratio": 0.0, "forced_mu": 0.0, "forced_discount_gap": 0.0,
         "rec_disc": 0.0, "leg_disc": 0.0, "differs": 0,
         "ep_discount_cost": 0.0, "latencies": [],
-        # `date` and `cell` ride along so the drift ratio can be recomputed
-        # under a WEEKLY RE-FIT calibration as well as the frozen anchor --
-        # a level factor is a per-(cell, week) multiplier, so swapping it is
-        # an exact rescale of mu, no re-prediction needed
+        # date/cell ride along so the drift ratio can be re-read under a
+        # weekly re-fit (a factor swap is an exact rescale of mu)
         "drift": {"mu": [], "r": [], "q": [], "sold": [], "date": [],
                   "cell": []},
         "last_row": None,
@@ -423,9 +396,7 @@ def _shadow_one(ep, ctx):
         sold = int(ep["units_sold"][t])
         ending = int(ep["ending_inventory"][t])
 
-        # What the business did, recorded UNconditioned on decision success
-        # (gating on it under-counted IL and mispointed the scrap classifier);
-        # accumulated on the episode and attributed to its close day.
+        # legacy IL, unconditioned on decision success, attributed to close day
         out["ep_discount_cost"] = out.get("ep_discount_cost", 0.0) + \
             float(ep["original_price"][t]) * legacy_d * sold
         last_obs = (q, sold, float(ep["cost"][t]), ending, row_day)
@@ -459,8 +430,7 @@ def _shadow_one(ep, ctx):
         if evt["is_exploration"]:
             out["n_forced"] += 1
             out["would_be_cost"] += evt["exploration_cost"]
-            # would-be learning yield: MUST match pipeline.update's NB Fisher
-            # information mu * L^2 * r/(r+mu), ratio vs the REFERENCE discount
+            # must match pipeline.update's NB Fisher info mu*L^2*r/(r+mu)
             lr = np.log((1 - evt["applied_discount"])
                         / (1 - evt["reference_discount"]))
             mu_rec = max(ep["mu_ref_hat"][t] * np.exp(
@@ -639,13 +609,8 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
 
     drift_ratio = _ratio(mu_arr)
 
-    # THE SECOND READING: the same rows re-priced under a WEEKLY RE-FIT, the
-    # way production's cron would hold the factors. The artifact's schedule
-    # stops at test_end, so `drift_ratio` above is "launch and never
-    # re-calibrate"; this one is "launch and re-fit weekly", and the spread
-    # between them is what weekly re-calibration is worth on this window.
-    # A factor is a per-(cell, week) multiplier, so swapping it is an exact
-    # rescale of mu -- no re-prediction, and eps/r/q are untouched.
+    # second reading: same rows under a WEEKLY RE-FIT (frozen vs weekly is
+    # what re-calibration is worth); a factor swap is an exact mu rescale
     refit_ratio, refit_cov, refit_applied = None, [], 0
     refit = {}
     if pre_window_frame is not None and drift["date"]:
@@ -693,14 +658,8 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     # trailing budget base is knowable at the start of each day
     closed = (kind != episodes.NOT_CLOSED).to_numpy()
     ep_il = last.discount_cost.to_numpy() + scrap_per_ep
-    # seeded with pre-window closed-episode IL, so the window's first days
-    # carry the trailing base production would actually hold at launch.
-    # SCALE IT TO THE SAMPLE: the seed is measured on the FULL frame (it has
-    # to be -- those episodes are outside the window and never sampled),
-    # while the window's own IL and the SPEND it is compared against are
-    # measured on the sampled slice. Left unscaled it inflates the first
-    # budget_il_window_days of budget by 1/sample_fraction and drives
-    # spend_over_budget toward zero on any sampled run.
+    # pre-window IL seed, SCALED TO THE SAMPLE (it is measured on the full
+    # frame; unscaled it inflates the first days' budgets by 1/fraction)
     seed_scale = len(groups) / max(len(population), 1)
     il_by_day = {day: amount * seed_scale
                  for day, amount in (prior_il_by_day or {}).items()}
@@ -773,20 +732,13 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             f"OVER BUDGET -- {over:.2f}x; the tau controller shrinks tau at the "
             "operator gate, capped at halving per day" if over > 1 else
             f"within budget -- {over:.2f}x"),
-        "note": (("tau was derived at launch on this run's own trailing "
-                  "pre-window week (tau_initial_derivation), so day one of "
-                  "tau_controller_trace is an out-of-sample test of it. "
+        "note": (("tau derived on this run's own pre-window week; "
                   "tau_recommended is the same bisection pooled over the "
-                  "WHOLE window -- a cross-check, not a correction; for the "
-                  "pilot, paste the derivation's tau_initial the way rho is "
-                  "pasted, after reading the trace.")
+                  "whole window -- a cross-check, not a correction.")
                  if tau_deriv is not None and not tau_deriv["fallback"] else
-                 ("tau came from the config paste: the pre-window week was "
-                  "missing or too thin to derive on (see "
-                  "tau_initial_derivation). The paste's backtest source runs "
-                  "the EXPLOIT-ONLY path, whose affordable sets differ from "
-                  "this anchored one, so read tau_recommended and "
-                  "tau_controller_trace before trusting the launch value.")),
+                 ("tau came from the config paste (pre-window week missing or "
+                  "too thin); read tau_recommended and tau_controller_trace "
+                  "before trusting the launch value.")),
     }
     budget_check["tau_controller_trace"] = _controller_trace(
         ledger, il_by_day, tau, widest_std, cfg, window_days=n_days,
@@ -803,12 +755,9 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             if per_episode > 0 else None,
         "max_mean_step": step,
         "calendar_floor_days_per_0.15_of_mean": 1,
-        # WHY the yield is what it is. A low per-episode figure has two very
-        # different causes with opposite remedies -- too few forced decisions
-        # (raise tau) or forced prices sitting too close to the reference
-        # (the affordable set only reaches the nearest tiers) -- and the
-        # aggregate cannot tell them apart. Information is QUADRATIC in the
-        # log price ratio, so the mean move is the term to read first.
+        # low yield has two causes with opposite remedies: few forced
+        # decisions (raise tau) vs small price moves (info is QUADRATIC in
+        # the log ratio) -- the terms below tell them apart
         "forced_decisions": n_forced,
         "information_per_forced_decision": round(
             raw_information / n_forced, 6) if n_forced else None,
@@ -818,25 +767,12 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             100 * forced_discount_gap / n_forced, 2) if n_forced else None,
         "mean_mu_on_forced_hours": round(
             forced_mu / n_forced, 3) if n_forced else None,
-        "note": ("Would-be: no price was applied, so this is the evidence the "
-                 "recommendations WOULD have bought. Each bounded update moves "
-                 f"the posterior mean at most {step} and at most one commits "
-                 "per day (human gate), so shifting the mean by X takes at "
-                 f"least ceil(X/{step}) calendar days however much evidence "
-                 "arrives. Divide episodes_per_bounded_update by the pilot's "
-                 "daily episode count for the evidence-side estimate; the "
-                 "binding constraint is whichever is larger. To read a "
-                 "DISAPPOINTING yield, go to the three terms behind it: "
-                 "information per forced decision is mu * L^2 * r/(r+mu) with "
-                 "L the log price ratio vs the REFERENCE discount, so it is "
-                 "quadratic in how far exploration moved the price and only "
-                 "linear in how much demand was there. A small "
-                 "mean_discount_gap_from_reference_forced_pp is the usual "
-                 "culprit and tau is its lever: tau buys the CHEAPEST "
-                 "alternatives first, and those are the tiers nearest the "
-                 "optimum -- the quadratically least informative ones. Compare "
-                 "the tau in force against q_spread_distribution: funding only "
-                 "sub-p25 spreads means exploring often and learning little."),
+        "note": ("Would-be evidence (no price applied). Calendar floor: one "
+                 f"bounded update/day, each moving the mean at most {step}. "
+                 "Per-decision info is mu*L^2*r/(r+mu), QUADRATIC in the log "
+                 "price move: a small mean_discount_gap is the usual cause of "
+                 "a poor yield, and tau is its lever (tau buys the cheapest "
+                 "-- least informative -- tiers first)."),
     }
 
     completeness = n_out / n_dec
@@ -861,25 +797,18 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         # than letting "0 violations" read as a proof over the window
         gate["sampling_caveat"] = (
             f"gate measured on {len(groups):,} of {len(population):,} episodes "
-            f"({len(groups) / max(len(population), 1):.1%}, seed {seed}). The "
-            "rates are sample estimates -- at this size the standard error on "
-            "a rate near 0.99 is "
-            f"{(0.99 * 0.01 / max(len(groups), 1)) ** 0.5:.4f}, against the "
-            "0.01 the gate discriminates on. The zero cost-floor violation "
-            "count is zero OVER THE SAMPLE, not a proof over the window. "
-            "Cost-floor safety is structural (the action set cannot express a "
-            "below-cost price) and separately unit-tested -- this gate "
-            "confirms it end-to-end, it does not establish it.")
+            f"(seed {seed}): rates are sample estimates, and the zero "
+            "cost-floor count is zero OVER THE SAMPLE, not a proof over the "
+            "window (cost-floor safety is structural and unit-tested).")
     if window_basis != HOLDOUT_BASIS:
         # in-sample rows flatter the drift ratio, tau and learning yield;
         # the plumbing checks survive
         gate["in_sample_caveat"] = (
-            f"run on '{window_basis}', NOT the hold-out. Every artifact was "
-            "fit on data up to split.test_end, so any of that window included "
-            "here is in-sample: the drift ratio, tau_recommended and the "
-            "learning yield are flattered by it. The completeness, matched-rate "
-            "and cost-floor checks are unaffected -- they test plumbing, not "
-            "fit. Re-run without --all for the launch record.")
+            f"run on '{window_basis}', NOT the hold-out: the drift ratio, "
+            "tau_recommended and the learning yield are flattered by "
+            "in-sample rows. The completeness, matched-rate and cost-floor "
+            "checks test plumbing, not fit, and are unaffected. Re-run "
+            "without --all for the launch record.")
     gate["verdict"] = ("PASS -- proceed to exploit-only pilot (section 19)"
                        if all(g["pass"] for g in gate.values()
                               if isinstance(g, dict))
@@ -930,13 +859,9 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         },
         "realised_vs_predicted_sold_ratio_at_legacy_price": round(drift_ratio, 4)
             if drift_ratio else None,
-        # BOTH calibration regimes on the same rows (owner, 2026-08-28).
-        # frozen = the shipped artifact, whose weekly schedule stops at
-        # test_end so every hold-out row holds the anchor: "launch and never
-        # re-calibrate". weekly_refit = factors re-fit each week on the
-        # trailing window ending strictly before it, the way production's
-        # cron holds them. The SPREAD is what weekly re-calibration is worth
-        # over this window; read it before deciding the production cadence.
+        # BOTH calibration regimes on the same rows: frozen = "launch and
+        # never re-calibrate"; weekly_refit = production's cron. The SPREAD
+        # decides the production cadence.
         "calibration_regimes": {
             "frozen_anchor": round(drift_ratio, 4) if drift_ratio else None,
             "weekly_refit": round(refit_ratio, 4) if refit_ratio else None,
@@ -948,15 +873,10 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
                 c["week"] for c in refit_cov if c.get("partial")],
             "weeks_unfitted_held_at_anchor": [
                 c["week"] for c in refit_cov if c.get("fitted") is False],
-            "note": ("Both ratios are realised/E[min(D,q)] on the SAME rows "
-                     "at the legacy price -- only the level factor differs. "
-                     "The schedule is fit here, not in the artifact, so the "
-                     "pre-launch bundle stays clean of hold-out rows (rule "
-                     "16); at week k it reads only weeks < k, which is what "
-                     "the cron has on that Monday. Both near 1.0 = the level "
-                     "held. Only frozen off = the anchor went stale and "
-                     "weekly re-fitting earns its keep. Both off = the level "
-                     "moved faster than a weekly cadence can track."),
+            "note": ("Same rows, legacy price, censored basis -- only the "
+                     "level factor differs. Both ~1.0 = level held; only "
+                     "frozen off = the anchor went stale (weekly re-fit earns "
+                     "its keep); both off = drift faster than weekly."),
         },
         "solver_latency_p95_s": round(float(np.percentile(latencies, 95)), 4),
         "note": ("Shadow outcomes carry execution_status="

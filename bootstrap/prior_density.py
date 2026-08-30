@@ -20,15 +20,9 @@ from bootstrap.prepare_data import population, split_frames
 
 
 def scored_rows(frame, cfg):
-    """ENTRY ROWS -- one per episode, its first hour, before any within-episode
-    selection has happened (hard rule 7).
-
-    The alternative (`all_stocked_hours`) and the sweep that compared them are
-    gone: within an episode the discount path RESPONDS to realised demand, so
-    those rows identify elasticity backwards, and no extract has ever made
-    them the better choice. Keeping a branch nobody selects is a second code
-    path to maintain and a config key that invites the wrong answer. History:
-    design 5.6, learnings.md."""
+    """ENTRY ROWS -- one per episode, its first hour, before any
+    within-episode selection has happened (rule 7; alternatives are gone,
+    see learnings.md)."""
     f = frame.copy()
     f["censored"] = episodes.censored_hours(f)
     f = f[f.starting_inventory >= 1]
@@ -57,13 +51,8 @@ def hour_multipliers(mu, cell, k, censored, min_rows=1):
 
 
 def time_cell(g):
-    """DATE x HOUR -- the cell the controlled arm profiles out.
-
-    `hour_of_day` alone was the alternative and is gone: it pools every
-    Tuesday 18:00 in the extract into one cell, so a promo day or a weather
-    week leaks into the price comparison. The cost of the finer cell is
-    thinner cells, which `min_rows_per_time_cell` handles by falling back to
-    a multiplier of 1.0."""
+    """DATE x HOUR -- the cell the controlled arm profiles out (the pooled
+    hour_of_day alternative is gone; see learnings.md)."""
     return (g.date.astype(str) + "|" + g.hour_of_day.astype(str)).to_numpy()
 
 
@@ -177,10 +166,9 @@ def build_curves(d, cfg, model, grid, window):
 
 
 def unconstrained_argmax(d, cfg, model, lo, hi, n):
-    """Each arm's unconstrained peak, searched PAST the policy bounds --
-    `search_bounds` is policy, not belief, so a wrong-signed likelihood must
-    be caught here rather than clipped to a bound and reported as measured.
-    Why this check exists: design 5.6 and learnings.md."""
+    """Each arm's unconstrained peak, searched PAST the policy bounds: a
+    wrong-signed likelihood must be caught, not clipped and reported as
+    measured."""
     wide = np.linspace(lo, max(1.0, hi), n)
     out = {}
     for cat, c in build_curves(d, cfg, model, wide, "train").items():
@@ -226,17 +214,10 @@ def fold_spread(d, cfg, model, grid, folds=3):
 
 def estimate(d, cfg, model, fast=False):
     """The prior, as a density per category. No constant anywhere in it.
-
-    `fast` skips the two blocks that cost most and feed NOTHING the
-    calibration<->dispersion loop reads: `fold_spread` only widens the std
-    FLOOR.
-    The loop compares FACTORS, which depend on `r`, which is fitted at the
-    prior MEAN -- so neither can move the fixed point, and re-computing them
-    on every turn was ~70% of the prior's cost. The final turn must run FULL:
-    the artifact's std is what `init_posterior` reads.
-    """
+    `fast` skips fold_spread (it only widens the std FLOOR, so it cannot move
+    the calibration fixed point); the loop's final turn must run FULL."""
     pc = cfg["posterior"]["prior"]
-    lo, hi = pc["search_bounds"]
+    lo, hi = cfg["posterior"]["epsilon_min"], cfg["posterior"]["epsilon_max"]
     grid = np.linspace(lo, hi, pc["search_grid_size"])
     step = float(grid[1] - grid[0])
     sat = float(pc["own_information_saturation"])
@@ -343,23 +324,15 @@ def estimate(d, cfg, model, fast=False):
             per_category[cat]["stability"] = fold
         if wrong_sign:
             per_category[cat]["wrong_sign_note"] = (
-                f"the likelihood's unconstrained peak is at {peak:+.3f} -- at "
-                "or above zero, which says demand RISES with price. That is "
-                "nonsensical rather than weak, so this category's own density "
-                "is discarded and it takes the pooled one. The usual cause is "
-                "the legacy ramp: deep discounts land on stock that is not "
-                "selling, so conditional on a price-neutral mu_ref the deeper "
-                "price reads as lower demand. Only exogenous price variation "
-                "fixes it -- see pricing.explore.")
+                f"unconstrained peak at {peak:+.3f} -- demand rising with "
+                "price. Own density discarded for the pooled one; usual cause "
+                "is the legacy ramp, and only exogenous price variation fixes "
+                "it.")
         if c["log_ratio_sd"] < 1e-9:
             per_category[cat]["no_price_variation"] = (
-                "every scored row sits at the same discount, so epsilon is "
-                "ABSENT from this category's likelihood -- not weakly "
-                "identified, absent. Its own density is the uniform on the "
-                "support by construction, and the prior it gets is the pooled "
-                "one. Nothing about this category's own elasticity has been "
-                "measured, and no estimator can change that: only price "
-                "variation can.")
+                "every scored row sits at one discount: epsilon is ABSENT "
+                "from this likelihood, and the category takes the pooled "
+                "prior. Only price variation can change that.")
     return grid, per_category, densities, {
         "pooled_mean": round(pooled_mean, 4),
         "pooled_std": round(pooled_std, 4),
@@ -376,7 +349,7 @@ def holdout_comparison(d, cfg, model, grid, candidates):
     likelihood per row, deff-deflated -- narrow-and-wrong loses badly,
     too-wide loses mildly. `oracle` (hindsight-best eps, unreachable) and
     `uniform` (flat, the floor) bracket the result. Rationale: design 5.6."""
-    window = cfg["posterior"]["prior"]["holdout_window"]
+    window = "calib"                       # the out-of-train scoring window
     hold = build_curves(d, cfg, model, grid, window)
     if not hold:
         return {"window": window, "note": "held-out window has no scorable rows"}

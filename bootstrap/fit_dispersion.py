@@ -139,7 +139,7 @@ def fit_dispersion(d, cfg):
                     "than the data has, for the steadiest cells in the "
                     "extract. If this list is long, the NB is the wrong family "
                     "for this extract and not just for these cells."),
-                "fallback_order": dc["fallback_order"],
+                "fallback_order": ["subcategory", "category", "global"],
                 # what the residuals were ACTUALLY formed at -- per category,
                 # from the prior in force
                 "working_elasticity": eps0,
@@ -149,17 +149,10 @@ def fit_dispersion(d, cfg):
                 "working_elasticity_by_category": {
                     k: round(v, 4) for k, v in sorted(eps_by_cat.items())}}
 
-    # rho against fitted residuals -- the authoritative value (phase 0's m3
-    # is a proxy). SAME WINDOW AS r: it once read the full frame, which is
-    # ~83% training rows -- where the model fits its own residuals by
-    # construction, so between-episode variance read artificially small
-    # (fixture: in-train rho 0.081 vs out-of-sample 0.230) -- and, on an
-    # extract that runs past test_end, hold-out rows too (hard rule 16). An
-    # understated rho understates deff, and deff deflates every posterior
-    # update, so every episode was counted as more evidence than it carries.
-    # calib is the one window that is both out-of-train and pre-gate (design
-    # 6); mean_forced_hours is measured on the same window so the deff pair
-    # is internally consistent.
+    # rho on the CALIB window, same as r: in-train rows understate it (the
+    # model fits its own residuals), an understated rho understates deff, and
+    # deff deflates every posterior update. mean_forced_hours shares the
+    # window so the deff pair is consistent.
     calib["resid"] = calib.units_sold - calib.mu_hat
 
     sizes = calib.groupby("episode_id")["resid"].size()
@@ -187,26 +180,11 @@ def fit_dispersion(d, cfg):
 
 
 def drift_by_window(d, cfg, freq="W"):
-    """Do `r` and `rho` actually move over time, or are they stable enough to
-    freeze? Refits BOTH on each rolling window of `freq`, using the same
-    estimators the frozen fit uses -- a second implementation would answer a
-    different question.
-
-    Why this is a MEASUREMENT and not a re-fit schedule. Both are second
-    moments from weak signal: `r` already falls back a level whenever a group
-    holds fewer than `min_rows_per_group` rows, and `rho` is one global scalar
-    that divides ALL accumulated evidence through `deff`. Fitting either on a
-    week would add noise to quantities the learning rate is denominated in.
-    And re-fitting `r` inside the learning phase reintroduces the eps <-> r
-    cycle design 5.6 removed by making the prior a censored Poisson profile:
-    eps moves -> residuals change -> r changes -> the likelihood reweights.
-
-    So the honest use of this series is to decide the RETRAIN cadence, and to
-    give `assurance.dispersion` / `assurance.correlation` a baseline for what
-    ordinary movement looks like. `spread_vs_alert` compares the observed
-    spread against `rho_drift_alert`: above 1 the live alert would fire on
-    ordinary variation, which makes it an alarm rather than a detector.
-    """
+    """Do r and rho actually move, or are they stable enough to freeze?
+    Refits both on rolling windows with the SAME estimators as the frozen
+    fit. A MEASUREMENT, not a re-fit schedule: weekly re-fits would add noise
+    to the learning rate's denominators and reintroduce the eps<->r cycle.
+    Use: decide the retrain cadence; baseline the assurance alerts."""
     dc = cfg["dispersion"]
     model = BaselineModel(cfg)
     eps_by_cat, eps0 = _working_elasticity(cfg)

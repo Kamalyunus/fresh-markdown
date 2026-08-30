@@ -107,23 +107,10 @@ def settle(cfg, max_turns):
                   "--check-convergence"], fatal=False)
             return True, turn, (convergence(cfg) or block)
 
-        # not settled: is it contracting, or stuck? A trajectory that is not
-        # shrinking will not shrink by being run again, and saying so beats
-        # burning turns on it.
-        #
-        # But the test has to be a STALL, not a bad turn. This once stopped on
-        # two consecutive non-improvements, which is ordinary noise in a loop
-        # that legitimately runs 8-9 turns -- and it read a plateau at turn 3
-        # of a 9-turn settle as "will not help", killing runs that were fine.
-        # So: stop only when the last three turns have all failed to beat the
-        # best reading that preceded them. One bounce or one flat pair is
-        # survivable; three turns of no new best is a fixed point that is not
-        # moving toward the tolerance.
-        #
-        # Read from THIS run's turns, not the artifact's `history`: that field
-        # is appended across runs, so a previous chain's readings survive into
-        # a fresh one, and a low reading from the old chain would read as a
-        # best this run can never beat -- a stall on the first turn.
+        # STALL test, not a bad-turn test: stop only after three turns with
+        # no new best (a plateau inside a 9-turn settle is ordinary). Reads
+        # THIS run's turns -- the artifact's `history` spans runs, and an old
+        # chain's low reading would stall a fresh run on turn 1.
         if block.get("max_abs_dlog") is not None:
             seen.append(float(block["max_abs_dlog"]))
         if len(seen) >= 4 and min(seen[-3:]) >= min(seen[:-3]):

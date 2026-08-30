@@ -65,7 +65,7 @@ def main():
         },
         "artifact_versions": {
             "baseline_model_version": model.version,
-            "train_population": cfg["baseline_model"]["train_population"],
+            "train_population": "eligible",
             "prior_source": prior["source"],
             "config_version": cfg["meta"]["config_version"],
             # did every priced row get its OWN week's level factors, or did

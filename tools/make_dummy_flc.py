@@ -4,46 +4,20 @@ Synthetic FLC data generator.
 Emits data matching the flc_filtered.parquet schema exactly, with a known
 ground-truth elasticity so that estimators can be validated against it.
 
-Two policy modes:
+Two policy modes: --policy legacy (ramp ~1pp/hour; price collinear with
+hour, elasticity NOT identifiable -- confirms an estimator detects the
+confound) and --policy randomized (identifiable -- confirms it recovers
+epsilon_true).
 
-  --policy legacy      Reproduces the current production behaviour: discount
-                       ramps ~1pp/hour from entry to a cap. Price is collinear
-                       with hour-of-day, so elasticity is NOT identifiable.
-                       Use this to confirm an estimator DETECTS the confound.
+BOTH source inventory conventions must stay modelled -- a fixture missing one
+passes quietly with that code path never executed: the write-off sentinel
+(ending_inventory zeroed at close, the ONLY closure test) and shrink
+(0 < ending < starting - sold, kept as scrap). `main` counts both per run;
+a zero means the fixture stopped exercising it.
 
-  --policy randomized  Entry discount randomized across the feasible range and
-                       hourly perturbations drawn from feasible deeper tiers.
-                       Elasticity IS identifiable. Use this to confirm an
-                       estimator RECOVERS epsilon_true.
-
-Usage:
-    python3 make_dummy_flc.py --skus 400 --days 60 --policy legacy
-    python3 make_dummy_flc.py --skus 400 --days 60 --policy randomized \
-        --out data/flc_filtered_randomized.parquet
-
-THE SOURCE'S TWO INVENTORY CONVENTIONS ARE MODELLED HERE, and both must stay
-modelled. A fixture missing one does not fail -- it passes, quietly, with the
-code path that reads it never executed:
-
-  write-off sentinel   `ending_inventory` zeroed on the row a listing closes.
-                       This is the ONLY test for closure. A fixture without it
-                       reads every episode as unclosed; with the old
-                       `write_off_convention` fallback in place it read every
-                       episode as CLOSED instead, and a stale fixture carrying
-                       no sentinel at all went unnoticed for months.
-  shrink               `0 < ending < starting - sold` -- stock gone without a
-                       sale and without a write-off. Real, and the chain is
-                       specified to KEEP it: scrap is leftover PLUS shrink.
-
-`main` counts both on every run. If either prints zero, the fixture is not
-exercising what it claims to.
-
-DIRT IS INJECTED AT THE SCOPE THE DEFECT REALLY HAS. Null category, null
-subcategory, zero base price and the multi-lot over-sell are ROW properties
-and are injected per row. A negative `flc_window` is a WINDOW property -- an
-episode entering already negative -- and is injected across whole windows,
-because `assign_episode_ids` differences the counter hour to hour and a single
-bad value reads as a window boundary rather than as bad data.
+Dirt is injected at the defect's real scope: row properties per row, a
+negative flc_window across whole windows (a single bad value would read as a
+window boundary).
 """
 
 import argparse
@@ -114,17 +88,9 @@ HOUR_FACTOR = {
 EXCLUSION_START = dt.date(2026, 4, 25)
 EXCLUSION_END = dt.date(2026, 6, 3)
 
-# THE FIXTURE MUST COVER THE CONFIGURED SPLITS, or the pipeline it exists to
-# exercise cannot run on it. The generator used to start at a hardcoded
-# 2026-03-01 for 90 days, of which the exclusion window removed the tail --
-# so the data ended 2026-04-24 while config.yaml's calib window began in July.
-# `fit_dispersion` then died with "calibration window contains no rows" and
-# the prior's held-out comparison came back empty, on the documented run order,
-# from a clean checkout. Both were silent about the cause.
-#
-# `--start` now defaults to whatever reaches split.train_start, and `--days` to
-# whatever reaches split.test_end, so `bootstrap.run --input <fixture>` runs
-# end to end. Pass either explicitly to override.
+# The fixture must cover the configured splits: --start defaults to
+# split.train_start and --days to what reaches split.test_end, so
+# `bootstrap.run --input <fixture>` runs end to end.
 DEFAULT_START = dt.date(2026, 3, 1)
 
 
@@ -273,23 +239,9 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
                 demand = int(rng.negative_binomial(r_disp, p))
                 sold = min(demand, inv)
 
-                # SHRINK -- stock that left without being sold and without
-                # being written off, `0 < ending < starting - sold`. A real
-                # business event the source reports, not dirt: the old chain
-                # rule DELETED these episodes and took 33.6pp of the extract's
-                # COGS with them, selecting the largest windows 4.5 to 1.
-                #
-                # Kept strictly interior. `ending == 0` would read as the
-                # write-off sentinel by `hour_status`, which is a CLOSE, not a
-                # shrink -- so the draw leaves at least one unit standing and
-                # the episode carries on. And never on the final hour, where
-                # shrink and leftover are indistinguishable once the source
-                # zeroes the ending: `starting - sold` is the whole remainder
-                # there and it is booked as leftover.
-                #
-                # Chain continuity is preserved BY CONSTRUCTION -- `inv` is
-                # assigned from `ending` below, so `ending[t] == starting[t+1]`
-                # whatever leaves during the hour.
+                # SHRINK (0 < ending < starting - sold): a real event, kept
+                # strictly interior (ending == 0 is the CLOSE sentinel) and
+                # never on the final hour. Continuity holds by construction.
                 shrink = 0
                 if (h_idx < n_hours - 1 and inv - sold >= 2
                         and rng.random() < shrink_rate):
@@ -336,32 +288,10 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
         df.loc[c, "normal_asp"] = 0.0                     # zero base price
         df.loc[e, "units_sold"] = df.loc[e, "inventory"].astype(int) + 3  # multi-lot
 
-        # NEGATIVE WINDOW -- injected on WHOLE WINDOWS, from the first hour.
-        #
-        # It used to be written onto RANDOM ROWS, and that did not model the
-        # source at all: a single corrupted counter mid-window reads as a
-        # window BOUNDARY to `assign_episode_ids`, which differences the
-        # counter hour to hour. One bad value shredded a clean 4-hour window
-        # into three fragments -- 3, 2, [-1], 0 -- and the fragments that did
-        # not carry the closing row came out `not_closed`. It manufactured
-        # 62 of the fixture's 65 unclosed episodes, so `edge_truncated` read 0
-        # against them and `share_of_unclosed_explained_by_edge` read 0: the
-        # diagnostic that is supposed to say "the extract boundary explains
-        # these" was being answered by an injection artifact instead. With
-        # dirt off, unclosed fell from 3.9% to 0.2%.
-        #
-        # The real pattern is an episode ENTERING already negative, and it
-        # stays an episode: the counter still decrements by one per hour, so
-        # segmentation keeps the window whole, `negative_window_recovered`
-        # rewrites it as a countdown from `manufacturing_window_hours`, and
-        # the episode keeps its closing row.
-        #
-        # The source's other negative shape -- a flat negative CONSTANT on
-        # every row -- is deliberately NOT injected. A flat counter differences
-        # to zero, so it segments into one-row episodes; only the one holding
-        # the window's final row would close, and the rest would come out
-        # `not_closed`. That is the same artifact this change removes, so
-        # injecting it here would put the noise back under a better name.
+        # NEGATIVE WINDOW -- injected on WHOLE WINDOWS, from the first hour
+        # (a single mid-window bad value reads as a window boundary to
+        # assign_episode_ids and manufactures not_closed fragments). The real
+        # pattern is an episode ENTERING negative, which recovery rewrites.
         if windows:
             k_win = max(1, int(len(windows) * dirty_frac))
             for w in rng.choice(len(windows), size=min(k_win, len(windows)),

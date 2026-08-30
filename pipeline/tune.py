@@ -4,17 +4,7 @@
     python3 -m pipeline.tune --apply    # paste the MEASURED values, back up
                                         # config.yaml, write the decision log
 
-Every tuning decision this project has made was reached the same way: run the
-bootstrap, read a named field in a named report, compare it against what
-config.yaml holds, and either paste the measured value or record an owner
-decision with the evidence beside it. That loop was being carried between a
-human and two agents by copy-paste, which is where numbers get stale -- a run
-was analysed at `information_increment: 12.0` after the measured 0.341 had
-already been pasted, and nothing noticed.
-
-So the loop lives here. Each check names the report field it reads, so a
-disagreement is traceable to a file rather than to someone's memory, and the
-class decides who may act:
+Each check names the report field it reads; the class decides who may act:
 
   PASTE  a MEASURED value the pipeline computed. Auto-applied by --apply.
   OWNER  a SET BY OWNER value. NEVER auto-applied (AGENTS rule: never invent
@@ -43,19 +33,9 @@ from common.config import load_config
 PASTE, OWNER, INFO, BLOCK = "PASTE", "OWNER", "INFO", "BLOCK"
 OK, ACT = "OK", "ACT"
 
-# WHAT A PASTE ACTUALLY INVALIDATES. Getting this wrong sent an agent into a
-# loop: --apply said "re-run the bootstrap", the script RETRAINED THE BASELINE
-# (step 3), every artifact moved, the fixed point reset, and the convergence
-# check the agent was trying to close went red again -- on values that touch no
-# artifact at all. A retrain also breaks hard rule 1 outright.
-#
-#   "none"        read at runtime, or a mirror of a value the artifact already
-#                 holds. Nothing to re-fit; status re-reads config directly.
-#   "calibration" changes what --fit-calibration solves, so the loop turns:
-#                 3b -> 4 -> 5 -> 5b, then backtest and shadow to refresh the
-#                 reports. The BASELINE IS NOT RETRAINED.
-#   "retrain"     changes what the model is fitted on. Only data.split does
-#                 this, and it is SET BY OWNER, so --apply never writes one.
+# What a paste invalidates: "none" = read at runtime or mirrors the
+# artifact; "calibration" = the loop turns (3b-5b, NO retrain);
+# "retrain" = only data.split, which is SET BY OWNER and never auto-applied.
 RERUN = {
     ("baseline_model", "calibration_fit_trailing_weeks"): "calibration",
 }
@@ -69,9 +49,8 @@ RERUN_STEPS = {
         "  (iterates 3b -> 4 -> 5 -> 5b to CONVERGED and refreshes the "
         "reports), then re-run pipeline.shadow"),
     "retrain": ("the model's own training data changed -- a full "
-                "full `python3 -m bootstrap.run --input <raw>` is required "
-                "(hard rule 1: nothing "
-                "from before is comparable)"),
+                "`python3 -m bootstrap.run --input <raw>` is required; "
+                "nothing from before is comparable (rule 1)"),
 }
 
 # config path -> the unique line anchor that carries its scalar. Targeted line
@@ -240,19 +219,11 @@ def _measured(cfg, shadow, rho_art, thresholds):
 
 
 def _derived(cfg, backtest, thresholds):
-    """Values the pipeline MEASURES, which used to sit behind a human.
-
-    A value the data can decide should not wait on a decision (owner,
-    2026-08-30). Two of these carry a GATE -- a second measurement that must
-    agree before the paste is safe -- and a failing gate downgrades the
-    finding to OWNER with the reason, rather than hiding it.
-    """
+    """Measured values that auto-apply; a failing gate downgrades the
+    finding to OWNER with the reason."""
     out = []
 
-    # the rail: `consistent_max_mean_step` is derived from the launch prior
-    # std so both rails trip at the same surprise instead of one clipping
-    # every batch. The threshold note says to read the PRICE consequence
-    # first, so that read is the gate rather than a human's recollection.
+    # the rail, gated on its measured price consequence
     bs = (thresholds or {}).get("bounded_step_recommendation") or {}
     cur = _get(cfg, ("learning", "max_mean_step"))
     rec = bs.get("consistent_max_mean_step")
@@ -309,9 +280,7 @@ def _derived(cfg, backtest, thresholds):
             "a looser trip, but never below this",
             f"thresholds.guardrail_threshold_recommendation.{name}"))
 
-    # the level band: sized from the MEASURED week-to-week anchor volatility,
-    # and allowed to TIGHTEN ONLY. A band wider than the current one is a
-    # decision about tolerated level error, not a reading (owner, 2026-08-30).
+    # the level band: sized from measured anchor volatility, TIGHTEN ONLY
     g = cfg.get("tuning") or {}
     sweep = (((backtest or {}).get("fidelity") or {})
              .get("calibration_window_sweep") or {})
@@ -322,10 +291,7 @@ def _derived(cfg, backtest, thresholds):
     if mae and cap:
         k = g.get("calibration_band_sigma_multiple", 3)
         half = k * float(mae)
-        # clamp in RATIO space, not log: exp(0.10) is 1.1052, so clamping the
-        # log half-width would WIDEN the upper edge past the ceiling. Each
-        # side is pulled in independently, so the result can never be wider
-        # than [1-cap, 1+cap] on either side -- tighten only.
+        # clamp in RATIO space (exp(0.10)=1.1052 would breach a log clamp)
         cap = float(cap)
         band = [round(max(1 - cap, float(np.exp(-half))), 4),
                 round(min(1 + cap, float(np.exp(half))), 4)]
@@ -346,18 +312,11 @@ def _derived(cfg, backtest, thresholds):
 
 
 def _business(cfg, thresholds):
-    """The values data cannot decide, because they are tolerances, not facts.
-
-    Each one is reported with the number the data DOES supply, so the owner
-    decides against evidence rather than against nothing -- but the tool never
-    writes them, and `--apply` never touches them.
-    """
+    """Tolerances data cannot decide; reported with evidence, never
+    written by --apply."""
     out = []
 
-    # the two rails resolve the same mismatch, and WHICH one moves is a safety
-    # posture: raising max_mean_step lets prices move faster, lowering
-    # max_std_shrink makes the system slower to become confident. The tool
-    # supplies both numbers and takes neither decision (owner, 2026-08-30).
+    # which rail moves is a safety posture; the tool supplies both numbers
     bs = (thresholds or {}).get("bounded_step_recommendation") or {}
     std0 = bs.get("median_launch_std")
     step = _get(cfg, ("learning", "max_mean_step"))
@@ -383,10 +342,7 @@ def _business(cfg, thresholds):
     by = ab.get("by_duration") or {}
     cur = _get(cfg, ("ab_test", "min_detectable_effect_pct"))
     if by:
-        # the FRONTIER, not the target. Echoing back the --mde flag would be
-        # recommending the question as its own answer; what the data supplies
-        # is what each duration can resolve, and the owner picks a number they
-        # would act on -- or learns the A/B cannot resolve one that small.
+        # the achievable FRONTIER, not the --mde flag echoed back
         achievable = sorted(
             ((v.get("detectable_mde_rel"), k) for k, v in by.items()
              if v.get("detectable_mde_rel") is not None))
@@ -469,10 +425,7 @@ def _readings(cfg, backtest, shadow):
         calib_weeks = ((pd.Timestamp(s["calib_end"])
                         - pd.Timestamp(s["calib_start"])).days + 1) / 7.0
         feasible = want and calib_weeks >= 2 * want
-        # MEASURED by the sweep (fit on trailing W, score the NEXT week), so
-        # it pastes -- but only when the split can hold it. calib >= 2W is the
-        # dependency rule, and a W the split cannot support is a SPLIT
-        # decision, which is the owner's.
+        # pastes only when the split can hold it (calib >= 2W)
         out.append(_finding(
             ("baseline_model", "calibration_fit_trailing_weeks"),
             PASTE if feasible else OWNER,
@@ -520,9 +473,8 @@ def collect(cfg, root="reports"):
 # --------------------------------------------------------------- applying
 
 def set_scalar(text, path, value):
-    """Replace one scalar in config.yaml, keeping its comment and every other
-    line byte-identical. A YAML round-trip would drop the comments, and in
-    this config the comment IS the reasoning."""
+    """Replace one scalar in config.yaml, keeping its comment and every
+    other line byte-identical (a YAML round-trip drops comments)."""
     anchor = ANCHORS.get(tuple(path))
     if anchor is None:
         raise KeyError(f"no line anchor for {'.'.join(path)}")
@@ -542,11 +494,8 @@ def set_scalar(text, path, value):
 
 
 def apply(cfg, report, config_path="config.yaml", out_dir="artifacts"):
-    """Paste the MEASURED values, back up the config, write the decision log.
-
-    OWNER values are never touched (AGENTS rule: never invent a SET BY OWNER
-    value) -- they are recorded as pending decisions with their evidence.
-    """
+    """Paste the MEASURED values, back up the config, write the decision
+    log. OWNER values are never touched."""
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     os.makedirs(out_dir, exist_ok=True)
     backup = os.path.join(out_dir, f"config_backup_{stamp}.yaml")
@@ -646,9 +595,7 @@ def main():
         for f_ in res["failed"]:
             print(f"  SKIPPED   {f_['key']}: {f_['error']}")
         if res["applied"]:
-            # the MINIMUM sufficient re-run, computed from what was written.
-            # Saying "re-run the bootstrap" for a runtime-only paste retrains
-            # the baseline, resets the fixed point and breaks hard rule 1.
+            # the MINIMUM sufficient re-run for what was written
             print(f"\n{RERUN_STEPS[res['rerun']]}")
     return 0
 

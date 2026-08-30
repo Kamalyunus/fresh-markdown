@@ -152,12 +152,9 @@ _smooth = guardrail.smooth   # one definition, shared with pipeline.monitor
 
 
 def control_arm_noise(d, cfg):
-    """Same-day treatment-vs-control noise -- the basis the monitor uses once
-    the A/B is live (cancels the common day effect the trailing basis keeps).
-    Both arms are smoothed over deterioration_smoothing_days BEFORE
-    differencing, exactly as pipeline.monitor.deterioration does -- an
-    unsmoothed floor overstates by up to ~sqrt(smooth) and leaves the
-    guardrail inert. Arm assignment is the monitor's own common.ab.arm."""
+    """Same-day treatment-vs-control noise (the monitor's basis once the
+    A/B is live). Arms are smoothed BEFORE differencing, exactly as
+    pipeline.monitor does; arm assignment is common.ab.arm."""
 
     ep = d.sort_values(["date", "hour_of_day"]).groupby("episode_id").agg(
         date=("date", "first"), sku_id=("sku_id", "first"), fc=("fc", "first"),
@@ -225,10 +222,8 @@ def control_arm_noise(d, cfg):
 
 
 def recommend_thresholds(trailing, control_arm, cfg):
-    """Per metric: the floor from each basis, which one binds, and whether the
-    configured threshold clears it. One config value is graded against the
-    trailing basis before the A/B and the control-arm basis during it, so it
-    must sit above BOTH."""
+    """Per metric: the floor from each basis, which binds, and whether the
+    configured threshold clears it (must sit above BOTH bases)."""
     sc = cfg["monitoring"]["stop_conditions"]
     out = {}
     for metric, key in (("scrap_rate", "scrap_deterioration_pct"),
@@ -264,8 +259,8 @@ def recommend_thresholds(trailing, control_arm, cfg):
                 f"series' own level. No threshold can clear it without also "
                 f"clearing the failure this guardrail exists to catch. This is "
                 f"the wrong basis for this metric, not a tuning problem: set "
-                f"monitoring.stop_conditions.deterioration_basis.{metric_key} "
-                f"to 'absolute_pp' and re-derive.")
+                f"common.guardrail.BASIS[{metric_key!r}] to 'absolute_pp' "
+                f"and re-derive.")
             out[metric] = rec
             continue
         if c_floor is None:
@@ -345,10 +340,10 @@ def guardrail_noise(d, cfg):
                 + (f"The series is at or below zero on "
                    f"{out['days_at_or_below_zero']} of {out['days']} days, so "
                    "a ratio to its mean is undefined in practice: switch this "
-                   "metric to deterioration_basis 'absolute_pp'."
+                   "metric to the absolute_pp basis (common.guardrail.BASIS)."
                    if out["days_at_or_below_zero"] else
-                   "Consider deterioration_basis 'absolute_pp', or more "
-                   "smoothing if the series is strictly positive."))
+                   "Consider the absolute_pp basis (common.guardrail.BASIS), "
+                   "or more smoothing if the series is strictly positive."))
         if out["outlier_dominated"]:
             sigma = out["daily_rel_dev_sigma"]
             sigma_robust = out["daily_rel_dev_sigma_robust"]
@@ -411,26 +406,10 @@ def guardrail_noise(d, cfg):
 
 
 def information_increment(cfg):
-    """`learning.information_increment` from the posterior's own arithmetic,
-    not judgment.
-
-    Fisher information adds to PRECISION: 1/s1^2 = 1/s0^2 + I. So the
-    information that shrinks the std by exactly `max_std_shrink` is
-
-        I* = (1/s0^2) * [1/(1-max_std_shrink)^2 - 1]
-
-    I* is a CEILING, not a target. `bounded_step` clips the update at the cap
-    and the excess is discarded -- outcomes are marked processed either way --
-    so an increment above I* waits longer to gather evidence it then throws
-    away. Below I* the update is simply a smaller step, which is safe.
-
-    I* moves with s0 (as 1/s0^2), so no single constant is right for the whole
-    pilot: it is smallest at launch, when the prior is widest and cheapest to
-    move, and grows as the posterior narrows. Derive it for the LAUNCH stds --
-    the phase the pilot exists to get through -- and re-derive after a prior
-    change. `wastes_at_launch` is what the CONFIGURED value throws away on a
-    launch-width cell, in multiples of what that step could use.
-    """
+    """information_increment from the posterior arithmetic: precision adds,
+    so I* = (1/s0^2) * [1/(1-max_std_shrink)^2 - 1] saturates the shrink cap.
+    A CEILING, not a target (excess evidence is clipped away); derived at the
+    LAUNCH stds and re-derived after any prior change."""
     s = cfg["learning"]["max_std_shrink"]
     k = 1.0 / (1.0 - s) ** 2 - 1.0
     with open(cfg["posterior"]["prior"]["path"]) as f:
@@ -479,32 +458,12 @@ def information_increment(cfg):
 
 
 def bounded_step(cfg):
-    """`max_mean_step` and `max_std_shrink` -- the two rails on one update.
-
-    They are NOT independent. `max_std_shrink` is the primary rate limiter:
-    it fixes how fast a cell may converge, and `information_increment` is
-    derived from it (see `information_increment`). `max_mean_step` then rails
-    the mean, and the coherent question is whether the two bind at the SAME
-    level of surprise.
-
-    A cap-sized update -- one carrying exactly the information that saturates
-    `max_std_shrink` -- moves the mean toward the batch's own estimate by
-
-        [1 - (1-max_std_shrink)^2] x |batch estimate - current mean|
-
-    (precision-weighted average, Normal approximation to the grid update).
-    So for a batch pulling one prior std away, the mean moves
-    `0.4375 x std` at a 25% shrink cap. If `max_mean_step` is far below that,
-    the mean rail clips on ordinary batches while the std rail almost never
-    binds -- the RUNBOOK's "most updates clip -> mis-sized" condition, by
-    construction rather than by accident.
-
-    Neither is fully derivable: they encode risk appetite. What IS derivable
-    is their consistency, the surprise level each one trips at, and the
-    convergence they imply. The policy consequence of a mean step is measured
-    separately, by `backtest.step_sensitivity`, which re-solves the DP arm at
-    eps +- max_mean_step on real episodes -- cross-check there before moving it.
-    """
+    """The two rails on one update, and whether they trip at the SAME
+    surprise. A cap-sized update moves the mean by
+    [1 - (1-max_std_shrink)^2] x |batch - mean| (Normal approx), so a
+    max_mean_step far below that clips on ordinary batches while the std rail
+    never binds. Neither is derivable (risk appetite); their CONSISTENCY is.
+    Cross-check the price consequence in backtest.step_sensitivity."""
     lc = cfg["learning"]
     shrink, step = lc["max_std_shrink"], lc["max_mean_step"]
     pull_frac = 1.0 - (1.0 - shrink) ** 2

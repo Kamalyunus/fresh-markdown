@@ -295,8 +295,7 @@ def test_the_backtest_cannot_reach_past_the_gate_window():
 
     `policy_replay` and `derive_tau_initial` ran on the whole frame, so
     tau_initial -- a MEASURED launch value -- was being fitted on the window
-    reserved for grading it. And `calibration_fit_window: "all"` resolved to
-    the whole frame, one config edit from fitting the level factors there.
+    reserved for grading it.
     """
     import inspect
     from backtest import __main__ as bt
@@ -308,9 +307,8 @@ def test_the_backtest_cannot_reach_past_the_gate_window():
         "the slice must happen before anything reads the frame"
 
     fit = inspect.getsource(train_baseline.fit_level_calibration)
-    all_branch = fit[fit.index('fit_window == "all"'):]
-    assert "pre_launch(d, cfg)" in all_branch.split("elif")[0], \
-        'calibration_fit_window "all" must mean all PRE-LAUNCH data'
+    assert "pre_launch(d, cfg)" in fit, \
+        "the calibration schedule must be bounded to PRE-LAUNCH data"
 
 
 def test_the_three_artifact_fits_stay_inside_their_own_splits():
@@ -328,8 +326,8 @@ def test_the_three_artifact_fits_stay_inside_their_own_splits():
     assert '"train"' in inspect.getsource(prior_density.estimate), \
         "the prior fit must be built on the TRAIN window"
     hold = inspect.getsource(prior_density.holdout_comparison)
-    assert 'cfg["posterior"]["prior"]["holdout_window"]' in hold, \
-        "the held-out comparison must score the CONFIGURED held-out window"
+    assert 'window = "calib"' in hold, \
+        "the held-out comparison must score the calib window"
     assert 'build_curves(d, cfg, model, grid, "train")' not in hold, \
         "the held-out comparison must not score the window the prior was fitted on"
 
@@ -383,10 +381,7 @@ def test_shadow_refuses_to_start_on_a_stale_tau(tmp_path):
     from common.config import ConfigError
     from pipeline import shadow
     cfg = load_config()
-    cfg = dict(cfg,
-               baseline_model=dict(cfg["baseline_model"],
-                                   apply_level_calibration=False),
-               exploration=dict(cfg["exploration"], tau_initial=410.74))
+    cfg = dict(cfg, exploration=dict(cfg["exploration"], tau_initial=410.74))
     path = tmp_path / "backtest.json"
     none = str(tmp_path / "missing.json")
     path.write_text(json.dumps(_derivation(410.74, scoped=False)))
@@ -876,11 +871,7 @@ def test_the_gate_freezes_calibration_even_though_the_schedule_runs_past_it():
     if not sched.get("by_week"):
         pytest.skip("calibration is not on the rolling schedule")
 
-    split = cfg["data"]["split"]
-    gate_start = pd.Timestamp(
-        split["test_start"]
-        if cfg["baseline_model"]["calibration_gate_window"] == "test"
-        else split["calib_start"])
+    gate_start = pd.Timestamp(cfg["data"]["split"]["test_start"])
     assert sched.get("gate_freezes_at") == str(gate_start.date()), (
         "the artifact must record where the gate freezes, or coverage cannot "
         "tell a deliberate freeze from production running onto stale factors")
@@ -985,7 +976,7 @@ def test_rho_is_fit_on_the_calib_window_not_the_full_frame():
     from bootstrap import fit_dispersion as fd
 
     src = inspect.getsource(fd.fit_dispersion)
-    rho_part = src[src.index("rho against fitted residuals"):]
+    rho_part = src[src.index("rho on the CALIB window"):]
     assert "d.copy()" not in rho_part, \
         "rho must not be fit on the raw input frame"
     assert 'calib.groupby("episode_id")' in rho_part

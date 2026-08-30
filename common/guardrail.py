@@ -4,7 +4,6 @@ trigger, and both MUST compute the same quantity. Two bases: `relative`
 (t/c - 1) for strictly positive rates (scrap); `absolute_pp` (t - c) when a
 metric can cross zero -- margin_rate does, so its relative floor exceeded the
 series' own level and was structurally blocked (measured; docs/learnings.md).
-Basis is per metric in monitoring.stop_conditions.deterioration_basis.
 """
 
 RELATIVE = "relative"
@@ -32,12 +31,12 @@ def deviation(treatment, control, worse_when_higher, basis):
     raise ValueError(f"unknown deterioration basis {basis!r}, expected one of {BASES}")
 
 
+BASIS = {"scrap": RELATIVE,        # strictly positive rate
+         "margin": ABSOLUTE_PP}    # can cross zero (relative floor blocked)
+
+
 def basis_for(cfg, metric_key):
-    """The configured basis for `scrap` or `margin`. Defaults to RELATIVE for
-    older configs, but the key should stay explicit in config.yaml -- the
-    basis changes what a threshold MEANS."""
-    sc = cfg["monitoring"]["stop_conditions"]
-    return sc.get("deterioration_basis", {}).get(metric_key, RELATIVE)
+    return BASIS.get(metric_key, RELATIVE)
 
 
 def units_of(basis):

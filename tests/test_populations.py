@@ -341,7 +341,6 @@ def test_every_eligible_episode_is_closed_but_not_the_reverse():
 def test_population_resolves_the_config_default(cfg):
     d, _ = tag_dp_eligibility(pd.concat([_frame(), _frame(cost=0.0)
                                          .assign(episode_id="bad")]), cfg)
-    assert cfg["baseline_model"]["train_population"] == "eligible"
     assert len(population(d, cfg, "integrity")) == len(d)
     # three nested populations, widest first
     assert (len(population(d, cfg, "dp_eligible"))
@@ -725,67 +724,6 @@ def test_the_backtest_grades_on_known_outcomes_only(cfg):
         "the exclusion must be counted, not silent"
 
 
-def test_tracing_changes_no_reported_number():
-    """The trace is diagnostics. If turning it on moved a figure, every export
-    would be quietly reporting something the backtest did not."""
-    import inspect
-    from backtest import replay
-
-    src = inspect.getsource(replay._replay_one)
-    # every write to the trace goes through `rec`, which is a no-op when off
-    assert "def rec(" in src and "if tr is not None" in src
-    # ...and the economics never read it back
-    body = src.split("def rec(")[1]
-    for accumulator in ("dp_disc_cost", "lg_disc_cost", "a_disc_cost"):
-        for line in body.split("\n"):
-            if accumulator in line and "+=" in line:
-                assert "tr" not in line and "rec(" not in line, \
-                    f"{accumulator} is being computed from the trace"
-
-
-def test_every_arm_traces_its_own_inventory_chain(cfg):
-    """Each arm holds DIFFERENT stock the moment it prices differently, so
-    each carries its own start/end pair. End of hour is AFTER sales and AFTER
-    that hour's restock/shrink -- the source's convention -- so `end[t]`
-    carries into `start[t+1]`, the invariant that says the columns mean what
-    their names say. Tolerance is half a unit because the simulated arms open
-    on the INTEGER shelf the solver priced while their carry is fractional;
-    the actual arm is exempt on the LAST row, where the source zeroes its
-    count to write the remainder off (design 12a)."""
-    from backtest.replay import _episode_frame, _replay_one
-
-    g = pd.DataFrame({
-        "episode_id": ["e"] * 4,
-        "date": ["2026-05-01"] * 4, "hour_of_day": [9, 10, 11, 12],
-        "total_discount": [0.25, 0.25, 0.30, 0.30],
-        "original_price": [10_000.0] * 4, "cost": [4000.0] * 4,
-        "d_ref": [0.25] * 4, "starting_inventory": [6, 5, 4, 3],
-        "units_sold": [1, 1, 1, 1], "mu_ref_hat": [1.5] * 4,
-        "r": [3.0] * 4, "eps": [-1.0] * 4,
-    })
-    g["ending_inventory"] = g.starting_inventory - g.units_sold
-    e = _episode_frame(g)
-    e["trace"] = True
-    row, _ = _replay_one(e, cfg)
-    hours = row["hours_trace"]
-    assert len(hours) == 4
-
-    for arm in ("actual", "legacy", "dp"):
-        for h in hours:
-            assert h[f"{arm}_start_inv"] is not None, f"{arm} start missing"
-            assert h[f"{arm}_end_inv"] is not None, f"{arm} end missing"
-        # the chain: this hour's close is next hour's open, down every arm
-        for a, b in zip(hours, hours[1:]):
-            assert a[f"{arm}_end_inv"] == pytest.approx(b[f"{arm}_start_inv"],
-                                                        abs=0.5), \
-                f"{arm} inventory chain breaks between hours"
-
-    # the arms are genuinely separate shelves, not three copies of one
-    assert any(h["dp_end_inv"] != h["legacy_end_inv"] for h in hours) or \
-        all(h["dp_discount"] == h["legacy_discount"] for h in hours), \
-        "the DP priced differently but its shelf never diverged"
-
-
 def test_the_learning_yield_reports_the_terms_behind_it():
     """A disappointing yield has two causes with OPPOSITE remedies -- too few
     forced decisions, or forced prices sitting too close to the reference --
@@ -821,52 +759,6 @@ def test_the_learning_yield_reports_the_terms_behind_it():
     gap = body[body.index('out["forced_discount_gap"] +='):]
     assert 'reference_discount' in gap[:220], \
         "the discount gap must be measured against the reference discount"
-
-
-def test_the_hourly_trace_accounts_for_every_unit_in_every_arm(cfg):
-    """Every unit an episode had either sold, shrank, or was scrapped at the
-    close -- there is no fourth fate, so per arm:
-
-        sum(units) + sum(shrink) + sum(scrap_at_close) == supply
-
-    Scrap is TERMINAL, so it may land only on the last row; shrink is hourly
-    and each simulated arm absorbs only what its own shelf still held.
-    Without this the hourly sheet would show a policy's sales without
-    showing where the rest of its stock went.
-    """
-    from backtest.replay import _episode_frame, _replay_one
-
-    # hour 2 loses 2 units to shrink; the episode closes holding stock
-    g = pd.DataFrame({
-        "episode_id": ["e"] * 4,
-        "date": ["2026-05-01"] * 4, "hour_of_day": [9, 10, 11, 12],
-        "total_discount": [0.25, 0.25, 0.30, 0.30],
-        "original_price": [10_000.0] * 4, "cost": [4000.0] * 4,
-        "d_ref": [0.25] * 4, "starting_inventory": [9, 8, 7, 5],
-        "units_sold": [1, 1, 0, 1], "mu_ref_hat": [1.5] * 4,
-        "r": [3.0] * 4, "eps": [-1.0] * 4,
-    })
-    #                      shrink of 2 between hour 2 and hour 3  ^
-    g["ending_inventory"] = [8, 7, 5, 0]
-    e = _episode_frame(g)
-    e["trace"] = True
-    row, _ = _replay_one(e, cfg)
-    hours = row["hours_trace"]
-
-    assert e["shrink"] == 2, "fixture no longer exercises shrink"
-    for arm, ep_arm in (("actual", "actual"), ("legacy", "legacy_model"),
-                        ("dp", "dp")):
-        sold = sum(h[f"{arm}_units"] or 0 for h in hours)
-        shrink = sum(h[f"{arm}_shrink"] or 0 for h in hours)
-        scrap = sum(h[f"{arm}_scrap_at_close"] or 0 for h in hours)
-        assert sold + shrink + scrap == pytest.approx(e["supply"]), \
-            f"{arm}: units unaccounted for on the hourly sheet"
-        # and the hourly decomposition rebuilds the episode's own scrap total
-        assert shrink + scrap == pytest.approx(row[f"{ep_arm}_scrap_units"]), \
-            f"{arm}: hourly scrap disagrees with the episode sheet"
-        # terminal by construction: nothing scrapped before the close
-        assert all(h[f"{arm}_scrap_at_close"] == 0 for h in hours[:-1]), \
-            f"{arm}: scrap landed before the episode closed"
 
 
 def test_step_sensitivity_prices_the_cap_on_real_episodes(cfg):

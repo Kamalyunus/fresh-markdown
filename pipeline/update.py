@@ -1,19 +1,10 @@
 """pipeline.update -- censored NB posterior update, operator-gated.
 
-Design section 5.11. Runs as a daily batch:
-
-    python3 -m pipeline.update             # monitor only
-    python3 -m pipeline.update --apply     # apply bounded posterior updates
-
-Eligibility: exploration outcomes only, finalized, reference_mu from the
-decision event (never recomputed). Censored NB likelihood on the grid; NB
-Fisher information deflated by deff; bounded step; exactly-once commit.
-
-Two things move, on different evidence: posterior mean/std on INFORMATION
-(when the unconsumed batch crosses `information_increment`); tau on SPEND,
-every run. Both persist to artifacts/posterior.json -- the only file this
-command writes; production callers read tau via `PosteriorStore.tau(cfg)`.
-Refuses to apply while any hard event-quality gate fails.
+Daily batch (design 5.11): `--apply` is the operator gate. Exploration
+outcomes only; censored NB likelihood; deff-deflated Fisher information;
+bounded step; exactly-once commit. Posterior moves on INFORMATION, tau on
+SPEND; both persist to artifacts/posterior.json. Refuses to apply while any
+hard event-quality gate fails.
 """
 
 import argparse
@@ -71,7 +62,7 @@ def collect_batch(store, posterior, cfg):
         if posterior.is_processed(o["outcome_id"]):
             continue
         dec = decisions[o["decision_id"]]
-        if not dec["is_exploration"] and not cfg["learning"]["use_exploitation_outcomes"]:
+        if not dec["is_exploration"]:      # MVP: exploration outcomes only
             continue
         ratio = (1 - dec["applied_discount"]) / (1 - dec["reference_discount"])
         ok = (dec["reference_mu"] > 0 and dec["dispersion_r"] > 0
@@ -223,17 +214,9 @@ def tau_calibration(decisions, outcomes, posterior, cfg):
 
 def calibration_current(cfg, today=None):
     """Does the level-calibration schedule cover the week being priced?
-
-    A row in a week the schedule does not reach takes the FROZEN fallback and
-    nothing raises -- so a missed weekly re-fit silently reverts production to
-    stale factors, the drift the point-in-time schedule exists to remove
-    (design 9.2). Detection after the fact is not enough: this is the hard
-    gate that stops the loop learning from prices set on factors nobody
-    refreshed.
-
-    Static calibration is a legitimate configuration and passes: there is no
-    schedule to outrun. `today` is injectable so the check is testable.
-    """
+    A week past the schedule takes the FROZEN fallback silently, so this is
+    the hard gate against learning from stale factors. Static calibration
+    passes; `today` is injectable for tests."""
     path = cfg["baseline_model"]["calibration_factor_path"]
     if not os.path.exists(path):
         return {"value": "none", "threshold": "schedule covers today",

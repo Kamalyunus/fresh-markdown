@@ -70,12 +70,6 @@ def load_config(path="config.yaml", strict=False):
     with open(path) as f:
         cfg = yaml.safe_load(f)
 
-    sb = cfg["posterior"]["prior"]["search_bounds"]
-    if [sb[0], sb[1]] != [cfg["posterior"]["epsilon_min"], cfg["posterior"]["epsilon_max"]]:
-        raise ConfigError(
-            "posterior.prior.search_bounds must equal [epsilon_min, epsilon_max] "
-            "(design 5.6: a bound tighter than epsilon_min is a defect)")
-
     if strict:
         missing = [".".join(p) for p in RUNTIME_REQUIRED
                    if config_get(cfg, p) is None]

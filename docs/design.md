@@ -2449,8 +2449,7 @@ Two quantities follow from this and are reported side by side everywhere —
 sellable off this shelf). They are never equal for finite `q`: the shelf
 does not truncate the *probability* of a busy hour, it caps that hour's
 *contribution*, so what is lost is `Σ_{k>q} (k−q)·P(k)` — the demand that
-overflowed. `docs/stockout_gap.html` is the business-facing explainer for
-that gap, for the question category owners always ask first.
+overflowed — lost sales, not model shrinkage.
 
 **Censoring is decided at the LAST ROW only.** It cannot happen anywhere
 else: the source stops emitting rows once inventory reaches zero (which is

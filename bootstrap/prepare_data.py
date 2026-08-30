@@ -30,13 +30,10 @@ SOURCE_TO_CANONICAL = {
 
 # Persisted with the split manifest; production must derive identical boundaries.
 EPISODE_RULE = (
-    "episode_id = sku_id|fc|<first hour of the window>, where a window is a "
-    "maximal run of consecutive hourly rows for one sku x fc over which the "
-    "source hours_remaining counter decrements by exactly one per elapsed "
-    "hour. The window is NOT keyed by calendar date: FLC windows commonly run "
-    "past midnight (36-hour windows are common), and a date key would split "
-    "one economic episode into two, resetting the monotonicity anchor and "
-    "charging the carried-over inventory to scrap at the seam.")
+    "episode_id = sku_id|fc|<first hour of the window>: a maximal run of "
+    "consecutive hourly rows over which hours_remaining decrements by one "
+    "per elapsed hour. NOT keyed by calendar date -- windows cross midnight, "
+    "and a date key would split one episode in two at the seam.")
 
 
 def assign_episode_ids(df):
@@ -79,13 +76,9 @@ def gap_split_windows(df):
         "windows_split_by_a_feed_gap": int(len(broken)),
         "fragments_dropped": int(len(ids)),
         "missing_hours": int((dt_h[gap] - 1).sum()),
-        "note": ("A hole in the hourly feed splits one source window into "
-                 "fragments. Every fragment is dropped, not just the "
-                 "unclosed one: the second opens mid-window with the wrong "
-                 "starting stock and a counter part-way through, and its "
-                 "first row would be read as an ENTRY row by the elasticity "
-                 "fit. Detected from the counter falling in step with the "
-                 "clock, which a genuinely new window never does."),
+        "note": ("Every fragment of a gap-split window is dropped: the "
+                 "second opens mid-window and its first row would read as an "
+                 "ENTRY row in the elasticity fit."),
     }
     return ids, detail
 
@@ -128,10 +121,8 @@ def edge_truncated_episodes(d):
     left = pd.Series(
         episodes.leftover_units(last.starting_inventory, last.units_sold).to_numpy(),
         index=ids)
-    # "Still running at the extract's last hour?" -- compared NUMERICALLY in
-    # hours: `ts + to_timedelta(hr)` overflows timedelta64[ns] on production's
-    # million-hour counters and wraps silently (learnings.md); the equivalent
-    # `hr > extract_end - ts` is bounded by the extract's own span.
+    # compared numerically in hours: ts + to_timedelta(hr) overflows
+    # timedelta64[ns] on million-hour counters and wraps silently
     hours_to_end = (extract_end - ts).dt.total_seconds() / 3600.0
     edge = (hr > hours_to_end) | (hours_to_end <= 0)
 
@@ -152,18 +143,11 @@ def edge_truncated_episodes(d):
         "share_of_unclosed_explained_by_edge":
             round(float(len(at_edge) / n_unknown), 4) if n_unknown else 0.0,
         "extract_last_hour": str(extract_end),
-        "note": ("FLAGGED, NOT DROPPED -- `edge_truncated` is a column, and "
-                 "these episodes stay dp_eligible. Their observed hours are "
-                 "good demand data and they are the largest episodes in the "
-                 "extract; only their ENDING is unknown, and every scrap and "
-                 "IL consumer already excludes an unclosed ending on its own "
-                 "(scrap_units returns NaN, replay zeroes scrap under "
-                 "outcome_known, shadow charges scrap only on COMPLETED). "
-                 "Read share_of_unclosed_explained_by_edge: near 1.0 and the "
-                 "unknown-scrap problem is purely the extract boundary; well "
-                 "below and there is a feed gap or a subset that never writes "
-                 "off, spread across the whole period. "
-                 "m11.not_closed_by_month shows which."),
+        "note": ("FLAGGED, NOT DROPPED; stays dp_eligible. Only the ENDING "
+                 "is unknown, and every scrap/IL consumer already excludes an "
+                 "unclosed ending. share_of_unclosed_explained_by_edge near "
+                 "1.0 = purely the extract boundary; well below = a feed "
+                 "problem."),
     }
     return at_edge, detail
 
@@ -251,8 +235,7 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     status0 = episodes.hour_status(d.starting_inventory, d.units_sold,
                                    d.ending_inventory)
     wf[-1] = wf[-1] + ({
-        "rule": ("continuity AND identity AND a clean final hour -- the three "
-                 "things that make an episode's inventory readable"),
+        "rule": "continuity AND identity AND a clean final hour",
         "rows_chain_discontinuous_dropped": int(discontinuous.sum()),
         "episodes_dropped": int(len(set(
             d_before_universe.episode_id) - set(d.episode_id))),
@@ -264,12 +247,9 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
         "rows_write_off": int((status0 == episodes.WRITE_OFF).sum()),
         "rows_hour_shortfall_NOT_dropped": int(
             (status0 == episodes.SHORTFALL).sum()),
-        "note": ("Only continuity DROPS here. The identity is provable once "
-                 "it holds, so a violation means the supply arithmetic is "
-                 "broken rather than the feed; a dirty final hour FLAGS "
-                 "final_hour_restock and gates the eligible population. An "
-                 "hour-level restock or shrink is neither -- both are real "
-                 "events, counted gross and settled at the episode level."),
+        "note": ("Only continuity DROPS here; the identity and a dirty "
+                 "final hour FLAG. Hour-level restock/shrink are real events, "
+                 "counted gross, settled at episode level."),
     },)
 
 
@@ -301,29 +281,17 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     moved = int((resegmented != d.episode_id).sum())
     if moved:
         raise AssertionError(
-            f"re-segmentation moved {moved} rows to a different episode, so "
-            "the ids every flag above is keyed to are stale -- episode_universe "
-            "already ran its continuity check against them. TWO causes, and "
-            "the second is the one that actually happened:\n"
-            "  (a) a filter after the ids are assigned is dropping ROWS rather "
-            "than whole episodes, punching a hole in a window. Check that every "
-            "drop is `isin(episode_id)`-scoped.\n"
-            "  (b) something between id assignment and here MUTATED "
-            "`hours_remaining`, which is the field the ids are derived from. "
-            "`negative_window_recovered` does exactly that, and its synthetic "
-            "countdown can line up with a genuine neighbouring window and MERGE "
-            "them -- no filter is misbehaving at all. That is why recovery runs "
-            "after this check; do not move it back above.")
+            f"re-segmentation moved {moved} rows -- the ids the flags are "
+            "keyed to are stale. Either (a) a filter is dropping ROWS rather "
+            "than whole episodes, or (b) something mutated hours_remaining "
+            "before this check (negative_window_recovered must stay AFTER "
+            "it).")
     wf.append(("contiguous_episodes_built", len(d), d.episode_id.nunique(),
                cogs_at_risk(d)))
 
-    # "Manufacturing" SKUs enter with an already-negative counter; dropping
-    # them selects on category. Recovered as a synthetic COUNTDOWN (not a
-    # clamp -- ids, DP horizon and extend_to_window all read the counter) iff
-    # the episode fits inside `data.manufacturing_window_hours` -- checked,
-    # not trusted.
-    # RUNS AFTER the re-segmentation check: this is the one step that mutates
-    # `hours_remaining`, the field the ids are derived from (design.md 5.2).
+    # manufacturing SKUs enter with a negative counter; recovered as a
+    # synthetic countdown iff the episode fits inside the cap. Runs AFTER the
+    # re-segmentation check -- this is the one step that mutates the counter.
     cap = int(cfg["data"]["manufacturing_window_hours"])
     entry = d.groupby("episode_id")["hours_remaining"].transform("first")
     length = d.groupby("episode_id")["hours_remaining"].transform("size")
@@ -448,9 +416,7 @@ def add_ref_rate_features(d, cfg):
 
 def pre_launch(d, cfg):
     """Everything the PRE-LAUNCH artifacts may see: episodes whose window
-    opened on or before `split.test_end`; episode-scoped, so a window opening
-    before the boundary is kept whole. Bounds `calibration_fit_window: "all"`
-    and the tau_initial derivation away from the hold-out (see data.holdout)."""
+    opened on or before split.test_end (episode-scoped, kept whole)."""
     return episodes.window_slice(d, None, cfg["data"]["split"]["test_end"])
 
 
@@ -458,55 +424,29 @@ def pre_launch(d, cfg):
 
 DP_INELIGIBLE = (
     ("cost_missing",
-     "cost <= 0 -- a MISSING cost, not a free good. d_max reads 1.0, so the "
-     "DP would discount to the tier cap believing scrap is free, and IL "
-     "(scrap = cost x leftover) reads zero"),
+     "cost <= 0 -- a MISSING cost, not a free good: d_max would read 1.0 and "
+     "scrap would read free"),
     ("non_priceable",
-     "cost >= original_price, so d_max <= 0 and feasible_tiers is EMPTY -- "
-     "there is no price for the DP to choose"),
+     "cost >= original_price: d_max <= 0, feasible_tiers is empty"),
     ("negative_window",
-     "hours_remaining still < 0 after negative_window_recovered -- an episode "
-     "entering negative that runs LONGER than data.manufacturing_window_hours, "
-     "so it is not the recoverable source pattern and its true window length "
-     "is unknown. The DP takes its horizon from the counter and "
-     "extend_to_window generates the synthetic tail from it; neither can read "
-     "a negative one. Same class as window_too_long"),
+     "hours_remaining still < 0 after recovery -- true window length unknown; "
+     "the DP horizon and extend_to_window read the counter"),
     ("window_too_long",
-     "hours_remaining above data.max_window_hours. extend_to_window RAISES "
-     "above the cap, so this is a crash rather than a refusal. Only backtest "
-     "and shadow extend; the artifact fits never read the counter"),
+     "hours_remaining above data.max_window_hours (extend_to_window raises)"),
     ("outcome_unknown",
-     "the episode never closed inside this data: its last row carries no "
-     "write-off sentinel, so it is still holding stock and nothing about how "
-     "it ENDED is observed. Only the extract's final hours can do this "
-     "legitimately -- split boundaries cannot, since window_slice assigns "
-     "episodes whole by opening date -- so on a 175-day extract of ~36h "
-     "windows this should be under 1% of episodes. Gates `eligible` as well "
-     "as `dp_eligible`: an unfinished episode is not a complete observation "
-     "of anything, and every consumer that met one silently mis-weighted it "
-     "(clearance read sold-so-far, and the backtest graded a truncated actual "
-     "arm against two full-horizon simulated ones). KEPT in the integrity "
-     "population so m11 can still count the residue"),
+     "the episode never closed inside this data (no write-off sentinel). "
+     "Gates `eligible` too: an unfinished episode is not a complete "
+     "observation of anything. Kept in the integrity population"),
     ("final_hour_restock",
-     "the LAST row sold more than it opened with, so stock arrived during the "
-     "episode's final hour. If the source also zeroed `ending` to write the "
-     "remainder off, how much arrived and how much was scrapped are two "
-     "unknowns with one equation -- the close is a guess, so the episode's "
-     "scrap is NaN and it is out of every IL and clearance figure. Gates "
-     "`episode_eligible` too, because a censored/not-censored call cannot be "
-     "made on an ambiguous final hour. Two of the six gates do that -- this "
-     "one and `outcome_unknown` -- and they are exactly conditions 2 and 3 of "
-     "`eligible`; the other four are solver requirements the demand model "
-     "cannot see"),
+     "the LAST row sold more than it opened with: arrival and write-off are "
+     "two unknowns with one equation, so scrap is NaN. Gates `eligible` too "
+     "-- the censoring call cannot be made on an ambiguous final hour"),
 )
 
-# Reported, NOT gating: a below-cost hour is a legacy-policy price. The
-# backtest's DP arm is self-anchored and never sees it; shadow's refusal from
-# the crossing hour on is the cost floor working (design.md 5.2).
+# Reported, NOT gating (design 5.2).
 BELOW_COST_HOURS = (
-    "some hour's OFFERED price is under cost. Tested on "
-    "original_price x (1 - d), never applied_price, which the source zeroes "
-    "on the ~78% of rows that sold nothing")
+    "some hour's OFFERED price is under cost -- tested on "
+    "original_price x (1 - d), never applied_price (zeroed on no-sale rows)")
 
 
 
@@ -521,16 +461,10 @@ def eligible_detail(d):
         "episodes_excluded": int(d.loc[not_elig, "episode_id"].nunique()),
         "rows_excluded": int(not_elig.sum()),
         "note": (
-            "FLAGGED, NOT DROPPED -- every row is still in the frame and the "
-            "integrity population still holds them. Three conditions, all in "
-            "common.episodes.episode_flow: the accounting identity holds, the "
-            "final hour is clean, and the episode CLOSED. That is what a "
-            "FROZEN ARTIFACT needs -- a censored likelihood is only correct if "
-            "we know which hours ran out. Two of the three are also DP gates "
-            "(`outcome_unknown` = not closed, `final_hour_restock` = unclean "
-            "final hour), so this row and the next OVERLAP by construction: "
-            "the populations are nested, integrity > eligible > dp_eligible, "
-            "and their exclusions must never be added together."),
+            "FLAGGED, NOT DROPPED. Three conditions (episode_flow): identity "
+            "holds, clean final hour, CLOSED -- what a frozen artifact needs. "
+            "Populations are NESTED (integrity > eligible > dp_eligible); "
+            "never add the rows' exclusions together."),
     }
 
 
@@ -634,11 +568,9 @@ def tag_dp_eligibility(d, cfg):
             float(sold[adj < 0].mean()), 3) if len(lost) else 0.0,
         "mean_sold_on_clean_rows": round(float(sold[adj == 0].mean()), 3)
             if (adj == 0).any() else 0.0,
-        "reading": ("corr near 0 with small absolute losses reads as real "
-                    "SHRINK -- damage, transfer, sampling. corr well above 0, "
-                    "or shrink rows selling far more than clean ones, reads as "
-                    "TIMING SKEW between the sales feed and the stock "
-                    "snapshot: a join to fix upstream, not shrink to chase."),
+        "reading": ("corr near 0 + small losses = real SHRINK; corr well "
+                    "above 0 = TIMING SKEW between feeds -- a join to fix "
+                    "upstream, not shrink to chase."),
     }
 
     # also reported-only: an unclosed ending is a missing OUTCOME, and every
@@ -660,9 +592,7 @@ def tag_dp_eligibility(d, cfg):
         "episodes_checked": int(d.episode_id.nunique()),
         "violations": int(len(violations)),
         "holds": not len(violations),
-        "note": ("Every unit is accounted for by exactly one of three fates: "
-                 "sold, shrunk, or still on the shelf at the last hour. "
-                 "Guaranteed by chain continuity, so a violation means the "
+        "note": ("Guaranteed by chain continuity: a violation means the "
                  "supply arithmetic is broken, not the source."),
     }
 
@@ -675,12 +605,8 @@ def tag_dp_eligibility(d, cfg):
         "units_arrived": int(paired.arrived.sum()),
         "units_shrunk": int(paired.vanished.sum()),
         "episodes_equal_in_and_out": int((paired.arrived == paired.vanished).sum()),
-        "note": ("Episodes with BOTH an arrival and a loss. Where the two are "
-                 "equal and the hours adjacent, a sale recorded an hour after "
-                 "the stock moved would look identical -- but that is a guess, "
-                 "and the counts here are not netted on the strength of it. "
-                 "Both figures stand: the episode is flagged restocked, the "
-                 "shrink settles into scrap, and it stays dp_eligible."),
+        "note": ("BOTH an arrival and a loss; never netted -- both counted "
+                 "in full, the episode stays dp_eligible."),
     }
 
     # Anomaly location by category and month: an incident, a corner of the
@@ -710,14 +636,10 @@ def tag_dp_eligibility(d, cfg):
             "median_units_per_episode": float(ep.units.median()),
             "by_category": _by("category"),
             "by_month": _by("month"),
-            "note": ("Hours where stock left the shelf that no sale or "
-                     "write-off accounts for. These episodes are KEPT and "
-                     "stay dp_eligible: the shrink settles into scrap at the "
-                     "episode level, so the identity still closes. "
-                     "Concentrated in one month reads as an incident; "
-                     "spread evenly reads as a standing feed property; "
-                     "concentrated in a few categories names the subset. "
-                     "This is the list to hand back to the business."),
+            "note": ("Stock left the shelf that no sale or write-off "
+                     "accounts for; KEPT, shrink settles into scrap. "
+                     "Concentrated in a month = incident; spread evenly = "
+                     "standing feed property; few categories = the subset."),
         }
 
     detail["episodes_dp_eligible"] = int(
@@ -725,20 +647,12 @@ def tag_dp_eligibility(d, cfg):
     detail["episodes_dp_ineligible"] = int(
         d.loc[~d.dp_eligible, "episode_id"].nunique())
     detail["note"] = (
-        "FLAGGED, NOT DROPPED. Every row above is still in the population. "
-        "below_cost_hours and edge_truncated are REPORTED ONLY and stay "
-        "dp_eligible: the backtest's DP arm is self-anchored so it never sees "
-        "a below-cost legacy price, in shadow the refusal from the crossing "
-        "hour onward is the cost floor working (counted in rejected_reasons), "
-        "and an unclosed ending is already excluded from every scrap and IL "
-        "figure by the closure sentinel rather than by a filter. "
-        "The three artifact fits read baseline_model.train_population, which "
-        "selects one of the THREE NESTED populations -- 'integrity' (every row "
-        "that survived the hard drops), 'eligible' (the previous waterfall "
-        "row), or 'dp_eligible' (this row); the DP, the backtest, shadow, the "
-        "calibration gate and the A/B always read dp_eligible. Reasons are "
-        "first-match in the order " + ", ".join(n for n, _ in DP_INELIGIBLE)
-        + ". Counts overlap, so they do not sum to episodes_dp_ineligible.")
+        "FLAGGED, NOT DROPPED. below_cost_hours and edge_truncated are "
+        "reported only and stay dp_eligible. Artifact fits read 'eligible'; "
+        "the DP, backtest, shadow, calibration gate and A/B read "
+        "'dp_eligible'. Reasons are first-match in the order "
+        + ", ".join(n for n, _ in DP_INELIGIBLE)
+        + "; counts overlap, so they do not sum to episodes_dp_ineligible.")
     return d, detail
 
 
@@ -746,8 +660,9 @@ def population(d, cfg, which=None):
     """ONE definition of the three NESTED populations: integrity (survived
     the chain), eligible (identity holds + clean final hour + CLOSED -- what
     a frozen artifact needs), dp_eligible (eligible + solver requirements).
-    None reads baseline_model.train_population; DP callers pass explicitly."""
-    which = which or cfg["baseline_model"]["train_population"]
+    None means "eligible" (the artifact-fit population); DP callers pass
+    "dp_eligible" explicitly."""
+    which = which or "eligible"
     if which == "integrity":
         return d
     if which == "eligible":
@@ -799,10 +714,6 @@ def main():
     d.to_parquet(args.out, index=False)
     write_manifest(args.manifest, cfg)
 
-    # The filter chain's own counts, printed compactly. The published
-    # waterfall (a 13-row report with COGS at every stage) was removed with
-    # the descriptive layer -- `wf` remains as the chain's internal audit,
-    # which the filter tests read.
     for stage in wf:                       # some carry a 5th detail dict
         label, rows, eps = stage[0], stage[1], stage[2]
         print(f"  {label:32s} rows {rows:>10,}  episodes {eps:>9,}")

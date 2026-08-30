@@ -263,17 +263,6 @@ def test_level_factor_must_be_solved_on_censored_basis():
     assert abs((lo + hi) / 2 - true_f) < 0.01
 
 
-def test_config_rejects_narrowed_search_bounds(tmp_path):
-    with open("config.yaml") as f:
-        cfg = yaml.safe_load(f)
-    cfg["posterior"]["prior"]["search_bounds"] = [-1.5, -0.05]
-    p = tmp_path / "bad.yaml"
-    p.write_text(yaml.safe_dump(cfg))
-    from common.config import ConfigError
-    with pytest.raises(ConfigError):
-        load_config(str(p))
-
-
 def test_config_strict_refuses_null_measured(tmp_path):
     from common.config import ConfigError
     with pytest.raises(ConfigError, match="refusing to start"):
@@ -713,14 +702,17 @@ def test_a_relative_floor_above_one_is_reported_as_blocked_not_as_a_number():
                                 "outlier_dominated": True,
                                 "mean_level": 0.0308, "days": 134,
                                 "days_at_or_below_zero": 36}}
-    cfg["monitoring"]["stop_conditions"]["deterioration_basis"] = {
-        "scrap": "relative", "margin": "relative"}
-    v = dt.recommend_thresholds(trailing, {}, cfg)["margin_rate"]["verdict"]
+    # on the wrong (relative) basis the floor is unusable and must BLOCK...
+    saved = guardrail.BASIS["margin"]
+    try:
+        guardrail.BASIS["margin"] = guardrail.RELATIVE
+        v = dt.recommend_thresholds(trailing, {}, cfg)["margin_rate"]["verdict"]
+    finally:
+        guardrail.BASIS["margin"] = saved
     assert v.startswith("BLOCKED"), v
     assert "absolute_pp" in v, "the verdict must name the remedy, not just complain"
 
-    # ...and on the right basis the same magnitude is an ordinary, settable floor
-    cfg["monitoring"]["stop_conditions"]["deterioration_basis"]["margin"] = "absolute_pp"
+    # ...and on the shipped absolute_pp basis it is an ordinary, settable floor
     v2 = dt.recommend_thresholds(trailing, {}, cfg)["margin_rate"]["verdict"]
     assert not v2.startswith("BLOCKED"), v2
 
