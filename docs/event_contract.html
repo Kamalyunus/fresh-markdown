@@ -449,19 +449,22 @@
   <p class="eyebrow">Perishable Markdown MVP · production integration</p>
   <h1>What gets logged every hour, and who has to produce it</h1>
   <p class="standfirst">
-    The system writes <strong>two event streams</strong>: a decision event when it sets a price,
-    and an outcome event when that hour closes. The decision event is written by the pricing
-    service and needs nothing from you beyond the state you send to ask for a price. The
-    outcome event is <strong>built on our side from the hourly FLC feed</strong>
+    Two parties, named consistently on this page: <strong>"you" is the engineering team</strong>
+    integrating the pricing loop, and <strong>"the agent" is this codebase</strong> — the
+    pricing service and its pipelines. The agent writes two event streams: a decision event
+    when it sets a price, and an outcome event when that hour closes. The decision event
+    needs nothing from you beyond the state you send to ask for a price. The outcome event is
+    <strong>built by the agent from the hourly FLC feed</strong>
     (<code>pipeline.ingest_outcomes</code>), matched to decisions by SKU, FC, date and hour —
-    so your whole integration is: <strong>call the API, apply the returned price, and tell us
-    when a price push fails</strong>. Every field below carries a real example value, and §05
-    walks one episode end to end in payloads captured from the running system.
+    so your whole integration is: <strong>call the API, apply the returned price, and tell
+    the agent when a price push fails</strong>. Every field below carries a real example
+    value, and §05 walks one episode end to end in payloads captured from the running
+    system.
   </p>
 
   <div class="ataglance">
     <div><b>12</b><span>fields you send to request a price</span></div>
-    <div><b>37</b><span>fields the service logs per decision</span></div>
+    <div><b>37</b><span>fields the agent logs per decision</span></div>
     <div><b>0</b><span>outcome fields you produce — built from the hourly feed</span></div>
     <div><b>1:1</b><span>outcomes per decision, hourly, exactly once</span></div>
   </div>
@@ -472,9 +475,9 @@
   <div class="prose">
     <p>
       One SKU in one fulfilment centre inside a clearance window is an <em>episode</em>. Every
-      hour of that episode is a <em>decision interval</em>: the service is asked for a price,
-      it logs what it decided, the price goes live, the hour ends, and the outcome is read
-      back from the hourly feed.
+      hour of that episode is a <em>decision interval</em>: the agent is asked for a price,
+      it logs what it decided, you apply the price, the hour ends, and the agent reads the
+      outcome back from the hourly feed.
     </p>
     <p>
       Both streams are append-only JSONL with durable writes and duplicate detection. Nothing is
@@ -490,17 +493,17 @@
       <span class="d">12 fields of state: what the item is, how much is left, how long it has, what price is in force now.</span>
     </div>
     <div>
-      <span class="step">Service</span>
+      <span class="step">Agent</span>
       <b>Decision event</b>
       <span class="d">36 fields. The price it chose, everything it chose from, and every input it used — enough to re-solve the decision later.</span>
     </div>
     <div>
       <span class="step">You</span>
       <b>Price goes live</b>
-      <span class="d">The applied price must be the one the service returned, or the mismatch rate climbs. A failed push is reported — that is the one outcome fact only you know.</span>
+      <span class="d">The applied price must be the one the agent returned, or the mismatch rate climbs. A failed push is reported — that is the one outcome fact only you know.</span>
     </div>
     <div>
-      <span class="step">Us</span>
+      <span class="step">Agent</span>
       <b>Outcome event</b>
       <span class="d">Built from the hourly feed: units sold, inventory in and out, the price in force — matched to the decision by SKU, FC, date, hour.</span>
     </div>
@@ -521,9 +524,9 @@
       would buy nothing.
     </p>
     <p>
-      The JSONL event streams described on this page are the pricing service's own storage
-      — you never write or read JSON. Your two deliverables are both tables: the production
-      table you already ship, and a small failed-pushes table (see §04).
+      The JSONL event streams described on this page are the agent's own storage — you never
+      write or read JSON. Your two deliverables are both tables: the production table you
+      already ship, and a small failed-pushes table (see §04).
     </p>
   </div>
 
@@ -544,7 +547,7 @@
   <h2><span class="num">02</span>What you send to request a price</h2>
   <div class="prose">
     <p>
-      Twelve fields, once per SKU × FC per hour. The service resolves everything else itself —
+      Twelve fields, once per SKU × FC per hour. The agent resolves everything else itself —
       the demand forecast from the frozen model, the dispersion parameter from its lookup table,
       the reference discount from config.
     </p>
@@ -593,7 +596,7 @@
           days it spans. Windows of 36 hours are common; midnight is an ordinary hour.</li>
       <li><b>Never derive it from the calendar date.</b> A date-keyed id splits one window
           into two at midnight. The second "episode" then starts with
-          <code>current_discount = null</code>, the service treats it as a fresh entry, and
+          <code>current_discount = null</code>, the agent treats it as a fresh entry, and
           the price can move back UP mid-window — breaking the one guarantee (prices never
           rise within an episode) the system treats as structural. The horizon and the
           learning evidence for those hours are wrong too.</li>
@@ -602,7 +605,7 @@
           decision.</li>
       <li><b>A restock does NOT open a new id.</b> Stock arriving mid-window — even one that
           <em>extends</em> the window, so <code>hours_remaining</code> jumps UP — is the same
-          listing and keeps its id; just send the new, larger counter and the service re-plans
+          listing and keeps its id; just send the new, larger counter and the agent re-plans
           over the longer horizon. The id changes only when the listing actually closed and a
           new one opened. This is the case that matters: a new id here resets the price
           anchor, and the price could rise on shoppers who saw yesterday's — the one move the
@@ -618,7 +621,7 @@
   </div>
 
   <div class="note risk">
-    <h4>The service refuses rather than returning an unsafe price</h4>
+    <h4>The agent refuses rather than returning an unsafe price</h4>
     <p>
       If the state is inconsistent — negative inventory, cost above list, a horizon that
       disagrees with itself, no feasible tier at or below the current price — the call raises
@@ -629,10 +632,10 @@
 </section>
 
 <section id="decision">
-  <h2><span class="num">03</span>What the service logs per decision</h2>
+  <h2><span class="num">03</span>What the agent logs per decision</h2>
   <div class="prose">
     <p>
-      Thirty-seven required fields, all written by the pricing service. Listed here so you can
+      Thirty-seven required fields, all written by the agent. Listed here so you can
       size storage and know what you can query later — not because you produce any of it. Three more
       diagnostic fields (<code>event</code>, <code>solver_latency_s</code>,
       <code>nb_tail_mass_max</code>) are written but not required.
@@ -647,7 +650,7 @@
       </thead>
       <tbody>
         <tr class="grouphead"><td colspan="3">Identity — 4</td></tr>
-        <tr><td class="f">decision_id</td><td class="ex">"d7557c60-5fad-…"</td><td>Immutable UUID. <strong>You must echo this on the outcome.</strong></td></tr>
+        <tr><td class="f">decision_id</td><td class="ex">"d7557c60-5fad-…"</td><td>Immutable UUID, minted by the agent; the ingester matches the feed row back to it.</td></tr>
         <tr><td class="f">episode_id</td><td class="ex">"EP-88213-4471"</td><td>As supplied.</td></tr>
         <tr><td class="f">is_entry</td><td class="ex">true</td><td>True on the episode's first decision.</td></tr>
         <tr><td class="f">timestamp</td><td class="ex">"2026-08-19T02:25:12+00:00"</td><td>UTC with offset.</td></tr>
@@ -723,7 +726,7 @@
         <tr><td class="f">units_sold</td><td><span class="tag you">feed</span></td><td class="t">int ≥ 0</td><td class="ex">0</td><td><strong>Zero-sale hours count.</strong> They are roughly three quarters of all hours and they are evidence, not noise — the feed carries them already.</td></tr>
         <tr><td class="f">starting_inventory</td><td><span class="tag you">feed</span></td><td class="t">int ≥ 0</td><td class="ex">2</td><td>The feed's inventory at the top of the hour. Should equal the decision's <code>q_remaining</code>.</td></tr>
         <tr><td class="f">ending_inventory</td><td><span class="tag you">feed</span></td><td class="t">int ≥ 0</td><td class="ex">2</td><td>The feed's close-of-hour count. When it does not equal <code>starting − sold</code>, the ingester derives <code>adjustment_reason</code> from the break.</td></tr>
-        <tr><td class="f">applied_price</td><td><span class="tag">derived</span></td><td class="t">float</td><td class="ex">5500.0</td><td>The OFFERED price from the feed: <code>normal_asp × (1 − discount)</code> — never the realised-price column, which is zeroed on no-sale rows. The gap to our recommendation is a monitored number — see §06.</td></tr>
+        <tr><td class="f">applied_price</td><td><span class="tag">derived</span></td><td class="t">float</td><td class="ex">5500.0</td><td>The OFFERED price from the feed: <code>normal_asp × (1 − discount)</code> — never the realised-price column, which is zeroed on no-sale rows. The gap to the agent's recommendation is a monitored number — see §06.</td></tr>
         <tr><td class="f">is_stockout</td><td><span class="tag">derived</span></td><td class="t">bool</td><td class="ex">false</td><td>The shelf EMPTIED: the hour reconciles and <code>starting − sold == 0</code>. Deliberately NOT <code>sold ≥ starting</code> — on a restocked hour that reads true while customers never faced an empty shelf, and demand was observed exactly.</td></tr>
         <tr><td class="f">execution_status</td><td><span class="tag you">you</span></td><td class="t">string</td><td class="ex">"ok"</td><td><code>"ok"</code> unless the hour appears in your failures file — then <code>"failed"</code>, and the outcome is stored but excluded from learning, which is the correct handling of an hour where the price never went live.</td></tr>
         <tr><td class="f">finalized_at</td><td><span class="tag">derived</span></td><td class="t">timestamp</td><td class="ex">"2026-08-19T19:00:00+00:00"</td><td>The hour's close, UTC.</td></tr>
@@ -791,7 +794,7 @@
   <h3>The entry decision, in full</h3>
   <div class="prose">
     <p>
-      All 39 fields the service writes — the 36 required plus <code>event</code>,
+      All 39 fields the agent writes — the 36 required plus <code>event</code>,
       <code>solver_latency_s</code> and <code>nb_tail_mass_max</code>. This is the widest payload
       in the contract, and none of it is yours to produce.
     </p>
@@ -1056,14 +1059,14 @@
         <tr><td class="f">event completeness</td><td class="t n">≥ 99%</td><td>Outcomes landing per decision. A priced hour missing from the feed, or a feed hour the ingester cannot interpret, shows up here first.</td></tr>
         <tr><td class="f">matched decision rate</td><td class="t n">≥ 99%</td><td>Decisions that got an outcome back.</td></tr>
         <tr><td class="f">duplicate or unmatched</td><td class="t n">≤ 1%</td><td>Repeated ids plus outcomes with no matching decision, over finalized outcomes.</td></tr>
-        <tr><td class="f">price mismatch</td><td class="t n">≤ 1%</td><td>Outcomes whose offered price (from the feed) differs from the decision's by more than <code>1e-6</code>. This is the "did our price actually go live" check — it catches silent push failures your failures file missed.</td></tr>
+        <tr><td class="f">price mismatch</td><td class="t n">≤ 1%</td><td>Outcomes whose offered price (from the feed) differs from the decision's by more than <code>1e-6</code>. This is the "did the agent's price actually go live" check — it catches silent push failures your failures table missed.</td></tr>
         <tr><td class="f">missing stockout field</td><td class="t n">exactly 0</td><td>Any outcome at all without <code>is_stockout</code>.</td></tr>
       </tbody>
     </table>
   </div>
 
   <div class="note">
-    <h4>Exactly-once, on our side</h4>
+    <h4>Exactly-once, on the agent's side</h4>
     <p>
       Outcome ids derive from decision ids, so re-running the ingester over the same feed
       dedups instead of double-counting, and learning consumes each <code>outcome_id</code>
@@ -1116,7 +1119,7 @@
       <span class="sev med">medium</span>
       <b>Can you report a failed price push?</b>
       <p>
-        The one outcome fact only you know. One JSONL row per failed hour (<code>sku_id</code>,
+        The one outcome fact only you know. One table row per failed hour (<code>sku_id</code>,
         <code>fc</code>, <code>date</code>, <code>hour_of_day</code>, <code>reason</code>);
         silence means the push succeeded. The feed's own discount column backstops this — a
         price that never went live shows up as a mismatch — but the explicit report is what
@@ -1128,7 +1131,7 @@
       <b>Are <code>cost</code> and <code>original_price</code> available per hour, per FC?</b>
       <p>
         Cost sets the price floor, so a stale or missing cost either blocks legal discounts or
-        permits below-cost ones. Both are per-request inputs, not reference data we hold.
+        permits below-cost ones. Both are per-request inputs, not reference data the agent holds.
       </p>
     </li>
   </ol>
@@ -1138,7 +1141,7 @@
   <p>
     Field lists are read directly from the running system — <code>events/store.py</code>
     (<code>DECISION_REQUIRED</code>, <code>OUTCOME_REQUIRED</code>),
-    <code>inference/decide.py</code> for what the service emits,
+    <code>inference/decide.py</code> for what the agent emits,
     <code>pipeline/ingest_outcomes.py</code> for how outcomes are built from the feed, and
     <code>config.yaml</code> for every threshold quoted in §06.
   </p>
