@@ -88,7 +88,7 @@ validate. Engineering owns everything on the other side of the event
 contract:
 
 - the hourly scheduler and transport that call `decide` per SKU × FC
-  (the 12-field request in `docs/event_contract.html` §02);
+  (the 12-field request in `docs/event_contract.html` §03);
 - applying the returned price (the applied price must be the returned one —
   the mismatch rate is gated at 1%);
 - reporting **failed price pushes** — one row per failed hour, as a table
@@ -100,10 +100,10 @@ contract:
 Outcomes are NOT engineering's to produce: `pipeline.ingest_outcomes`
 (Lane C) builds them from the hourly FLC feed, matched to decisions by
 (SKU, FC, date, hour), deriving `adjustment_reason`, `is_stockout` and the
-offered price itself. §07 of the contract page is the pre-build
-feasibility checklist, and §08 is the conventions register: every
-derivation stands on source-data meanings only engineering can confirm —
-walk them through it before the pilot.
+offered price itself. §08 of the contract page is the pre-build
+feasibility checklist, and §01 — deliberately first — is the definitions
+and claims register: every derivation stands on source-data meanings only
+engineering can confirm, so align on §01 before anything else.
 
 The caller reads `tau` from `PosteriorStore.tau(cfg)` — **not** from
 `config.exploration.tau_initial`, which is only the launch value and never

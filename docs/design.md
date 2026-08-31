@@ -559,7 +559,7 @@ renames atomically, two cannot.
 The source-data conventions everything below stands on (the write-off
 sentinel, shrink, the counter, percent discounts) were inferred from the
 extract, not decreed: they are registered as claims in
-`docs/event_contract.html` §08, owned by the data's producers, and a
+`docs/event_contract.html` §01, owned by the data's producers, and a
 corrected claim is a code change here, never work on their side.
 
 Validation checks nine invariants and **rejects the state rather than
@@ -1136,7 +1136,7 @@ over which the source's `hours_remaining` counter ticks down exactly one
 per elapsed hour.** Both signals must agree: time-contiguity alone merges
 back-to-back windows; the counter alone stitches across a data hole.
 Crossing midnight is a one-hour step like any other. Known limitation,
-confirmed by the producer (contract §08 C5): the counter can also step UP
+confirmed by the producer (contract §01 C5): the counter can also step UP
 mid-window when a restock extends the window, which this rule reads as a
 new-window boundary — so a restock-extended window in the extract splits
 in two. Accepted for now (owner): the derivation retires once
