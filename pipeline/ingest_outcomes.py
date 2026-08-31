@@ -6,7 +6,9 @@ ingests, matched to decisions by (sku_id, fc, date, hour_of_day). Everything
 the old producer contract asked for is derived:
 
   adjustment_reason   common.episodes.adjustment_reason on (start, sold, end)
-  is_stockout         sold >= starting
+  is_stockout         common.episodes.is_censored_hour -- the shelf EMPTIED
+                      (reconciling and start - sold == 0), never the naive
+                      sold >= starting, which misreads a restocked hour
   applied_price       original_price x (1 - discount) -- the OFFERED price,
                       never the realised-price column (zeroed on no-sale rows)
   outcome_id          "feed-<decision_id>" (idempotent re-runs dedup)
@@ -25,7 +27,7 @@ import json
 import pandas as pd
 
 from common.config import load_config
-from common.episodes import adjustment_reason
+from common.episodes import adjustment_reason, is_censored_hour
 from bootstrap.prepare_data import SOURCE_TO_CANONICAL
 from events.store import EventStore
 
@@ -87,7 +89,7 @@ def build_outcomes(decisions, feed, failures=None, now=None):
             "starting_inventory": start,
             "ending_inventory": end,
             "applied_price": offered,
-            "is_stockout": sold >= start,
+            "is_stockout": bool(is_censored_hour(start, sold, end)),
             "execution_status": "ok",
             "finalized_at": (pd.Timestamp(f"{r.date} {int(r.hour_of_day)}:00",
                                           tz="UTC")

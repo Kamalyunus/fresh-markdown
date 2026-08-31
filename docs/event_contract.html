@@ -702,7 +702,7 @@
         <tr><td class="f">starting_inventory</td><td><span class="tag you">feed</span></td><td class="t">int ≥ 0</td><td class="ex">2</td><td>The feed's inventory at the top of the hour. Should equal the decision's <code>q_remaining</code>.</td></tr>
         <tr><td class="f">ending_inventory</td><td><span class="tag you">feed</span></td><td class="t">int ≥ 0</td><td class="ex">2</td><td>The feed's close-of-hour count. When it does not equal <code>starting − sold</code>, the ingester derives <code>adjustment_reason</code> from the break.</td></tr>
         <tr><td class="f">applied_price</td><td><span class="tag">derived</span></td><td class="t">float</td><td class="ex">5500.0</td><td>The OFFERED price from the feed: <code>normal_asp × (1 − discount)</code> — never the realised-price column, which is zeroed on no-sale rows. The gap to our recommendation is a monitored number — see §06.</td></tr>
-        <tr><td class="f">is_stockout</td><td><span class="tag">derived</span></td><td class="t">bool</td><td class="ex">false</td><td><code>sold ≥ starting</code>.</td></tr>
+        <tr><td class="f">is_stockout</td><td><span class="tag">derived</span></td><td class="t">bool</td><td class="ex">false</td><td>The shelf EMPTIED: the hour reconciles and <code>starting − sold == 0</code>. Deliberately NOT <code>sold ≥ starting</code> — on a restocked hour that reads true while customers never faced an empty shelf, and demand was observed exactly.</td></tr>
         <tr><td class="f">execution_status</td><td><span class="tag you">you</span></td><td class="t">string</td><td class="ex">"ok"</td><td><code>"ok"</code> unless the hour appears in your failures file — then <code>"failed"</code>, and the outcome is stored but excluded from learning, which is the correct handling of an hour where the price never went live.</td></tr>
         <tr><td class="f">finalized_at</td><td><span class="tag">derived</span></td><td class="t">timestamp</td><td class="ex">"2026-08-19T19:00:00+00:00"</td><td>The hour's close, UTC.</td></tr>
         <tr class="groupsep"><td class="f">adjustment_reason</td><td><span class="tag">derived</span></td><td class="t">string</td><td class="ex">"episode_close_write_off"</td><td>Derived by <code>common.episodes.adjustment_reason</code> whenever inventory does not reconcile — omitted otherwise. Exactly three values; see the box below for what they mean in the feed.</td></tr>
@@ -1009,9 +1009,9 @@
     </p>
     <p>
       Note also that <code>is_stockout</code> is <code>false</code> on all three, including the
-      write-off. Stockout means demand hit the inventory ceiling, which is
-      <code>sold ≥ starting</code>. Stock being written off at the close is a different event
-      and must not be reported as a stockout.
+      write-off. Stockout means the shelf emptied — the hour reconciles with
+      <code>starting − sold == 0</code> — so neither a write-off (stock remained) nor a
+      restocked hour that sold past its opening count (the shelf never sat empty) is one.
     </p>
   </div>
 </section>

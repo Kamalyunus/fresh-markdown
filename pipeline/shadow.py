@@ -457,7 +457,7 @@ def _shadow_one(ep, ctx):
             "units_sold": sold, "starting_inventory": q,
             "ending_inventory": ending,
             "applied_price": float(ep["original_price"][t] * (1 - legacy_d)),
-            "is_stockout": sold >= q,
+            "is_stockout": bool(episodes.is_censored_hour(q, sold, ending)),
             "execution_status": SHADOW_STATUS,
         }
         # unreconciled inventory without a documented reason is quarantined,

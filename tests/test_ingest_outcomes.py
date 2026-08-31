@@ -63,6 +63,10 @@ def test_adjustment_reasons_are_derived_not_asked_for():
     assert by["D3"]["adjustment_reason"] == "unexplained_shortfall"
     assert "adjustment_reason" not in by["D4"]
     assert by["D4"]["is_stockout"] is True
+    # a restocked hour that sold past its opening count is NOT a stockout:
+    # the shelf never sat empty and demand was observed exactly (the naive
+    # sold >= starting read it as censored -- the trap update.py names)
+    assert by["D1"]["is_stockout"] is False
     assert rep["adjustment_reasons"] == {"intraday_restock": 1,
                                          "episode_close_write_off": 1,
                                          "unexplained_shortfall": 1}
