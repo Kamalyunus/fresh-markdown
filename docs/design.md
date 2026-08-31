@@ -990,8 +990,11 @@ that must hold first: reports from one model, a settled loop,
 `calib ≥ 2W`, no graded window across the exclusion gap — a BLOCK
 suppresses everything and `--apply` refuses). *A value the data can decide
 does not wait on a human*: the guardrail stops (3σ floors), the fit window
-W (the sweep, subject to `calib ≥ 2W`), and `max_mean_step` (the
-consistent-rails value) PASTE — `max_mean_step` behind a gate on its
+W (the sweep, subject to `calib ≥ 2W`, **with hysteresis** — W is the one
+paste that turns the calibration loop, and re-settling re-scores the
+sweep, so a strict argmin oscillates near-tied windows and loops an agent
+on apply → check-only; it switches only on a material win), and
+`max_mean_step` (the consistent-rails value) PASTE — `max_mean_step` behind a gate on its
 measured price consequence (`tuning.max_price_share_changed_for_auto_rail`,
 `max_il_delta_pct_for_auto_rail`), downgrading to OWNER with the reason
 when exceeded.

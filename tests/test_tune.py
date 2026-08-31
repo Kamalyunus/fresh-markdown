@@ -331,3 +331,39 @@ def test_apply_names_the_minimum_rerun_and_never_asks_for_a_retrain(
     # and the decision log records which re-run the run required
     log = json.load(open(res["log"]))["runs"][-1]
     assert log["rerun_required"] == res["rerun"]
+
+
+def test_the_fit_window_holds_on_a_near_tie_instead_of_oscillating(cfg, tmp_path):
+    """W is the only paste that turns the calibration loop, and re-settling
+    the loop re-scores the sweep -- a strict argmin flips between near-tied
+    windows and loops an agent on apply -> check-only forever. Near-tie:
+    HOLD. Material win: switch."""
+    import pipeline.tune as tune
+
+    def w_finding(sweep):
+        backtest = {"fidelity": {"calibration_window_sweep": sweep}}
+        finds = tune._readings(cfg, backtest, {})
+        return [f for f in finds
+                if f["key"] == "baseline_model.calibration_fit_trailing_weeks"][0]
+
+    cur = cfg["baseline_model"]["calibration_fit_trailing_weeks"]  # 2 shipped
+    near_tie = {
+        "recommended_fit_window": "trailing_1w",
+        "trailing_1w": {"mean_abs_log_error": 0.0195,
+                        "share_weeks_in_band": 0.87},
+        f"trailing_{cur}w": {"mean_abs_log_error": 0.0200,
+                             "share_weeks_in_band": 0.85},
+    }
+    f = w_finding(near_tie)
+    assert f["status"] == "OK" and f["recommended"] == cur
+    assert "HELD" in f["evidence"]
+
+    material = {
+        "recommended_fit_window": "trailing_1w",
+        "trailing_1w": {"mean_abs_log_error": 0.010,
+                        "share_weeks_in_band": 0.95},
+        f"trailing_{cur}w": {"mean_abs_log_error": 0.0200,
+                             "share_weeks_in_band": 0.85},
+    }
+    f = w_finding(material)
+    assert f["status"] == "ACT" and f["recommended"] == 1

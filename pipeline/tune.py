@@ -425,16 +425,39 @@ def _readings(cfg, backtest, shadow):
         calib_weeks = ((pd.Timestamp(s["calib_end"])
                         - pd.Timestamp(s["calib_start"])).days + 1) / 7.0
         feasible = want and calib_weeks >= 2 * want
-        # pastes only when the split can hold it (calib >= 2W)
+        # HYSTERESIS. W is the only paste that turns the calibration loop,
+        # and --check-only re-settling the loop moves the sweep's own scores
+        # -- so a strict argmin flips between near-tied windows and sends an
+        # agent into apply -> check-only forever. Switch only when the
+        # candidate beats the CURRENT window materially on the sweep's own
+        # metrics; a near-tie holds the value in force.
+        held = False
+        cur_e, want_e = sweep.get(f"trailing_{cur}w"), sweep.get(rec)
+        if (want != cur and isinstance(cur_e, dict)
+                and isinstance(want_e, dict)):
+            better_mae = (want_e.get("mean_abs_log_error", 9e9)
+                          < 0.9 * cur_e.get("mean_abs_log_error", 0))
+            better_band = (want_e.get("share_weeks_in_band", 0)
+                           >= cur_e.get("share_weeks_in_band", 1) + 0.05)
+            held = not (better_mae or better_band)
         out.append(_finding(
             ("baseline_model", "calibration_fit_trailing_weeks"),
             PASTE if feasible else OWNER,
-            OK if want == cur else ACT, cur, want,
-            f"the rolling-origin sweep prefers {rec}"
-            + (f"; calib is {calib_weeks:.1f}w so calib >= 2W holds"
-               if feasible else
-               f", but calib is {calib_weeks:.1f}w and the rule is calib >= 2W "
-               f"({2*want}w needed) -- move the SPLIT, not this key"),
+            OK if (want == cur or held) else ACT, cur,
+            cur if held else want,
+            (f"the sweep prefers {rec} but within noise of the current "
+             f"{cur}w (mae {want_e.get('mean_abs_log_error')} vs "
+             f"{cur_e.get('mean_abs_log_error')}, in-band "
+             f"{want_e.get('share_weeks_in_band')} vs "
+             f"{cur_e.get('share_weeks_in_band')}) -- HELD. A W change turns "
+             "the calibration loop and re-scores the sweep, so near-ties "
+             "oscillate; it switches only on a material win"
+             if held else
+             f"the rolling-origin sweep prefers {rec}"
+             + (f"; calib is {calib_weeks:.1f}w so calib >= 2W holds"
+                if feasible else
+                f", but calib is {calib_weeks:.1f}w and the rule is calib >= "
+                f"2W ({2*want}w needed) -- move the SPLIT, not this key")),
             "backtest.fidelity.calibration_window_sweep.recommended_fit_window"))
     return out
 
