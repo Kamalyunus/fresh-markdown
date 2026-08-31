@@ -91,9 +91,9 @@ contract:
   (the 12-field request in `docs/event_contract.html` §02);
 - applying the returned price (the applied price must be the returned one —
   the mismatch rate is gated at 1%);
-- reporting **failed price pushes** — one JSONL row per failed hour
-  (`sku_id`, `fc`, `date`, `hour_of_day`, `reason`); silence means the push
-  succeeded;
+- reporting **failed price pushes** — one row per failed hour, as a table
+  (parquet/CSV) or JSONL (`sku_id`, `fc`, `date`, `hour_of_day`, `reason`);
+  no row means the push succeeded;
 - a defined fallback for `StateRejected` (hold the current price; alert on
   rate).
 
