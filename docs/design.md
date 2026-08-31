@@ -1135,7 +1135,12 @@ and everything episode-terminal was wrong at each seam.
 over which the source's `hours_remaining` counter ticks down exactly one
 per elapsed hour.** Both signals must agree: time-contiguity alone merges
 back-to-back windows; the counter alone stitches across a data hole.
-Crossing midnight is a one-hour step like any other. Duplicate
+Crossing midnight is a one-hour step like any other. Known limitation,
+confirmed by the producer (contract §08 C5): the counter can also step UP
+mid-window when a restock extends the window, which this rule reads as a
+new-window boundary — so a restock-extended window in the extract splits
+in two. Accepted for now (owner): the derivation retires once
+engineering's `episode_id` lands in the feed. Duplicate
 `(sku, fc, date, hour)` rows collide two runs into one id, so both copies
 drop (`duplicate_hour_rows_dropped`).
 
