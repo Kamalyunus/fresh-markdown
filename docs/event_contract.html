@@ -486,6 +486,21 @@
     </p>
   </div>
 
+  <div class="tscroll">
+    <table>
+      <caption>Who owns what. The dividing rule: you own the DATA and what it means; the agent owns every DERIVATION built on those meanings — and when a meaning is corrected, the fix is a change to the agent's code, never new work on your side.</caption>
+      <thead>
+        <tr><th>You (engineering) own</th><th>The agent owns</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>The production table: its grain (one row per SKU × FC × hour), its keys, and <strong>what every column means</strong> — including the conventions in §08, which the agent inferred from your data and you are asked to confirm or correct</td><td>The decision: forecast, DP, exploration, and the 37-field decision event</td></tr>
+        <tr><td><code>episode_id</code>: what counts as one clearance window (§02) — you know whether a listing was extended or relisted; the agent cannot</td><td>Every derivation on top of your conventions: outcome construction, the restock / write-off / shrink classification, stockout and censoring, scrap accounting, decision matching, all ids except <code>episode_id</code></td></tr>
+        <tr><td>Applying the returned price, and knowing whether the push succeeded (the failures table)</td><td>Learning, monitoring, guardrails, and the audit trail</td></tr>
+        <tr><td>The daily landing of the table: a row for every priced hour, zero-sale hours included</td><td>Fixing its own code when you correct a convention in §08</td></tr>
+      </tbody>
+    </table>
+  </div>
+
   <div class="flow">
     <div>
       <span class="step">You</span>
@@ -1084,7 +1099,9 @@
   <div class="prose">
     <p>
       Ranked by how much trouble they have caused in replay and shadow. If your team can answer
-      these five, the rest of the contract is routine field plumbing.
+      these five, the rest of the contract is routine field plumbing. Separate from feasibility,
+      §08 lists the <em>meanings</em> the agent has assumed about your table — those need your
+      sign-off, not your engineering time.
     </p>
   </div>
 
@@ -1138,6 +1155,54 @@
       </p>
     </li>
   </ol>
+</section>
+
+<section id="conventions">
+  <h2><span class="num">08</span>The source conventions — inferred by the agent, owned by you</h2>
+  <div class="prose">
+    <p>
+      Everything the agent computes stands on a small set of claims about what your table's
+      columns <em>mean</em>. None of them came from you: each was <strong>inferred from the
+      extract</strong> and verified only against the data itself, and your team may define some
+      of these differently. You are the producers — you own whether each claim is true.
+      Read the list, and for each one either confirm it or say what the real rule is. A
+      correction is cheap: every claim has exactly one implementation in the agent
+      (<code>common/episodes.py</code>, mostly), so fixing a wrong reading is one code change
+      on the agent's side and <strong>zero work on yours</strong>. A wrong claim left
+      unconfirmed is the expensive case — every derivation on top of it is wrong silently.
+    </p>
+  </div>
+
+  <div class="tscroll">
+    <table>
+      <caption>Confirm or correct each claim. "Self-check" names the diagnostic the agent runs against every new extract; it can detect a convention BREAKING, but only you can say whether the reading was right in the first place.</caption>
+      <thead>
+        <tr><th>#</th><th>The agent's claim about your data</th><th>What stands on it</th><th>Self-check</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>C1</td><td><code>ending_inventory</code> is the <strong>counted</strong> end-of-hour quantity, arrivals included — so <code>ending[t] == starting[t+1]</code> inside a window, with no exception</td><td>The whole inventory chain: episode integrity, restock and shrink detection</td><td>continuity check on every extract; violating episodes are dropped and counted</td></tr>
+        <tr><td>C2</td><td>When a listing closes, the source <strong>writes the remainder off by zeroing</strong> <code>ending_inventory</code> on the final row. That zero is the ONLY closure signal, and true leftover is <code>max(0, starting − sold)</code> there</td><td>Which episodes count as finished; ALL scrap and IL figures; the scrap guardrail</td><td><code>write_off_convention_in_force</code>, <code>final_rows_without_closure_sentinel</code>; a sentinel-free feed reads every episode unclosed, loudly</td></tr>
+        <tr><td>C3</td><td>The feed <strong>stops emitting rows when inventory reaches zero</strong> — an empty shelf ends the episode, so a sold-out hour can only be the last one</td><td>Censoring: which hours enter the demand model as "at least this much"; <code>is_stockout</code></td><td><code>censoring_off_last_row</code> — rows that emptied mid-episode should be zero</td></tr>
+        <tr><td>C4</td><td><code>discount</code> is a <strong>percent</strong> of list (25.0, not 0.25); <code>final_price</code> is the <em>realised</em> price and reads <strong>0 on zero-sale rows</strong>, so the offered price is <code>normal_asp × (1 − discount/100)</code> and never reconstructed from <code>final_price</code></td><td>Every price the agent reads or compares, including the price-mismatch gate</td><td>discounts outside [0, 1] after conversion are dropped and counted — a unit change would drop everything, loudly</td></tr>
+        <tr><td>C5</td><td><code>flc_window</code> is a <strong>nominal</strong> countdown: it decrements one per elapsed hour inside a window, is usually still positive when a listing closes (it does NOT signal the end), resets <em>upward</em> when a new window starts, and windows entering already-negative are the manufacturing pattern resolving within ~24h</td><td>Episode boundaries in historical data; the DP's planning horizon; the negative-window recovery</td><td>counter-monotonicity postcondition; <code>episodes_entering_negative_but_longer_than_cap</code> should be near zero</td></tr>
+        <tr><td>C6</td><td>An hour where <code>0 &lt; ending &lt; starting − sold</code> is <strong>shrink</strong> — stock genuinely left without a sale or write-off (damage, transfer, sampling), not a feed error — and those units belong in scrap. If your definition of scrap counts only disposal at close, the guardrail means something different: say so</td><td>Scrap = leftover + shrink; IL; the exploration budget base; the scrap-deterioration guardrail</td><td><code>unreconciled_anomalies</code> locates shrink by category and month; corr(shrink, sales) separates real shrink from feed-timing skew</td></tr>
+        <tr><td>C7</td><td>A stocked hour that <strong>sold nothing still gets a row</strong> (~3 hours in 4)</td><td>Outcome completeness; demand evidence at shallow discounts</td><td>the completeness gate (§06)</td></tr>
+        <tr><td>C8</td><td>Two rows for one (SKU, FC, hour) is a <strong>defect with no true state</strong> — neither copy is preferable</td><td>Both copies are ignored everywhere (offline drop; the ingester matches neither)</td><td><code>duplicate_hour_rows_dropped</code> / <code>feed_duplicate_hours</code>, both counted</td></tr>
+        <tr><td>C9</td><td><code>ending &gt; starting − sold</code> means <strong>stock arrived during the hour</strong> (a restock), including an hour that sold more than it opened with</td><td>The restock classification; the rule that a restock never excludes an episode; the stockout carve-out</td><td>restock counts per extract; the flow identity still closes</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note risk">
+    <h4>How to disagree</h4>
+    <p>
+      Don't adapt your data to the claims — the claims exist to describe YOUR data. If C2's
+      zero means something else in your system, if discounts are fractions somewhere, if the
+      counter can legitimately jump, say which claim and what the real rule is. The agent has
+      one implementation per claim, so the correction lands in one place — and the
+      self-checks then verify the corrected reading against the next extract.
+    </p>
+  </div>
 </section>
 
 <footer>

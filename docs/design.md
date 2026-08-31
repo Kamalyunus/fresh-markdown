@@ -556,6 +556,12 @@ renames atomically, two cannot.
 
 ### 5.10 Inference and the event contract
 
+The source-data conventions everything below stands on (the write-off
+sentinel, shrink, the counter, percent discounts) were inferred from the
+extract, not decreed: they are registered as claims in
+`docs/event_contract.html` §08, owned by the data's producers, and a
+corrected claim is a code change here, never work on their side.
+
 Validation checks nine invariants and **rejects the state rather than
 returning any price** — the worst failure is a confidently wrong price, not
 "no answer". Outcomes are constructed by `pipeline.ingest_outcomes` from

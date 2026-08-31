@@ -101,7 +101,9 @@ Outcomes are NOT engineering's to produce: `pipeline.ingest_outcomes`
 (Lane C) builds them from the hourly FLC feed, matched to decisions by
 (SKU, FC, date, hour), deriving `adjustment_reason`, `is_stockout` and the
 offered price itself. §07 of the contract page is the pre-build
-feasibility checklist.
+feasibility checklist, and §08 is the conventions register: every
+derivation stands on source-data meanings only engineering can confirm —
+walk them through it before the pilot.
 
 The caller reads `tau` from `PosteriorStore.tau(cfg)` — **not** from
 `config.exploration.tau_initial`, which is only the launch value and never
