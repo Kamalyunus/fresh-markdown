@@ -127,3 +127,32 @@ def test_built_outcomes_pass_the_store_and_rerun_is_a_dedup(tmp_path):
     assert store.quarantined_this_run == 0
     assert sum(store.emit_outcome(dict(o)) for o in outs) == 0   # dedup
     assert store.duplicate_counts["outcome"] == 2
+
+
+def test_monitor_scrap_series_counts_shrink_like_the_floors_do():
+    """The noise floors are measured on episodes.scrap_units (leftover +
+    shrink); a leftover-only live trigger runs looser than its floor by the
+    shrink rate, and a live shrink surge could never fire it."""
+    from common.config import load_config
+    from pipeline.monitor import guardrail_series
+
+    cfg = load_config()
+    hours = [  # one episode: a mid-window shrink of 2, closes holding 1
+        # (hr, start, sold, ending)
+        (3, 6, 1, 3),      # 6 - 1 = 5 expected, 3 reported -> shrink 2
+        (2, 3, 1, 2),
+        (1, 2, 1, 0),      # write-off row: leftover 1, NOT shrink
+    ]
+    decisions, outcomes = [], []
+    for hr, start, sold, end in hours:
+        decisions.append({
+            "decision_id": f"g{hr}", "episode_id": "EP-G", "sku_id": "s",
+            "fc": "f", "timestamp": "2026-08-19T10:00:00+00:00",
+            "hours_remaining": hr, "cost": 100.0})
+        outcomes.append({
+            "decision_id": f"g{hr}", "starting_inventory": start,
+            "units_sold": sold, "ending_inventory": end,
+            "applied_price": 500.0})
+    g = guardrail_series(decisions, outcomes, cfg)
+    # scrap = leftover 1 + shrink 2 = 3, over opening 6
+    assert g["daily_scrap_rate"]["2026-08-19"] == pytest.approx(3 / 6)

@@ -125,17 +125,29 @@ def guardrail_series(decisions, outcomes, cfg):
 
     # episode grain first: scrap is an end-of-episode quantity; summing hourly
     # ending_inventory would count the same unsold unit every hour
-    ep = df.sort_values("hours_remaining", ascending=False).groupby(
+    df = df.sort_values("hours_remaining", ascending=False)
+    # SHRINK counts into scrap (scrap = leftover + vanished), same basis as
+    # episodes.scrap_units, which the noise floors are measured on -- a
+    # leftover-only trigger runs looser than its floor by the shrink rate.
+    # A write-off row (last hour, zeroed ending, stock remaining) is the
+    # leftover, not shrink; restock rows clip to zero.
+    is_last = ~df.duplicated("episode_id", keep="last")
+    disc = (df.start_inv - df.sold) - df.ending_inventory
+    write_off = is_last & (df.ending_inventory == 0) & (disc > 0)
+    df["_shrink"] = np.where(write_off, 0, disc.clip(lower=0))
+    ep = df.groupby(
         "episode_id").agg(date=("date", "first"), arm=("arm", "first"),
                           start_inv=("start_inv", "first"),
                           starting_inventory=("start_inv", "last"),
                           units_sold=("sold", "last"),
                           ending_inventory=("ending_inventory", "last"),
+                          shrink=("_shrink", "sum"),
                           revenue=("revenue", "sum"),
                           margin=("margin", "sum"))
-    # scrap = max(0, inventory - sold) on the last hour, never the reported
+    # leftover = max(0, inventory - sold) on the last hour, never the reported
     # ending_inventory (source writes it off to zero at window close)
-    ep["end_inv"] = episodes.leftover_units(ep.starting_inventory, ep.units_sold)
+    ep["end_inv"] = episodes.leftover_units(
+        ep.starting_inventory, ep.units_sold) + ep.shrink
     # same population rule as business_metrics and the threshold derivation:
     # no closure sentinel = still open -- leftover, not scrap
     ep = ep[~ep.index.isin(_still_running(ep))]
