@@ -156,3 +156,14 @@ def test_monitor_scrap_series_counts_shrink_like_the_floors_do():
     g = guardrail_series(decisions, outcomes, cfg)
     # scrap = leftover 1 + shrink 2 = 3, over opening 6
     assert g["daily_scrap_rate"]["2026-08-19"] == pytest.approx(3 / 6)
+
+
+def test_failures_can_arrive_as_a_table(tmp_path):
+    """Engineering keeps outputs in tables; parquet and CSV load like JSONL."""
+    rows = pd.DataFrame([{"sku_id": "7", "fc": "F1", "date": "2026-08-19",
+                          "hour_of_day": 17, "reason": "push_timeout"}])
+    for name, writer in (("f.parquet", rows.to_parquet), ("f.csv", rows.to_csv)):
+        p = tmp_path / name
+        writer(p, index=False)
+        assert load_failures(str(p)) == {
+            ("7", "F1", "2026-08-19", 17): "push_timeout"}

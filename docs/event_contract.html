@@ -507,6 +507,27 @@
   </div>
 
   <div class="note">
+    <h4>Where the production table fits — and what stays yours</h4>
+    <p>
+      The interface on the outcome side is <strong>the hourly FLC production table you
+      already maintain</strong> (<code>sb_scm.fresh_flc_detail</code>: inventory, units sold,
+      discount, list price, cost, window counter per SKU × FC × hour). Hourly, keep your
+      working state however you like — JSON, a temp table, anything; none of it is read.
+      What matters is that <strong>once a day</strong> the table carries a row for every
+      priced hour of the previous day — zero-sale hours included, which it does today —
+      and <code>pipeline.ingest_outcomes</code> runs on it as a daily batch, builds the
+      outcome events, and matches them to decisions. Daily is not a compromise: learning
+      (<code>pipeline.update</code>) is itself a daily batch, so an hourly outcome stream
+      would buy nothing.
+    </p>
+    <p>
+      The JSONL event streams described on this page are the pricing service's own storage
+      — you never write or read JSON. Your two deliverables are both tables: the production
+      table you already ship, and a small failed-pushes table (see §04).
+    </p>
+  </div>
+
+  <div class="note">
     <h4>Why the decision event is so wide</h4>
     <p>
       It is an audit trail, not a log line. <code>pipeline.assurance</code> takes a logged
@@ -683,9 +704,10 @@
       constructs exactly one finalized outcome per decision from the hourly FLC feed — the
       same snapshot the bootstrap already ingests — matched by (SKU, FC, date, hour). The
       fields are listed so you know what gets stored and what the feed must carry. The only
-      per-hour fact that must come from you is a <strong>failed price push</strong>: one JSONL
-      row (<code>sku_id</code>, <code>fc</code>, <code>date</code>, <code>hour_of_day</code>,
-      <code>reason</code>). Absent means the push succeeded.
+      per-hour fact that must come from you is a <strong>failed price push</strong>: one row
+      per failed hour — a table (parquet/CSV) or JSONL, your choice — with
+      <code>sku_id</code>, <code>fc</code>, <code>date</code>, <code>hour_of_day</code>,
+      <code>reason</code>. No row means the push succeeded.
     </p>
   </div>
 

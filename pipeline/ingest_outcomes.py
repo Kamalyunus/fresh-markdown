@@ -15,8 +15,10 @@ the old producer contract asked for is derived:
   finalized_at        the hour's close, UTC
 
 The one fact only engineering knows -- did the price push succeed -- arrives
-as an optional failures file (JSONL, one row per failed push:
-{"sku_id", "fc", "date", "hour_of_day", "reason"}). Absent = ok.
+as an optional failures input: a table (parquet/CSV) or JSONL, one row per
+failed push (sku_id, fc, date, hour_of_day, reason). No row = ok. Runs as a
+DAILY batch over the previous day's table rows; learning is a daily batch
+too, so hourly delivery would buy nothing.
 
 Run: python3 -m pipeline.ingest_outcomes --feed <hourly parquet> [--failures f.jsonl]
 """
@@ -37,16 +39,19 @@ def _key(sku, fc, date, hour):
 
 
 def load_failures(path):
-    """{key: reason} from the failures JSONL, or {} when no file is given."""
+    """{key: reason} from the failures input -- a parquet/CSV table or
+    JSONL -- or {} when no file is given."""
     if not path:
         return {}
-    out = {}
-    with open(path) as f:
-        for line in f:
-            r = json.loads(line)
-            out[_key(r["sku_id"], r["fc"], r["date"], r["hour_of_day"])] = \
-                r.get("reason", "unspecified")
-    return out
+    if path.endswith(".parquet"):
+        rows = pd.read_parquet(path).to_dict("records")
+    elif path.endswith(".csv"):
+        rows = pd.read_csv(path).to_dict("records")
+    else:
+        with open(path) as f:
+            rows = [json.loads(line) for line in f]
+    return {_key(r["sku_id"], r["fc"], r["date"], r["hour_of_day"]):
+            (r.get("reason") or "unspecified") for r in rows}
 
 
 def build_outcomes(decisions, feed, failures=None, now=None):
@@ -123,8 +128,8 @@ def main():
                     help="hourly FLC parquet (raw source schema)")
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--failures", default=None,
-                    help="JSONL of failed price pushes: sku_id, fc, date, "
-                         "hour_of_day, reason")
+                    help="failed price pushes -- parquet/CSV table or JSONL: "
+                         "sku_id, fc, date, hour_of_day, reason")
     ap.add_argument("--events-dir", default=None)
     args = ap.parse_args()
 

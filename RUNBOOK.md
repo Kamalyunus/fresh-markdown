@@ -117,7 +117,8 @@ Run after midnight, in this order:
 
 ```bash
 python3 -m pipeline.ingest_outcomes --feed <hourly parquet> \
-    [--failures failures.jsonl]        # outcomes from the feed, idempotent
+    [--failures failures.parquet]      # yesterday's table rows -> outcomes;
+                                       # idempotent, failures table optional
 python3 -m pipeline.update             # monitor only -- always safe
 python3 -m pipeline.update --apply     # OPERATOR GATE -- see below
 python3 -m pipeline.monitor            # business / learning / safety series
