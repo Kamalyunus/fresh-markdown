@@ -526,7 +526,10 @@
     <p>
       The JSONL event streams described on this page are the agent's own storage — you never
       write or read JSON. Your two deliverables are both tables: the production table you
-      already ship, and a small failed-pushes table (see §04).
+      already ship, and a small failed-pushes table (see §04). Going the other way, the agent
+      dumps its decision and outcome logs as tables daily (<code>pipeline.export_events</code>
+      — parquet, list fields JSON-encoded) for loading into the warehouse; those tables are a
+      derived convenience for analytics and joins, never the audit record.
     </p>
   </div>
 

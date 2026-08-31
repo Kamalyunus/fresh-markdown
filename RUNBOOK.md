@@ -124,6 +124,8 @@ python3 -m pipeline.update --apply     # OPERATOR GATE -- see below
 python3 -m pipeline.monitor            # business / learning / safety series
 python3 -m pipeline.assurance          # the frozen artifacts vs the live world
 python3 -m pipeline.status             # the only screen that must be read daily
+python3 -m pipeline.export_events      # decision/outcome tables for the
+                                       # warehouse -- derived, never the record
 ```
 
 **Weekly, in the same lane — re-fit the level factors.** The calibration
