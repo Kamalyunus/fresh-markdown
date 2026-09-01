@@ -176,14 +176,28 @@ def tau_provenance_error(cfg, backtest, shadow=None):
     is accepted only when no shadow derivation exists, with the old three
     failure modes: none on disk; predating the entry-only scoping fix
     (marker: no `spread_decisions`); a value that disagrees with it.
+    This is a PROVENANCE check -- did the paste come from the derivation --
+    not a precision requirement on tau. `tau_initial` seeds day one only
+    (`PosteriorStore.tau`); from the first calibration tau is production
+    state and `tau_next` moves it up to 25% a day, so a few percent at launch
+    is absorbed immediately. The tolerance is relative because tau is
+    currency and scales with the population's IL. The pastes this catches --
+    wrong run, wrong field, the pre-scoping-fix backtest -- are all off by
+    tens of percent or multiples, never by fractions of one.
+
     `backtest`/`shadow` are the loaded reports, or None.
     """
     tau = cfg["exploration"]["tau_initial"]
     if tau is None:
         return None                 # null is a separate, louder failure
+    tol = float(cfg["exploration"]["tau_paste_tolerance_rel"])
+
+    def agrees(derived):
+        return abs(float(derived) - float(tau)) <= tol * abs(float(derived))
+
     sh = (shadow or {}).get("tau_initial_derivation") or {}
     if sh.get("tau_initial") is not None:
-        if abs(float(sh["tau_initial"]) - float(tau)) <= 0.01:
+        if agrees(sh["tau_initial"]):
             return None             # sourced from the anchored-path derivation
         return (f"exploration.tau_initial is {tau} but the shadow run derived "
                 f"{sh['tau_initial']} on its own anchored path. Re-paste from "
@@ -203,7 +217,7 @@ def tau_provenance_error(cfg, backtest, shadow=None):
                 "system that explores every hour. Re-run `python3 -m backtest` "
                 "and re-paste.")
     derived = float(der["tau_initial"])
-    if abs(derived - float(tau)) > 0.01:
+    if not agrees(derived):
         return (f"exploration.tau_initial is {tau} but the backtest derived "
                 f"{derived}. Re-paste, or re-run the backtest if the paste is "
                 "the newer of the two.")

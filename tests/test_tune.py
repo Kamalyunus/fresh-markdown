@@ -419,9 +419,15 @@ def test_tau_uses_the_same_staleness_rule_the_status_gate_enforces(cfg):
         return [f for f in tune._measured(c, sh, None, {}, None)
                 if f["key"] == "exploration.tau_initial"][0]
 
+    # 0.19% drift: inside the provenance tolerance, so neither complains.
+    # tau_initial seeds day one only and tau_next absorbs it (posterior.py).
+    assert tau_finding(cfg, shadow)["status"] == "OK"
+    assert tau_provenance_error(cfg, None, shadow) is None
+
+    # a wrong-run paste is the case the gate exists for, and both see it
+    cfg["exploration"]["tau_initial"] = 34.0
     f = tau_finding(cfg, shadow)
     assert f["status"] == "ACT" and f["recommended"] == 270.5
-    # the two now agree: whatever tune calls stale, the gate rejects
     assert tau_provenance_error(cfg, None, shadow) is not None
 
     cfg["exploration"]["tau_initial"] = 270.5

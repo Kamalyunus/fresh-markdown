@@ -94,6 +94,7 @@ pricing:
 exploration:
   budget_share_of_il: 0.01             # SET BY OWNER  exploration spend, share of markdown IL
   tau_initial: null                    # MEASURED  shadow derives the launch tau; ships null
+  tau_paste_tolerance_rel: 0.05        # SET  tau_initial paste vs its derivation. A PROVENANCE check, not precision: tau_initial seeds day one only and tau_next moves tau up to 25%/day, so a few percent is absorbed. Wrong-run pastes are off by tens of percent
   tau0_derivation_min_decisions: 500   # SET  floor for shadow's launch-tau
   tau_adjust_clip: [0.5, 1.25]         # SET  max daily multiplicative change in tau
   tau_spend_guard: 1.0                 # SET  divide-by-zero guard on realised cost, currency
