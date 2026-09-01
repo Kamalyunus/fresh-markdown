@@ -17,7 +17,8 @@ import pandas as pd
 from scipy.optimize import minimize_scalar
 from scipy.stats import nbinom
 
-from common.config import load_config, design_effect
+from common.config import (design_effect, intraclass_correlation,
+                           load_config)
 from common import episodes
 from common.provenance import stamp
 from bootstrap.prepare_data import population, split_frames
@@ -151,15 +152,16 @@ def fit_dispersion(d, cfg):
 
     # rho on the CALIB window, same as r: in-train rows understate it (the
     # model fits its own residuals), an understated rho understates deff, and
-    # deff deflates every posterior update. mean_forced_hours shares the
-    # window so the deff pair is consistent.
+    # deff deflates every posterior update. `m` is NOT frozen alongside it:
+    # production measures forced hours per episode per batch, because that
+    # number moves with the exploration rate by construction.
     calib["resid"] = calib.units_sold - calib.mu_hat
 
     sizes = calib.groupby("episode_id")["resid"].size()
-    sub_d = calib[calib.episode_id.isin(sizes[sizes >= 3].index)]
-    between = sub_d.groupby("episode_id")["resid"].mean().var(ddof=1)
-    total = sub_d["resid"].var(ddof=1)
-    rho = float(np.clip(between / total, 0.0, 0.95)) if total > 0 else 0.0
+    min_hours = cfg["assurance"]["rho_min_hours_per_episode"]
+    sub_d = calib[calib.episode_id.isin(sizes[sizes >= min_hours].index)]
+    rho = intraclass_correlation(sub_d["resid"], sub_d["episode_id"],
+                                 dc["rho_clip_max"])
 
     hours = calib.groupby("episode_id").size()
     changed = calib.groupby("episode_id")["total_discount"].nunique() > 1
@@ -174,8 +176,13 @@ def fit_dispersion(d, cfg):
                                     str(dates.max().date())],
                "fit_rows": int(len(calib)),
                "fit_episodes": int(calib.episode_id.nunique()),
-               "mean_forced_hours_per_episode": round(h_forced, 3),
-               "implied_deff": round(design_effect(rho, h_forced), 3)}
+               # DIAGNOSTIC ONLY, and not "forced hours": the mean LENGTH of
+               # legacy episodes whose discount changed. Production measures
+               # the real m per batch (common.config.deff_from_episodes),
+               # because it moves with the exploration rate by construction.
+               "legacy_mean_hours_per_changing_episode": round(h_forced, 3),
+               "implied_deff_at_that_length": round(
+                   design_effect(rho, h_forced), 3)}
     return r_lookup, rho_out
 
 
@@ -339,8 +346,9 @@ def main():
     print(f"r by subcategory : {len(r_lookup['subcategory'])} groups, "
           f"global r = {r_lookup['global']:.3f}, clamp at {r_lookup['clamp_at']:.3f}")
     print(f"rho              : {rho_out['rho']}  "
-          f"(forced hours {rho_out['mean_forced_hours_per_episode']}, "
-          f"deff {rho_out['implied_deff']})")
+          f"(legacy episode length "
+          f"{rho_out['legacy_mean_hours_per_changing_episode']}, "
+          f"deff {rho_out['implied_deff_at_that_length']})")
     dr = rho_out["drift_by_window"]
     if dr.get("windows_fitted"):
         print(f"drift ({dr['freq']})       : r {dr['r_median']} +-{dr['r_spread']} | "
@@ -348,7 +356,7 @@ def main():
               f"{dr['windows_fitted']} windows")
         print(f"                   {dr['verdict']}")
     print("paste into config.yaml: dispersion.rho, "
-          "dispersion.mean_forced_hours_per_episode")
+          "-- m is measured per batch, never pasted")
 
 
 if __name__ == "__main__":

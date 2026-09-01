@@ -15,7 +15,8 @@ import numpy as np
 from scipy.stats import chi2 as chi2_dist
 from scipy.stats import nbinom
 
-from common.config import load_config, deff, design_effect
+from common.config import (design_effect, intraclass_correlation,
+                           load_config)
 from events.store import EventStore
 from pricing import dp as dp_mod
 from pricing.explore import affordable_set
@@ -211,16 +212,20 @@ def correlation_drift(decisions, outcomes, cfg):
                 "verdict": "INSUFFICIENT"}
 
     resid = np.array([x for v in usable.values() for x, _ in v])
-    means = np.array([np.mean([x for x, _ in v]) for v in usable.values()])
-    total = float(resid.var(ddof=1))
-    rho_live = float(np.clip(means.var(ddof=1) / total, 0.0, 0.95)) if total > 0 else 0.0
+    groups = np.array([eid for eid, v in usable.items() for _ in v])
+    rho_live = intraclass_correlation(resid, groups,
+                                      cfg["dispersion"]["rho_clip_max"])
 
     moved = [v for v in usable.values() if len({round(dd, 6) for _, dd in v}) > 1]
     hours = float(np.mean([len(v) for v in (moved or list(usable.values()))]))
     deff_live = design_effect(rho_live, hours)
 
     rho_frozen = cfg["dispersion"]["rho"]
-    deff_frozen = float(deff(cfg))
+    # BOTH sides at the LIVE clustering: m is now measured per batch wherever
+    # deff is applied (common.config.deff_from_episodes), so the forced-hours
+    # channel cannot drift by construction and this check isolates what IS
+    # still frozen -- rho -- weighted by the consequence it has today.
+    deff_frozen = design_effect(rho_frozen, hours)
     # deff = 1 + (m - 1) * rho divides accumulated information, and it drifts
     # through BOTH terms. Judging on rho alone was blind to the m channel:
     # forced hours per episode can move (an exploration-rate change moves it
@@ -234,8 +239,6 @@ def correlation_drift(decisions, outcomes, cfg):
         "rho_frozen": round(float(rho_frozen), 4),
         "rho_drift": round(abs(rho_live - rho_frozen), 4),
         "mean_forced_hours_live": round(hours, 3),
-        "mean_forced_hours_frozen": float(
-            cfg["dispersion"]["mean_forced_hours_per_episode"]),
         "deff_live": round(deff_live, 3),
         "deff_frozen": round(deff_frozen, 3),
         "deff_drift_rel": round(deff_drift, 4),

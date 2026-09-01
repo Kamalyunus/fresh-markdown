@@ -192,8 +192,8 @@ while any measured or owner-decided value is null. Every value is labelled:
 `MEASURED` (produced by the pipeline), `SET` (design choice), or `SET BY
 OWNER` (business decision — **an agent must never invent one**). The
 runtime-required values `load_config(strict=True)` refuses on while null:
-`dispersion.rho`, `dispersion.mean_forced_hours_per_episode`,
-`exploration.tau_initial`, `monitoring.stop_conditions.
+`dispersion.rho`, `exploration.tau_initial`,
+`monitoring.stop_conditions.
 scrap_deterioration_pct` and `margin_deterioration_pct`, and
 `ab_test.min_detectable_effect_pct`. Config is the source of every tunable
 and of **no secret**: credentials live in `~/.env` as `REDSHIFT_*` — no
@@ -359,11 +359,26 @@ list indicts the NB family for the extract).
 `rho` is one global scalar fitted against the model's own residuals **on
 the calib window** (in-train rows understate it — the model fits its own
 residuals — and an understated rho understates deff, which deflates every
-posterior update). `dispersion.rho` and
-`dispersion.mean_forced_hours_per_episode` must be re-pasted from
+posterior update). `dispersion.rho` must be re-pasted from
 `artifacts/rho.json` after every retrain and after a prior change (the
 working elasticity moves the residuals); a stale paste mis-weights every
-posterior step silently, in the direction of slower learning. Why NB:
+posterior step silently, in the direction of slower learning.
+
+rho is fitted with `common.config.intraclass_correlation`, the one-way ANOVA
+ICC. `var(group means)/var(all)` — the form used before — estimates
+`rho + (1−rho)/m`, because a group mean of m *independent* draws still varies
+by σ²/m and that term reads as shared signal: on independent hours it returns
+1/m (measured 0.164 at m=6, deff 1.82) and every posterior step was deflated
+by that much pure estimator artifact.
+
+**`m` is not pasted.** It is measured wherever deff is applied
+(`common.config.deff_from_episodes`) as the forced outcomes per episode in
+the batch at hand. The frozen key held the mean *length* of legacy episodes
+whose discount changed — not forced hours at all — and the real quantity
+moves with the exploration rate by construction, so freezing it guaranteed
+drift. Measuring it closes that channel instead of alerting on it, and
+`assurance.correlation` is then a check on the one thing still frozen: rho,
+priced at today's clustering. Why NB:
 hourly demand is far more variable than Poisson. Why `r` per subcategory
 but `rho` global: dispersion differs by product type and the data supports
 it there; a noisy per-category `rho` would inject noise into the
@@ -756,8 +771,8 @@ freshness line calls stale. The re-run map:
 
 | after changing | re-run | re-paste |
 | --- | --- | --- |
-| baseline (retrain) | `bootstrap.run` (whole loop) → `shadow` | `rho`, `mean_forced_hours_per_episode` |
-| elasticity prior | `fit_dispersion` onward (§5.5) | same two mirrors |
+| baseline (retrain) | `bootstrap.run` (whole loop) → `shadow` | `rho` |
+| elasticity prior | `fit_dispersion` onward (§5.5) | `rho` |
 | a config tunable a report reads | that report onward; bump `meta.config_version` | — |
 | the extract | everything from `prepare_data` | — |
 

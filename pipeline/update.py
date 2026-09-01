@@ -17,7 +17,7 @@ import pandas as pd
 from scipy.special import gammaln, logsumexp
 from scipy.stats import nbinom
 
-from common.config import load_config, deff
+from common.config import load_config, deff_from_episodes
 from common import episodes
 from events.store import EventStore
 from pricing import explore
@@ -142,12 +142,17 @@ def grid_update(pairs, cell_record, cfg):
                          cfg["pricing"]["demand_floor"], None)
     information = float(np.sum(
         mu_at_mean * log_ratio ** 2 * r / (r + mu_at_mean)))
-    effective_information = information / deff(cfg)
+    # deff at THIS batch's clustering: how many forced outcomes each
+    # episode actually contributed, not a frozen paste
+    batch_deff = deff_from_episodes(
+        cfg["dispersion"]["rho"], [d["episode_id"] for d, _, _ in pairs])
+    effective_information = information / batch_deff
     return raw_mean, raw_std, effective_information, {
         "zero_sales_share": round(float((k == 0).mean()), 4),
         "stockout_share": round(float(censored.mean()), 4),
         "exploration_cost": round(float(sum(
             d["exploration_cost"] for d, _, _ in pairs)), 2),
+        "deff_applied": round(batch_deff, 3),
         "predictive_check": predictive_check,
     }
 

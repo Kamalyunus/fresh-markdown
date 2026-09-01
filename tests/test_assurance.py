@@ -153,24 +153,26 @@ def test_correlation_matches_the_frozen_value_when_the_world_has_not_moved(cfg):
     # mean_forced_hours_per_episode, and shared variance is tuned so live rho
     # lands near the frozen scalar (0.2436 on the calib window; count
     # discreteness sets a ~0.26 floor on the generator's live rho)
-    hours = round(cfg["dispersion"]["mean_forced_hours_per_episode"])
-    decs, outs = _episodes(cfg, 300, hours=hours, episode_shift=0.02, seed=4)
+    hours = cfg["assurance"]["rho_min_hours_per_episode"] * 2
+    decs, outs = _episodes(cfg, 300, hours=hours, episode_shift=0.25, seed=4)
     out = assurance.correlation_drift(decs, outs, cfg)
     assert out["verdict"] == "PASS", out
     assert abs(out["rho_live"] - frozen) <= cfg["assurance"]["rho_drift_alert"]
 
 
-def test_forced_hours_drift_alone_fails_though_rho_never_moves(cfg):
-    """The channel the rho-only verdict could not see. Same rho, half the
-    hours per episode: deff is rescaled and every posterior update in the
-    window is deflated by the wrong divisor, while rho_drift stays quiet."""
-    hours = round(cfg["dispersion"]["mean_forced_hours_per_episode"])
-    decs, outs = _episodes(cfg, 300, hours=hours // 2, episode_shift=0.02,
-                           seed=4)
-    out = assurance.correlation_drift(decs, outs, cfg)
-    assert out["rho_drift"] <= cfg["assurance"]["rho_drift_alert"]   # quiet
-    assert out["deff_drift_rel"] > cfg["assurance"]["deff_drift_alert_rel"]
-    assert out["verdict"] == "FAIL", out
+def test_deff_is_measured_at_the_live_clustering_not_a_frozen_paste(cfg):
+    """m was a config paste -- and not forced hours at all, but the mean
+    LENGTH of legacy episodes whose discount changed. It is now measured
+    wherever deff is applied, so the forced-hours channel cannot drift: the
+    same world at half the hours per episode is not an alarm, it is a
+    different (correctly computed) divisor on both sides."""
+    base_hours = cfg["assurance"]["rho_min_hours_per_episode"] * 2
+    for hours in (base_hours, base_hours // 2):
+        decs, outs = _episodes(cfg, 300, hours=hours, episode_shift=0.25,
+                               seed=4)
+        out = assurance.correlation_drift(decs, outs, cfg)
+        assert out["mean_forced_hours_live"] == pytest.approx(hours, abs=0.01)
+        assert out["verdict"] == "PASS", out
 
 
 def test_correlation_catches_drift_that_would_rescale_every_update(cfg):
@@ -294,19 +296,19 @@ def test_uniformity_needs_size_as_well_as_significance(cfg):
     assert out["affordable_but_not_explored"] == 1
 
 
-def test_correlation_verdict_is_on_deff_not_rho_alone(cfg):
-    """deff = 1 + (m-1)*rho divides accumulated information and drifts through
-    BOTH terms. The rho-only verdict was blind to the forced-hours channel: m
-    can move -- an exploration-rate change moves it by design -- and rescale
-    every update while rho sits still."""
+def test_a_stale_rho_still_fails_weighted_by_todays_clustering(cfg):
+    """What remains frozen is rho, and the verdict prices its staleness at
+    the clustering in force -- the same absolute rho error matters more when
+    episodes contribute more correlated hours."""
     from common.config import design_effect
 
     rho = float(cfg["dispersion"]["rho"])
-    m_frozen = float(cfg["dispersion"]["mean_forced_hours_per_episode"])
     gate = cfg["assurance"]["deff_drift_alert_rel"]
+    stale = rho + cfg["assurance"]["rho_drift_alert"]
+    m_small = cfg["assurance"]["rho_min_hours_per_episode"]
+    m_large = m_small * 4
 
-    frozen = design_effect(rho, m_frozen)
-    # rho unchanged, forced hours halved: invisible to a rho-only check
-    live = design_effect(rho, m_frozen / 2)
-    assert abs(rho - rho) <= cfg["assurance"]["rho_drift_alert"]   # rho: quiet
-    assert abs(live - frozen) / frozen > gate                      # deff: FAIL
+    drift = [abs(design_effect(stale, m) - design_effect(rho, m))
+             / design_effect(rho, m) for m in (m_small, m_large)]
+    assert drift[0] < drift[1]          # same rho error, larger consequence
+    assert drift[1] > gate              # and it trips the gate where it bites

@@ -64,8 +64,6 @@ ANCHORS = {
     ("learning", "max_std_shrink"): "  max_std_shrink:",
     ("exploration", "tau_initial"): "  tau_initial:",
     ("dispersion", "rho"): "  rho:",
-    ("dispersion", "mean_forced_hours_per_episode"):
-        "  mean_forced_hours_per_episode:",
     ("baseline_model", "calibration_fit_trailing_weeks"):
         "  calibration_fit_trailing_weeks:",
     ("monitoring", "stop_conditions", "scrap_deterioration_pct"):
@@ -197,9 +195,7 @@ def _measured(cfg, shadow, rho_art, thresholds, backtest=None):
             f"I* at the launch prior std; configured {cur}",
             "thresholds.information_increment_recommendation.recommended"))
 
-    for key, art_key in ((("dispersion", "rho"), "rho"),
-                         (("dispersion", "mean_forced_hours_per_episode"),
-                          "mean_forced_hours_per_episode")):
+    for key, art_key in ((("dispersion", "rho"), "rho"),):
         got = (rho_art or {}).get(art_key)
         cur = _get(cfg, key)
         if got is not None:

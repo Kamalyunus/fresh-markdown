@@ -59,10 +59,10 @@ dispersion:
   clamp_percentile: 0.90               # SET  clamp high converged r
   min_rows_per_group: 200              # SET  below this: fall back one level
   r_search_bounds: [0.05, 50.0]        # SET  MLE search range for r
+  rho_clip_max: 0.95                   # SET  ceiling on the fitted intra-episode correlation
   r_lookup_path: "artifacts/r_lookup.json"
   rho_path: "artifacts/rho.json"
-  rho: 0.2436                          # MEASURED  fit_dispersion, on the calib window; mirrors artifacts/rho.json
-  mean_forced_hours_per_episode: 5.909 # MEASURED  ditto -> deff = 2.196
+  rho: 0.2436                          # MEASURED  fit_dispersion, on the calib window; mirrors artifacts/rho.json. m is NOT pasted: deff measures forced hours per episode per batch (common.config.deff_from_episodes)
 
 tuning:                                # SET  gates pipeline.tune checks before auto-applying
   max_price_share_changed_for_auto_rail: 0.10   # SET  auto-rail ceiling on price churn

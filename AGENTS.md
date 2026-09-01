@@ -17,7 +17,7 @@ statement and the incident that created the rule.
    matches in both reports. `--fit-calibration` does NOT retrain; plain
    `train_baseline` and `bootstrap.run` DO. (§5.4)
 1a. **Changing the elasticity prior invalidates `rho`, `deff` and the level
-   factor** — re-run `fit_dispersion` onward and re-paste the mirrors. (§5.6)
+   factor** — re-run `fit_dispersion` onward and re-paste `rho`. (§5.6)
 1b. **Bootstrap the chain with `python3 -m bootstrap.run`, never by hand-running
    steps 3b–5b** — they are one turn of a fixed-point loop that needs 8–9 turns
    on production data, and re-running the step list to settle it retrains the
@@ -217,7 +217,7 @@ Every paste has one source and one checker:
 
 | Config value | Paste from | Checked by |
 | --- | --- | --- |
-| `dispersion.rho`, `mean_forced_hours_per_episode` | `artifacts/rho.json`, after EVERY retrain | `artifact mirrors` (strict start-up refuses drift) |
+| `dispersion.rho` | `artifacts/rho.json`, after EVERY retrain (`m` is measured per batch, never pasted) | `artifact mirrors` (strict start-up refuses drift) |
 | `exploration.tau_initial` | `reports/shadow.json` → `tau_initial_derivation` (backtest = cross-check only) | `tau_provenance_error` — shadow refuses a stale paste |
 | `scrap/margin_deterioration_pct`, `min_detectable_effect_pct` | OWNER, from `reports/thresholds.json` — `TOO TIGHT` and `LIKELY INERT` are blocking | `guardrail floors` |
 

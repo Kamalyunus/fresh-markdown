@@ -15,7 +15,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from common.config import load_config, deff, ConfigError
+from common.config import load_config, deff_from_episodes, ConfigError
 from common import episodes
 from common.parallel import map_episodes
 from common.episodes import adjustment_reason
@@ -383,6 +383,7 @@ def _shadow_one(ep, ctx):
     out = {
         "events": [], "rejected": {}, "spreads": [],
         "cost_floor_violations": 0, "n_forced": 0, "empty_affordable": 0,
+        "episode_id": ep["episode_id"],
         "would_be_cost": 0.0, "raw_information": 0.0,
         # info is quadratic in the log price move, linear in demand
         "abs_log_ratio": 0.0, "forced_mu": 0.0, "forced_discount_gap": 0.0,
@@ -567,6 +568,9 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     n_forced = empty_affordable = 0
     raw_information = 0.0
     abs_log_ratio = forced_mu = forced_discount_gap = 0.0
+    # one entry per FORCED hour, so deff is measured at the clustering this
+    # run actually produced rather than a frozen calib-window paste
+    forced_episode_ids = []
     # markdown IL on the SAME episodes/window as the spend, so budget and
     # spend share a population; accumulated as scalars, not rows
     il_discount = 0.0
@@ -592,6 +596,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         empty_affordable += out["empty_affordable"]
         would_be_cost += out["would_be_cost"]
         raw_information += out["raw_information"]
+        forced_episode_ids.extend([out["episode_id"]] * out["n_forced"])
         abs_log_ratio += out["abs_log_ratio"]
         forced_mu += out["forced_mu"]
         forced_discount_gap += out["forced_discount_gap"]
@@ -660,7 +665,9 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
 
     # weeks-to-convergence input: evidence bought -> bounded posterior steps;
     # the step cap and daily human gate keep a calendar floor regardless
-    eff_information = raw_information / deff(cfg)
+    shadow_deff = deff_from_episodes(cfg["dispersion"]["rho"],
+                                     forced_episode_ids)
+    eff_information = raw_information / shadow_deff
     inc = cfg["learning"]["information_increment"]
     n_ep = len(groups)
     # Would-be spend vs budget on SHADOW'S OWN basis: the backtest bisection
@@ -773,7 +780,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     learning_yield = {
         "effective_information_total": round(eff_information, 2),
         "effective_information_per_episode": round(per_episode, 5),
-        "deff_applied": round(deff(cfg), 3),
+        "deff_applied": round(shadow_deff, 3),
         "bounded_updates_supported": round(eff_information / inc, 2),
         "episodes_per_bounded_update": round(inc / per_episode, 1)
             if per_episode > 0 else None,

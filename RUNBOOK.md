@@ -41,8 +41,8 @@ Then, in order:
    `information_available_per_row` first). There is no pass flag; a pooled
    or uniform prior is a designed outcome, not a failure.
 3. **Paste MEASURED values into `config.yaml`** — the only hand step:
-   - `dispersion.rho`, `dispersion.mean_forced_hours_per_episode` — from
-     `artifacts/rho.json`, after **every** retrain;
+   - `dispersion.rho` — from `artifacts/rho.json`, after **every** retrain
+     (`m` is measured per batch by `deff_from_episodes`, never pasted);
    - `learning.information_increment` — from `reports/thresholds.json` →
      `information_increment_recommendation.recommended`, re-derived after
      **every** prior change (it is the ceiling above which a bounded update

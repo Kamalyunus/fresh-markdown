@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from common.ab import arm
-from common.config import load_config, deff
+from common.config import load_config, deff_from_episodes
 from events.store import EventStore
 from pricing.posterior import PosteriorStore
 from pipeline import assurance as assurance_mod
@@ -288,7 +288,9 @@ def learning_metrics(decisions, posterior, cfg, outcomes=()):
             k: round(v, 1) for k, v in
             update_mod.daily_exploration_spend(decisions, outcomes).items()},
         "tau_current": decisions[-1]["tau_current"] if decisions else None,
-        "deff_applied": round(deff(cfg), 3),
+        "deff_applied": round(deff_from_episodes(
+            cfg["dispersion"]["rho"],
+            [d["episode_id"] for d in forced]), 3),
         # std only moves when an update commits, so "std flat for N days" is
         # exactly "no committed update in N days" (section 15.2 alert)
         "posterior_std_flat_alert": sorted(

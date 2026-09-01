@@ -14,7 +14,7 @@ import pandas as pd
 from scipy.special import gammaln, logsumexp
 from scipy.stats import poisson
 
-from common.config import design_effect
+from common.config import design_effect, intraclass_correlation
 from common import episodes
 from bootstrap.prepare_data import population, split_frames
 
@@ -94,11 +94,10 @@ def deflation_deff(rows, model, cfg):
     resid = rows.units_sold.to_numpy() - model.predict_mu_ref(rows)
     f = pd.DataFrame({"episode_id": rows.episode_id.to_numpy(), "resid": resid})
     sizes = f.groupby("episode_id").resid.size()
-    sub = f[f.episode_id.isin(sizes[sizes >= 3].index)]
-    total = float(sub.resid.var(ddof=1)) if len(sub) > 1 else 0.0
-    between = (float(sub.groupby("episode_id").resid.mean().var(ddof=1))
-               if sub.episode_id.nunique() > 1 else 0.0)
-    rho = float(np.clip(between / total, 0.0, 0.95)) if total > 0 else 0.0
+    min_hours = cfg["assurance"]["rho_min_hours_per_episode"]
+    sub = f[f.episode_id.isin(sizes[sizes >= min_hours].index)]
+    rho = intraclass_correlation(sub.resid, sub.episode_id,
+                                 cfg["dispersion"]["rho_clip_max"])
     m = float(sizes.mean()) if len(sizes) else 1.0
     return max(1.0, design_effect(rho, m)), rho, m
 

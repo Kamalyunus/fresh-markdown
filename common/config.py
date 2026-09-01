@@ -9,6 +9,8 @@ MEASURED / SET BY OWNER value is null.
 import json
 import os
 
+import numpy as np
+import pandas as pd
 import yaml
 
 
@@ -19,7 +21,6 @@ class ConfigError(RuntimeError):
 # Keys that must be non-null before any price is applied in production.
 RUNTIME_REQUIRED = [
     ("dispersion", "rho"),
-    ("dispersion", "mean_forced_hours_per_episode"),
     ("exploration", "tau_initial"),
     ("monitoring", "stop_conditions", "scrap_deterioration_pct"),
     ("monitoring", "stop_conditions", "margin_deterioration_pct"),
@@ -32,8 +33,6 @@ RUNTIME_REQUIRED = [
 # set deff); strict mode refuses to start on divergence.
 ARTIFACT_MIRRORS = [
     (("dispersion", "rho_path"), "rho", ("dispersion", "rho")),
-    (("dispersion", "rho_path"), "mean_forced_hours_per_episode",
-     ("dispersion", "mean_forced_hours_per_episode")),
 ]
 
 
@@ -97,6 +96,34 @@ def reference_discount(cfg, category):
     return float(table.get(key, table["_default"]))
 
 
+def intraclass_correlation(residuals, groups, clip_max=0.95):
+    """One-way random-effects ICC -- the ONE home for rho.
+
+    `var(group means) / var(all)` estimates `rho + (1 - rho)/m`, not rho:
+    a group mean of m independent draws still varies by sigma^2/m, and that
+    term is read as shared signal. On INDEPENDENT hours it returns 1/m
+    (measured: 0.164 at m=6), so deff deflated every posterior step by ~1.8x
+    of pure estimator artifact. The ANOVA form subtracts MSW, which is
+    exactly that term, and recovers rho at every m.
+    """
+    s = pd.Series(np.asarray(residuals, dtype=float))
+    g = pd.Series(np.asarray(groups)).reset_index(drop=True)
+    s = s.reset_index(drop=True)
+    sizes = g.groupby(g).size().to_numpy()
+    k, n = len(sizes), len(s)
+    if k < 2 or n <= k:
+        return 0.0
+    means = s.groupby(g).mean()
+    msb = float((sizes * (means.to_numpy() - s.mean()) ** 2).sum() / (k - 1))
+    msw = float(((s - g.map(means)) ** 2).sum() / (n - k))
+    # n0: the unbalanced-design effective group size (== m when balanced)
+    n0 = (n - (sizes ** 2).sum() / n) / (k - 1)
+    den = msb + (n0 - 1) * msw
+    if den <= 0:
+        return 0.0
+    return float(np.clip((msb - msw) / den, 0.0, clip_max))
+
+
 def design_effect(rho, forced_hours):
     """Cluster design effect: 1 + (m - 1) * rho, floored at 1 (design 5.11).
     The single definition -- the floor keeps a negative rho from DIVIDING
@@ -104,7 +131,18 @@ def design_effect(rho, forced_hours):
     return max(1.0, 1.0 + (forced_hours - 1.0) * rho)
 
 
-def deff(cfg):
-    """Design effect from the frozen rho and forced-hours in config."""
-    return design_effect(cfg["dispersion"]["rho"],
-                         cfg["dispersion"]["mean_forced_hours_per_episode"])
+def deff_from_episodes(rho, episode_ids):
+    """deff at the clustering ACTUALLY present: `m` is the mean number of
+    forced outcomes per episode in `episode_ids`.
+
+    `m` was a frozen config paste measured on the calib window as the mean
+    LENGTH of legacy episodes whose discount changed -- not forced hours at
+    all, and fixed while the real quantity moves with the exploration rate by
+    construction. Measuring it per batch closes that drift channel instead of
+    alerting on it, and removes a paste, a mirror and a staleness failure.
+    """
+    ids = [e for e in episode_ids if e is not None]
+    if not ids:
+        return 1.0
+    counts = pd.Series(ids).value_counts()
+    return design_effect(rho, float(counts.mean()))

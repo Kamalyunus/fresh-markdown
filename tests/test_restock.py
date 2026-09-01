@@ -171,7 +171,7 @@ def test_information_is_in_nb_units_not_poisson(cfg):
     overstated evidence by ~1.6-1.9x at production mu and r -- on top of
     what deff corrects -- so `information_increment` fired earlier than its
     face value. Design 5.11."""
-    from pipeline.update import deff
+    from common.config import deff_from_episodes
 
     cell = {"mean": -1.0, "std": 0.6}
     dec = _decision(0, 1, 9)
@@ -185,8 +185,11 @@ def test_information_is_in_nb_units_not_poisson(cfg):
              cfg["pricing"]["demand_floor"])
     L2 = np.log(ratio) ** 2
     r = dec["dispersion_r"]
-    nb = 40 * mu * L2 * (r / (r + mu)) / deff(cfg)
-    poisson = 40 * mu * L2 / deff(cfg)
+    # deff at THIS batch's clustering: 40 forced hours all from one episode
+    d_eff = deff_from_episodes(cfg["dispersion"]["rho"],
+                               [dec["episode_id"]] * 40)
+    nb = 40 * mu * L2 * (r / (r + mu)) / d_eff
+    poisson = 40 * mu * L2 / d_eff
     assert eff_info == pytest.approx(nb, rel=1e-9)
     assert eff_info < poisson  # the damping is real, not a no-op
 
