@@ -119,8 +119,12 @@ def business_metrics(decisions, outcomes, cfg):
 def guardrail_series(decisions, outcomes, cfg):
     """Daily scrap and realised-margin rates plus the 15.4 deterioration
     series. Definitions match bootstrap.derive_thresholds._daily_series
-    exactly -- the noise floors are measured on them. Basis: control arm when
-    both arms carry a day's data, else the trailing-window mean."""
+    exactly -- the noise floors are measured on them. Basis: the trailing
+    window mean, unless `ab_test.active` says an A/B is running AND both arms
+    carry data. Before the A/B every priced unit is system-priced and merely
+    hash-LABELLED into arms, so an arm comparison there is
+    treatment-vs-treatment: a catalogue-wide deterioration cancels exactly and
+    the guardrail cannot fire (design 12)."""
     dec = {d["decision_id"]: d for d in decisions}
     rows = []
     for o in outcomes:
@@ -186,6 +190,7 @@ def guardrail_series(decisions, outcomes, cfg):
     window = cfg["monitoring"]["guardrail_noise_window_days"]
 
     smoothing = cfg["monitoring"]["stop_conditions"]["deterioration_smoothing_days"]
+    ab_active = bool(cfg["ab_test"].get("active"))
 
     def deterioration(metric, worse_when_higher, smooth, dev_basis):
         """Deterioration against baseline, positive = worse. Both series are
@@ -194,7 +199,15 @@ def guardrail_series(decisions, outcomes, cfg):
         smoothing AND basis, so the comparison lives in one function."""
         treat = by_arm.get("treatment")
         ctrl = by_arm.get("control")
-        if treat is not None and ctrl is not None:
+        # The control-arm basis needs a control arm that is NOT system-priced.
+        # `arm()` labels every priced SKU x FC by hash, so before the A/B both
+        # labels are present and both are treated: the comparison is
+        # treatment-vs-treatment and a catalogue-wide scrap doubling is a
+        # deviation of exactly ZERO. The guardrail was structurally inert for
+        # the whole pilot. `ab_test.active` is the only thing that can say
+        # which regime we are in -- it cannot be inferred from the labels.
+        note = None
+        if ab_active and treat is not None and ctrl is not None:
             t = guard.smooth(treat[metric], smooth)
             c = guard.smooth(ctrl[metric], smooth)
             common = t.index.intersection(c.index)
@@ -203,8 +216,17 @@ def guardrail_series(decisions, outcomes, cfg):
             t = guard.smooth(overall[metric], smooth)
             c = t.rolling(window, min_periods=window).mean().shift(smooth)
             basis = f"trailing_{window}d_mean"
+            if ab_active and ctrl is None:
+                # control units are legacy-priced, so they emit no decisions
+                # and never reach the event store -- say so rather than let a
+                # silent fallback read as an arm comparison
+                note = ("ab_test.active is true but the event store holds no "
+                        "control-arm rows: control units are not system-priced, "
+                        "so their outcomes never enter it. Comparing against "
+                        "the trailing mean instead -- a genuine arm comparison "
+                        "needs control outcomes from the feed.")
         dev = guard.deviation(t, c, worse_when_higher, dev_basis)
-        return dev.replace([np.inf, -np.inf], np.nan).dropna(), basis
+        return dev.replace([np.inf, -np.inf], np.nan).dropna(), basis, note
 
     out = {"days_observed": int(len(overall)),
            "daily_scrap_rate": {str(k): round(float(v), 6)
@@ -214,9 +236,11 @@ def guardrail_series(decisions, outcomes, cfg):
     for metric, worse_high, key in (("scrap_rate", True, "scrap"),
                                     ("margin_rate", False, "margin")):
         dev_basis = guard.basis_for(cfg, key)
-        dev, basis = deterioration(metric, worse_high, smoothing[key], dev_basis)
+        dev, basis, note = deterioration(metric, worse_high, smoothing[key],
+                                         dev_basis)
         out[f"{key}_deterioration"] = {
             "basis": basis,
+            **({"basis_note": note} if note else {}),
             "deterioration_basis": dev_basis,
             # a reader cannot tell 0.15 relative from 0.15 pp by looking
             "units": guard.units_of(dev_basis),
@@ -269,6 +293,9 @@ def learning_metrics(decisions, posterior, cfg, outcomes=()):
     empty_rate = (np.mean([d["affordable_set_size"] == 0 for d in decisions])
                   if decisions else None)
     return {
+        # routing, so the budget's widest-std is taken over cells a category
+        # actually reaches (an unrouted GLOBAL never narrows)
+        "cell_of": dict(posterior.state["cell_of"]),
         "posterior_by_cell": {
             c: {"mean": r["mean"], "std": r["std"], "n_obs": r["n_obs"],
                 "accumulated_information": round(r["accumulated_information"], 2),
@@ -366,7 +393,8 @@ def stop_conditions(safety, learning, business, guardrail, cfg):
     cells = learning["posterior_by_cell"]
     day = max(il_by_day) if il_by_day else None
     if il_by_day and cells:
-        widest_std = max(rec["std"] for rec in cells.values())
+        widest_std = PosteriorStore.widest_active_std(
+            cells, learning.get("cell_of") or {})
         budget = explore.budget_today(
             explore.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
         spend = float((learning.get("exploration_cost_by_day") or {}).get(day, 0.0))

@@ -224,9 +224,10 @@ def tau_calibration(decisions, outcomes, posterior, cfg):
         block["through_date"] = through
         return block
 
-    # the WIDEST cell std, matching the monitor: the budget is sized for the
-    # cell that still has the most to learn, not the average one
-    widest_std = max(rec["std"] for rec in cells.values())
+    # the widest ROUTED cell's std, matching the monitor: the budget is sized
+    # for the cell that still has the most to learn. GLOBAL, when nothing
+    # routes to it, never narrows and would pin this at the launch std.
+    widest_std = posterior.widest_std()
     # a share of TRAILING realised IL, never the same day's own
     trailing_il = explore.trailing_daily_il(il_by_day, through, cfg)
     budget = explore.budget_today(trailing_il, widest_std, cfg)

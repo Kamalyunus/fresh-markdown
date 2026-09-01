@@ -279,7 +279,13 @@ gate, backtest, shadow, tau and A/B pass `"dp_eligible"` explicitly.
 
 Every stage reports **`cogs_at_risk`** — unit cost × supply (opening +
 gross arrivals), once per episode — because rows are not the unit the
-business cares about: a stage can take 1% of rows and 15% of the money.
+business cares about: a stage can take 1% of rows and 15% of the money. The
+whole waterfall, COGS and per-stage detail dicts included, is **persisted to
+`split_manifest.json`**: it used to be printed as three columns and dropped,
+so `flow_identity.holds` turning False, the restock/edge diagnostics and the
+shrink-vs-skew reading all landed on the floor while the run succeeded. A
+NaN `cogs_at_risk` (any episode with a null cost) is written as `null` —
+bare `NaN` is not JSON.
 
 Why the paranoia: the three source-schema traps all fail silently. A missed
 percent conversion produces discounts of 25.0 with no error; the realised-
@@ -427,8 +433,12 @@ The specification (`bootstrap.prior_density`):
 - **Estimator.** Per category and arm, the censored Poisson log-likelihood
   over the ε grid with frozen `μ_ref` as baseline; censored hours enter as
   `P(D ≥ q)`.
-- **Density.** Each curve, deflated by an ε-free design effect, becomes
-  `w(ε) ∝ exp(ll/deff)`. The category's own density is the 50/50 arm
+- **Density.** Each curve, deflated by an ε-free design effect **clustered on
+  SKU × FC**, becomes `w(ε) ∝ exp(ll/deff)`. The cluster is the unit, not the
+  episode: these are entry rows, one per episode, so a within-episode ICC is
+  1.0 by construction and the deflation could never engage. What correlates
+  between entry rows is the same unit recurring across days — the cluster the
+  A/B randomises on, and the one that does not average away. The category's own density is the 50/50 arm
   mixture, shrunk toward the pooled density (log-likelihoods summed across
   right-signed categories) with weight
   `own_information_weight = min(1, span/own_information_saturation)`.
@@ -1155,6 +1165,17 @@ the series' own noise **on the basis the monitor compares against**:
 trailing mean before the A/B, same-day treatment-vs-control during it (one
 config value serves both phases, so it must clear the larger —
 `guardrail_threshold_recommendation` reports both floors and which binds).
+
+**Which basis is in force is `ab_test.active`, never the arm labels.**
+`common.ab.arm` hash-labels every priced SKU × FC, so before the A/B both
+labels are present *and both arms are system-priced*: an arm comparison is
+then treatment-vs-treatment, a catalogue-wide deterioration cancels exactly,
+and the guardrail cannot fire at all. It was structurally inert for the whole
+pilot. With `active: false` the monitor uses the trailing mean. Note the
+converse too: during a real A/B the control units are legacy-priced, emit no
+decisions and so never reach the event store — the monitor reports
+`basis_note` and falls back to the trailing mean rather than silently
+presenting a one-armed comparison as an arm comparison.
 The control-arm floor is measured on the **smoothed** series
 (`deterioration_smoothing_days`, arms smoothed before differencing, the
 monitor's own order) with the monitor's own arm hash; the comparison itself

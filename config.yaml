@@ -150,6 +150,7 @@ monitoring:
   alert_posterior_std_flat_days: 21    # SET  learning-loop health
 
 ab_test:
+  active: false                        # SET BY OWNER  is the A/B running? Before it, every priced unit is system-priced and only hash-LABELLED into arms, so an arm comparison is treatment-vs-treatment and the guardrail cannot fire -- the monitor uses the trailing-mean basis until this is true
   allocation: 0.50                     # SET
   power: 0.80                          # SET  for duration derivation
   alpha: 0.05                          # SET  two-sided

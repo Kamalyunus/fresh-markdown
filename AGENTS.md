@@ -219,7 +219,8 @@ Every paste has one source and one checker:
 | --- | --- | --- |
 | `dispersion.rho` | `artifacts/rho.json`, after EVERY retrain (`m` is measured per batch, never pasted) | `artifact mirrors` (strict start-up refuses drift) |
 | `exploration.tau_initial` | `reports/shadow.json` → `tau_initial_derivation` (backtest = cross-check only) | `tau_provenance_error` — shadow refuses a stale paste |
-| `scrap/margin_deterioration_pct`, `min_detectable_effect_pct` | OWNER, from `reports/thresholds.json` — `TOO TIGHT` and `LIKELY INERT` are blocking | `guardrail floors` |
+| `scrap/margin_deterioration_pct`, `min_detectable_effect_pct` | OWNER, from `reports/thresholds.json` — `TOO TIGHT`, `BLOCKED` and `LIKELY INERT` are all blocking | `guardrail floors` |
+| `ab_test.active` | OWNER — `false` until the A/B starts; the arm labels cannot say which regime is in force | `monitor.*_deterioration.basis` |
 
 ## Where to look
 

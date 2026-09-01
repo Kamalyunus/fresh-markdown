@@ -53,7 +53,10 @@ Then, in order:
      the pilot, not the shadow run; a stale or mismatched paste is refused,
      by design).
 4. **Owner sets the `SET BY OWNER` keys** (`scrap_deterioration_pct`,
-   `margin_deterioration_pct`, `min_detectable_effect_pct`) from
+   `margin_deterioration_pct`, `min_detectable_effect_pct`, and
+   `ab_test.active` — leave it `false` until the A/B genuinely starts, or the
+   guardrail compares system-priced units against system-priced units and
+   cannot fire) from
    `reports/thresholds.json` — never invented, and never below a floor the
    report stamps `TOO TIGHT`. The two learning rails
    (`learning.max_std_shrink`, then `learning.max_mean_step`) are owner calls

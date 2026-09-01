@@ -274,3 +274,51 @@ def test_a_zero_base_price_is_refused_not_priced_at_full_discount():
     assert [o["decision_id"] for o in outs] == ["D2"]
     assert rep["unusable_feed_rows"] == 1
     assert "original_price" in rep["unusable_examples"][0]["reason"]
+
+
+def test_the_guardrail_is_not_inert_before_the_ab(tmp_path):
+    """arm() hash-labels every priced SKU x FC, so before the A/B both labels
+    exist and BOTH are system-priced: an arm comparison is
+    treatment-vs-treatment and a catalogue-wide scrap doubling cancels to
+    exactly zero. The guardrail was structurally unable to fire for the whole
+    pilot."""
+    import copy
+
+    from common.config import load_config
+    from pipeline.monitor import guardrail_series
+
+    cfg = load_config()
+    # the trailing basis needs guardrail_noise_window_days of history before
+    # it produces a comparison at all, plus the smoothing shift
+    span = cfg["monitoring"]["guardrail_noise_window_days"] + 20
+    decisions, outcomes, i = [], [], 0
+    for day in range(span):
+        # scrap doubles for the last stretch, across the WHOLE catalogue
+        sold, end = (2, 0) if day < span - 10 else (1, 0)
+        for unit in range(40):
+            i += 1
+            decisions.append({
+                "decision_id": f"g{i}", "episode_id": f"E{i}",
+                "sku_id": f"S{unit}", "fc": "F1", "category": "VEG",
+                "subcategory": "LEAFY", "hours_remaining": 1, "cost": 100.0,
+                "original_price": 1000.0,
+                "timestamp": (pd.Timestamp("2026-06-01")
+                              + pd.Timedelta(days=day)).isoformat() + "+00:00",
+                "date": str((pd.Timestamp("2026-06-01")
+                             + pd.Timedelta(days=day)).date())})
+            outcomes.append({
+                "decision_id": f"g{i}", "starting_inventory": 4,
+                "units_sold": sold, "ending_inventory": end,
+                "applied_price": 800.0})
+
+    pre = guardrail_series(decisions, outcomes, cfg)
+    assert pre["scrap_deterioration"]["basis"].startswith("trailing_")
+    assert pre["scrap_deterioration"]["latest"] > 0, pre["scrap_deterioration"]
+
+    live = copy.deepcopy(cfg)
+    live["ab_test"] = dict(live["ab_test"], active=True)
+    during = guardrail_series(decisions, outcomes, live)
+    assert during["scrap_deterioration"]["basis"] == "control_arm"
+    # and with both arms system-priced the deviation is exactly zero --
+    # which is precisely why this basis must not be the pre-A/B default
+    assert during["scrap_deterioration"]["latest"] == 0.0

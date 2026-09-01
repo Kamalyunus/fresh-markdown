@@ -201,8 +201,7 @@ def derive_tau0(d_full, cfg, start, model, posterior, r_lookup, il_history,
         return block
 
     # day-one budget: production's own quantity on the seeded trailing base
-    cells = posterior.state["cells"]
-    widest_std = max(rec["std"] for rec in cells.values())
+    widest_std = posterior.widest_std()
     budget = explore.budget_today(
         explore.trailing_daily_il(il_history, start_ts.strftime("%Y-%m-%d"),
                                   cfg), widest_std, cfg)
@@ -701,8 +700,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     # production's budget_today, not a simplified one: it scales the share
     # down as the posterior narrows (constant here, but the same quantity
     # the stop condition is evaluated against)
-    cells = posterior.state["cells"]
-    widest_std = max(rec["std"] for rec in cells.values())
+    widest_std = posterior.widest_std()
     # aggregate gate grades mean spend against the MEAN daily budget on the
     # same trailing basis as the controller trace, so the two cannot disagree
     daily_budgets = [explore.budget_today(

@@ -1237,3 +1237,27 @@ def test_no_pre_launch_artifact_reads_past_test_end(workspace):
     seen = [w.get("window") or w.get("start") for w in windows
             if isinstance(w, dict)]
     assert all(str(s) <= test_end for s in seen if s), seen
+
+
+def test_the_manifest_persists_the_waterfall_it_computed(workspace):
+    """Every stage's rows, episodes, COGS at risk and detail dict were
+    computed and then printed as three columns -- so flow_identity.holds
+    going False, the restock/edge diagnostics and the shrink-vs-skew reading
+    all landed on the floor while the run succeeded. AGENTS and design 5.2
+    describe an artifact that did not exist."""
+    ws = workspace
+    raw = (ws / "artifacts" / "split_manifest.json").read_text()
+    assert "NaN" not in raw, "bare NaN is not JSON and most parsers refuse it"
+    manifest = json.loads(raw)
+
+    stages = manifest["waterfall"]
+    assert len(stages) > 1
+    assert [s["stage"] for s in stages] == [s["stage"] for s in stages if s["stage"]]
+    assert all(isinstance(s["rows"], int) and isinstance(s["episodes"], int)
+               for s in stages)
+    # the COGS-at-risk column the docs tell the owner to read
+    assert any(s["cogs_at_risk"] for s in stages)
+    # and at least one stage carries its detail dict, the identity among them
+    details = [s["detail"] for s in stages if s["detail"]]
+    assert details
+    assert any("flow_identity" in d for d in details), list(details[0])

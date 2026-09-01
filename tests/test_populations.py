@@ -709,3 +709,38 @@ def test_the_prior_entry_row_is_the_first_HOUR_not_the_lowest_clock_time(cfg):
     assert len(row) == 1
     assert (row.date.iloc[0], int(row.hour_of_day.iloc[0])) == ("2026-07-01", 22)
     assert row.total_discount.iloc[0] == 0.10      # the entry price, not 0.25
+
+
+def test_the_priors_deflation_can_actually_engage(cfg):
+    """scored_rows returns ONE row per episode, so an episode-grouped ICC was
+    empty by construction: rho 0, deff exactly 1.0 for every category, and
+    design 5.6's deflation could never do anything. Clustered on the unit that
+    recurs -- SKU x FC -- it engages when correlation is present."""
+    import numpy as np
+    import pandas as pd
+
+    from bootstrap.prior_density import deflation_deff
+
+    class _Model:                     # mu_ref is the deflation's baseline only
+        @staticmethod
+        def predict_mu_ref(rows):
+            return np.full(len(rows), 5.0)
+
+    rng = np.random.default_rng(0)
+    n_units, per_unit = 200, cfg["assurance"]["rho_min_hours_per_episode"] + 1
+    rows = []
+    for u in range(n_units):
+        shared = rng.normal(0, 2.0)            # a persistent per-unit level
+        for _ in range(per_unit):
+            rows.append({"sku_id": f"S{u}", "fc": "F1",
+                         "units_sold": 5.0 + shared + rng.normal(0, 0.5)})
+    frame = pd.DataFrame(rows).assign(episode_id=lambda f: range(len(f)))
+
+    deff, rho, m = deflation_deff(frame, _Model(), cfg)
+    assert m == pytest.approx(per_unit)
+    assert rho > 0.5                    # the shared level dominates
+    assert deff > 1.0                   # and the deflation is real
+
+    # one row per unit: no clustering to measure, deff falls back to 1.0
+    solo = frame.drop_duplicates("sku_id").copy()
+    assert deflation_deff(solo, _Model(), cfg)[0] == pytest.approx(1.0)

@@ -272,3 +272,36 @@ def test_a_window_with_no_exploration_holds_tau_still(cfg, tmp_path):
     from pricing import explore
     doubled = explore.tau_next(before, 805_478.0, 0.0, cfg)
     assert doubled == pytest.approx(before * cfg["exploration"]["tau_adjust_clip"][1])
+
+
+def test_an_unrouted_global_cell_cannot_pin_the_budget(cfg, tmp_path):
+    """GLOBAL is always created -- cell_name falls back to it for an unknown
+    category -- but when every category clears the episode floor nothing
+    routes there, so it never receives an outcome and never narrows. Taking
+    the max over ALL cells then pinned widest_std at the launch std forever:
+    the budget could not scale down as the learning cells converged."""
+    floor = cfg["posterior"]["min_episodes_per_week_for_cell"]
+    store = PosteriorStore.initialise(
+        cfg, {"vegetables": {"mean": -1.0, "std": 0.6},
+              "fruit": {"mean": -1.2, "std": 0.5}},
+        {"vegetables": floor, "fruit": floor},          # both own their cells
+        path=str(tmp_path / "posterior.json"))
+
+    cells, cell_of = store.state["cells"], store.state["cell_of"]
+    assert "GLOBAL" in cells and "GLOBAL" not in cell_of.values()
+    assert store.widest_std() == pytest.approx(0.6)
+
+    # both routed cells converge to the floor; GLOBAL never moves
+    for name in ("vegetables", "fruit"):
+        cells[name]["std"] = cfg["posterior"]["min_std"]
+    assert cells["GLOBAL"]["std"] == pytest.approx(0.6)
+    assert store.widest_std() == pytest.approx(cfg["posterior"]["min_std"])
+
+    # and when a category DOES route to GLOBAL it counts again
+    routed = PosteriorStore.initialise(
+        cfg, {"vegetables": {"mean": -1.0, "std": 0.6},
+              "fruit": {"mean": -1.2, "std": 0.5}},
+        {"vegetables": floor, "fruit": 0},
+        path=str(tmp_path / "routed.json"))
+    assert "GLOBAL" in routed.state["cell_of"].values()
+    assert routed.widest_std() == pytest.approx(0.6)

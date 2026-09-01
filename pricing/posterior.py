@@ -101,6 +101,29 @@ class PosteriorStore:
     def cell_name(self, category):
         return self.state["cell_of"].get(str(category), GLOBAL_CELL)
 
+    @staticmethod
+    def widest_active_std(cells, cell_of):
+        """Widest std among cells a category actually ROUTES to.
+
+        GLOBAL is always created -- `cell_name` falls back to it for a
+        category the prior never saw -- but when every category clears
+        `min_episodes_per_week_for_cell` nothing routes there, so it receives
+        no outcome and never narrows. Taking the max over all cells then
+        pinned this at the launch std forever: the exploration budget never
+        scaled down as the learning cells converged (design 5.8's
+        `budget_scale_floor` was unreachable) and the flat-std alert listed
+        GLOBAL permanently.
+        """
+        routed = set(cell_of.values())
+        active = [r["std"] for c, r in cells.items() if c in routed]
+        return max(active) if active else max(r["std"] for r in cells.values())
+
+    def widest_std(self):
+        """The std the exploration budget is sized for: the routed cell with
+        the most still to learn."""
+        return self.widest_active_std(self.state["cells"],
+                                      self.state["cell_of"])
+
     def get(self, category):
         """The record priced with: the category's own cell or the global cell.
         It always exists -- initialised from the prior at launch."""

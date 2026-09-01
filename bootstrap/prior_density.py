@@ -92,16 +92,26 @@ def curve(g, mu_ref, grid, controlled, cfg):
 
 
 def deflation_deff(rows, model, cfg):
-    """Design effect from within-episode correlation of `units_sold - mu_ref`
-    residuals -- eps-FREE, keeping the epsilon step out of the dispersion
-    chain (`fit_dispersion` owns the fitted rho). Returns (deff, rho, mean
-    rows per episode)."""
+    """Design effect for the prior's likelihood -- eps-FREE, keeping the
+    epsilon step out of the dispersion chain (`fit_dispersion` owns the
+    fitted rho). Returns (deff, rho, mean rows per cluster).
+
+    Clustered on SKU x FC, NOT on episode. These are ENTRY rows (rule 7), so
+    there is exactly one per episode and a within-episode ICC is 1.0 by
+    construction -- the old episode grouping made `sizes >= 3` empty, rho 0
+    and deff exactly 1.0 for every category, so design 5.6's deflation could
+    never engage and the pooled shrinkage ran on undeflated spans. The
+    correlation that does exist between entry rows is the same unit recurring
+    across days: the same cluster the A/B randomises on, and the one that
+    does not average away.
+    """
     resid = rows.units_sold.to_numpy() - model.predict_mu_ref(rows)
-    f = pd.DataFrame({"episode_id": rows.episode_id.to_numpy(), "resid": resid})
-    sizes = f.groupby("episode_id").resid.size()
-    min_hours = cfg["assurance"]["rho_min_hours_per_episode"]
-    sub = f[f.episode_id.isin(sizes[sizes >= min_hours].index)]
-    rho = intraclass_correlation(sub.resid, sub.episode_id,
+    unit = (rows.sku_id.astype(str) + "|" + rows.fc.astype(str)).to_numpy()
+    f = pd.DataFrame({"unit": unit, "resid": resid})
+    sizes = f.groupby("unit").resid.size()
+    min_rows = cfg["assurance"]["rho_min_hours_per_episode"]
+    sub = f[f.unit.isin(sizes[sizes >= min_rows].index)]
+    rho = intraclass_correlation(sub.resid, sub.unit,
                                  cfg["dispersion"]["rho_clip_max"])
     m = float(sizes.mean()) if len(sizes) else 1.0
     return max(1.0, design_effect(rho, m)), rho, m
