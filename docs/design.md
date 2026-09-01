@@ -794,6 +794,15 @@ Rules, in order:
    half is wholly out-of-train.
 2. **W from the rolling-origin sweep** (`calibration_window_sweep`). If the
    sweep wants a W that violates rule 1, revisit the split, not the band.
+   Every row — `uncalibrated` included — is scored on **one common set of
+   evaluation weeks** (the longest candidate's burn-in). Per-window burn-in
+   judged a long window on a later, smaller sample than a short one, so the
+   ranking read *which weeks* rather than which window. `uncalibrated` is
+   ranked with the windows: when no-factors wins, `verdict` says so and
+   `tune` raises it as an INFO reading. It is never a paste — W = 0 is not a
+   config value — so `recommended_fit_window` stays the best *calibrated*
+   window, and whether level calibration earns its keep at all is an owner
+   call on the design.
 3. **`test` = 2 weeks**: one week carries the full weekly swing; beyond
    two, the frozen anchor only gets staler.
 4. **`holdout` ≈ 3 weeks**: enough for the tau-controller walk and several

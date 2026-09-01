@@ -150,6 +150,11 @@ python3 -m bootstrap.seal        # calibration.json changed -- re-seal the bundl
   frozen factors.
 - If `calibration_window_sweep` starts preferring a different trailing
   window, that is an owner decision — re-read it, do not drift the config.
+- `uncalibrated_beats_all_windows: true` (with its `verdict`) means no-factors
+  scored better than every window on the same eval weeks: the level factors
+  are adding estimation noise, not removing bias. Read `fidelity.by_category`
+  next — factors near 1 everywhere are inert; factors that scatter are being
+  fit on too little data per cell.
 
 **The `--apply` gate.** One human approves at most one posterior step per
 cell per day. Before approving, read each cell's block:

@@ -367,3 +367,35 @@ def test_the_fit_window_holds_on_a_near_tie_instead_of_oscillating(cfg, tmp_path
     }
     f = w_finding(material)
     assert f["status"] == "ACT" and f["recommended"] == 1
+
+
+def test_no_factors_winning_is_reported_and_is_never_a_paste(cfg):
+    """`uncalibrated` beating every window says the level factors are adding
+    noise. That is an owner reading, not a W: W=0 is not a config value, so
+    the paste stays on the best CALIBRATED window."""
+    import pipeline.tune as tune
+
+    cur = cfg["baseline_model"]["calibration_fit_trailing_weeks"]
+    sweep = {
+        "uncalibrated": {"mean_abs_log_error": 0.0803,
+                         "share_weeks_in_band": 0.7222},
+        f"trailing_{cur}w": {"mean_abs_log_error": 0.0967,
+                             "share_weeks_in_band": 0.7059},
+        "recommended_fit_window": f"trailing_{cur}w",
+        "uncalibrated_beats_all_windows": True,
+    }
+    finds = tune._readings(cfg, {"fidelity": {"calibration_window_sweep": sweep}}, {})
+    by = {f["key"]: f for f in finds}
+
+    keep = by["level calibration earns its keep"]
+    assert (keep["class"], keep["status"]) == ("INFO", "ACT")
+    assert "0.0803" in keep["evidence"] and "0.0967" in keep["evidence"]
+
+    # the W paste is untouched -- it never points at "no calibration"
+    w = by["baseline_model.calibration_fit_trailing_weeks"]
+    assert w["recommended"] == cur and w["status"] == "OK"
+
+    del sweep["uncalibrated_beats_all_windows"]
+    assert "level calibration earns its keep" not in {
+        f["key"] for f in
+        tune._readings(cfg, {"fidelity": {"calibration_window_sweep": sweep}}, {})}

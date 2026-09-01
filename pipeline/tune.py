@@ -459,6 +459,26 @@ def _readings(cfg, backtest, shadow):
                 f", but calib is {calib_weeks:.1f}w and the rule is calib >= "
                 f"2W ({2*want}w needed) -- move the SPLIT, not this key")),
             "backtest.fidelity.calibration_window_sweep.recommended_fit_window"))
+
+    # no-factors beating every window is not a W to paste -- it says the
+    # factors are adding noise, which is an owner call on the design, not a
+    # key. Reported whatever W is in force.
+    if sweep.get("uncalibrated_beats_all_windows"):
+        unc, cal = sweep.get("uncalibrated") or {}, sweep.get(rec) or {}
+        out.append(_finding(
+            "level calibration earns its keep", INFO, ACT,
+            "factors applied", "compare against no factors",
+            f"on the same eval weeks, uncalibrated scores mae "
+            f"{unc.get('mean_abs_log_error')} / in-band "
+            f"{unc.get('share_weeks_in_band')} against {rec}'s "
+            f"{cal.get('mean_abs_log_error')} / "
+            f"{cal.get('share_weeks_in_band')} -- the factors lose on both. "
+            "A model already at the anchor level has no bias for them to "
+            "remove, so they contribute estimation noise. Check "
+            "fidelity.by_category before acting: factors that are near 1 "
+            "everywhere are inert, factors that scatter are being fit on too "
+            "little data",
+            "backtest.fidelity.calibration_window_sweep.verdict"))
     return out
 
 

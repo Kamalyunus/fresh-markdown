@@ -137,9 +137,20 @@ def level_mix_decomposition(d, cfg):
 
 def calibration_window_sweep(d, cfg):
     """Rolling-origin sweep of the calibration fit window: per-category factors
-    fit on weeks [t-W, t-1], applied to week t, over every eligible week. When
-    the level trends, longer windows are MORE stale, not more accurate.
-    `uncalibrated` is the no-factor comparison baseline."""
+    fit on weeks [t-W, t-1], applied to week t. When the level trends, longer
+    windows are MORE stale, not more accurate.
+
+    Every row -- `uncalibrated` included -- is scored on the SAME evaluation
+    weeks (the longest window's burn-in). Per-window burn-in would judge a
+    long window on a later, smaller sample than a short one, and the ranking
+    would then read WHICH WEEKS rather than which window.
+
+    `uncalibrated` is ranked with the rest. When no-factors wins, the level
+    factors are adding estimation noise instead of removing bias -- a finding
+    for the owner, not a window to paste (W=0 is not a config value), so
+    `recommended_fit_window` stays the best CALIBRATED window and the reading
+    is carried separately.
+    """
     band = cfg["baseline_model"]["calibration_gate_band"]
     tier_step = cfg["pricing"]["tier_step"]
     windows = cfg["baseline_model"]["calibration_window_sweep_weeks"]
@@ -152,6 +163,10 @@ def calibration_window_sweep(d, cfg):
           .agg(sold=("units_sold", "sum"), pred=("predicted_units", "sum"))
           .reset_index())
     weeks = sorted(cw.week.unique())
+    start = max(list(windows) + [1])       # common burn-in: one eval set
+    if start >= len(weeks):
+        return (f"NOT RUN -- {len(weeks)} anchor weeks cannot score a common "
+                f"eval set behind the longest window ({start}w)")
 
     def summarise(ratios):
         arr = np.array(ratios)
@@ -166,7 +181,7 @@ def calibration_window_sweep(d, cfg):
     def ratios_for(window):
         out = []
         for i, t in enumerate(weeks):
-            if i < max(window, 1):
+            if i < start:                  # the SAME weeks for every row
                 continue
             cur = cw[cw.week == t]
             if window == 0:
@@ -191,16 +206,31 @@ def calibration_window_sweep(d, cfg):
         if r:
             result[f"trailing_{w}w"] = summarise(r)
 
-    candidates = {k: v for k, v in result.items() if k != "uncalibrated"}
+    def rank(k):
+        return (-result[k]["share_weeks_in_band"],
+                result[k]["mean_abs_log_error"])
+
+    candidates = [k for k in result if k.startswith("trailing_")]
     if candidates:
-        best = min(candidates,
-                   key=lambda k: (-candidates[k]["share_weeks_in_band"],
-                                  candidates[k]["mean_abs_log_error"]))
+        best = min(candidates, key=rank)
         result["recommended_fit_window"] = best
+        result["eval_weeks_common_from"] = str(weeks[start])
+        beats = "uncalibrated" in result and rank("uncalibrated") < rank(best)
+        result["uncalibrated_beats_all_windows"] = bool(beats)
         result["note"] = (
             "Rolling-origin: factors fit on the trailing window, applied to "
             "the NEXT week. Shorter windows winning = the level is trending; "
-            "longer winning = the variation is noise.")
+            "longer winning = the variation is noise. Every row is scored on "
+            "the same eval weeks, so the ranking reads the window and not the "
+            "sample.")
+        if beats:
+            result["verdict"] = (
+                "NO-FACTORS WINS -- `uncalibrated` beats every fit window on "
+                "the sweep's own metrics, so level calibration is adding "
+                "estimation noise rather than removing bias. "
+                "recommended_fit_window remains the best CALIBRATED window "
+                "(W=0 is not a config value); the reading to act on is "
+                "whether level calibration earns its keep at all.")
     return result
 
 
