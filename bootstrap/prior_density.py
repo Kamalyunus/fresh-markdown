@@ -28,7 +28,12 @@ def scored_rows(frame, cfg):
     f = f[f.starting_inventory >= 1]
     # censored entry rows kept: the Poisson likelihood handles censoring
     # without a dispersion parameter, so there is nothing to drop them for
-    return f.sort_values(["episode_id", "hour_of_day"]) \
+    # DATE first: sorting on hour alone picks the 00:00 row of an episode
+    # that opened at 22:00 the night before -- a within-episode, post-price-
+    # path row, exactly the confound rule 7 exists to exclude. Production
+    # windows routinely cross midnight (design 12a); episodes.last_rows
+    # already orders by ("date", "hour_of_day") for the same reason.
+    return f.sort_values(["episode_id", "date", "hour_of_day"]) \
             .groupby("episode_id").head(1).copy()
 
 

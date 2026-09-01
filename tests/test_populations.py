@@ -683,3 +683,29 @@ def test_population_refuses_a_frame_without_its_eligibility_flag(cfg):
                           dp_eligible=[True, False])
     assert len(population(flagged, cfg)) == 1
     assert len(population(flagged, cfg, "dp_eligible")) == 1
+
+
+def test_the_prior_entry_row_is_the_first_HOUR_not_the_lowest_clock_time(cfg):
+    """Rule 7: the prior identifies elasticity on ENTRY rows only. Sorting by
+    hour_of_day alone picks the 00:00 row of an episode that opened at 22:00
+    the night before -- a within-episode, post-price-path row, which is the
+    confound the rule exists to exclude. Production windows cross midnight
+    routinely (design 12a); the fixture has none, so nothing caught it."""
+    import pandas as pd
+
+    from bootstrap.prior_density import scored_rows
+
+    ep = pd.DataFrame([
+        # opens 22:00 at the anchor, deepens after midnight
+        {"date": "2026-07-01", "hour_of_day": 22, "total_discount": 0.10},
+        {"date": "2026-07-01", "hour_of_day": 23, "total_discount": 0.10},
+        {"date": "2026-07-02", "hour_of_day": 0, "total_discount": 0.25},
+        {"date": "2026-07-02", "hour_of_day": 3, "total_discount": 0.25},
+    ]).assign(episode_id="EP-MIDNIGHT", starting_inventory=5, units_sold=1,
+              ending_inventory=4, category="VEG", subcategory="LEAFY",
+              original_price=1e4, cost=4e3, fc="F1", d_ref=0.30)
+
+    row = scored_rows(ep, cfg)
+    assert len(row) == 1
+    assert (row.date.iloc[0], int(row.hour_of_day.iloc[0])) == ("2026-07-01", 22)
+    assert row.total_discount.iloc[0] == 0.10      # the entry price, not 0.25

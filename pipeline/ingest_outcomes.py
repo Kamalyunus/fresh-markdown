@@ -26,6 +26,7 @@ Run: python3 -m pipeline.ingest_outcomes --feed <hourly parquet> [--failures f.j
 import argparse
 import json
 
+import numpy as np
 import pandas as pd
 
 from common.config import load_config
@@ -73,19 +74,35 @@ def build_outcomes(decisions, feed, failures=None, now=None):
         else:
             rows[k] = r
 
-    outcomes, unmatched, reasons = [], [], {}
+    outcomes, unmatched, reasons, unusable = [], [], {}, []
     for dec in decisions:
         k = _key(dec["sku_id"], dec["fc"], dec["date"], dec["hour_of_day"])
         r = rows.get(k)
         if r is None:
             unmatched.append(dec["decision_id"])
             continue
-        start = int(round(r.starting_inventory))
-        sold = int(r.units_sold)
-        end = int(round(r.ending_inventory))
+        # ONE bad row must not take the day's batch with it: int(nan) raises,
+        # and the whole daily ingest used to abort before the store -- whose
+        # entire design is "quarantine with the problem attached, never
+        # silently discard" -- ever saw a row. A zero base price is the live
+        # counterpart of the offline ffill/drop at prepare_data: it makes
+        # applied_price 0.0, which the store accepts and the monitor then
+        # charges as full-list discount, inflating IL.
+        try:
+            start = int(round(float(r.starting_inventory)))
+            sold = int(float(r.units_sold))
+            end = int(round(float(r.ending_inventory)))
+            base = float(r.original_price)
+            disc = float(r.total_discount)
+            if not (np.isfinite(base) and np.isfinite(disc)) or base <= 0:
+                raise ValueError(f"unusable price (original_price={base!r})")
+        except (TypeError, ValueError) as exc:
+            unusable.append({"decision_id": dec["decision_id"],
+                             "reason": f"{type(exc).__name__}: {exc}"})
+            continue
         # OFFERED price; feed discount is PERCENT (prepare_data converts the
         # same column the same way)
-        offered = float(r.original_price) * (1 - float(r.total_discount) / 100.0)
+        offered = base * (1 - disc / 100.0)
         out = {
             "event": "outcome",
             "outcome_id": f"feed-{dec['decision_id']}",
@@ -115,6 +132,10 @@ def build_outcomes(decisions, feed, failures=None, now=None):
         "decisions_without_feed_row": len(unmatched),
         "unmatched_decision_ids": unmatched[:20],
         "feed_duplicate_hours": dup_feed,
+        # counted and named, never silently dropped: one unusable row costs
+        # its own decision, not the day
+        "unusable_feed_rows": len(unusable),
+        "unusable_examples": unusable[:20],
         "adjustment_reasons": reasons,
         "push_failures_applied": sum(1 for o in outcomes
                                      if o["execution_status"] == "failed"),
@@ -151,6 +172,12 @@ def main():
           f"(emitted {report['emitted']:,}, "
           f"duplicates {report['duplicates_skipped']:,}, "
           f"quarantined {report['quarantined']:,})")
+    if report["unusable_feed_rows"]:
+        print(f"unusable feed rows : {report['unusable_feed_rows']:,} "
+              "(non-numeric inventory or a zero/absent base price -- counted "
+              "into the completeness gap, batch NOT aborted)")
+        for row in report["unusable_examples"][:5]:
+            print(f"  {row['decision_id']}: {row['reason']}")
     print(f"no feed row        : {report['decisions_without_feed_row']:,}"
           + (" -- this is the completeness gap the gate measures"
              if report["decisions_without_feed_row"] else ""))

@@ -243,3 +243,34 @@ def test_business_metrics_counts_shrink_like_the_guardrail_and_il_pct_do():
     assert b["il_pct_aggregate"]["il_absolute"] == pytest.approx(
         3 * 200.0 + 3 * 100.0)
     assert b["sell_through"] == pytest.approx(3 / 6)
+
+
+def test_one_unusable_feed_row_costs_its_decision_not_the_days_batch():
+    """int(nan) raised and aborted the whole daily ingest before the store --
+    whose design is quarantine-with-a-reason -- ever saw a row, so the day
+    read as a 100% completeness gap instead of one named row."""
+    import numpy as np
+
+    feed = _feed([{"start": 3, "sold": 1, "end": 2},
+                  {"hour": 18, "start": 2, "sold": 0, "end": 2},
+                  {"hour": 19, "start": 4, "sold": 1, "end": 3}])
+    feed.loc[1, "ending_inventory"] = np.nan
+    outs, rep = build_outcomes(
+        [_dec(1), _dec(2, hour=18), _dec(3, hour=19)], feed)
+
+    assert [o["decision_id"] for o in outs] == ["D1", "D3"]
+    assert rep["unusable_feed_rows"] == 1
+    assert rep["unusable_examples"][0]["decision_id"] == "D2"
+
+
+def test_a_zero_base_price_is_refused_not_priced_at_full_discount():
+    """Offline, prepare_data ffills then drops original_price == 0. Live it
+    produced applied_price 0.0, which the store accepts and monitor charges
+    as (original_price - 0) x sold -- the whole list price booked as IL."""
+    feed = _feed([{"start": 3, "sold": 1, "end": 2, "price": 0.0},
+                  {"hour": 18, "start": 2, "sold": 1, "end": 1}])
+    outs, rep = build_outcomes([_dec(1), _dec(2, hour=18)], feed)
+
+    assert [o["decision_id"] for o in outs] == ["D2"]
+    assert rep["unusable_feed_rows"] == 1
+    assert "original_price" in rep["unusable_examples"][0]["reason"]

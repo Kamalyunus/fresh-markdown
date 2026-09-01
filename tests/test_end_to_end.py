@@ -1211,3 +1211,29 @@ def test_a_new_window_is_not_mistaken_for_a_gap(workspace):
     ids, detail = gap_split_windows(
         frame([(10, 3), (11, 2), (12, 1), (13, 9), (14, 8)]))
     assert len(ids) == 0
+
+
+def test_no_pre_launch_artifact_reads_past_test_end(workspace):
+    """Rule 16: the hold-out is read once, by pipeline.shadow. derive_thresholds
+    PASTES guardrail floors and the MDE frontier into config via tune, and
+    fit_dispersion's drift_by_window sets the retrain cadence -- both were
+    measuring on the full extract, i.e. tuning config on the window that
+    exists to grade it."""
+    import pandas as pd
+
+    from bootstrap.prepare_data import pre_launch
+
+    import yaml
+
+    ws = workspace
+    cfg = yaml.safe_load((ws / "config.yaml").read_text())
+    d = pd.read_parquet(ws / "data" / "prepared.parquet")
+    test_end = cfg["data"]["split"]["test_end"]
+    assert (d.date.astype(str) > test_end).any(), "fixture has no hold-out rows"
+    assert (pre_launch(d, cfg).date.astype(str) <= test_end).all()
+
+    rho = json.loads((ws / "artifacts" / "rho.json").read_text())
+    windows = (rho.get("drift_by_window") or {}).get("by_window") or []
+    seen = [w.get("window") or w.get("start") for w in windows
+            if isinstance(w, dict)]
+    assert all(str(s) <= test_end for s in seen if s), seen

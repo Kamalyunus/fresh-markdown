@@ -16,6 +16,7 @@ import pandas as pd
 
 from common.config import load_config, reference_discount
 from common.provenance import stamp
+from common import episodes
 from bootstrap.prepare_data import population, pre_launch, split_frames
 from pricing.demand import expected_min_demand_inventory_vec
 
@@ -327,8 +328,17 @@ def fit_level_calibration(d, cfg):
     gate_start = pd.Timestamp(split["test_start"])   # gate window = test
     weeks_back = cfg["baseline_model"]["calibration_fit_trailing_weeks"]
     lo = gate_start - pd.Timedelta(weeks=weeks_back)
-    dates = pd.to_datetime(d.date)
-    calib = d[(dates >= lo) & (dates < gate_start)].copy()
+    # SAME population and SAME cut as the weekly schedule below, which uses
+    # population(pre_launch(d, cfg)) and window_slice. A row-level date cut on
+    # the unfiltered frame put ineligible rows (final-hour restocks, unknown
+    # outcomes) into the anchor fit and truncated windows at the midnight seam
+    # (rules 14/15), so the frozen fallback and the by-week factors were
+    # solved on different rows -- and check_calibration_convergence then
+    # compares them cell by cell.
+    calib = episodes.window_slice(population(d, cfg),
+                                  lo.strftime("%Y-%m-%d"),
+                                  (gate_start - pd.Timedelta(days=1))
+                                  .strftime("%Y-%m-%d")).copy()
     if not len(calib):
         raise RuntimeError("calibration fit window contains no rows")
 

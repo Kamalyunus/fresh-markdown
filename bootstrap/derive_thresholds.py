@@ -21,6 +21,7 @@ from common.config import load_config
 from common import episodes
 from common import guardrail
 from common.metrics import il_pct
+from bootstrap.prepare_data import pre_launch
 
 
 # ------------------------------------------------------------- A/B duration
@@ -540,7 +541,11 @@ def main():
     cfg = load_config(args.config)
     mde = args.mde if args.mde is not None \
         else cfg["ab_test"]["min_detectable_effect_pct"]
-    d = pd.read_parquet(args.input)
+    # RULE 16: the hold-out is read once, by pipeline.shadow. These floors
+    # and the MDE frontier are PASTED into config by pipeline.tune, so
+    # measuring them on the full extract tunes config on the window that
+    # exists to grade it. backtest cuts the same way (backtest/__main__.py).
+    d = pre_launch(pd.read_parquet(args.input), cfg)
 
     se_by_T = empirical_se_by_duration(d, cfg)
     trailing = guardrail_noise(d, cfg)

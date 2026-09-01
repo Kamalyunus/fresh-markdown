@@ -21,7 +21,7 @@ from common.config import (design_effect, intraclass_correlation,
                            load_config)
 from common import episodes
 from common.provenance import stamp
-from bootstrap.prepare_data import population, split_frames
+from bootstrap.prepare_data import population, pre_launch, split_frames
 from bootstrap.train_baseline import BaselineModel
 
 
@@ -197,7 +197,9 @@ def drift_by_window(d, cfg, freq="W"):
     eps_by_cat, eps0 = _working_elasticity(cfg)
     bounds = dc["r_search_bounds"]
 
-    full = population(d, cfg).copy()
+    # rule 16: drift_by_window sets the retrain cadence and baselines the
+    # rho drift alert, both pre-launch readings -- the hold-out is shadow's
+    full = population(pre_launch(d, cfg), cfg).copy()
     full = full[full.starting_inventory >= 1]
     if not len(full):
         return {"verdict": "NOT RUN -- no rows"}
