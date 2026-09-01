@@ -76,6 +76,23 @@ def leftover_units(starting_inventory, units_sold):
     return net_leftover(starting_inventory, units_sold).clip(lower=0)
 
 
+def shrink_by_hour(starting_inventory, units_sold, ending_inventory, is_last_row):
+    """Units that vanished in each hour: `(starting - ending) - sold`, clipped
+    at zero, with the write-off exemption on the LAST ROW ONLY.
+
+    The one home for shrink. `episode_flow` aggregates it as `vanished` and
+    `pipeline.monitor` measures the live guardrail with it -- a second
+    hand-rolled copy is how the trigger came to run looser than the floor it
+    is compared against. Mid-episode a zeroed ending with stock still owed is
+    shrink, not a close (learnings.md); restock hours clip to zero.
+    """
+    disc = ((np.asarray(starting_inventory) - np.asarray(ending_inventory))
+            - np.asarray(units_sold))
+    status = hour_status(starting_inventory, units_sold, ending_inventory)
+    return np.where((status == WRITE_OFF) & np.asarray(is_last_row), 0,
+                    np.clip(disc, 0, None))
+
+
 def hour_status(starting_inventory, units_sold, ending_inventory):
     """Classify every hour against the source's convention. Vectorised.
 
@@ -102,16 +119,19 @@ def episode_flow(d):
     supply (= opening + arrived) counts everything that arrived (design 12a).
     """
     d = d.sort_values(["date", "hour_of_day"])
-    status = hour_status(d.starting_inventory, d.units_sold, d.ending_inventory)
     disc = ((d.starting_inventory.to_numpy() - d.ending_inventory.to_numpy())
             - d.units_sold.to_numpy())
-    # The write-off exemption applies to the LAST ROW ONLY: mid-episode a zero
-    # ending with stock still owed is shrink, not a close (learnings.md).
     # `d` is in time order, so the last occurrence of each id is its final hour.
     is_last_row = ~d.episode_id.duplicated(keep="last").to_numpy()
+    # the write-off exemption lives in shrink_by_hour, the one home; `disc`
+    # keeps its negatives here because `arrived` is read off them below
+    status = hour_status(d.starting_inventory, d.units_sold, d.ending_inventory)
     disc = np.where((status == WRITE_OFF) & is_last_row, 0, disc)
 
     g = pd.DataFrame({"episode_id": d.episode_id.to_numpy(), "disc": disc,
+                      "shrink": shrink_by_hour(d.starting_inventory,
+                                               d.units_sold,
+                                               d.ending_inventory, is_last_row),
                       "sold": d.units_sold.to_numpy(),
                       "start": d.starting_inventory.to_numpy()})
     agg = g.groupby("episode_id", sort=False).agg(
@@ -120,7 +140,7 @@ def episode_flow(d):
     # a same-size restock would hide both real events (design 12a).
     agg["arrived"] = (-g[g.disc < 0].groupby("episode_id", sort=False).disc.sum()
                       ).reindex(agg.index).fillna(0).astype("int64")
-    agg["vanished"] = g[g.disc > 0].groupby("episode_id", sort=False).disc.sum(
+    agg["vanished"] = g.groupby("episode_id", sort=False).shrink.sum(
         ).reindex(agg.index).fillna(0).astype("int64")
     agg["supply"] = agg.opening + agg.arrived
     agg["clearance"] = np.divide(

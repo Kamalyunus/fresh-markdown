@@ -207,3 +207,39 @@ def test_export_events_writes_warehouse_safe_tables(tmp_path):
     assert export(store, str(tmp_path / "exports"))["decisions"][1] == 2
     assert export(store, str(tmp_path / "exports"),
                   since="2026-08-19")["decisions"][1] == 1
+
+
+def test_business_metrics_counts_shrink_like_the_guardrail_and_il_pct_do():
+    """Scrap = leftover + shrink has ONE definition. business_metrics read
+    leftover only, so IL, waste_units, sell-through and the by-arm IL% -- the
+    A/B's primary metric and production's exploration-budget base -- were all
+    a different IL from the one the noise floors and common.metrics.il_pct
+    are measured on."""
+    from common.config import load_config
+    from pipeline.monitor import business_metrics, guardrail_series
+
+    cfg = load_config()
+    hours = [(3, 6, 1, 3),      # 6 - 1 = 5 expected, 3 reported -> shrink 2
+             (2, 3, 1, 2),
+             (1, 2, 1, 0)]      # write-off row: leftover 1, NOT shrink
+    decisions, outcomes = [], []
+    for hr, start, sold, end in hours:
+        decisions.append({
+            "decision_id": f"b{hr}", "episode_id": "EP-B", "sku_id": "s",
+            "fc": "f", "category": "VEG", "subcategory": "LEAFY",
+            "timestamp": "2026-08-19T10:00:00+00:00", "hours_remaining": hr,
+            "original_price": 1000.0, "cost": 100.0})
+        outcomes.append({
+            "decision_id": f"b{hr}", "starting_inventory": start,
+            "units_sold": sold, "ending_inventory": end,
+            "applied_price": 800.0})
+
+    b = business_metrics(decisions, outcomes, cfg)
+    g = guardrail_series(decisions, outcomes, cfg)
+    # leftover 1 + shrink 2 = 3 units of scrap, on both sides
+    assert b["waste_units"] == 3
+    assert g["daily_scrap_rate"]["2026-08-19"] == pytest.approx(3 / 6)
+    # IL charges cost x scrap, not cost x leftover
+    assert b["il_pct_aggregate"]["il_absolute"] == pytest.approx(
+        3 * 200.0 + 3 * 100.0)
+    assert b["sell_through"] == pytest.approx(3 / 6)

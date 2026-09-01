@@ -58,16 +58,26 @@ def business_metrics(decisions, outcomes, cfg):
         return {"note": "no outcome matches a decision -- nothing to measure"}
     df = pd.DataFrame(rows)
 
-    ep = df.sort_values("hours_remaining", ascending=False).groupby("episode_id").agg(
+    df = df.sort_values("hours_remaining", ascending=False)
+    # SCRAP = leftover + shrink, the one definition (episodes.scrap_units, and
+    # what common.metrics.il_pct and the noise floors are measured on). IL,
+    # waste_units, sell-through and the by-arm IL% here read leftover only,
+    # so the A/B's primary metric was a different IL from the one it was
+    # powered on and production's exploration budget base was a third.
+    df["_shrink"] = episodes.shrink_by_hour(
+        df.starting_inventory, df.units_sold, df.ending_inventory,
+        ~df.duplicated("episode_id", keep="last"))
+    ep = df.groupby("episode_id").agg(
         category=("category", "first"), fc=("fc", "first"), arm=("arm", "first"),
         original_price=("original_price", "first"), cost=("cost", "first"),
         discount_cost=("discount_cost", "sum"), units_sold=("units_sold", "sum"),
         starting_inventory=("starting_inventory", "last"),
-        end_sold=("units_sold", "last"),
+        end_sold=("units_sold", "last"), shrink=("_shrink", "sum"),
         ending_inventory=("ending_inventory", "last"))
     # leftover, never the reported ending_inventory (written off to zero at
     # window close -- reading it directly zeroes IL's scrap term)
-    ep["end_inv"] = episodes.leftover_units(ep.starting_inventory, ep.end_sold)
+    ep["end_inv"] = (episodes.leftover_units(ep.starting_inventory, ep.end_sold)
+                     + ep.shrink)
     # still-open episodes excluded: same population as bootstrap.measure and
     # derive_thresholds, so floor and trigger measure the same thing
     running = _still_running(ep.assign(units_sold=ep.end_sold))
@@ -131,10 +141,9 @@ def guardrail_series(decisions, outcomes, cfg):
     # leftover-only trigger runs looser than its floor by the shrink rate.
     # A write-off row (last hour, zeroed ending, stock remaining) is the
     # leftover, not shrink; restock rows clip to zero.
-    is_last = ~df.duplicated("episode_id", keep="last")
-    disc = (df.start_inv - df.sold) - df.ending_inventory
-    write_off = is_last & (df.ending_inventory == 0) & (disc > 0)
-    df["_shrink"] = np.where(write_off, 0, disc.clip(lower=0))
+    df["_shrink"] = episodes.shrink_by_hour(
+        df.start_inv, df.sold, df.ending_inventory,
+        ~df.duplicated("episode_id", keep="last"))
     ep = df.groupby(
         "episode_id").agg(date=("date", "first"), arm=("arm", "first"),
                           start_inv=("start_inv", "first"),

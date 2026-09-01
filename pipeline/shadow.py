@@ -81,8 +81,21 @@ def pre_window_il_history(d, cfg, before):
             .groupby(rows.episode_id).sum())
     kind = episodes.classify_last(last)
     leftover = episodes.leftover_units(last.starting_inventory, last.units_sold)
-    scrap = (last.cost.to_numpy() * leftover.to_numpy()
+    # scrap = leftover + shrink, the one definition; `rows` carries every hour
+    # of these episodes, so the shrink is available here
+    shrink = pd.Series(
+        episodes.shrink_by_hour(rows.starting_inventory, rows.units_sold,
+                                rows.ending_inventory,
+                                ~rows.episode_id.duplicated(keep="last")),
+        index=rows.episode_id.to_numpy()).groupby(level=0).sum()
+    scrap = (last.cost.to_numpy()
+             * (leftover.to_numpy()
+                + shrink.reindex(last.episode_id.to_numpy()).fillna(0).to_numpy())
              * (kind == episodes.COMPLETED).to_numpy())
+    # a NULL unit cost makes IL nan, and nan fails every `>` comparison
+    # downstream -- the budget then reads "within budget -- nanx" instead of
+    # refusing. Drop the episode from the base and let the count show up.
+    scrap = np.where(np.isnan(scrap), 0.0, scrap)
     closed = (kind != episodes.NOT_CLOSED).to_numpy()
     out = {}
     for eid, day, ok, sc in zip(last.episode_id.to_numpy(),
@@ -381,7 +394,7 @@ def _shadow_one(ep, ctx):
                   "cell": []},
         "last_row": None,
     }
-    anchor, last_obs = None, None
+    anchor, last_obs, hours_seen = None, None, []
 
     for t in range(n):
         if not ep["is_observed"][t]:      # window tail: no outcome to record
@@ -400,6 +413,7 @@ def _shadow_one(ep, ctx):
         out["ep_discount_cost"] = out.get("ep_discount_cost", 0.0) + \
             float(ep["original_price"][t]) * legacy_d * sold
         last_obs = (q, sold, float(ep["cost"][t]), ending, row_day)
+        hours_seen.append((q, sold, ending))
 
         state = {
             "episode_id": ep["episode_id"], "sku_id": int(ep["sku_id"][t]),
@@ -484,11 +498,19 @@ def _shadow_one(ep, ctx):
     # loop, all episodes together in one frame
     if last_obs is not None:
         start, sold_last, unit_cost, ending_last, close_day = last_obs
+        # SCRAP = leftover + shrink (episodes.scrap_units). The budget base
+        # read leftover only, so the day-one budget and tau_recommended were
+        # sized on a smaller IL than the guardrail floors and il_pct measure.
+        starts, solds, endings = (list(x) for x in zip(*hours_seen))
+        is_last = [False] * (len(hours_seen) - 1) + [True]
+        shrink = int(episodes.shrink_by_hour(starts, solds, endings,
+                                             is_last).sum())
         out["last_row"] = {"episode_id": ep["episode_id"],
                            "discount_cost": out.get("ep_discount_cost", 0.0),
                            "starting_inventory": start,
                            "units_sold": sold_last, "cost": unit_cost,
                            "ending_inventory": ending_last,
+                           "shrink": shrink,
                            "close_day": close_day}
     return out
 
@@ -649,8 +671,9 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     last = pd.DataFrame(last_rows)
     kind = episodes.classify_last(last)
     leftover = episodes.leftover_units(last.starting_inventory, last.units_sold)
+    scrap_units = leftover.to_numpy() + last.shrink.to_numpy()
     completed = (kind == episodes.COMPLETED).to_numpy()
-    scrap_per_ep = (last.cost.to_numpy() * leftover.to_numpy()) * completed
+    scrap_per_ep = (last.cost.to_numpy() * scrap_units) * completed
     il_scrap = float(scrap_per_ep.sum())
     il_unknown_scrap = int((kind == episodes.NOT_CLOSED).sum())
     markdown_il = il_discount + il_scrap
