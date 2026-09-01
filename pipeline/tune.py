@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 
 from common.config import load_config
+from pricing.explore import tau_provenance_error
 
 PASTE, OWNER, INFO, BLOCK = "PASTE", "OWNER", "INFO", "BLOCK"
 OK, ACT = "OK", "ACT"
@@ -179,7 +180,7 @@ def _blocks(cfg, backtest, shadow, calibration, root):
     return out
 
 
-def _measured(cfg, shadow, rho_art, thresholds):
+def _measured(cfg, shadow, rho_art, thresholds, backtest=None):
     """MEASURED values the pipeline computed and config must mirror."""
     out = []
 
@@ -210,11 +211,17 @@ def _measured(cfg, shadow, rho_art, thresholds):
     tau = ((shadow or {}).get("tau_initial_derivation") or {}).get("tau_initial")
     cur = _get(cfg, ("exploration", "tau_initial"))
     if tau is not None:
-        out.append(_finding(("exploration", "tau_initial"), PASTE,
-                            OK if _close(cur, tau, 1e-2) else ACT, cur, tau,
-                            "derived on shadow's own trailing pre-window week "
-                            "-- preferred over a backtest bisection",
-                            "shadow.tau_initial_derivation.tau_initial"))
+        # ONE definition of "is this paste current": the same gate
+        # pipeline.status enforces. A looser tolerance here reports OK,
+        # --apply writes nothing, and status still FAILs -- tune runs clean
+        # against a red status and the only escape is a hand edit.
+        stale = tau_provenance_error(cfg, backtest, shadow)
+        out.append(_finding(
+            ("exploration", "tau_initial"), PASTE,
+            ACT if (cur is None or stale) else OK, cur, tau,
+            stale or ("matches shadow's own derivation on the trailing "
+                      "pre-window week -- the gate pipeline.status enforces"),
+            "shadow.tau_initial_derivation.tau_initial"))
     return out
 
 
@@ -501,7 +508,7 @@ def collect(cfg, root="reports"):
 
     findings = list(blocks)
     if not blocks:
-        findings += _measured(cfg, shadow, rho_art, thresholds)
+        findings += _measured(cfg, shadow, rho_art, thresholds, backtest)
         findings += _derived(cfg, backtest, thresholds)
         findings += _business(cfg, thresholds)
         findings += _readings(cfg, backtest, shadow)

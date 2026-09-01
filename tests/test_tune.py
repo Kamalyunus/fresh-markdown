@@ -399,3 +399,35 @@ def test_no_factors_winning_is_reported_and_is_never_a_paste(cfg):
     assert "level calibration earns its keep" not in {
         f["key"] for f in
         tune._readings(cfg, {"fidelity": {"calibration_window_sweep": sweep}}, {})}
+
+
+def test_tau_uses_the_same_staleness_rule_the_status_gate_enforces(cfg):
+    """tune's own 1% tolerance was 270x looser than the gate's absolute 0.01
+    won: a 0.51 drift reported OK, --apply wrote nothing, and status still
+    FAILed. tune ran clean against a red status and the only escape was a
+    hand edit of config.yaml."""
+    import copy as _copy
+
+    from pricing.explore import tau_provenance_error
+
+    cfg = _copy.deepcopy(cfg)
+    cfg["exploration"]["tau_initial"] = 269.99
+    shadow = {"tau_initial_derivation": {"tau_initial": 270.5,
+                                         "spread_decisions": 1000}}
+
+    def tau_finding(c, sh):
+        return [f for f in tune._measured(c, sh, None, {}, None)
+                if f["key"] == "exploration.tau_initial"][0]
+
+    f = tau_finding(cfg, shadow)
+    assert f["status"] == "ACT" and f["recommended"] == 270.5
+    # the two now agree: whatever tune calls stale, the gate rejects
+    assert tau_provenance_error(cfg, None, shadow) is not None
+
+    cfg["exploration"]["tau_initial"] = 270.5
+    assert tau_finding(cfg, shadow)["status"] == "OK"
+    assert tau_provenance_error(cfg, None, shadow) is None
+
+    # a null paste is still ACT -- the gate stays quiet on null by design
+    cfg["exploration"]["tau_initial"] = None
+    assert tau_finding(cfg, shadow)["status"] == "ACT"
