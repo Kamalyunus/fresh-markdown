@@ -45,6 +45,18 @@ def units_of(basis):
             else "relative deviation (t/c - 1); 0.15 means 15%")
 
 
+def verdict_is_blocking(verdict):
+    """Design 12's three blocking floor verdicts, in ONE place so the checker
+    and the paster cannot disagree: TOO TIGHT (fires on ordinary days and
+    silently suspends exploration), BLOCKED (no threshold on this basis is
+    both safe and useful), LIKELY INERT (a guardrail that cannot fire is
+    absent, not conservative). `pipeline.status` refuses the chain and
+    `pipeline.tune` refuses the paste on this same test.
+    """
+    v = str(verdict or "").upper()
+    return v.startswith("TOO") or "BLOCKED" in v or "INERT" in v
+
+
 def floor_is_unusable(floor, basis):
     """A floor a threshold cannot be set above -- the guardrail is BLOCKED.
     On the RELATIVE basis a floor >= 1.0 means ordinary daily swing exceeds

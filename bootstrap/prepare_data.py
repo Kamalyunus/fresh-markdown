@@ -665,11 +665,20 @@ def population(d, cfg, which=None):
     which = which or "eligible"
     if which == "integrity":
         return d
-    if which == "eligible":
-        return d[d.episode_eligible] if "episode_eligible" in d else d
-    if which == "dp_eligible":
-        return d[d.dp_eligible] if "dp_eligible" in d else d
-    raise ValueError(f"unknown population {which!r}")
+    if which not in ("eligible", "dp_eligible"):
+        raise ValueError(f"unknown population {which!r}")
+    flag = "episode_eligible" if which == "eligible" else "dp_eligible"
+    # REFUSE rather than fall back to the whole frame. Returning `d` when the
+    # flag is missing means a stale prepared.parquet (or any derived frame)
+    # silently fits artifacts on the INTEGRITY population while every report
+    # labels them eligible -- the one home for the filter, failing in the
+    # silent direction.
+    if flag not in d:
+        raise ValueError(
+            f"population({which!r}) needs the {flag!r} column and this frame "
+            "has none -- re-run bootstrap.prepare_data; a frame without the "
+            "eligibility flags is the integrity population, not this one")
+    return d[d[flag]]
 
 
 def split_frames(d, cfg):

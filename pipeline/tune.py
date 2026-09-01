@@ -28,7 +28,8 @@ import shutil
 import numpy as np
 import pandas as pd
 
-from common.config import load_config
+from common.config import artifact_mirror_drift, load_config
+from common.guardrail import verdict_is_blocking
 from pricing.explore import tau_provenance_error
 
 PASTE, OWNER, INFO, BLOCK = "PASTE", "OWNER", "INFO", "BLOCK"
@@ -72,6 +73,7 @@ ANCHORS = {
     ("monitoring", "stop_conditions", "margin_deterioration_pct"):
         "    margin_deterioration_pct:",
     ("ab_test", "min_detectable_effect_pct"): "  min_detectable_effect_pct:",
+    ("baseline_model", "calibration_gate_band"): "  calibration_gate_band:",
 }
 
 
@@ -201,8 +203,13 @@ def _measured(cfg, shadow, rho_art, thresholds, backtest=None):
         got = (rho_art or {}).get(art_key)
         cur = _get(cfg, key)
         if got is not None:
+            # the SAME rule pipeline.status and load_config(strict=True)
+            # enforce (common.config.artifact_mirror_drift). tune's own 0.1%
+            # relative check reported OK on a paste those two refuse, so
+            # --apply wrote nothing and status stayed red.
+            stale = any(art_key in d for d in artifact_mirror_drift(cfg))
             out.append(_finding(
-                key, PASTE, OK if _close(cur, got) else ACT, cur, got,
+                key, PASTE, ACT if (cur is None or stale) else OK, cur, got,
                 "config mirrors the frozen artifact; a stale paste "
                 "mis-weights every posterior step, silently",
                 f"artifacts/rho.json {art_key}"))
@@ -277,6 +284,19 @@ def _derived(cfg, backtest, thresholds):
         cur = _get(cfg, path)
         floor = block.get("binding_floor")
         if floor is None:
+            continue
+        # `binding_floor` is set BEFORE the unusability check, so a BLOCKED /
+        # TOO TIGHT / LIKELY INERT block still carries a number. Pasting it
+        # writes a threshold the report itself calls unusable. Same test the
+        # status row uses -- one definition, in common.guardrail.
+        if verdict_is_blocking(block.get("verdict")):
+            out.append(_finding(
+                path, OWNER, ACT, cur, None,
+                f"{block.get('verdict')} -- NOT pasted. binding_floor "
+                f"({floor}) exists but the block is unusable, so no value "
+                "here is both safe and useful; fix the basis or the metric, "
+                "not this key",
+                f"thresholds.guardrail_threshold_recommendation.{name}.verdict"))
             continue
         ok = cur is not None and float(cur) >= float(floor)
         out.append(_finding(

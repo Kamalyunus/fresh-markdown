@@ -662,3 +662,24 @@ def test_simulated_arms_absorb_only_the_shrink_their_shelf_held(cfg):
         assert 0.0 <= row[f"{arm}_shrink_applied"] < 2.0
         assert row[f"{arm}_scrap_units"] == pytest.approx(
             row[f"{arm}_leftover_units"] + row[f"{arm}_shrink_applied"])
+
+
+def test_population_refuses_a_frame_without_its_eligibility_flag(cfg):
+    """The one home for the filter must fail LOUDLY: returning the whole
+    frame let a stale prepared.parquet fit every artifact on the integrity
+    population while each report labelled it eligible."""
+    import pandas as pd
+    import pytest
+
+    from bootstrap.prepare_data import population
+
+    bare = pd.DataFrame({"episode_id": ["e1", "e2"], "units_sold": [1, 2]})
+    assert len(population(bare, cfg, "integrity")) == 2      # integrity is all
+    for which in ("eligible", "dp_eligible"):
+        with pytest.raises(ValueError, match="re-run bootstrap.prepare_data"):
+            population(bare, cfg, which)
+
+    flagged = bare.assign(episode_eligible=[True, False],
+                          dp_eligible=[True, False])
+    assert len(population(flagged, cfg)) == 1
+    assert len(population(flagged, cfg, "dp_eligible")) == 1

@@ -14,6 +14,7 @@ import os
 from common.config import (RUNTIME_REQUIRED, artifact_mirror_drift,
                            config_get, load_config)
 from common import provenance
+from common.guardrail import verdict_is_blocking
 from pricing import explore
 
 PASS, FAIL, WARN, NONE = "PASS", "FAIL", "WARN", "not run"
@@ -248,9 +249,13 @@ def _guardrails(thresholds):
                     "re-run python3 -m bootstrap.derive_thresholds")
     verdicts = {k: v.get("verdict") for k, v in rec.items()
                 if isinstance(v, dict) and "verdict" in v}
-    bad = [k for k, v in verdicts.items() if str(v).upper().startswith("TOO")]
-    # TOO TIGHT is blocking, not advisory: it fires on ordinary days and
-    # silently suspends exploration, which is the product.
+    # All three of design 12's blocking verdicts, not just the first. TOO
+    # TIGHT fires on ordinary days and silently suspends exploration; BLOCKED
+    # means no threshold on that basis is both safe and useful; LIKELY INERT
+    # means the guardrail cannot fire, and a guardrail that cannot fire is
+    # absent, not conservative. Passing two of the three let --apply paste a
+    # floor the report itself calls unusable while status stayed green.
+    bad = [k for k, v in verdicts.items() if verdict_is_blocking(v)]
     return _row("guardrail floors", FAIL if bad else PASS,
                 ", ".join(f"{k}={v}" for k, v in verdicts.items()) or "reported",
                 "thresholds.guardrail_threshold_recommendation" if bad else "")
@@ -260,15 +265,20 @@ def _stops(monitor):
     if not monitor:
         return _row("stop conditions", NONE, "no monitor report",
                     "python3 -m pipeline.monitor")
+    # monitor.stop_conditions is {fired: {name: bool|status}, guardrails:
+    # {...}, suspend_exploration: bool} -- read THAT shape. Iterating the
+    # top level looking for v["fired"] found three container keys, counted
+    # them as "3 evaluated", never saw a per-condition flag, and left the
+    # owner-null WARN branch dead.
     sc = monitor.get("stop_conditions", {})
-    fired = [k for k, v in sc.items()
-             if (v.get("fired") if isinstance(v, dict) else v) is True]
-    blocked = [k for k, v in sc.items()
-               if isinstance(v, dict) and v.get("blocked")]
+    flags = sc.get("fired") if isinstance(sc.get("fired"), dict) else {}
+    fired = [k for k, v in flags.items() if v is True]
+    blocked = [k for k, v in flags.items()
+               if isinstance(v, str) and v.upper().startswith("BLOCKED")]
     if fired:
         return _row("stop conditions", FAIL, "fired: " + ", ".join(fired),
                     "monitor.safety, monitor.guardrails")
-    detail = f"{len(sc)} evaluated, none fired"
+    detail = f"{len(flags)} evaluated, none fired"
     if blocked:
         detail += f" · {len(blocked)} cannot fire (owner threshold null)"
     return _row("stop conditions", WARN if blocked else PASS, detail,

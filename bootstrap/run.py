@@ -133,8 +133,11 @@ def main():
                          "settles in 3-4. The cap is a runaway guard, not a "
                          "budget -- the STALL test stops a loop that is not "
                          "improving long before this")
-    ap.add_argument("--mde", type=float, default=0.075,
-                    help="A/B target for derive_thresholds")
+    ap.add_argument("--mde", type=float, default=None,
+                    help="A/B target for derive_thresholds; default is the "
+                         "owner's ab_test.min_detectable_effect_pct (a "
+                         "literal here silently overrode that config key on "
+                         "every standard run -- rule 8)")
     ap.add_argument("--check-only", action="store_true",
                     help="settle the loop against the artifacts already on "
                          "disk and refresh the reports -- NO retrain. This is "
@@ -158,8 +161,8 @@ def main():
     step("step 6: backtest", ["backtest", "--input", PREPARED,
                               "--out", "reports/backtest.json"])
     step("step 6b: derive_thresholds",
-         ["bootstrap.derive_thresholds", "--input", PREPARED,
-          "--mde", str(args.mde)])
+         ["bootstrap.derive_thresholds", "--input", PREPARED]
+         + (["--mde", str(args.mde)] if args.mde is not None else []))
     step("step 11: seal", ["bootstrap.seal"], fatal=False)
     step("where this run stands: status", ["pipeline.status"], fatal=False)
 

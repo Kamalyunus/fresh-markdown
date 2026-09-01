@@ -73,15 +73,33 @@ def test_assurance_thin_window_is_a_warning_not_a_pass(cfg, tmp_path):
     assert _verdicts(status.collect(cfg, str(tmp_path)))["assurance"] == status.FAIL
 
 
-def test_stop_conditions_that_cannot_fire_are_flagged(cfg, tmp_path):
-    """An owner threshold left null means the guardrail is not watching."""
-    _write(tmp_path, "monitor", {"stop_conditions": {
-        "scrap": {"fired": False, "blocked": True},
-        "margin": {"fired": False}}})
-    assert _verdicts(status.collect(cfg, str(tmp_path)))["stop conditions"] == status.WARN
+def test_stop_conditions_are_read_in_the_shape_the_monitor_writes(cfg, tmp_path):
+    """monitor.stop_conditions is {fired, guardrails, suspend_exploration};
+    a per-condition flag lives under `fired`, and a null owner threshold
+    arrives there as a BLOCKED status string. Reading the TOP level instead
+    found three container keys, reported "3 evaluated", and left both the
+    WARN and FAIL branches unreachable."""
+    def report(fired):
+        return {"stop_conditions": {
+            "fired": fired,
+            "guardrails": {k: {"fired": v is True} for k, v in fired.items()},
+            "suspend_exploration": any(v is True for v in fired.values())}}
 
-    _write(tmp_path, "monitor", {"stop_conditions": {"scrap": {"fired": True}}})
-    assert _verdicts(status.collect(cfg, str(tmp_path)))["stop conditions"] == status.FAIL
+    _write(tmp_path, "monitor", report({
+        "scrap_deterioration_pct": "BLOCKED -- threshold is null (SET BY OWNER)",
+        "margin_deterioration_pct": False}))
+    row = [r for r in status.collect(cfg, str(tmp_path))["checks"]
+           if r["check"] == "stop conditions"][0]
+    assert row["verdict"] == status.WARN
+    assert "2 evaluated" in row["detail"]          # conditions, not containers
+    assert "1 cannot fire" in row["detail"]
+
+    _write(tmp_path, "monitor", report({"scrap_deterioration_pct": True,
+                                        "margin_deterioration_pct": False}))
+    row = [r for r in status.collect(cfg, str(tmp_path))["checks"]
+           if r["check"] == "stop conditions"][0]
+    assert row["verdict"] == status.FAIL
+    assert "scrap_deterioration_pct" in row["detail"]   # WHICH one fired
 
 
 def test_a_stale_report_vintage_fails_rather_than_grading_a_ghost_model(cfg):
@@ -182,3 +200,22 @@ def test_convergence_goes_stale_when_the_chain_it_checked_moves(cfg, tmp_path):
     row = status._calibration_convergence(c)
     assert row["verdict"] == status.PASS
     assert "staleness unverifiable" in row["detail"]
+
+
+def test_every_blocking_floor_verdict_fails_not_just_TOO_TIGHT(cfg, tmp_path):
+    """Design 12 names three blocking verdicts. status matched only "TOO",
+    so BLOCKED and LIKELY INERT read PASS -- and tune pasted the BLOCKED
+    floor's binding_floor while the chain stayed green."""
+    for verdict in ("TOO TIGHT -- below the measured floor",
+                    "BLOCKED -- the binding trailing floor is 1.4 on the "
+                    "RELATIVE basis",
+                    "CLEARS THE FLOOR BUT LIKELY INERT"):
+        _write(tmp_path, "thresholds", {"guardrail_threshold_recommendation": {
+            "scrap": {"verdict": verdict}}})
+        assert _verdicts(status.collect(cfg, str(tmp_path)))[
+            "guardrail floors"] == status.FAIL, verdict
+
+    _write(tmp_path, "thresholds", {"guardrail_threshold_recommendation": {
+        "scrap": {"verdict": "clears the floor"}}})
+    assert _verdicts(status.collect(cfg, str(tmp_path)))[
+        "guardrail floors"] == status.PASS

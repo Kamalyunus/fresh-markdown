@@ -437,3 +437,35 @@ def test_tau_uses_the_same_staleness_rule_the_status_gate_enforces(cfg):
     # a null paste is still ACT -- the gate stays quiet on null by design
     cfg["exploration"]["tau_initial"] = None
     assert tau_finding(cfg, shadow)["status"] == "ACT"
+
+
+def test_an_unusable_guardrail_floor_is_never_pasted(cfg):
+    """binding_floor is set BEFORE the unusability check, so a BLOCKED block
+    still carries a number. Pasting it writes a threshold the report itself
+    calls unusable while status stays green."""
+    blocked = {"guardrail_threshold_recommendation": {"scrap": {
+        "config_key": "monitoring.stop_conditions.scrap_deterioration_pct",
+        "binding_floor": 1.4, "binding_basis": "trailing",
+        "verdict": "BLOCKED -- the binding trailing floor is 1.4 on the "
+                   "RELATIVE basis"}}}
+    f = [x for x in tune._derived(cfg, {}, blocked)
+         if x["key"].endswith("scrap_deterioration_pct")][0]
+    assert f["class"] == "OWNER" and f["recommended"] is None
+    assert "BLOCKED" in f["evidence"] and "NOT pasted" in f["evidence"]
+
+    usable = {"guardrail_threshold_recommendation": {"scrap": {
+        "config_key": "monitoring.stop_conditions.scrap_deterioration_pct",
+        "binding_floor": 0.18, "binding_basis": "control_arm",
+        "verdict": "clears the floor"}}}
+    f = [x for x in tune._derived(cfg, {}, usable)
+         if x["key"].endswith("scrap_deterioration_pct")][0]
+    assert f["class"] == "PASTE" and f["recommended"] == 0.18
+
+
+def test_every_paste_key_has_a_line_anchor(cfg):
+    """A PASTE whose key is missing from ANCHORS raises inside --apply and is
+    reported SKIPPED every run -- calibration_gate_band could never tighten
+    through the tool."""
+    for key in tune.RERUN:
+        assert key in tune.ANCHORS, key
+    assert ("baseline_model", "calibration_gate_band") in tune.ANCHORS
