@@ -760,8 +760,21 @@ runs daily and tests the frozen artifacts against the live world:
 | --- | --- | --- |
 | `reproduction` | Do logged decisions re-solve to themselves? | The DP is deterministic; a mismatch means something moved underneath it |
 | `dispersion` | Is live demand as lumpy as frozen `r` claims? | Every bounded update assumes it, and no business metric moves |
-| `correlation` | Is `rho` still the frozen value? | It divides all accumulated evidence through `deff` |
+| `correlation` | Is **`deff`** still the frozen value? | It divides all accumulated evidence |
 | `exploration` | Is the applied price a uniform draw from the affordable set? | The causal claim rests on it entirely |
+
+Two thresholds here are set on the quantity with the *consequence*, not the
+one that is easiest to measure. **`correlation` judges `deff = 1 + (m−1)ρ`,
+not `rho`**: deff drifts through both terms, and a rho-only verdict was blind
+to the forced-hours channel — `m` moves whenever the exploration rate does,
+rescaling every update while `rho` sits still (`rho_drift` remains as the
+diagnostic saying which term moved). **`exploration` needs significance AND
+effect size**: χ² power grows with `n` and the event store is append-only
+with no window, so a p-value alone tightens every day the system runs — at
+100 draws it takes a ~47% bin deviation to FAIL and at a million, ~0.5%. The
+same draw distribution would pass in week one and fail at volume with nothing
+about the draw having changed. `uniformity_max_bin_deviation` is scale-free
+and carries the meaning; the p-value only stops noise being called bias.
 
 Details that carry the value: the decision event carries `mu_ref_path` and
 `anchor_discount` so it is *sufficient* to re-solve (never remove an event

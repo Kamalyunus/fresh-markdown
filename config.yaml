@@ -124,10 +124,12 @@ assurance:                             # pipeline.assurance -- live-data checks
   dispersion_alert_z: 3.0              # SET  |z| on the binomial null
   rho_min_episodes: 200                # SET  below this, do not re-measure
   rho_min_hours_per_episode: 3         # SET  matches bootstrap.fit_dispersion
-  rho_drift_alert: 0.10                # SET  absolute drift in rho that alerts.
+  rho_drift_alert: 0.10                # SET  absolute rho drift; DIAGNOSTIC only -- fit_dispersion reports it, the assurance verdict is on deff
+  deff_drift_alert_rel: 0.15           # SET  relative drift in deff = 1 + (m-1)*rho, the quantity that divides information. Both terms drift; rho alone was blind to the forced-hours channel
   uniformity_bins: 5                   # SET  chi-square bins on the mapped rank
   uniformity_min_draws: 100            # SET  below this, report insufficient
-  uniformity_alert_p: 0.01             # SET  chi-square p-value floor
+  uniformity_alert_p: 0.01             # SET  chi-square p floor: guards against calling noise a bias at low n
+  uniformity_max_bin_deviation: 0.15   # SET  FAIL needs significance AND size. chi-square power grows with n on an unwindowed store, so p alone tightens every day; this is scale-free
 
 monitoring:
   guardrail_noise_window_days: 28      # SET  trailing baseline for threshold calibration

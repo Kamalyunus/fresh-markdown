@@ -220,18 +220,27 @@ def correlation_drift(decisions, outcomes, cfg):
     deff_live = design_effect(rho_live, hours)
 
     rho_frozen = cfg["dispersion"]["rho"]
-    drift = abs(rho_live - rho_frozen)
+    deff_frozen = float(deff(cfg))
+    # deff = 1 + (m - 1) * rho divides accumulated information, and it drifts
+    # through BOTH terms. Judging on rho alone was blind to the m channel:
+    # forced hours per episode can move (an exploration-rate change moves it
+    # by design) and rescale every update while rho sits still. Judge the
+    # quantity with the consequence; rho_drift stays as the diagnostic that
+    # says WHICH term moved.
+    deff_drift = abs(deff_live - deff_frozen) / max(deff_frozen, 1e-9)
     return {
         "episodes": len(usable),
         "rho_live": round(rho_live, 4),
         "rho_frozen": round(float(rho_frozen), 4),
-        "rho_drift": round(drift, 4),
+        "rho_drift": round(abs(rho_live - rho_frozen), 4),
         "mean_forced_hours_live": round(hours, 3),
+        "mean_forced_hours_frozen": float(
+            cfg["dispersion"]["mean_forced_hours_per_episode"]),
         "deff_live": round(deff_live, 3),
-        "deff_frozen": round(float(deff(cfg)), 3),
-        # deff divides accumulated information -- drift here silently
-        # rescales every update in the window
-        "verdict": "PASS" if drift <= ac["rho_drift_alert"] else "FAIL",
+        "deff_frozen": round(deff_frozen, 3),
+        "deff_drift_rel": round(deff_drift, 4),
+        "verdict": ("PASS" if deff_drift <= ac["deff_drift_alert_rel"]
+                    else "FAIL"),
     }
 
 
@@ -276,6 +285,14 @@ def exploration_uniformity(decisions, cfg):
     expected = n / bins
     stat = float(((counts - expected) ** 2 / expected).sum())
     pval = float(chi2_dist.sf(stat, bins - 1))
+    # SIGNIFICANT **and** LARGE. chi-square power grows with n, and this store
+    # is append-only with no window, so a p-value alone tightens every day the
+    # system runs: the same draw distribution that passes in week one fails at
+    # volume with nothing about the draw having changed. The effect size is
+    # scale-free and carries the meaning -- how far a bin actually sits from
+    # uniform -- while p still guards against calling noise a bias at low n.
+    max_dev = float(np.max(np.abs(counts - expected)) / expected)
+    biased = pval < ac["uniformity_alert_p"] and max_dev > ac["uniformity_max_bin_deviation"]
     return {
         "exploration_draws": n,
         "unreconstructed": unreconstructed,
@@ -284,10 +301,10 @@ def exploration_uniformity(decisions, cfg):
         "expected_per_bin": round(expected, 1),
         "chi_square": round(stat, 3),
         "p_value": round(pval, 4),
+        "max_bin_deviation": round(max_dev, 4),
         # a biased draw leaves no trace in any business metric -- it only
         # corrupts the causal claim
-        "verdict": ("FAIL" if pval < ac["uniformity_alert_p"] or contradictions
-                    else "PASS"),
+        "verdict": "FAIL" if biased or contradictions else "PASS",
     }
 
 

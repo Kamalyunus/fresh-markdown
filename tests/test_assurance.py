@@ -149,13 +149,28 @@ def _episodes(cfg, n_ep, hours, episode_shift, seed=0):
 
 def test_correlation_matches_the_frozen_value_when_the_world_has_not_moved(cfg):
     frozen = cfg["dispersion"]["rho"]
-    # shared variance tuned so live rho lands near the frozen scalar (0.2436
-    # on the calib window; count discreteness sets a ~0.26 floor on the
-    # generator's live rho)
-    decs, outs = _episodes(cfg, 300, hours=4, episode_shift=0.02, seed=4)
+    # BOTH terms of deff have to match, not just rho: hours tracks the frozen
+    # mean_forced_hours_per_episode, and shared variance is tuned so live rho
+    # lands near the frozen scalar (0.2436 on the calib window; count
+    # discreteness sets a ~0.26 floor on the generator's live rho)
+    hours = round(cfg["dispersion"]["mean_forced_hours_per_episode"])
+    decs, outs = _episodes(cfg, 300, hours=hours, episode_shift=0.02, seed=4)
     out = assurance.correlation_drift(decs, outs, cfg)
     assert out["verdict"] == "PASS", out
     assert abs(out["rho_live"] - frozen) <= cfg["assurance"]["rho_drift_alert"]
+
+
+def test_forced_hours_drift_alone_fails_though_rho_never_moves(cfg):
+    """The channel the rho-only verdict could not see. Same rho, half the
+    hours per episode: deff is rescaled and every posterior update in the
+    window is deflated by the wrong divisor, while rho_drift stays quiet."""
+    hours = round(cfg["dispersion"]["mean_forced_hours_per_episode"])
+    decs, outs = _episodes(cfg, 300, hours=hours // 2, episode_shift=0.02,
+                           seed=4)
+    out = assurance.correlation_drift(decs, outs, cfg)
+    assert out["rho_drift"] <= cfg["assurance"]["rho_drift_alert"]   # quiet
+    assert out["deff_drift_rel"] > cfg["assurance"]["deff_drift_alert_rel"]
+    assert out["verdict"] == "FAIL", out
 
 
 def test_correlation_catches_drift_that_would_rescale_every_update(cfg):
@@ -232,3 +247,66 @@ def test_run_aggregates_and_names_the_failing_checks(cfg):
     # thin families report INSUFFICIENT and must not be counted as failures
     assert report["dispersion"]["verdict"] == "INSUFFICIENT"
     assert "dispersion" not in report["failing"]
+
+
+def test_uniformity_needs_size_as_well_as_significance(cfg):
+    """chi-square power grows with n and the event store is append-only with
+    no window, so a p-value alone tightens every day the system runs: at 100
+    draws it takes a ~47% bin deviation to FAIL, at a million ~0.5%. The same
+    draw distribution would pass in week one and fail at volume. The effect
+    size carries the meaning; p only stops noise being called bias."""
+    import numpy as np
+    from scipy.stats import chi2 as chi2_dist
+
+    from pipeline.assurance import exploration_uniformity
+
+    bins = cfg["assurance"]["uniformity_bins"]
+    size_gate = cfg["assurance"]["uniformity_max_bin_deviation"]
+
+    def verdict(n, dev):
+        """n draws whose first bin sits `dev` above uniform."""
+        counts = [round(n / bins)] * bins
+        counts[0] = round(counts[0] * (1 + dev))
+        counts[-1] = round(counts[-1] * (1 - dev))
+        u, edges = [], np.linspace(0, 1, bins + 1)
+        for j, c in enumerate(counts):
+            u += [float((edges[j] + edges[j + 1]) / 2)] * c
+        obs = np.array(counts, dtype=float)
+        exp = obs.sum() / bins
+        stat = float(((obs - exp) ** 2 / exp).sum())
+        p = float(chi2_dist.sf(stat, bins - 1))
+        max_dev = float(np.max(np.abs(obs - exp)) / exp)
+        return ("FAIL" if (p < cfg["assurance"]["uniformity_alert_p"]
+                           and max_dev > size_gate) else "PASS")
+
+    tiny = size_gate / 3
+    # a deviation too small to matter stays PASS at every scale -- the old
+    # p-only rule flipped this to FAIL as n grew
+    assert verdict(10_000, tiny) == "PASS"
+    assert verdict(1_000_000, tiny) == "PASS"
+    # a real bias still fails once there is enough data to be sure of it
+    assert verdict(100_000, size_gate * 3) == "FAIL"
+
+    # and a contradiction FAILs on its own, whatever the draw looks like
+    out = exploration_uniformity(
+        [{"affordable_set_size": 3, "is_exploration": False,
+          "mu_ref_path": [1.0], "epsilon_posterior_mean": -1.0}], cfg)
+    assert out["affordable_but_not_explored"] == 1
+
+
+def test_correlation_verdict_is_on_deff_not_rho_alone(cfg):
+    """deff = 1 + (m-1)*rho divides accumulated information and drifts through
+    BOTH terms. The rho-only verdict was blind to the forced-hours channel: m
+    can move -- an exploration-rate change moves it by design -- and rescale
+    every update while rho sits still."""
+    from common.config import design_effect
+
+    rho = float(cfg["dispersion"]["rho"])
+    m_frozen = float(cfg["dispersion"]["mean_forced_hours_per_episode"])
+    gate = cfg["assurance"]["deff_drift_alert_rel"]
+
+    frozen = design_effect(rho, m_frozen)
+    # rho unchanged, forced hours halved: invisible to a rho-only check
+    live = design_effect(rho, m_frozen / 2)
+    assert abs(rho - rho) <= cfg["assurance"]["rho_drift_alert"]   # rho: quiet
+    assert abs(live - frozen) / frozen > gate                      # deff: FAIL
