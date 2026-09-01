@@ -152,6 +152,25 @@ def grid_update(pairs, cell_record, cfg):
     }
 
 
+def daily_exploration_spend(decisions, outcomes):
+    """Realised exploration cost keyed by the day the outcome finalized.
+
+    The ONE definition of "what exploration cost that day", shared by the tau
+    controller and the monitor's stop condition -- attributed on the same day
+    key `through` is derived from, so the correction and its backstop cannot
+    drift apart.
+    """
+    dec = {d["decision_id"]: d for d in decisions}
+    by_day = {}
+    for o in outcomes:
+        d = dec.get(o["decision_id"])
+        if not d or not d.get("is_exploration") or not o.get("finalized_at"):
+            continue
+        day = str(o["finalized_at"])[:10]
+        by_day[day] = by_day.get(day, 0.0) + float(d["exploration_cost"])
+    return by_day
+
+
 def tau_calibration(decisions, outcomes, posterior, cfg):
     """Move tau toward the budget from realised spend (design 5.8) -- on
     the SAME two numbers the monitor's stop condition compares, so the
@@ -177,30 +196,42 @@ def tau_calibration(decisions, outcomes, posterior, cfg):
         block["through_date"] = through
         return block
 
-    forced = [d for d in decisions if d["is_exploration"]]
-    if not forced:
+    # THE DAY JUST CLOSED, on both sides -- the controller design 5.8
+    # specifies and the one shadow's trace walks. Summing every forced
+    # decision ever against all-time IL diluted each day's correction by 1/N
+    # (a 10x overspend on day 27 moved tau by 0.76x instead of the 0.5x clip)
+    # and took the exploration_cost_vs_budget stop condition blind with it,
+    # because both compared the same two cumulative totals.
+    spend_by_day = daily_exploration_spend(decisions, outcomes)
+    realised = float(spend_by_day.get(through, 0.0))
+    business = business_metrics(decisions, outcomes, cfg)
+    il_by_day = business.get("il_by_close_day") or {}
+    cells = posterior.state["cells"]
+    if not il_by_day or not cells:
+        block["skipped"] = ("no closed-episode IL to project a budget from"
+                            if not il_by_day else "no posterior cells")
+        return block
+    if not realised:
         # zero spend is an ABSENCE OF SIGNAL, not underspend: calibrating on
         # it clips tau upward every day exploration is suspended. Hold still.
-        block["skipped"] = "no exploration in the window -- nothing to calibrate from"
+        block["skipped"] = ("no exploration on the day just closed -- nothing "
+                            "to calibrate from")
         block["through_date"] = through
-        return block
-    realised = float(sum(d["exploration_cost"] for d in forced))
-    business = business_metrics(decisions, outcomes, cfg)
-    il_abs = (business.get("il_pct_aggregate") or {}).get("il_absolute")
-    cells = posterior.state["cells"]
-    if not il_abs or not cells:
-        block["skipped"] = ("no closed-episode IL to project a budget from"
-                            if not il_abs else "no posterior cells")
         return block
 
     # the WIDEST cell std, matching the monitor: the budget is sized for the
     # cell that still has the most to learn, not the average one
     widest_std = max(rec["std"] for rec in cells.values())
-    budget = explore.budget_today(il_abs, widest_std, cfg)
+    # a share of TRAILING realised IL, never the same day's own
+    trailing_il = explore.trailing_daily_il(il_by_day, through, cfg)
+    budget = explore.budget_today(trailing_il, widest_std, cfg)
     block.update({
         "through_date": through,
         "realised_exploration_cost": round(realised, 1),
-        "markdown_il": round(float(il_abs), 1),
+        "markdown_il": round(float(trailing_il), 1),
+        "markdown_il_basis": (
+            f"mean realised IL/day over the trailing "
+            f"{cfg['exploration']['budget_il_window_days']} days to {through}"),
         "widest_posterior_std": widest_std,
         "budget": round(budget, 1),
         "tau_after": round(explore.tau_next(tau_now, budget, realised, cfg), 2),

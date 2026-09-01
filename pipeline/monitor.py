@@ -18,6 +18,7 @@ from common.config import load_config, deff
 from events.store import EventStore
 from pricing.posterior import PosteriorStore
 from pipeline import assurance as assurance_mod
+from pipeline import update as update_mod
 from pricing import explore
 from common import episodes
 # aliased: stop_conditions() takes a parameter named `guardrail`
@@ -45,6 +46,9 @@ def business_metrics(decisions, outcomes, cfg):
             "episode_id": d["episode_id"], "category": d["category"],
             "fc": d["fc"], "sku_id": d["sku_id"],
             "timestamp": d.get("timestamp"),
+            # the TRADING date the decision priced, not the UTC wall clock
+            "date": str(d.get("date")
+                        or pd.Timestamp(d["timestamp"]).date()),
             "hours_remaining": d["hours_remaining"],
             "original_price": d["original_price"], "cost": d["cost"],
             "units_sold": o["units_sold"],
@@ -73,6 +77,7 @@ def business_metrics(decisions, outcomes, cfg):
         discount_cost=("discount_cost", "sum"), units_sold=("units_sold", "sum"),
         starting_inventory=("starting_inventory", "last"),
         end_sold=("units_sold", "last"), shrink=("_shrink", "sum"),
+        close_day=("date", "last"),
         ending_inventory=("ending_inventory", "last"))
     # leftover, never the reported ending_inventory (written off to zero at
     # window close -- reading it directly zeroes IL's scrap term)
@@ -100,6 +105,12 @@ def business_metrics(decisions, outcomes, cfg):
                                     / (ep.units_sold.sum() + ep.end_inv.sum())), 4)
             if (ep.units_sold.sum() + ep.end_inv.sum()) > 0 else None,
         "waste_units": int(ep.end_inv.clip(lower=0).sum()),
+        # realised IL by CLOSE DAY: the trailing base the tau controller
+        # prices a day's budget from (explore.trailing_daily_il). Closed
+        # episodes only -- an unclosed one contributes nothing until it closes,
+        # which is what makes the base knowable at the start of each day.
+        "il_by_close_day": {str(k): round(float(v), 2) for k, v
+                            in ep.groupby("close_day").il.sum().items()},
         # visible: a rising count means early reporting, not falling waste
         "episodes_excluded_still_running": len(running),
     }
@@ -251,7 +262,7 @@ def evaluate_guardrail(block, threshold, persistence_days):
     }
 
 
-def learning_metrics(decisions, posterior, cfg):
+def learning_metrics(decisions, posterior, cfg, outcomes=()):
     cells = posterior.state["cells"]
     forced = [d for d in decisions if d["is_exploration"]]
     realised_cost = sum(d["exploration_cost"] for d in forced)
@@ -271,6 +282,11 @@ def learning_metrics(decisions, posterior, cfg):
                         / (1 - d["reference_discount"]))) for d in forced])), 4)
             if forced else None,
         "realised_exploration_cost": round(realised_cost, 1),
+        # per-day, from update.daily_exploration_spend -- the ONE definition
+        # the tau controller and the stop condition both price a day with
+        "exploration_cost_by_day": {
+            k: round(v, 1) for k, v in
+            update_mod.daily_exploration_spend(decisions, outcomes).items()},
         "tau_current": decisions[-1]["tau_current"] if decisions else None,
         "deff_applied": round(deff(cfg), 3),
         # std only moves when an update commits, so "std flat for N days" is
@@ -339,15 +355,21 @@ def stop_conditions(safety, learning, business, guardrail, cfg):
     fired["missing_stockout_field"] = (safety["missing_stockout_field_rate"] or 0) > 0
 
     # realised exploration cost vs budget over the event window; the budget
-    # uses realised markdown IL as the projection and the widest cell std
-    il_abs = (business.get("il_pct_aggregate") or {}).get("il_absolute")
+    # uses TRAILING realised IL as the projection and the widest cell std --
+    # the same two per-day numbers pipeline.update's tau controller moves on
+    # (design 5.8). Comparing all-time spend against all-time IL made both
+    # blind together: the ratio tends to 1.0 as history grows, so a day at
+    # 10x budget could not fire it.
+    il_by_day = business.get("il_by_close_day") or {}
     cells = learning["posterior_by_cell"]
-    if il_abs and cells:
+    day = max(il_by_day) if il_by_day else None
+    if il_by_day and cells:
         widest_std = max(rec["std"] for rec in cells.values())
-        budget = explore.budget_today(il_abs, widest_std, cfg)
+        budget = explore.budget_today(
+            explore.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
+        spend = float((learning.get("exploration_cost_by_day") or {}).get(day, 0.0))
         fired["exploration_cost_vs_budget"] = (
-            learning["realised_exploration_cost"]
-            > sc["exploration_cost_vs_budget"] * budget) if budget > 0 else False
+            spend > sc["exploration_cost_vs_budget"] * budget) if budget > 0 else False
     else:
         fired["exploration_cost_vs_budget"] = False
 
@@ -378,7 +400,7 @@ def main():
     decisions = store.load_decisions()
     outcomes = store.load_outcomes()
 
-    learning = learning_metrics(decisions, posterior, cfg)
+    learning = learning_metrics(decisions, posterior, cfg, outcomes)
     safety = safety_metrics(store, decisions, outcomes)
     learning["realised_vs_predicted_sold_ratio"] = \
         safety["realised_vs_predicted_sold_ratio"]

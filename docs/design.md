@@ -524,7 +524,18 @@ halving is the safety direction.
 
 **The daily loop:** at midnight, (1) yesterday's realised IL closes; (2)
 today's budget = `budget_share_of_il` × trailing mean × the posterior-std
-scale; (3) today's τ = `tau_next(yesterday's τ, budget, spend)`. The
+scale; (3) today's τ = `tau_next(yesterday's τ, budget, spend)`. **Both
+sides are ONE DAY** — the spend of the day just closed against the budget
+priced from the days before it. Comparing all-time spend against all-time IL
+(as the controller once did) dilutes each day's correction by 1/N: the ratio
+tends to 1 as history accumulates, so a day at ten times budget moves τ by
+0.76× instead of the 0.5× clip, and because
+`monitoring.exploration_cost_vs_budget` compares the same two numbers by
+design, the backstop goes blind at exactly the same rate. `il_by_close_day`
+(monitor) and `daily_exploration_spend` (update) are the one definition of
+each side; `pipeline.shadow`'s controller trace walks the same arithmetic, so
+"would the pilot survive its first week" grades the controller production
+actually runs. The
 calibration commits inside `pipeline.update --apply` — τ moves on
 **spend**, not evidence, exactly once per day (`tau_calibrated_through`).
 τ persists in the posterior artifact; `exploration.tau_initial` is only the

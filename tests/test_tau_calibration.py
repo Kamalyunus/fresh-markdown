@@ -1,6 +1,7 @@
 """tau moves on spend, at the operator gate (design 5.8)."""
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from common.config import load_config
@@ -62,11 +63,23 @@ def _outcome(i, sold, date="2026-08-19"):
     }
 
 
-def _store(cfg, tmp_path, n, cost_each, date="2026-08-19"):
+def _store(cfg, tmp_path, n, cost_each, date="2026-08-19", history_days=3,
+           history_cost=0.0):
+    """`history_days` of prior closed episodes before `date`, because the
+    budget is a share of TRAILING realised IL -- a single-day store has no
+    trailing base and the controller correctly holds tau still."""
     store = EventStore(cfg, root=str(tmp_path / "events"))
-    for i in range(n):
+    i = 0
+    for back in range(history_days, 0, -1):
+        day = str(pd.Timestamp(date) - pd.Timedelta(days=back))[:10]
+        for _ in range(n):
+            store.emit_decision(_decision(i, 0.30, history_cost, day))
+            store.emit_outcome(_outcome(i, 1, day))
+            i += 1
+    for _ in range(n):
         store.emit_decision(_decision(i, 0.30, cost_each, date))
         store.emit_outcome(_outcome(i, 1, date))
+        i += 1
     return store
 
 
@@ -111,13 +124,44 @@ def test_tau_is_calibrated_on_the_same_numbers_the_stop_condition_uses(cfg, tmp_
     decisions, outcomes = store.load_decisions(), store.load_outcomes()
 
     block = upd.tau_calibration(decisions, outcomes, posterior, cfg)
-    learning = mon.learning_metrics(decisions, posterior, cfg)
+    learning = mon.learning_metrics(decisions, posterior, cfg, outcomes)
     business = mon.business_metrics(decisions, outcomes, cfg)
 
-    assert block["realised_exploration_cost"] == \
-        learning["realised_exploration_cost"]
-    assert block["markdown_il"] == \
-        pytest.approx(business["il_pct_aggregate"]["il_absolute"])
+    day = block["through_date"]
+    # SAME DAY on both sides: the controller prices the day just closed, and
+    # the stop condition backstops that same day. All-time totals on both
+    # sides diluted each day's correction by 1/N and blinded the backstop
+    # with it.
+    assert block["realised_exploration_cost"] == pytest.approx(
+        learning["exploration_cost_by_day"][day])
+    assert block["markdown_il"] == pytest.approx(
+        upd.explore.trailing_daily_il(business["il_by_close_day"], day, cfg))
+    # the day being priced closed episodes of its own, yet the budget base
+    # is strictly the days BEFORE it (design 5.8: trailing, never same-day)
+    il_by_day = business["il_by_close_day"]
+    assert il_by_day[day] > 0
+    assert block["markdown_il"] == pytest.approx(
+        upd.explore.trailing_daily_il(
+            {k: v for k, v in il_by_day.items() if k != day}, day, cfg))
+
+
+def test_a_single_overspending_day_is_not_diluted_by_history(cfg, tmp_path):
+    """All-time spend vs all-time IL made the correction weaker the longer
+    the system ran: the ratio tends to 1.0, so a 10x day moved tau by 0.76x
+    instead of the 0.5x clip, and the stop condition never fired."""
+    lo = cfg["exploration"]["tau_adjust_clip"][0]
+    short = _store(cfg, tmp_path / "short", 20, cost_each=5000.0,
+                   history_days=3, history_cost=1.0)
+    long = _store(cfg, tmp_path / "long", 20, cost_each=5000.0,
+                  history_days=25, history_cost=1.0)
+    a = upd.tau_calibration(short.load_decisions(), short.load_outcomes(),
+                            _posterior(cfg, tmp_path / "short"), cfg)
+    b = upd.tau_calibration(long.load_decisions(), long.load_outcomes(),
+                            _posterior(cfg, tmp_path / "long"), cfg)
+    for block in (a, b):
+        assert block["tau_after"] == pytest.approx(
+            block["tau_before"] * lo, abs=0.01), block
+    assert a["realised_exploration_cost"] == b["realised_exploration_cost"]
 
 
 # -------------------------------------------------------------- exactly once
