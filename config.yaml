@@ -1,6 +1,15 @@
 # Perishable Markdown MVP -- single tuning surface (design section 5.1).
 #
 # Every threshold, constant, window, and rate in the system lives here.
+#
+# WARNING -- every value marked MEASURED in this file was derived from the
+# repo's SYNTHETIC fixture and is evidence about the fixture only (AGENTS
+# rule 19). On a real extract they are all wrong, sometimes badly: pulling
+# this file overwrites whatever your own run derived. After `bootstrap.run`
+# on your data, run `python3 -m pipeline.tune --apply` and let it re-derive
+# every one of them. The values that must never ship a number at all
+# (tau_initial, the guardrail stops, min_detectable_effect_pct) ship null so
+# load_config(strict=True) refuses to start until you paste your own.
 
 meta:
   config_version: "1.0.0"
@@ -145,8 +154,8 @@ monitoring:
       scrap: 7                         # per metric, chosen from measured noise
       margin: 1
     persistence_days: 2                # SET  consecutive days before a stop fires
-    scrap_deterioration_pct: 0.3572  # MEASURED  3-sigma of the trailing noise
-    margin_deterioration_pct: 0.1435  # MEASURED  3-sigma of the trailing noise
+    scrap_deterioration_pct: null      # MEASURED  3-sigma of the trailing noise; SHIPS NULL -- paste from YOUR reports/thresholds.json
+    margin_deterioration_pct: null     # MEASURED  3-sigma of the trailing noise; SHIPS NULL -- paste from YOUR reports/thresholds.json
   alert_posterior_std_flat_days: 21    # SET  learning-loop health
 
 ab_test:
