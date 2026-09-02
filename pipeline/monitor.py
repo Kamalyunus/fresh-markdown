@@ -21,6 +21,7 @@ from pipeline import assurance as assurance_mod
 from pipeline import update as update_mod
 from pricing import explore
 from common import episodes
+from common.provenance import config_fingerprint
 # aliased: stop_conditions() takes a parameter named `guardrail`
 from common import guardrail as guard
 
@@ -441,6 +442,7 @@ def main():
     # it informs the operator gate, it does not suspend pricing
     assurance = assurance_mod.run(decisions, outcomes, cfg)
     report = {
+        "config": config_fingerprint(cfg, "production"),
         "business": business,
         "guardrails": guardrail,
         "learning": learning,

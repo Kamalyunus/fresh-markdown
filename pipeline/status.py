@@ -231,45 +231,58 @@ def _shadow(shadow):
                 "" if ok else "shadow.rejected_reasons, quarantined_event_count")
 
 
-def _vintages(cfg, state, backtest, shadow):
-    """Gate evidence is only evidence about the artifacts it ran against
-    (hard rule 1): after a retrain, yesterday's backtest and shadow reports
-    silently grade a model that is no longer on disk, and every row they
-    feed above would still read green. Model mismatch is FAIL; a config
-    edited since the report is WARN (re-run to re-grade under it)."""
+def _vintages(cfg, state, reports):
+    """Gate evidence is only evidence about the artifacts AND config it ran
+    under (hard rule 1): after a retrain, yesterday's backtest and shadow
+    grade a model no longer on disk; after a paste, they grade a config no
+    longer in force. Model mismatch is FAIL. A config that moved is WARN and
+    NAMES what moved -- every report now carries the fingerprint of the
+    config it read (`config.digest` + `config.snapshot`, by phase), so this
+    no longer depends on a human remembering to bump `meta.config_version`.
+    """
     bundle = state["bundle"]
     if bundle is None:
         return _row("report vintages", NONE,
                     "no single artifact bundle to compare against",
                     "see the artifact bundle line")
+    live = provenance.config_fingerprint(cfg, phase=None)["digest"]
     stale, moved, checked = [], [], []
-    for name, rep in (("backtest", backtest), ("shadow", shadow)):
+    for name, rep in reports.items():
         if not rep:
             continue                # its own row already reads "not run"
         av = rep.get("artifact_versions") or {}
-        if av.get("baseline_model_version") != bundle:
+        if "baseline_model_version" in av and av["baseline_model_version"] != bundle:
             stale.append(f"{name} ran against bundle "
-                         f"{av.get('baseline_model_version')}")
-        elif av.get("config_version") != cfg["meta"]["config_version"]:
-            moved.append(f"{name} ran under config_version "
-                         f"{av.get('config_version')}")
-        else:
-            checked.append(name)
+                         f"{av['baseline_model_version']}")
+            continue
+        fp = rep.get("config")
+        if fp:
+            if fp.get("digest") != live:
+                diff = provenance.config_diff(fp.get("snapshot") or {}, cfg)
+                moved.append(f"{name} ({fp.get('phase')}) ran under config "
+                             f"{fp.get('digest')}; since then: "
+                             + ("; ".join(diff) if diff else "keys unchanged, "
+                                "values re-serialised"))
+            else:
+                checked.append(f"{name}={fp.get('phase')}")
+        elif av:                    # a report from before fingerprints
+            if av.get("config_version") != cfg["meta"]["config_version"]:
+                moved.append(f"{name} ran under config_version "
+                             f"{av.get('config_version')} (pre-fingerprint)")
+            else:
+                checked.append(f"{name}=unfingerprinted")
     if stale:
         return _row("report vintages", FAIL,
                     "; ".join(stale) + f" -- artifacts on disk are {bundle}",
                     "re-run it: every row it feeds grades a model that is "
                     "no longer deployed")
     if moved:
-        return _row("report vintages", WARN,
-                    "; ".join(moved)
-                    + f" (now {cfg['meta']['config_version']})",
-                    "re-run to re-grade under the current config")
+        return _row("report vintages", WARN, "; ".join(moved),
+                    "re-run to re-grade under the config now in force")
     if not checked:
-        return _row("report vintages", NONE, "no version-stamped reports yet")
+        return _row("report vintages", NONE, "no stamped reports yet")
     return _row("report vintages", PASS,
-                f"{', '.join(checked)} match bundle {bundle} and "
-                f"config_version {cfg['meta']['config_version']}")
+                f"bundle {bundle} · config {live} · " + ", ".join(checked))
 
 
 def _tau(cfg, backtest, shadow=None):
@@ -365,13 +378,17 @@ def collect(cfg, root="reports"):
     a status view that cannot itself be tested is not worth trusting."""
     backtest = _read(os.path.join(root, "backtest.json"))
     shadow = _read(os.path.join(root, "shadow.json"))
+    reports = {"backtest": backtest, "shadow": shadow,
+               "thresholds": _read(os.path.join(root, "thresholds.json")),
+               "monitor": _read(os.path.join(root, "monitor.json")),
+               "assurance": _read(os.path.join(root, "assurance.json"))}
     state = provenance.verify(cfg, provenance.load_seal(cfg))
     rows = [
         _launch_blockers(cfg),
         _bundle(cfg, state),
         _mirrors(cfg),
         _config_vs_reports(cfg, root),
-        _vintages(cfg, state, backtest, shadow),
+        _vintages(cfg, state, reports),
         _calibration(cfg, backtest),
         _calibration_convergence(cfg),
         _prior(cfg),

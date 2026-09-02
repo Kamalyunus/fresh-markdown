@@ -6,6 +6,7 @@ import pandas as pd
 
 from common.config import load_config
 from bootstrap.prepare_data import population, pre_launch
+from common.provenance import config_fingerprint
 from bootstrap.train_baseline import BaselineModel
 from backtest.replay import fidelity, policy_replay, derive_tau_initial
 
@@ -63,6 +64,7 @@ def main():
                      "test_end. The hold-out is read once, by "
                      "`pipeline.shadow --holdout`."),
         },
+        "config": config_fingerprint(cfg, "backtest"),
         "artifact_versions": {
             "baseline_model_version": model.version,
             "train_population": "eligible",

@@ -110,25 +110,25 @@ def test_a_stale_report_vintage_fails_rather_than_grading_a_ghost_model(cfg):
     old = {"artifact_versions": {
         "baseline_model_version": "bundle-OLD",
         "config_version": cfg["meta"]["config_version"]}}
-    row = status._vintages(cfg, state, old, None)
+    row = status._vintages(cfg, state, {"backtest": old})
     assert row["verdict"] == status.FAIL and "bundle-OLD" in row["detail"]
 
     fresh = {"artifact_versions": {
         "baseline_model_version": "bundle-NEW",
         "config_version": cfg["meta"]["config_version"]}}
-    assert status._vintages(cfg, state, fresh, fresh)["verdict"] == status.PASS
+    assert status._vintages(cfg, state, {"backtest": fresh, "shadow": fresh})["verdict"] == status.PASS
 
 
 def test_a_report_from_an_edited_config_warns(cfg):
     state = {"bundle": "b"}
     rep = {"artifact_versions": {"baseline_model_version": "b",
                                  "config_version": "0.0.0-old"}}
-    row = status._vintages(cfg, state, None, rep)
+    row = status._vintages(cfg, state, {"shadow": rep})
     assert row["verdict"] == status.WARN and "0.0.0-old" in row["detail"]
 
 
 def test_vintages_without_a_bundle_read_not_run_never_pass(cfg):
-    row = status._vintages(cfg, {"bundle": None}, {}, {})
+    row = status._vintages(cfg, {"bundle": None}, {})
     assert row["verdict"] == status.NONE
 
 
@@ -307,3 +307,41 @@ def test_an_invariant_a_block_names_is_not_reported_as_green(cfg, tmp_path):
     empty.mkdir()
     assert [x for x in status.collect(cfg, str(empty))["checks"]
             if x["check"] == "config mirrors reports"][0]["verdict"] == status.NONE
+
+
+def test_report_vintages_names_the_config_values_that_moved(cfg, tmp_path):
+    """A report is evidence about the config it ran under. After a paste the
+    old check still read PASS because meta.config_version had not been
+    bumped; the fingerprint makes the paste visible and names it."""
+    import copy as _copy
+
+    from common.provenance import config_fingerprint
+
+    bundle = "m1"
+    state = {"bundle": bundle, "problems": [], "missing": [],
+             "sealed_bundle": bundle, "verdict": "PASS"}
+    same = {"artifact_versions": {"baseline_model_version": bundle},
+            "config": config_fingerprint(cfg, "shadow")}
+    row = status._vintages(cfg, state, {"shadow": same})
+    assert row["verdict"] == status.PASS
+    assert "shadow=shadow" in row["detail"]           # phase is reported
+
+    pasted = _copy.deepcopy(cfg)
+    pasted["exploration"]["tau_initial"] = 999.0
+    row = status._vintages(pasted, state, {"shadow": same})
+    assert row["verdict"] == status.WARN
+    assert "exploration.tau_initial" in row["detail"]
+    assert "999.0" in row["detail"]
+
+    # a model mismatch still outranks a config move, and is FAIL
+    other = {"artifact_versions": {"baseline_model_version": "m0"},
+             "config": config_fingerprint(cfg, "backtest")}
+    row = status._vintages(cfg, state, {"backtest": other, "shadow": same})
+    assert row["verdict"] == status.FAIL and "m0" in row["detail"]
+
+    # reports without a config key (monitor before this change) fall back to
+    # the version string rather than crashing or passing silently
+    legacy = {"artifact_versions": {"baseline_model_version": bundle,
+                                    "config_version": "0.0.1"}}
+    row = status._vintages(cfg, state, {"backtest": legacy})
+    assert row["verdict"] == status.WARN and "pre-fingerprint" in row["detail"]

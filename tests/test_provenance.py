@@ -127,3 +127,32 @@ def test_a_seal_naming_a_bundle_that_is_gone_is_caught(cfg):
     state = provenance.verify(cfg, sealed)
     assert state["verdict"] == "FAIL"
     assert any("is not on disk" in p for p in state["problems"])
+
+
+def test_config_fingerprint_moves_on_any_value_and_names_what_moved():
+    """meta.config_version is a hand-bumped string that tune --apply never
+    touches, so two reports run under different tau/rho/W both said '1.0.0'.
+    The fingerprint is a digest of the whole config plus the snapshot, so
+    status can say WHICH values moved since a report ran."""
+    import copy
+    from common.config import load_config
+    from common.provenance import config_diff, config_fingerprint
+
+    cfg = load_config()
+    a = config_fingerprint(cfg, "backtest")
+    assert a["phase"] == "backtest" and len(a["digest"]) == 16
+    assert a["snapshot"]["pricing"]["tier_step"] == cfg["pricing"]["tier_step"]
+    # deterministic
+    assert config_fingerprint(cfg, "backtest")["digest"] == a["digest"]
+
+    moved = copy.deepcopy(cfg)
+    moved["exploration"]["tau_initial"] = 1234.5
+    moved["dispersion"]["rho"] = 0.5
+    b = config_fingerprint(moved, "shadow")
+    assert b["digest"] != a["digest"]
+    assert b["config_version"] == a["config_version"]     # the string did NOT move
+
+    diff = config_diff(a["snapshot"], moved)
+    assert any(d.startswith("exploration.tau_initial:") for d in diff)
+    assert any(d.startswith("dispersion.rho:") for d in diff)
+    assert len(diff) == 2

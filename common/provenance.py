@@ -45,6 +45,41 @@ def stamp(payload, cfg, bundle, tool):
     return payload
 
 
+def config_fingerprint(cfg, phase=None):
+    """What a report RAN UNDER: the full config it read, a digest of it, and
+    the phase the report belongs to (backtest / shadow / production).
+
+    `meta.config_version` is a string a human is meant to bump when a
+    tunable a report reads changes. Nobody does, and `tune --apply` pastes
+    values without touching it, so the report-vintage check was blind to
+    every paste -- a shadow run under tau 270 and one under tau 1,300 both
+    said "1.0.0". The digest moves on any change; the snapshot says WHICH
+    values were in force, so status can name what moved since.
+    """
+    canon = json.dumps(cfg, sort_keys=True, default=str, separators=(",", ":"))
+    return {
+        "phase": phase,
+        "digest": hashlib.sha256(canon.encode()).hexdigest()[:16],
+        "config_version": cfg["meta"]["config_version"],
+        "snapshot": json.loads(json.dumps(cfg, default=str)),
+    }
+
+
+def config_diff(snapshot, cfg, prefix=""):
+    """Dotted keys whose value differs between a report's snapshot and the
+    config now in force -- the list status prints when a digest has moved."""
+    live = json.loads(json.dumps(cfg, default=str))
+    out = []
+    for key in sorted(set(snapshot) | set(live)):
+        a, b = snapshot.get(key), live.get(key)
+        path = f"{prefix}{key}"
+        if isinstance(a, dict) and isinstance(b, dict):
+            out.extend(config_diff(a, b, path + "."))
+        elif a != b:
+            out.append(f"{path}: {a!r} -> {b!r}")
+    return out
+
+
 def file_digest(path, chunk=1 << 20):
     h = hashlib.sha256()
     with open(path, "rb") as f:

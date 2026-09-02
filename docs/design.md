@@ -771,8 +771,14 @@ inconsistent set. Re-run `seal` after `--fit-calibration`.
 
 Stale *reports* are the other half: after a retrain, yesterday's
 `backtest.json` still parses and silently grades a ghost model. Every
-gate-feeding report stamps `artifact_versions`; `status` compares them
-against disk — model mismatch is FAIL, moved `config_version` is WARN.
+gate-feeding report stamps `artifact_versions` **and a `config`
+fingerprint** — the phase it belongs to (`backtest` / `shadow` /
+`production`), a digest of the whole config it read, and the full snapshot.
+`status` compares them against disk: model mismatch is FAIL; a config that
+has moved since the report is WARN and **names the values that moved**. The
+snapshot is also the answer to "what config was in force for each phase" —
+read `reports/<name>.json → config.snapshot`. `meta.config_version` stays as
+a human label only; nothing depends on anyone remembering to bump it.
 
 **The operating instruction:** run `python3 -m pipeline.status` before
 quoting from any report and before ending any session that touched
@@ -783,7 +789,7 @@ freshness line calls stale. The re-run map:
 | --- | --- | --- |
 | baseline (retrain) | `bootstrap.run` (whole loop) → `shadow` | `rho` |
 | elasticity prior | `fit_dispersion` onward (§5.5) | `rho` |
-| a config tunable a report reads | that report onward; bump `meta.config_version` | — |
+| a config tunable a report reads | that report onward — `status` names the moved keys until you do | — |
 | the extract | everything from `prepare_data` | — |
 
 ### 5.15 Production assurance — testing the assumptions, not the code

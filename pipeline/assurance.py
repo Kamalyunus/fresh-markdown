@@ -18,6 +18,7 @@ from scipy.stats import nbinom
 from common.config import (design_effect, intraclass_correlation,
                            load_config)
 from events.store import EventStore
+from common.provenance import config_fingerprint
 from pricing import dp as dp_mod
 from pricing.explore import affordable_set
 from pricing.demand import mu_at
@@ -313,6 +314,7 @@ def exploration_uniformity(decisions, cfg):
 
 def run(decisions, outcomes, cfg):
     report = {
+        "config": config_fingerprint(cfg, "production"),
         "reproduction": reproduction(decisions, cfg),
         "dispersion": dispersion_fit(decisions, outcomes, cfg),
         "correlation": correlation_drift(decisions, outcomes, cfg),

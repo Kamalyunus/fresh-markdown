@@ -18,6 +18,7 @@ import pandas as pd
 from common.config import load_config, deff_from_episodes, ConfigError
 from common import episodes
 from common.parallel import map_episodes
+from common.provenance import config_fingerprint
 from common.episodes import adjustment_reason
 from bootstrap.train_baseline import BaselineModel
 from bootstrap.fit_dispersion import lookup_r
@@ -844,6 +845,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
                        else "FAIL -- do not apply prices")
 
     return {
+        "config": config_fingerprint(cfg, "shadow"),
         "artifact_versions": {
             "baseline_model_version": model.version,
             "posterior_versions": {c: r["version"]

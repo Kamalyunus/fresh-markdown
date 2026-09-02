@@ -22,6 +22,7 @@ from common import episodes
 from common import guardrail
 from common.metrics import il_pct
 from bootstrap.prepare_data import pre_launch
+from common.provenance import config_fingerprint
 
 
 # ------------------------------------------------------------- A/B duration
@@ -551,6 +552,7 @@ def main():
     trailing = guardrail_noise(d, cfg)
     control = control_arm_noise(d, cfg)
     report = {
+        "config": config_fingerprint(cfg, "backtest"),
         "ab_duration": duration_table(se_by_T, cfg, mde),
         "guardrail_noise": trailing,
         "guardrail_noise_control_arm_basis": control,
