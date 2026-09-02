@@ -50,7 +50,15 @@ def workspace(tmp_path_factory):
     run("-m", "bootstrap.estimate_prior", "--input", "data/prepared.parquet")
     run("-m", "backtest", "--input", "data/prepared.parquet",
         "--out", "reports/backtest.json", "--policy-episodes", "150")
-    return ws
+    # every test here chdirs into the workspace; RESTORE on teardown, or the
+    # whole rest of the session runs against this fixture's artifacts and
+    # config instead of the repo's -- silently, and only for whoever happens
+    # to run after this module
+    yield ws
+    os.chdir(_ORIGINAL_CWD)
+
+
+_ORIGINAL_CWD = os.getcwd()
 
 
 def _chdir(ws):

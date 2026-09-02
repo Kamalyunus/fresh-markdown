@@ -229,32 +229,21 @@ def test_a_measured_value_that_disagrees_with_its_report_fails(cfg, tmp_path):
     import copy as _copy
 
     from pipeline import tune
+    from tests.test_tune import _cfg_with, _reports as tune_reports
 
-    _write(tmp_path, "backtest", {
-        "artifact_versions": {"baseline_model_version": "m1"},
-        "fidelity": {"calibration_window_sweep": {
-            "recommended_fit_window": "trailing_1w",
-            "trailing_1w": {"mean_abs_log_error": 0.001,
-                            "share_weeks_in_band": 0.99},
-            "trailing_2w": {"mean_abs_log_error": 0.02,
-                            "share_weeks_in_band": 0.80}}}})
+    tune_reports(tmp_path)                       # a complete, block-free set
+    cfg = _cfg_with(cfg, tmp_path)               # artifacts matching it
 
-    def verdict(c):
-        return [r for r in status.collect(c, str(tmp_path))["checks"]
+    def row(cfg_in):
+        return [r for r in status.collect(cfg_in, str(tmp_path))["checks"]
                 if r["check"] == "config mirrors reports"][0]
 
-    # a BLOCK upstream suppresses it -- never a silent pass
-    assert verdict(cfg)["verdict"] in (status.NONE, status.PASS, status.FAIL)
-
     drifted = _copy.deepcopy(cfg)
-    drifted["baseline_model"]["calibration_fit_trailing_weeks"] = 2
-    drifted["data"]["split"] = dict(drifted["data"]["split"],
-                                    calib_start="2026-06-01",
-                                    calib_end="2026-07-26")
-    row = verdict(drifted)
-    if row["verdict"] != status.NONE:            # not blocked upstream
-        assert row["verdict"] == status.FAIL
-        assert "calibration_fit_trailing_weeks" in row["detail"]
+    drifted["learning"]["information_increment"] = 999.0
+    r = row(drifted)
+    assert r["verdict"] == status.FAIL
+    assert "learning.information_increment" in r["detail"]
+    assert "999.0" in r["detail"]
 
     # every key the check guards is one nobody CHOOSES -- owner preferences
     # (max_mean_step, max_std_shrink, the MDE) must never appear here or the
@@ -262,3 +251,36 @@ def test_a_measured_value_that_disagrees_with_its_report_fails(cfg, tmp_path):
     owner = {("learning", "max_mean_step"), ("learning", "max_std_shrink"),
              ("ab_test", "min_detectable_effect_pct")}
     assert not (tune.MEASURED_KEYS & owner)
+
+
+def test_an_invariant_a_block_names_is_not_reported_as_green(cfg, tmp_path):
+    """Setting W without the calib >= 2W the split can support raises a
+    tune BLOCK. Reporting that as 'not evaluated' left the owner reading
+    'all gates green (1 not run)' immediately after breaking an invariant."""
+    import copy as _copy
+
+    _write(tmp_path, "backtest", {
+        "artifact_versions": {"baseline_model_version": "m1"},
+        "fidelity": {"calibration_window_sweep": {
+            "recommended_fit_window": "trailing_4w",
+            "trailing_4w": {"mean_abs_log_error": 0.01,
+                            "share_weeks_in_band": 0.9}}}})
+
+    def row(c):
+        return [r for r in status.collect(c, str(tmp_path))["checks"]
+                if r["check"] == "config mirrors reports"][0]
+
+    broken = _copy.deepcopy(cfg)
+    broken["baseline_model"]["calibration_fit_trailing_weeks"] = 4
+    broken["data"]["split"] = dict(broken["data"]["split"],
+                                   calib_start="2026-06-29",
+                                   calib_end="2026-07-26")      # 4 weeks
+    r = row(broken)
+    assert r["verdict"] == status.FAIL
+    assert "data.split" in r["detail"] and "calib >= 8w" in r["detail"]
+
+    # a genuinely absent report is still "not run", never a pass and never a fail
+    empty = tmp_path / "none"
+    empty.mkdir()
+    assert [x for x in status.collect(cfg, str(empty))["checks"]
+            if x["check"] == "config mirrors reports"][0]["verdict"] == status.NONE

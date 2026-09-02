@@ -96,10 +96,18 @@ def _config_vs_reports(cfg, root):
         return _row("config mirrors reports", NONE,
                     f"could not evaluate: {type(exc).__name__}: {exc}",
                     "python3 -m pipeline.tune")
-    if rep["blocked"]:
-        return _row("config mirrors reports", NONE,
-                    "not evaluated -- a BLOCK upstream makes every reading "
-                    "meaningless", "python3 -m pipeline.tune")
+    blocks = [f for f in rep["findings"] if f["class"] == tune.BLOCK]
+    if blocks:
+        # NAME them. "a BLOCK upstream" left an owner who had just broken an
+        # invariant staring at an all-green screen with one quiet "not run".
+        # A missing report is genuinely not-run; every other BLOCK is an
+        # invariant violated, and status must not report that as green.
+        missing_only = all(f["key"] == "reports present" for f in blocks)
+        detail = "; ".join(f"{f['key']}: {f['current']} -- needs "
+                           f"{f['recommended']}" for f in blocks)
+        return _row("config mirrors reports",
+                    NONE if missing_only else FAIL, detail,
+                    "python3 -m pipeline.tune  (it prints the full reason)")
     measured = {".".join(k) for k in tune.MEASURED_KEYS}
     stale = [f for f in rep["findings"]
              if f["status"] == tune.ACT and f["key"] in measured
