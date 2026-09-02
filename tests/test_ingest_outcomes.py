@@ -198,8 +198,8 @@ def test_business_metrics_counts_shrink_like_the_guardrail_and_il_pct_do():
         decisions.append({
             "decision_id": f"b{hr}", "episode_id": "EP-B", "sku_id": "s",
             "fc": "f", "category": "VEG", "subcategory": "LEAFY",
-            "timestamp": "2026-08-19T10:00:00+00:00", "hours_remaining": hr,
-            "original_price": 1000.0, "cost": 100.0})
+            "date": "2026-08-19", "hour_of_day": 24 - hr,
+            "hours_remaining": hr, "original_price": 1000.0, "cost": 100.0})
         outcomes.append({
             "decision_id": f"b{hr}", "starting_inventory": start,
             "units_sold": sold, "ending_inventory": end,
@@ -271,8 +271,8 @@ def test_the_guardrail_is_not_inert_before_the_ab(tmp_path):
             decisions.append({
                 "decision_id": f"g{i}", "episode_id": f"E{i}",
                 "sku_id": f"S{unit}", "fc": "F1", "category": "VEG",
-                "subcategory": "LEAFY", "hours_remaining": 1, "cost": 100.0,
-                "original_price": 1000.0,
+                "subcategory": "LEAFY", "hours_remaining": 1, "hour_of_day": 23,
+                "cost": 100.0, "original_price": 1000.0,
                 "timestamp": (pd.Timestamp("2026-06-01")
                               + pd.Timedelta(days=day)).isoformat() + "+00:00",
                 "date": str((pd.Timestamp("2026-06-01")
@@ -320,7 +320,7 @@ def test_the_guardrail_series_is_keyed_on_the_trading_day():
         "decision_id": "late", "episode_id": "EP-L", "sku_id": "s", "fc": "f",
         "date": "2026-08-19", "hour_of_day": 23,
         "timestamp": "2026-08-20T02:00:00+00:00",      # UTC is already D+1
-        "hours_remaining": 1, "cost": 100.0}]
+        "hours_remaining": 1, "cost": 100.0, "original_price": 1000.0}]
     outcomes = [{"decision_id": "late", "starting_inventory": 4,
                  "units_sold": 1, "ending_inventory": 0,
                  "applied_price": 500.0}]

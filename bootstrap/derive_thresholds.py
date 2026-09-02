@@ -20,6 +20,7 @@ from common.ab import arm
 from common.config import load_config
 from common import episodes
 from common import guardrail
+from common import metrics
 from common.metrics import il_pct
 from bootstrap.prepare_data import pre_launch
 from common.provenance import config_fingerprint
@@ -104,31 +105,6 @@ def duration_table(se_by_T, cfg, mde_rel):
 
 # --------------------------------------------------------- guardrail noise
 
-def _daily_series(d):
-    ep = d.sort_values(["date", "hour_of_day"]).groupby("episode_id").agg(
-        date=("date", "first"),
-        start_inv=("starting_inventory", "first"),
-        sold=("units_sold", "sum"))
-    # ending with stock on hand IS disposal; only extract-boundary episodes
-    # are unknown -- the floor is measured on neither invented numbers nor a
-    # sliver of the population
-    ep["end_inv"] = episodes.scrap_units(d)
-    ep = ep[ep.end_inv.notna()]
-    rev = ((d.offered_price * d.units_sold).groupby(d.episode_id).sum()
-           .rename("revenue"))
-    margin = (((d.offered_price - d.cost) * d.units_sold)
-              .groupby(d.episode_id).sum().rename("margin"))
-    ep = ep.join(rev).join(margin)
-
-    day = ep.groupby("date").agg(start_inv=("start_inv", "sum"),
-                                 end_inv=("end_inv", "sum"),
-                                 revenue=("revenue", "sum"),
-                                 margin=("margin", "sum")).sort_index()
-    day["scrap_rate"] = day.end_inv / day.start_inv
-    day["margin_rate"] = day.margin / day.revenue.replace(0, np.nan)
-    return day
-
-
 def _sigma_summary(rel):
     """3-sigma and robust 3-sigma of a deviation series; shared by both bases
     so the two floors cannot drift apart. `outlier_dominated` marks a raw
@@ -164,29 +140,11 @@ def control_arm_noise(d, cfg):
     A/B is live). Arms are smoothed BEFORE differencing, exactly as
     pipeline.monitor does; arm assignment is common.ab.arm."""
 
-    ep = d.sort_values(["date", "hour_of_day"]).groupby("episode_id").agg(
-        date=("date", "first"), sku_id=("sku_id", "first"), fc=("fc", "first"),
-        start_inv=("starting_inventory", "first"))
-    ep["scrap"] = episodes.scrap_units(d)
-    ep = ep[ep.scrap.notna()]
-    rev = ((d.offered_price * d.units_sold).groupby(d.episode_id).sum()
-           .rename("revenue"))
-    mar = (((d.offered_price - d.cost) * d.units_sold)
-           .groupby(d.episode_id).sum().rename("margin"))
-    ep = ep.join(rev).join(mar)
+    ep, _ = metrics.settled(metrics.episode_economics(d))
     alloc = cfg["ab_test"]["allocation"]
-    ep["arm"] = [arm(s, f, alloc) for s, f in zip(ep.sku_id, ep.fc)]
+    ep["arm"] = [arm(s_, f, alloc) for s_, f in zip(ep.sku_id, ep.fc)]
 
-    def daily(g):
-        day = g.groupby("date").agg(start_inv=("start_inv", "sum"),
-                                    scrap=("scrap", "sum"),
-                                    revenue=("revenue", "sum"),
-                                    margin=("margin", "sum")).sort_index()
-        return pd.DataFrame({"scrap_rate": day.scrap / day.start_inv,
-                             "margin_rate": day.margin
-                             / day.revenue.replace(0, np.nan)})
-
-    arms = {a: daily(g) for a, g in ep.groupby("arm")}
+    arms = {a: metrics.daily_rates(g) for a, g in ep.groupby("arm")}
     if set(arms) < {"treatment", "control"}:
         return {"note": "one arm empty -- cannot measure a same-day basis"}
 
@@ -304,7 +262,7 @@ def guardrail_noise(d, cfg):
     """3-sigma daily noise of scrap rate and realised margin rate, as relative
     deviation from a trailing-window mean."""
     window = cfg["monitoring"]["guardrail_noise_window_days"]
-    day = _daily_series(d)
+    day = metrics.daily_rates(metrics.settled(metrics.episode_economics(d))[0])
 
     def noise(series, smooth=1, basis=guardrail.RELATIVE):
         # average `smooth` days BEFORE comparing; the trailing baseline is

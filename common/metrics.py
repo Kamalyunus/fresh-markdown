@@ -17,43 +17,72 @@ import pandas as pd
 
 from common import episodes
 
+ECON_CARRY = ("category", "fc", "sku_id", "arm", "dp_eligible")
+
+
+def episode_economics(d):
+    """THE episode-grain frame every IL, scrap and margin consumer reads:
+    il_pct, the guardrail noise floors, the live guardrail series and the
+    business metrics. Five hand-synced copies of this groupby existed, kept
+    equal by comments saying "definitions match exactly".
+
+    `d` is hourly in the prepared-frame vocabulary: episode_id, date,
+    hour_of_day, starting_inventory, units_sold, ending_inventory,
+    original_price, offered_price, cost (+ any of ECON_CARRY). Returns one
+    row per episode: `date` (opened), `close_day`, `opening`, `units_sold`,
+    `scrap` (episodes.scrap_units -- NaN where the episode is not settled),
+    `revenue`, `margin`, `discount_cost`, `il`, `denom`.
+    """
+    d = d.sort_values(["date", "hour_of_day"])
+    carry = {c: (c, "first") for c in ECON_CARRY if c in d.columns}
+    disc = (d.original_price - d.offered_price) * d.units_sold
+    ep = d.assign(_disc=disc, _rev=d.offered_price * d.units_sold,
+                  _mar=(d.offered_price - d.cost) * d.units_sold).groupby(
+        "episode_id").agg(
+        date=("date", "first"), close_day=("date", "last"),
+        original_price=("original_price", "first"), cost=("cost", "first"),
+        opening=("starting_inventory", "first"), units_sold=("units_sold", "sum"),
+        discount_cost=("_disc", "sum"), revenue=("_rev", "sum"),
+        margin=("_mar", "sum"), **carry)
+    ep["scrap"] = episodes.scrap_units(d)
+    ep["il"] = ep.discount_cost + ep.cost * ep.scrap
+    ep["denom"] = ep.original_price * ep.units_sold      # ENDOGENOUS denominator
+    return ep
+
+
+def settled(ep):
+    """The rows a figure may be built on, and why the rest were not: a
+    missing cost makes scrap read zero (deflating IL), and an unsettled
+    episode's scrap is unknown -- excluded and COUNTED, never zeroed."""
+    cost_missing = int((~(ep.cost > 0)).sum())          # NaN counts as missing
+    ep = ep[ep.cost > 0]
+    not_closed = int(ep.scrap.isna().sum())
+    ep = ep[ep.scrap.notna()]
+    return ep, {"episodes_excluded_not_closed": not_closed,
+                "episodes_excluded_cost_missing": cost_missing,
+                "excluded_share": round(not_closed / max(not_closed + len(ep), 1), 4)}
+
+
+def daily_rates(ep):
+    """Scrap rate and realised-margin rate by OPENING day, ratio of sums --
+    the series the noise floors are measured on and the live guardrail
+    triggers on, from one function so the two cannot drift."""
+    day = ep.groupby("date").agg(opening=("opening", "sum"), scrap=("scrap", "sum"),
+                                 revenue=("revenue", "sum"),
+                                 margin=("margin", "sum")).sort_index()
+    day["scrap_rate"] = day.scrap / day.opening
+    day["margin_rate"] = day.margin / day.revenue.replace(0, np.nan)
+    return day
+
+
 def il_pct(d):
     """IL% under legacy policy. Sets A/B power (design 2.2-2.3). Denominator
     is original_price x units_sold -- ENDOGENOUS. Zero-sale episodes are
     handled only by ratio-of-sums aggregation, never by averaging
     per-episode ratios (undefined there)."""
-    d = d.copy()
-    d["discount_cost"] = (d.original_price - d.offered_price) * d.units_sold
-
-    ep = d.sort_values(["date", "hour_of_day"]).groupby("episode_id").agg(
-        category=("category", "first"),
-        fc=("fc", "first"),
-        sku_id=("sku_id", "first"),
-        original_price=("original_price", "first"),
-        start_inv=("starting_inventory", "first"),
-        end_start_inv=("starting_inventory", "last"),
-        end_sold=("units_sold", "last"),
-        end_hours_remaining=("hours_remaining", "last"),
-        cost=("cost", "first"),
-        discount_cost=("discount_cost", "sum"),
-        units_sold=("units_sold", "sum"),
-        **({"dp_eligible": ("dp_eligible", "first")} if "dp_eligible" in d else {}),
-    )
-    # a missing cost makes scrap read zero, deflating IL -- excluded, counted
-    cost_missing = int((~(ep.cost > 0)).sum())   # NaN counts as missing
-    ep = ep[ep.cost > 0]
-    # the listing ending IS the disposal, whatever the nominal counter says;
-    # only episodes at the extract boundary have a genuinely unknown outcome
-    ep["scrap_units"] = episodes.scrap_units(d)
-    dropped = int(ep.scrap_units.isna().sum())
-    ep = ep[ep.scrap_units.notna()]
-    ep["il"] = ep.discount_cost + ep.cost * ep.scrap_units
-    ep["denom"] = ep.original_price * ep.units_sold      # ENDOGENOUS denominator
+    ep, excluded = settled(episode_economics(d))
 
     zero_denom_share = float((ep.denom <= 0).mean())
-    excluded = {"episodes_excluded_not_closed": dropped,
-                "episodes_excluded_cost_missing": cost_missing,
-                "excluded_share": round(dropped / max(dropped + len(ep), 1), 4)}
 
     def ratio_of_sums(g):
         den = g.denom.sum()

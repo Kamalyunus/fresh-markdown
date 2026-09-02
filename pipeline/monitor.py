@@ -22,69 +22,35 @@ from pipeline import assurance as assurance_mod
 from pipeline import update as update_mod
 from pricing import explore
 from common import episodes
+from common import metrics
 from common.provenance import config_fingerprint
 # aliased: stop_conditions() takes a parameter named `guardrail`
 from common import guardrail as guard
 
 
-def _still_running(ep):
-    """Episodes with stock on hand and no closure sentinel -- still open.
-    Their leftover is stock on the shelf, not scrap; excluding them keeps the
-    series on the population the noise floors were measured on."""
-    kind = episodes.classify_last(ep)
-    return set(kind.index[kind == episodes.NOT_CLOSED])
+def event_frame(decisions, outcomes, cfg):
+    """Matched (decision, outcome) pairs as HOURLY rows in the prepared-frame
+    vocabulary, so metrics.episode_economics is the one episode-grain
+    definition on live events too -- floor and trigger measure one thing."""
+    alloc = cfg["ab_test"]["allocation"]
+    return pd.DataFrame([{
+        "episode_id": d["episode_id"], "date": decision_day(d),
+        "hour_of_day": d["hour_of_day"],
+        "category": d.get("category"), "fc": d["fc"], "sku_id": d["sku_id"],
+        "arm": arm(d["sku_id"], d["fc"], alloc),
+        "original_price": d["original_price"], "offered_price": o["applied_price"],
+        "cost": d["cost"], "starting_inventory": o["starting_inventory"],
+        "units_sold": o["units_sold"], "ending_inventory": o["ending_inventory"],
+    } for d, o in match_pairs(decisions, outcomes)])
 
 
 def business_metrics(decisions, outcomes, cfg):
     if not outcomes:
         return {"note": "no finalized outcomes yet"}
-    rows = []
-    for d, o in match_pairs(decisions, outcomes):
-        rows.append({
-            "episode_id": d["episode_id"], "category": d["category"],
-            "fc": d["fc"], "sku_id": d["sku_id"],
-            "timestamp": d.get("timestamp"),
-            "date": decision_day(d),
-            "hours_remaining": d["hours_remaining"],
-            "original_price": d["original_price"], "cost": d["cost"],
-            "units_sold": o["units_sold"],
-            "starting_inventory": o["starting_inventory"],
-            "ending_inventory": o["ending_inventory"],
-            "discount_cost": (d["original_price"] - o["applied_price"])
-                             * o["units_sold"],
-            "arm": arm(d["sku_id"], d["fc"], cfg["ab_test"]["allocation"]),
-        })
-    if not rows:
+    df = event_frame(decisions, outcomes, cfg)
+    if df.empty:
         return {"note": "no outcome matches a decision -- nothing to measure"}
-    df = pd.DataFrame(rows)
-
-    df = df.sort_values("hours_remaining", ascending=False)
-    # SCRAP = leftover + shrink, the one definition (episodes.scrap_units, and
-    # what common.metrics.il_pct and the noise floors are measured on). IL,
-    # waste_units, sell-through and the by-arm IL% here read leftover only,
-    # so the A/B's primary metric was a different IL from the one it was
-    # powered on and production's exploration budget base was a third.
-    df["_shrink"] = episodes.shrink_by_hour(
-        df.starting_inventory, df.units_sold, df.ending_inventory,
-        ~df.duplicated("episode_id", keep="last"))
-    ep = df.groupby("episode_id").agg(
-        category=("category", "first"), fc=("fc", "first"), arm=("arm", "first"),
-        original_price=("original_price", "first"), cost=("cost", "first"),
-        discount_cost=("discount_cost", "sum"), units_sold=("units_sold", "sum"),
-        starting_inventory=("starting_inventory", "last"),
-        end_sold=("units_sold", "last"), shrink=("_shrink", "sum"),
-        close_day=("date", "last"),
-        ending_inventory=("ending_inventory", "last"))
-    # leftover, never the reported ending_inventory (written off to zero at
-    # window close -- reading it directly zeroes IL's scrap term)
-    ep["end_inv"] = (episodes.leftover_units(ep.starting_inventory, ep.end_sold)
-                     + ep.shrink)
-    # still-open episodes excluded: same population as bootstrap.measure and
-    # derive_thresholds, so floor and trigger measure the same thing
-    running = _still_running(ep.assign(units_sold=ep.end_sold))
-    ep = ep[~ep.index.isin(running)]
-    ep["il"] = ep.discount_cost + ep.cost * ep.end_inv
-    ep["denom"] = ep.original_price * ep.units_sold
+    ep, excluded = metrics.settled(metrics.episode_economics(df))
 
     def cut(g):
         den = float(g.denom.sum())
@@ -92,93 +58,40 @@ def business_metrics(decisions, outcomes, cfg):
                 "il_pct_denominator": den,
                 "il_absolute": round(float(g.il.sum()), 1)}
 
+    units = float(ep.units_sold.sum() + ep.scrap.sum())
     return {
         "il_pct_aggregate": cut(ep),
         "il_pct_by_category": {k: cut(g) for k, g in ep.groupby("category")},
         "il_pct_by_fc": {k: cut(g) for k, g in ep.groupby("fc")},
         "il_pct_by_arm": {k: cut(g) for k, g in ep.groupby("arm")},
-        "sell_through": round(float(ep.units_sold.sum()
-                                    / (ep.units_sold.sum() + ep.end_inv.sum())), 4)
-            if (ep.units_sold.sum() + ep.end_inv.sum()) > 0 else None,
-        "waste_units": int(ep.end_inv.clip(lower=0).sum()),
+        "sell_through": round(float(ep.units_sold.sum() / units), 4)
+            if units > 0 else None,
+        "waste_units": int(ep.scrap.sum()),
         # realised IL by CLOSE DAY: the trailing base the tau controller
-        # prices a day's budget from (explore.trailing_daily_il). Closed
-        # episodes only -- an unclosed one contributes nothing until it closes,
+        # prices a day's budget from (explore.trailing_daily_il). Settled
+        # episodes only -- an open one contributes nothing until it closes,
         # which is what makes the base knowable at the start of each day.
         "il_by_close_day": {str(k): round(float(v), 2) for k, v
                             in ep.groupby("close_day").il.sum().items()},
         # visible: a rising count means early reporting, not falling waste
-        "episodes_excluded_still_running": len(running),
+        "scrap_basis": excluded,
     }
 
 
 def guardrail_series(decisions, outcomes, cfg):
     """Daily scrap and realised-margin rates plus the 15.4 deterioration
-    series. Definitions match bootstrap.derive_thresholds._daily_series
-    exactly -- the noise floors are measured on them. Basis: the trailing
-    window mean, unless `ab_test.active` says an A/B is running AND both arms
-    carry data. Before the A/B every priced unit is system-priced and merely
-    hash-LABELLED into arms, so an arm comparison there is
-    treatment-vs-treatment: a catalogue-wide deterioration cancels exactly and
-    the guardrail cannot fire (design 12)."""
-    rows = []
-    for d, o in match_pairs(decisions, outcomes):
-        rows.append({
-            "date": decision_day(d),
-            "timestamp": d["timestamp"],
-            "episode_id": d["episode_id"],
-            "arm": arm(d["sku_id"], d["fc"], cfg["ab_test"]["allocation"]),
-            "hours_remaining": d["hours_remaining"],
-            "cost": d["cost"],
-            "start_inv": o["starting_inventory"],
-            "ending_inventory": o["ending_inventory"],
-            "sold": o["units_sold"],
-            "revenue": o["applied_price"] * o["units_sold"],
-            "margin": (o["applied_price"] - d["cost"]) * o["units_sold"],
-        })
-    if not rows:
+    series, on metrics.daily_rates -- the series the noise floors are
+    measured on. Basis: the trailing window mean, unless `ab_test.active`
+    says an A/B is running AND both arms carry data. Before the A/B every
+    priced unit is system-priced and merely hash-LABELLED into arms, so an
+    arm comparison there is treatment-vs-treatment: a catalogue-wide
+    deterioration cancels exactly and the guardrail cannot fire (design 12)."""
+    df = event_frame(decisions, outcomes, cfg)
+    if df.empty:
         return {"note": "no finalized outcomes yet"}
-    df = pd.DataFrame(rows)
-
-    # episode grain first: scrap is an end-of-episode quantity; summing hourly
-    # ending_inventory would count the same unsold unit every hour
-    df = df.sort_values("hours_remaining", ascending=False)
-    # SHRINK counts into scrap (scrap = leftover + vanished), same basis as
-    # episodes.scrap_units, which the noise floors are measured on -- a
-    # leftover-only trigger runs looser than its floor by the shrink rate.
-    # A write-off row (last hour, zeroed ending, stock remaining) is the
-    # leftover, not shrink; restock rows clip to zero.
-    df["_shrink"] = episodes.shrink_by_hour(
-        df.start_inv, df.sold, df.ending_inventory,
-        ~df.duplicated("episode_id", keep="last"))
-    ep = df.groupby(
-        "episode_id").agg(date=("date", "first"), arm=("arm", "first"),
-                          start_inv=("start_inv", "first"),
-                          starting_inventory=("start_inv", "last"),
-                          units_sold=("sold", "last"),
-                          ending_inventory=("ending_inventory", "last"),
-                          shrink=("_shrink", "sum"),
-                          revenue=("revenue", "sum"),
-                          margin=("margin", "sum"))
-    # leftover = max(0, inventory - sold) on the last hour, never the reported
-    # ending_inventory (source writes it off to zero at window close)
-    ep["end_inv"] = episodes.leftover_units(
-        ep.starting_inventory, ep.units_sold) + ep.shrink
-    # same population rule as business_metrics and the threshold derivation:
-    # no closure sentinel = still open -- leftover, not scrap
-    ep = ep[~ep.index.isin(_still_running(ep))]
-
-    def daily(frame):
-        day = frame.groupby("date").agg(
-            start_inv=("start_inv", "sum"), end_inv=("end_inv", "sum"),
-            revenue=("revenue", "sum"), margin=("margin", "sum")).sort_index()
-        return pd.DataFrame({
-            "scrap_rate": day.end_inv.clip(lower=0) / day.start_inv,
-            "margin_rate": day.margin / day.revenue.replace(0, np.nan),
-        })
-
-    overall = daily(ep)
-    by_arm = {arm: daily(g) for arm, g in ep.groupby("arm")}
+    ep, _ = metrics.settled(metrics.episode_economics(df))
+    overall = metrics.daily_rates(ep)
+    by_arm = {a: metrics.daily_rates(g) for a, g in ep.groupby("arm")}
     window = cfg["monitoring"]["guardrail_noise_window_days"]
 
     smoothing = cfg["monitoring"]["stop_conditions"]["deterioration_smoothing_days"]

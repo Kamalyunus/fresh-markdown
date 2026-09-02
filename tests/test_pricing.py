@@ -555,7 +555,8 @@ def _paired_arm_frame(days=70, skus=60, seed=0):
                              hour_of_day=10, sku_id=sku, fc="FC1",
                              starting_inventory=20, units_sold=sold,
                              ending_inventory=0, hours_remaining=0,
-                             offered_price=1000.0, cost=600.0))
+                             offered_price=1000.0, original_price=1000.0,
+                             cost=600.0))
     return pd.DataFrame(rows)
 
 
