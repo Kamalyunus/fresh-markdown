@@ -41,7 +41,13 @@ def empirical_se_by_duration(d, cfg):
         ses, aggs, blocks = [], [], 0
         t = start
         while t + span <= end + pd.Timedelta(days=1):
-            block = d[(d._date >= t) & (d._date < t + span)]
+            # WHOLE episodes by opening date, like every other cut in the
+            # repo: a row-level cut split cross-midnight episodes, so the
+            # block's last row was not the episode's and scrap_units read
+            # a truncated frame
+            block = episodes.window_slice(
+                d, t.strftime("%Y-%m-%d"),
+                (t + span - pd.Timedelta(days=1)).strftime("%Y-%m-%d"))
             t = t + span
             if block.episode_id.nunique() < ab["min_episodes_per_block"]:
                 continue

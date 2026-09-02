@@ -343,7 +343,12 @@ def safety_metrics(store, decisions, outcomes):
         "duplicate_decision_count": store.duplicate_counts["decision"],
         "duplicate_outcome_count": store.duplicate_counts["outcome"],
         # a rate over the outcomes that HAVE a decision to compare against;
-        # unmatched outcomes are counted separately and diluted this
+        # unmatched outcomes are counted separately and diluted this. The
+        # counts are what the stop condition compares on -- the rounded
+        # rate is for reading, and comparing it disagreed with update's
+        # unrounded gate at the boundary
+        "price_mismatch_count": mismatches,
+        "compared_pair_count": compared,
         "applied_vs_recommended_price_mismatch": round(
             mismatches / max(compared, 1), 4),
         "zero_sales_rate": round(float(np.mean(
@@ -370,8 +375,9 @@ def stop_conditions(safety, learning, business, guardrail, cfg):
                      + safety["unmatched_outcome_count"]) / n
     fired = {}
     fired["duplicate_or_unmatched"] = dup_unmatched > sc["duplicate_or_unmatched_rate"]
-    fired["price_mismatch"] = (safety["applied_vs_recommended_price_mismatch"]
-                               > sc["price_mismatch_rate"])
+    fired["price_mismatch"] = (
+        safety["price_mismatch_count"] / max(safety["compared_pair_count"], 1)
+        > sc["price_mismatch_rate"])
 
     # realised exploration cost vs budget over the event window; the budget
     # uses TRAILING realised IL as the projection and the widest cell std --

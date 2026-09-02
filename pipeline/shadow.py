@@ -807,18 +807,16 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
                  "-- least informative -- tiers first)."),
     }
 
+    # outcomes accepted per decision emitted; the gap is quarantine + dupes.
+    # (A separate "matched rate" gate was the same expression under a
+    # second name and threshold.)
     completeness = n_out / n_dec
-    matched = n_out / n_dec        # 1:1 by construction; gaps = quarantined/dupes
     sg = cfg["monitoring"]["shadow_gate"]
     gate = {
         "event_completeness": {
             "value": round(completeness, 4),
             "threshold": sg["min_event_completeness"],
             "pass": completeness >= sg["min_event_completeness"]},
-        "matched_decision_rate": {
-            "value": round(matched, 4),
-            "threshold": sg["min_matched_decision_rate"],
-            "pass": matched >= sg["min_matched_decision_rate"]},
         "cost_floor_violations": {
             "value": cost_floor_violations,
             "threshold": 0,
@@ -1006,8 +1004,6 @@ def main():
           f"({report['state_rejected_count']} states rejected)")
     print(f"event completeness : {g['event_completeness']['value']:.4f} "
           f"-> {'PASS' if g['event_completeness']['pass'] else 'FAIL'}")
-    print(f"matched rate       : {g['matched_decision_rate']['value']:.4f} "
-          f"-> {'PASS' if g['matched_decision_rate']['pass'] else 'FAIL'}")
     print(f"cost-floor viol.   : {g['cost_floor_violations']['value']} "
           f"-> {'PASS' if g['cost_floor_violations']['pass'] else 'FAIL'}")
     rv = report["recommendation_vs_legacy"]

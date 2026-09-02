@@ -164,7 +164,12 @@ def main():
          ["bootstrap.derive_thresholds", "--input", PREPARED]
          + (["--mde", str(args.mde)] if args.mde is not None else []))
     step("step 11: seal", ["bootstrap.seal"], fatal=False)
-    step("where this run stands: status", ["pipeline.status"], fatal=False)
+    # advisory HERE, not a gate: on a first bootstrap tau is null and shadow
+    # has not run, so status is red by design. It gates the pilot (RUNBOOK),
+    # and a red row above is the next thing to do, not a broken bundle.
+    if step("where this run stands: status", ["pipeline.status"], fatal=False):
+        print("\nstatus is RED -- advisory at this stage; the rows above say "
+              "what the pilot still needs")
 
     if not ok:
         print(f"\nLOOP DID NOT SETTLE in {turns} turn(s): "

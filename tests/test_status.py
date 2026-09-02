@@ -43,7 +43,6 @@ def test_shadow_verdict_carries_a_trailing_note(cfg, tmp_path):
     _write(tmp_path, "shadow", {"shadow_gate": {
         "verdict": "PASS -- proceed to exploit-only pilot (section 19)",
         "event_completeness": {"value": 1.0, "pass": True},
-        "matched_decision_rate": {"value": 1.0, "pass": True},
         "cost_floor_violations": {"value": 0, "pass": True}}})
     row = next(r for r in status.collect(cfg, str(tmp_path))["checks"]
                if r["check"] == "shadow gate")
@@ -435,3 +434,11 @@ def test_a_fallback_shadow_block_defers_to_the_backtest_checks(cfg):
     shadow = {"tau_initial_derivation": {"tau_initial": None, "fallback": True}}
     assert tau_provenance_error(_cfg_with_tau(cfg, 410.74),
                                 _derivation(410.74), shadow) is None
+
+
+def test_a_null_prior_block_reads_not_run_rather_than_crashing(cfg):
+    """The same block is guarded with `or {}` two checks earlier; here it
+    was read bare, and a config without a prior path took status down."""
+    live = dict(cfg, posterior=dict(cfg["posterior"], prior=None))
+    row = status._prior(live)
+    assert row["verdict"] == status.NONE

@@ -201,7 +201,8 @@ def _calibration_convergence(cfg):
 
 
 def _prior(cfg):
-    prior = _read(cfg["posterior"]["prior"]["path"])
+    path = (cfg["posterior"].get("prior") or {}).get("path")
+    prior = _read(path) if path else None
     if not prior:
         return _row("elasticity prior", NONE, "no prior artifact")
     per = prior.get("per_category", {})
@@ -228,8 +229,8 @@ def _shadow(shadow):
         return v.get("value") if isinstance(v, dict) else v
 
     return _row("shadow gate", PASS if ok else FAIL,
-                f"completeness {val('event_completeness')} · matched "
-                f"{val('matched_decision_rate')} · cost-floor violations "
+                f"completeness {val('event_completeness')} "
+                "· cost-floor violations "
                 f"{val('cost_floor_violations')}",
                 "" if ok else "shadow.rejected_reasons, quarantined_event_count")
 
@@ -403,9 +404,9 @@ def collect(cfg, root="reports"):
         _prior(cfg),
         _tau(cfg, backtest, shadow),
         _shadow(shadow),
-        _guardrails(_read(os.path.join(root, "thresholds.json"))),
-        _stops(_read(os.path.join(root, "monitor.json"))),
-        _assurance(_read(os.path.join(root, "assurance.json"))),
+        _guardrails(reports["thresholds"]),
+        _stops(reports["monitor"]),
+        _assurance(reports["assurance"]),
     ]
     return {
         "checks": rows,

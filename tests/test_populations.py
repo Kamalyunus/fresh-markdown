@@ -918,3 +918,26 @@ def test_a_restock_is_detected_from_the_source_convention():
     steep.loc[steep.hour_of_day > 15, "ending_inventory"] = 0
     steep.loc[steep.hour_of_day > 15, "units_sold"] = 0
     assert episode_flow(steep).arrived.eq(0).all()
+
+
+def test_ab_duration_blocks_take_whole_episodes(cfg, monkeypatch):
+    """Every other cut in the repo is episode-scoped. The A/B block cut was
+    by row date, so a cross-midnight episode at a block edge was split and
+    il_pct read a truncated frame whose last row was not the close."""
+    from bootstrap import derive_thresholds as dt
+
+    seen = []
+    monkeypatch.setattr(dt, "il_pct", lambda block: (
+        seen.append(sorted(block.episode_id.unique())) or
+        {"il_pct_ratio_se_clustered": 1.0, "il_pct_aggregate": 0.1}))
+    d = pd.DataFrame({
+        "episode_id": ["a", "a", "b", "b", "c"],
+        # `a` opens on the last day of block 1 and closes in block 2
+        "date": ["2026-03-07", "2026-03-08", "2026-03-02", "2026-03-02",
+                 "2026-03-15"],
+        "hour_of_day": [23, 0, 9, 10, 9],
+    })
+    c = dict(cfg, ab_test=dict(cfg["ab_test"], candidate_durations_weeks=[1],
+                               min_episodes_per_block=1))
+    dt.empirical_se_by_duration(d, c)
+    assert seen == [["a", "b"], ["c"]], seen

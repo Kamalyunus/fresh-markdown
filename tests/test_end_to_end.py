@@ -410,6 +410,12 @@ def test_decision_loop_and_exactly_once_update(workspace):
     cfg["monitoring"]["stop_conditions"]["scrap_deterioration_pct"] = 0.20
     cfg["monitoring"]["stop_conditions"]["margin_deterioration_pct"] = 0.15
     live = stop_conditions(*args, cfg)
+    # the price-mismatch stop compares COUNTS, never the 4dp rate written
+    # for reading: at the boundary the rounded rate read "not fired" while
+    # update's unrounded gate refused the same log
+    safety = dict(args[0], price_mismatch_count=10_001,
+                  compared_pair_count=1_000_000)          # 0.010001 > 0.01
+    assert stop_conditions(safety, *args[1:], cfg)["fired"]["price_mismatch"]
     for key in ("scrap_deterioration_pct", "margin_deterioration_pct"):
         assert live["fired"][key] in (True, False)     # evaluated, not skipped
         g = live["guardrails"][key]
@@ -507,7 +513,6 @@ def test_shadow_phase_harness(workspace):
     # decisions logged, no prices applied: completeness 1:1, zero cost-floor
     assert gate["cost_floor_violations"]["value"] == 0
     assert gate["event_completeness"]["value"] == 1.0
-    assert gate["matched_decision_rate"]["pass"]
     assert report["decision_count"] > 50
 
     # a sampled gate must say so, and must not let a zero violation COUNT

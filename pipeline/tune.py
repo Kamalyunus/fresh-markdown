@@ -652,8 +652,6 @@ def apply(report, config_path="config.yaml", out_dir="artifacts"):
                  "bootstrap after applying: a changed increment or rail "
                  "changes what the next run measures."),
     })
-    with open(log_path, "w") as f:
-        json.dump(history, f, indent=2)
     order = ["none", "calibration", "retrain"]
     needed = max((RERUN.get(tuple(f_["key"].split(".")), "none")
                   for f_ in applied), key=order.index, default="none")

@@ -139,7 +139,6 @@ monitoring:
   guardrail_noise_window_days: 28      # SET  trailing baseline for threshold calibration
   shadow_gate:                         # SET  the phase-1 exit gate (design 5.13)
     min_event_completeness: 0.99
-    min_matched_decision_rate: 0.99
     sample_episodes: 3000              # SET  0 = every episode
   stop_conditions:
     duplicate_or_unmatched_rate: 0.01  # SET
