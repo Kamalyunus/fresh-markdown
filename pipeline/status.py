@@ -14,7 +14,7 @@ import os
 from common.config import (RUNTIME_REQUIRED, artifact_mirror_drift,
                            config_get, load_config)
 from common import provenance
-from common.guardrail import verdict_is_blocking
+from common.guardrail import verdict_is_blocking, verdict_is_insufficient
 from pricing import explore
 
 PASS, FAIL, WARN, NONE = "PASS", "FAIL", "WARN", "not run"
@@ -127,7 +127,10 @@ def _config_vs_reports(cfg, root):
     if stale:
         return _row("config mirrors reports", FAIL,
                     "; ".join(f"{f['key']} is {f['current']} but the report "
-                              f"says {f['recommended']}" for f in stale),
+                              + (f"says {f['recommended']}"
+                                 if f['recommended'] is not None else
+                                 f"did not measure it ({f['evidence']})")
+                              for f in stale),
                     "python3 -m pipeline.tune --apply")
     return _row("config mirrors reports", WARN,
                 "; ".join(f"{f['key']} is {f['current']} and the sweep prefers "
@@ -289,7 +292,7 @@ def _tau(cfg, backtest, shadow=None):
     pasted = cfg["exploration"]["tau_initial"]
     sh = (shadow or {}).get("tau_initial_derivation") or {}
     derived = sh.get("tau_initial") if sh.get("tau_initial") is not None else \
-        (backtest or {}).get("tau_initial_derivation", {}).get("tau_initial")
+        ((backtest or {}).get("tau_initial_derivation") or {}).get("tau_initial")
     src = "shadow" if sh.get("tau_initial") is not None else "backtest"
     if pasted is None:
         # shadow derives its own launch tau; the paste gates the PILOT
@@ -328,9 +331,15 @@ def _guardrails(thresholds):
     # absent, not conservative. Passing two of the three let --apply paste a
     # floor the report itself calls unusable while status stayed green.
     bad = [k for k, v in verdicts.items() if verdict_is_blocking(v)]
-    return _row("guardrail floors", FAIL if bad else PASS,
+    # "insufficient history" is neither: nobody measured the floor, so
+    # nothing was checked -- WARN, never PASS
+    thin = [k for k, v in verdicts.items() if verdict_is_insufficient(v)]
+    return _row("guardrail floors",
+                FAIL if bad else WARN if thin else PASS,
                 ", ".join(f"{k}={v}" for k, v in verdicts.items()) or "reported",
-                "thresholds.guardrail_threshold_recommendation" if bad else "")
+                "thresholds.guardrail_threshold_recommendation" if bad else
+                "more closed-episode history, then re-run derive_thresholds"
+                if thin else "")
 
 
 def _stops(monitor):

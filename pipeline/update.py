@@ -157,21 +157,37 @@ def grid_update(pairs, cell_record, cfg):
     }
 
 
-def daily_exploration_spend(decisions, outcomes):
-    """Realised exploration cost keyed by the day the outcome finalized.
+def latest_priced_day(decisions, outcomes):
+    """The TRADING date of the most recent decision that has a finalized
+    outcome -- the day the controller prices and the stop condition backstops.
 
-    The ONE definition of "what exploration cost that day", shared by the tau
-    controller and the monitor's stop condition -- attributed on the same day
-    key `through` is derived from, so the correction and its backstop cannot
-    drift apart.
+    Keyed by the decision's `date`, never by `finalized_at`: an outcome
+    finalizes at the hour's close in UTC, so an hour-23 decision on day D
+    finalizes at D+1T00:00Z. Keying on that put the controller one day ahead
+    of the IL side -- it graded ONE HOUR of spend against a full day's budget,
+    ratcheted tau up 25% a day on that basis, and `tau_calibrated_through`
+    then guaranteed the other 23 hours were never priced at all.
     """
+    dec = {d["decision_id"]: d for d in decisions}
+    days = [str(dec[o["decision_id"]]["date"]) for o in outcomes
+            if o.get("decision_id") in dec and o.get("finalized_at")
+            and dec[o["decision_id"]].get("date")]
+    return max(days) if days else None
+
+
+def daily_exploration_spend(decisions, outcomes):
+    """Realised exploration cost by TRADING date -- the ONE definition shared
+    by the tau controller and the monitor's stop condition, on the same day
+    key `latest_priced_day` uses, so the correction and its backstop cannot
+    drift apart. Counts a forced decision once its outcome has finalized."""
     dec = {d["decision_id"]: d for d in decisions}
     by_day = {}
     for o in outcomes:
         d = dec.get(o["decision_id"])
-        if not d or not d.get("is_exploration") or not o.get("finalized_at"):
+        if (not d or not d.get("is_exploration") or not o.get("finalized_at")
+                or not d.get("date")):
             continue
-        day = str(o["finalized_at"])[:10]
+        day = str(d["date"])
         by_day[day] = by_day.get(day, 0.0) + float(d["exploration_cost"])
     return by_day
 
@@ -191,11 +207,10 @@ def tau_calibration(decisions, outcomes, posterior, cfg):
                             "force to calibrate")
         return block
 
-    dates = [o["finalized_at"][:10] for o in outcomes if o.get("finalized_at")]
-    if not dates:
+    through = latest_priced_day(decisions, outcomes)
+    if through is None:
         block["skipped"] = "no finalized outcomes"
         return block
-    through = max(dates)
     if posterior.tau_calibrated_through() == through:
         block["skipped"] = f"already calibrated through {through}"
         block["through_date"] = through
@@ -216,13 +231,12 @@ def tau_calibration(decisions, outcomes, posterior, cfg):
         block["skipped"] = ("no closed-episode IL to project a budget from"
                             if not il_by_day else "no posterior cells")
         return block
-    if not realised:
-        # zero spend is an ABSENCE OF SIGNAL, not underspend: calibrating on
-        # it clips tau upward every day exploration is suspended. Hold still.
-        block["skipped"] = ("no exploration on the day just closed -- nothing "
-                            "to calibrate from")
-        block["through_date"] = through
-        return block
+    # Zero realised spend on a priced day is NOT skipped: `through` is by
+    # construction a day with finalized decisions, so zero spend means
+    # nothing was affordable -- exactly the under-spend design 5.8 raises
+    # tau on, and the only way a tau cut below the smallest spread ever
+    # recovers. shadow's trace walks that rule; production used to hold
+    # still and the two disagreed.
 
     # the widest ROUTED cell's std, matching the monitor: the budget is sized
     # for the cell that still has the most to learn. GLOBAL, when nothing

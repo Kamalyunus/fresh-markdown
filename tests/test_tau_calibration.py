@@ -250,28 +250,46 @@ def test_a_null_tau_initial_is_reported_not_crashed(cfg, tmp_path):
     assert "null" in block["skipped"]
 
 
-def test_a_window_with_no_exploration_holds_tau_still(cfg, tmp_path):
-    """The bug this exists for is positive feedback, not a rounding error."""
-    store = EventStore(cfg, root=str(tmp_path / "events"))
-    for i in range(20):                       # exploitation only: cost 0, no draws
-        d = _decision(i, 0.30, exploration_cost=0.0)
-        assert not d["is_exploration"]
-        store.emit_decision(d)
-        store.emit_outcome(_outcome(i, 1))
+def test_zero_spend_across_priced_hours_raises_tau_by_the_clip(cfg, tmp_path):
+    """Design 5.8: priced hours with NOTHING affordable is under-spend, and
+    raising tau on it is the only way a tau cut below the smallest spread
+    ever recovers. Production used to hold still here while shadow's trace
+    walked the rule, so the two disagreed on the same data."""
+    store = _store(cfg, tmp_path, 20, cost_each=0.0)      # exploitation only
+    assert not any(d["is_exploration"] for d in store.load_decisions())
     posterior = _posterior(cfg, tmp_path)
 
     before = posterior.tau(cfg)
     block = upd.tau_calibration(store.load_decisions(), store.load_outcomes(),
                                 posterior, cfg)
-    assert not block["commit"], "tau must not move on a window with no exploration"
-    assert "no exploration" in block["skipped"]
-    assert block["tau_after"] == before
+    assert block["commit"], block
+    assert block["realised_exploration_cost"] == 0.0 and block["budget"] > 0
+    assert block["tau_after"] == pytest.approx(
+        before * cfg["exploration"]["tau_adjust_clip"][1], abs=0.01)
 
-    # and the raw controller still does the dangerous thing, so the guard above
-    # is what stands between the two -- not luck
-    from pricing import explore
-    doubled = explore.tau_next(before, 805_478.0, 0.0, cfg)
-    assert doubled == pytest.approx(before * cfg["exploration"]["tau_adjust_clip"][1])
+
+def test_an_hour_23_decision_is_graded_on_its_trading_day(cfg, tmp_path):
+    """An hour-23 outcome finalizes at D+1T00:00Z. Keying the controller on
+    that put it one day ahead of the IL side: it graded ONE hour of spend
+    against a full day's budget, ratcheted tau up 25% a day on that basis,
+    and `tau_calibrated_through` then guaranteed the other 23 hours were
+    never priced at all."""
+    store = _store(cfg, tmp_path, 20, cost_each=50.0)     # day-19 spend: 1000
+    late = _decision(999, 0.30, 50.0)                     # same day, hour 23
+    late["hour_of_day"], late["timestamp"] = 23, "2026-08-19T23:00:00+00:00"
+    store.emit_decision(late)
+    o = _outcome(999, 1)
+    o["finalized_at"] = "2026-08-20T00:00:00+00:00"       # closes on D+1 UTC
+    store.emit_outcome(o)
+    decisions, outcomes = store.load_decisions(), store.load_outcomes()
+
+    assert upd.latest_priced_day(decisions, outcomes) == "2026-08-19"
+    spend = upd.daily_exploration_spend(decisions, outcomes)
+    assert spend == {"2026-08-19": pytest.approx(21 * 50.0)}, spend
+
+    block = upd.tau_calibration(decisions, outcomes, _posterior(cfg, tmp_path), cfg)
+    assert block["through_date"] == "2026-08-19"
+    assert block["realised_exploration_cost"] == pytest.approx(21 * 50.0)
 
 
 def test_an_unrouted_global_cell_cannot_pin_the_budget(cfg, tmp_path):
@@ -305,3 +323,20 @@ def test_an_unrouted_global_cell_cannot_pin_the_budget(cfg, tmp_path):
         path=str(tmp_path / "routed.json"))
     assert "GLOBAL" in routed.state["cell_of"].values()
     assert routed.widest_std() == pytest.approx(0.6)
+
+
+def test_a_cell_that_took_outcomes_still_counts_for_the_budget(cfg, tmp_path):
+    """Routing can move after a re-initialise; a cell that learned
+    something keeps a std the budget must size for."""
+    floor = cfg["posterior"]["min_episodes_per_week_for_cell"]
+    store = PosteriorStore.initialise(
+        cfg, {"vegetables": {"mean": -1.0, "std": 0.6},
+              "fruit": {"mean": -1.2, "std": 0.9}},
+        {"vegetables": floor, "fruit": floor},
+        path=str(tmp_path / "posterior.json"))
+    cells, cell_of = store.state["cells"], dict(store.state["cell_of"])
+    cells["GLOBAL"]["std"] = 0.1                   # keep GLOBAL out of the max
+    cell_of["fruit"] = "GLOBAL"                    # fruit no longer routes to itself
+    assert PosteriorStore.widest_active_std(cells, cell_of) == pytest.approx(0.6)
+    cells["fruit"]["n_obs"] = 12                   # ...but it has evidence
+    assert PosteriorStore.widest_active_std(cells, cell_of) == pytest.approx(0.9)

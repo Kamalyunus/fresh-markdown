@@ -866,6 +866,10 @@ def derive_tau_initial(ledger, ep, cfg):
         return None
     return {"tau_initial": round(tau, 2),
             "unit": "currency (expected IL given up, per section 12.3)",
+            # solved on policy_replay's SAMPLE (--policy-episodes), not the
+            # window: the daily IL and spend are both sample-scaled, so the
+            # ratio holds but the currency amount is the sample's
+            "episodes_in_sample": int(len(ep)),
             "implied_daily_spend": round(
                 ledger.implied_daily_spend(tau, n_days), 1),
             "daily_budget": round(budget_per_day, 1),

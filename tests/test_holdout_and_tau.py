@@ -503,6 +503,28 @@ def test_the_first_shadow_day_carries_the_pre_window_trailing_base():
     assert pre_window_il_history(d, cfg, None) == {}
 
 
+def test_a_sold_out_early_episode_still_counts_its_shrink_as_scrap():
+    """Scrap = leftover + shrink, one definition. A sold-out-early close has
+    leftover 0 but can still have lost units mid-window; gating scrap on
+    COMPLETED zeroed that shrink on the budget base alone."""
+    from pipeline.shadow import pre_window_il_history
+
+    cfg = load_config()
+    # 3 units: hour 9 sells 1 and ONE VANISHES (ending 1, not 2); hour 10
+    # sells the last unit -> net leftover 0, closed, SOLD_OUT_EARLY
+    d = pd.DataFrame({
+        "episode_id": ["e"] * 2, "date": ["2026-08-01"] * 2,
+        "hour_of_day": [9, 10], "total_discount": [0.30] * 2,
+        "original_price": [10_000.0] * 2, "cost": [4000.0] * 2,
+        "starting_inventory": [3, 1], "units_sold": [1, 1],
+        "ending_inventory": [1, 0],
+    })
+    from common import episodes
+    assert episodes.classify(d).iloc[0] == episodes.SOLD_OUT_EARLY
+    h = pre_window_il_history(d, cfg, "2026-08-04")
+    assert h["2026-08-01"] == pytest.approx(0.30 * 10_000 * 2 + 1 * 4000)
+
+
 def test_the_pre_window_seed_is_scaled_to_the_sample():
     """The seed and the spend must describe the SAME slice of the business."""
     import inspect
@@ -912,7 +934,9 @@ def test_shadow_refits_calibration_forward_only_and_reports_both_regimes():
     from pipeline import shadow
 
     src = inspect.getsource(shadow.weekly_refit_schedule)
-    assert "wk.dt.start_time < w0" in src, \
+    # the ONE whole-episode trailing cut, shared with the artifact schedule;
+    # it ends the day before the week (strictly before -- no look-ahead)
+    assert "episodes.trailing_weeks_window(scope, w0, weeks_back)" in src, \
         "each week must fit on data strictly before it -- no look-ahead"
     assert "_solve_level_factors" in src, \
         "must reuse the one factor solve, not a second copy"
@@ -1048,3 +1072,20 @@ def test_the_prior_fast_path_drops_only_what_cannot_move_the_fixed_point():
     # the wrong-sign search is NOT skipped: it decides which categories pool,
     # which moves the mean, which moves r
     assert "unconstrained_argmax(d, cfg, model" in src
+
+
+def test_the_trailing_fit_window_keeps_episodes_whole_at_the_week_seam():
+    """Both schedule loops cut the trailing window by ROW week, so an
+    episode opening Sunday and closing Monday lost its Monday rows -- and
+    the artifact schedule and shadow's re-fit solved on different rows."""
+    d = pd.DataFrame({
+        "episode_id": ["a", "a", "b", "b"],
+        "date": ["2026-08-09", "2026-08-10",       # Sun -> Mon (week seam)
+                 "2026-08-10", "2026-08-11"],      # opens in the fit week
+        "hour_of_day": [23, 0, 9, 10],
+    })
+    window, weeks = episodes.trailing_weeks_window(d, "2026-08-10", 1)
+    assert sorted(window.episode_id.unique()) == ["a"]
+    assert len(window) == 2 and weeks == 1
+    empty, none = episodes.trailing_weeks_window(d, "2026-08-03", 1)
+    assert len(empty) == 0 and none == 0

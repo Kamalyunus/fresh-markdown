@@ -372,13 +372,10 @@ def fit_level_calibration(d, cfg):
     by_week, coverage = {}, []
     wk = pd.to_datetime(scope.date).dt.to_period("W")
     for w in sorted(wk.unique()):
-        w_lo = w.start_time - pd.Timedelta(weeks=weeks_back)
-        window = scope[(wk.dt.start_time >= w_lo)
-                       & (wk.dt.start_time < w.start_time)]
+        window, weeks_seen = episodes.trailing_weeks_window(
+            scope, w.start_time, weeks_back)
         if not len(window):
             continue
-        weeks_seen = int(wk[(wk.dt.start_time >= w_lo)
-                            & (wk.dt.start_time < w.start_time)].nunique())
         f = _solve_level_factors(window.copy(), cfg, model, k_shrink,
                                  min_anchor, tier_step, max_k, r_lookup)
         if f is None:                       # too thin: hold 1.0, say so

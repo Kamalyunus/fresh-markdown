@@ -319,3 +319,31 @@ def test_a_stale_rho_still_fails_weighted_by_todays_clustering(cfg):
              / design_effect(rho, m) for m in (m_small, m_large)]
     assert drift[0] < drift[1]          # same rho error, larger consequence
     assert drift[1] > gate              # and it trips the gate where it bites
+
+
+def test_run_is_insufficient_until_every_check_ran(cfg):
+    """Nothing failing and one check that saw almost nothing is not a PASS:
+    the operator gate read the top-line verdict and signed off a window in
+    which dispersion and correlation were never checked."""
+    decs = [_decision(cfg, q=3, path=[0.8] * 4) for _ in range(4)]
+    report = assurance.run(decs, [], cfg)
+    assert report["reproduction"]["verdict"] == "PASS"
+    assert not report["failing"]
+    assert "dispersion" in report["insufficient"]
+    assert report["verdict"] == "INSUFFICIENT"
+
+
+def test_icc_survives_a_nan_residual():
+    """One NaN poisoned every sum and returned 0.0 -- 'no clustering', so
+    deff read 1 and every posterior step was over-weighted."""
+    import numpy as np
+    from common.config import intraclass_correlation
+    rng = np.random.default_rng(0)
+    groups = np.repeat(np.arange(40), 6)
+    shared = rng.normal(size=40)[groups]
+    resid = shared + rng.normal(size=240) * 0.5
+    clean = intraclass_correlation(resid, groups)
+    dirty = resid.copy()
+    dirty[7] = np.nan
+    assert clean > 0.5
+    assert intraclass_correlation(dirty, groups) == pytest.approx(clean, abs=0.05)

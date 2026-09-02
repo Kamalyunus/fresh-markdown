@@ -34,6 +34,14 @@ def _still_running(ep):
     return set(kind.index[kind == episodes.NOT_CLOSED])
 
 
+def _decision_day(d):
+    """The TRADING date a decision priced -- the day key every per-day
+    series here shares with update.latest_priced_day. The UTC wall clock is
+    a different day for late hours and split the guardrail's daily series
+    at midnight UTC while IL and the budget were keyed on the trading day."""
+    return str(d.get("date") or pd.Timestamp(d["timestamp"]).date())
+
+
 def business_metrics(decisions, outcomes, cfg):
     if not outcomes:
         return {"note": "no finalized outcomes yet"}
@@ -47,9 +55,7 @@ def business_metrics(decisions, outcomes, cfg):
             "episode_id": d["episode_id"], "category": d["category"],
             "fc": d["fc"], "sku_id": d["sku_id"],
             "timestamp": d.get("timestamp"),
-            # the TRADING date the decision priced, not the UTC wall clock
-            "date": str(d.get("date")
-                        or pd.Timestamp(d["timestamp"]).date()),
+            "date": _decision_day(d),
             "hours_remaining": d["hours_remaining"],
             "original_price": d["original_price"], "cost": d["cost"],
             "units_sold": o["units_sold"],
@@ -130,10 +136,10 @@ def guardrail_series(decisions, outcomes, cfg):
     rows = []
     for o in outcomes:
         d = dec.get(o["decision_id"])
-        if not d or "timestamp" not in d:
+        if not d:
             continue
         rows.append({
-            "date": pd.Timestamp(d["timestamp"]).date(),
+            "date": _decision_day(d),
             "timestamp": d["timestamp"],
             "episode_id": d["episode_id"],
             "arm": arm(d["sku_id"], d["fc"], cfg["ab_test"]["allocation"]),
@@ -146,7 +152,7 @@ def guardrail_series(decisions, outcomes, cfg):
             "margin": (o["applied_price"] - d["cost"]) * o["units_sold"],
         })
     if not rows:
-        return {"note": "no finalized outcomes with timestamps yet"}
+        return {"note": "no finalized outcomes yet"}
     df = pd.DataFrame(rows)
 
     # episode grain first: scrap is an end-of-episode quantity; summing hourly
@@ -315,6 +321,7 @@ def learning_metrics(decisions, posterior, cfg, outcomes=()):
         "exploration_cost_by_day": {
             k: round(v, 1) for k, v in
             update_mod.daily_exploration_spend(decisions, outcomes).items()},
+        "latest_priced_day": update_mod.latest_priced_day(decisions, outcomes),
         "tau_current": decisions[-1]["tau_current"] if decisions else None,
         "deff_applied": round(deff_from_episodes(
             cfg["dispersion"]["rho"],
@@ -332,13 +339,14 @@ def learning_metrics(decisions, posterior, cfg, outcomes=()):
 
 def safety_metrics(store, decisions, outcomes):
     matched = {o["decision_id"] for o in outcomes}
-    mismatches = 0
+    mismatches, compared = 0, 0
     dec = {d["decision_id"]: d for d in decisions}
     expected_denom, realised_denom = 0.0, 0.0
     for o in outcomes:
         d = dec.get(o["decision_id"])
         if not d:
             continue
+        compared += 1
         if abs(o["applied_price"] - d["applied_price"]) > 1e-6:
             mismatches += 1
         expected_denom += d["expected_denominator"]
@@ -353,13 +361,14 @@ def safety_metrics(store, decisions, outcomes):
                                        if o["decision_id"] not in dec),
         "duplicate_decision_count": store.duplicate_counts["decision"],
         "duplicate_outcome_count": store.duplicate_counts["outcome"],
-        "applied_vs_recommended_price_mismatch": round(mismatches / n_out, 4),
+        # a rate over the outcomes that HAVE a decision to compare against;
+        # unmatched outcomes are counted separately and diluted this
+        "applied_vs_recommended_price_mismatch": round(
+            mismatches / max(compared, 1), 4),
         "zero_sales_rate": round(float(np.mean(
             [o["units_sold"] == 0 for o in outcomes])), 4) if outcomes else None,
         "stockout_rate": round(float(np.mean(
             [bool(o["is_stockout"]) for o in outcomes])), 4) if outcomes else None,
-        "missing_stockout_field_rate": round(float(np.mean(
-            ["is_stockout" not in o for o in outcomes])), 4) if outcomes else None,
         "quarantined_event_count": len(store.load_quarantine()),
         "solver_latency_p95_s": round(float(np.percentile(
             [d.get("solver_latency_s", 0.0) for d in decisions], 95)), 4)
@@ -382,7 +391,6 @@ def stop_conditions(safety, learning, business, guardrail, cfg):
     fired["duplicate_or_unmatched"] = dup_unmatched > sc["duplicate_or_unmatched_rate"]
     fired["price_mismatch"] = (safety["applied_vs_recommended_price_mismatch"]
                                > sc["price_mismatch_rate"])
-    fired["missing_stockout_field"] = (safety["missing_stockout_field_rate"] or 0) > 0
 
     # realised exploration cost vs budget over the event window; the budget
     # uses TRAILING realised IL as the projection and the widest cell std --
@@ -392,8 +400,11 @@ def stop_conditions(safety, learning, business, guardrail, cfg):
     # 10x budget could not fire it.
     il_by_day = business.get("il_by_close_day") or {}
     cells = learning["posterior_by_cell"]
-    day = max(il_by_day) if il_by_day else None
-    if il_by_day and cells:
+    # the SAME day the controller prices (update.latest_priced_day) -- the
+    # last day with a closed episode is a different day whenever the latest
+    # day's episodes are still open
+    day = learning.get("latest_priced_day")
+    if il_by_day and cells and day:
         widest_std = PosteriorStore.widest_active_std(
             cells, learning.get("cell_of") or {})
         budget = explore.budget_today(

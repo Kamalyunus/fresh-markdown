@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 
 from common.config import artifact_mirror_drift, load_config
-from common.guardrail import verdict_is_blocking
+from common.guardrail import verdict_is_blocking, verdict_is_insufficient
 from pricing.explore import tau_provenance_error
 
 PASTE, OWNER, INFO, BLOCK = "PASTE", "OWNER", "INFO", "BLOCK"
@@ -94,6 +94,13 @@ def _read(path):
         with open(path) as f:
             return json.load(f)
     return None
+
+
+def _sweep_of(backtest):
+    """The sweep block, or {} -- it is a STRING on its NOT RUN path, and
+    `.get` on that took tune down with a traceback instead of a finding."""
+    s = ((backtest or {}).get("fidelity") or {}).get("calibration_window_sweep")
+    return s if isinstance(s, dict) else {}
 
 
 def _get(cfg, path):
@@ -208,6 +215,15 @@ def _measured(cfg, shadow, rho_art, thresholds, backtest=None):
             inc_rec.get("verdict") or
             f"I* at the launch prior std; configured {cur}",
             "thresholds.information_increment_recommendation.recommended"))
+    elif str(inc_rec.get("verdict") or "").startswith("NOT RUN"):
+        # the value in force was measured on SOME earlier run (or is the
+        # fixture's); this run could not measure it. Silence here read as
+        # "matches", and status stayed green on an unverified key.
+        out.append(_finding(
+            ("learning", "information_increment"), PASTE, ACT, cur, None,
+            f"{inc_rec['verdict']} -- the configured value is unverified "
+            "by this run; --apply cannot paste a value that was not measured",
+            "thresholds.information_increment_recommendation.verdict"))
 
     for key, art_key in ((("dispersion", "rho"), "rho"),):
         got = (rho_art or {}).get(art_key)
@@ -251,6 +267,11 @@ def _derived(cfg, backtest, thresholds):
     bs = (thresholds or {}).get("bounded_step_recommendation") or {}
     cur = _get(cfg, ("learning", "max_mean_step"))
     rec = bs.get("consistent_max_mean_step")
+    if rec is None and str(bs.get("verdict") or "").startswith("NOT RUN"):
+        out.append(_finding(
+            ("learning", "max_mean_step"), OWNER, ACT, cur, None,
+            f"{bs['verdict']} -- the rail in force is unverified by this run",
+            "thresholds.bounded_step_recommendation.verdict"))
     if rec is not None:
         ss = (((backtest or {}).get("policy_deltas") or {})
               .get("step_sensitivity") or {})
@@ -294,6 +315,13 @@ def _derived(cfg, backtest, thresholds):
         cur = _get(cfg, path)
         floor = block.get("binding_floor")
         if floor is None:
+            if verdict_is_insufficient(block.get("verdict")):
+                out.append(_finding(
+                    path, INFO, OK, cur, None,
+                    f"{block.get('verdict')} -- no floor to check "
+                    f"{'the configured stop' if cur is not None else 'a stop'} "
+                    "against yet; status reads this as WARN",
+                    f"thresholds.guardrail_threshold_recommendation.{name}.verdict"))
             continue
         # `binding_floor` is set BEFORE the unusability check, so a BLOCKED /
         # TOO TIGHT / LIKELY INERT block still carries a number. Pasting it
@@ -319,8 +347,7 @@ def _derived(cfg, backtest, thresholds):
 
     # the level band: sized from measured anchor volatility, TIGHTEN ONLY
     g = cfg.get("tuning") or {}
-    sweep = (((backtest or {}).get("fidelity") or {})
-             .get("calibration_window_sweep") or {})
+    sweep = _sweep_of(backtest)
     chosen = f"trailing_{cfg['baseline_model']['calibration_fit_trailing_weeks']}w"
     mae = ((sweep.get(chosen) or {}).get("mean_abs_log_error")
            if isinstance(sweep.get(chosen), dict) else None)
@@ -414,6 +441,12 @@ def _readings(cfg, backtest, shadow):
     # the frozen anchor on the hold-out. Measured, not assumed.
     cr = (shadow or {}).get("calibration_regimes") or {}
     frozen, weekly = cr.get("frozen_anchor"), cr.get("weekly_refit")
+    if cr.get("refit_error"):
+        out.append(_finding(
+            "calibration cadence", INFO, ACT, frozen, None,
+            f"the weekly re-fit RAISED in shadow ({cr['refit_error']}) -- "
+            "the cadence question is unanswered, not answered 'frozen'",
+            "shadow.calibration_regimes.refit_error"))
     if frozen is not None and weekly is not None:
         better = "weekly re-fit" if abs(weekly - 1) < abs(frozen - 1) else "frozen anchor"
         out.append(_finding(
@@ -432,7 +465,10 @@ def _readings(cfg, backtest, shadow):
     if days is None and win.get("date_min") and win.get("date_max"):
         days = (pd.Timestamp(win["date_max"])
                 - pd.Timestamp(win["date_min"])).days + 1
-    episodes = win.get("episodes") or (shadow or {}).get("episodes")
+    # the POPULATION's episodes/day: a --max-episodes sample understates
+    # the daily evidence rate and flips the reading to EVIDENCE
+    episodes = (win.get("population_episodes") or win.get("episodes")
+                or (shadow or {}).get("episodes"))
     if per_update and days and episodes:
         per_day = episodes / days
         evidence_days = per_update / per_day if per_day else None
@@ -452,8 +488,7 @@ def _readings(cfg, backtest, shadow):
             "shadow.learning_yield_would_be"))
 
     # the fit window W the rolling-origin sweep prefers, bounded by calib >= 2W
-    sweep = (((backtest or {}).get("fidelity") or {})
-             .get("calibration_window_sweep") or {})
+    sweep = _sweep_of(backtest)
     rec = sweep.get("recommended_fit_window")
     if rec:
         want = int(re.sub(r"\D", "", rec) or 0)
@@ -586,6 +621,10 @@ def apply(cfg, report, config_path="config.yaml", out_dir="artifacts"):
     applied, failed = [], []
     for f_ in report["to_paste"]:
         path = tuple(f_["key"].split("."))
+        if f_["recommended"] is None:
+            failed.append(dict(f_, error="the report carries no value to "
+                                         "paste (NOT RUN) -- re-run it"))
+            continue
         try:
             text = set_scalar(text, path, f_["recommended"])
             applied.append(f_)

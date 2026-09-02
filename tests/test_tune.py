@@ -488,3 +488,101 @@ def test_every_paste_key_has_a_line_anchor(cfg):
     for key in tune.RERUN:
         assert key in tune.ANCHORS, key
     assert ("baseline_model", "calibration_gate_band") in tune.ANCHORS
+
+
+def test_a_not_run_sweep_is_a_finding_not_a_traceback(cfg, tmp_path):
+    """replay writes the sweep as a STRING on its NOT RUN path; `.get` on
+    that took tune down instead of reporting the missing measurement."""
+    root = tmp_path / "r"
+    root.mkdir()
+    _reports(root)
+    bt = json.loads((root / "backtest.json").read_text())
+    bt["fidelity"]["calibration_window_sweep"] = "NOT RUN: calib < 2W"
+    (root / "backtest.json").write_text(json.dumps(bt))
+    assert tune._sweep_of(bt) == {}
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(root))      # no traceback
+    assert not any(f["key"] == "baseline_model.calibration_fit_trailing_weeks"
+                   and f["class"] == tune.PASTE for f in rep["findings"])
+
+
+def test_a_not_run_measurement_is_an_act_never_silence(cfg, tmp_path):
+    """derive_thresholds writes {verdict: "NOT RUN -- ..."} with no value
+    when it cannot measure I*. tune emitted nothing, status read "every
+    MEASURED value matches", and the fixture's paste stayed in force
+    unverified. It must surface as ACT, and --apply must refuse to paste
+    a value that does not exist."""
+    root = tmp_path / "r"
+    root.mkdir()
+    _reports(root)
+    th = json.loads((root / "thresholds.json").read_text())
+    th["information_increment_recommendation"] = {
+        "verdict": "NOT RUN -- no per-category prior stds"}
+    th["bounded_step_recommendation"] = {
+        "verdict": "NOT RUN -- degenerate prior widths"}
+    (root / "thresholds.json").write_text(json.dumps(th))
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(root))
+    by_key = {f["key"]: f for f in rep["findings"]}
+    inc = by_key["learning.information_increment"]
+    assert inc["class"] == tune.PASTE and inc["status"] == tune.ACT
+    assert inc["recommended"] is None and "NOT RUN" in inc["evidence"]
+    rail = by_key["learning.max_mean_step"]
+    assert rail["class"] == tune.OWNER and rail["status"] == tune.ACT
+
+    # and the paster refuses it instead of writing "None" into config.yaml
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(open(os.path.join(ROOT, "config.yaml")).read())
+    log = tune.apply(cfg, rep, config_path=str(cfg_path),
+                     out_dir=str(tmp_path / "art"))
+    text = cfg_path.read_text()
+    assert "information_increment: None" not in text
+    assert any(f["key"] == "learning.information_increment"
+               for f in log["failed"])
+
+
+def test_an_unmeasured_floor_is_named_not_skipped(cfg, tmp_path):
+    root = tmp_path / "r"
+    root.mkdir()
+    _reports(root)
+    th = json.loads((root / "thresholds.json").read_text())
+    th["guardrail_threshold_recommendation"]["scrap_rate"] = {
+        "config_key": "monitoring.stop_conditions.scrap_deterioration_pct",
+        "verdict": "insufficient history on either basis"}
+    (root / "thresholds.json").write_text(json.dumps(th))
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(root))
+    hits = [f for f in rep["findings"]
+            if f["key"] == "monitoring.stop_conditions.scrap_deterioration_pct"]
+    assert hits and hits[0]["class"] == tune.INFO
+    assert "insufficient" in hits[0]["evidence"]
+    assert not any(f["key"] == hits[0]["key"] for f in rep["to_paste"])
+
+
+def test_a_refit_that_raised_in_shadow_is_an_open_question(cfg, tmp_path):
+    """shadow swallowed the weekly re-fit's exception into coverage, wrote
+    weekly_refit null, and tune then read the cadence as settled."""
+    root = tmp_path / "r"
+    root.mkdir()
+    _reports(root)
+    sh = json.loads((root / "shadow.json").read_text())
+    sh["calibration_regimes"] = {"frozen_anchor": 1.0002, "weekly_refit": None,
+                                 "refit_error": "KeyError: 'd_ref'"}
+    (root / "shadow.json").write_text(json.dumps(sh))
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(root))
+    cad = [f for f in rep["findings"] if f["key"] == "calibration cadence"]
+    assert cad and cad[0]["status"] == tune.ACT
+    assert "KeyError" in cad[0]["evidence"]
+
+
+def test_the_bottleneck_reads_the_population_rate_not_the_sample(cfg, tmp_path):
+    """A --max-episodes shadow sample understates episodes/day and flips
+    the reading to EVIDENCE when the calendar is the real limit."""
+    root = tmp_path / "r"
+    root.mkdir()
+    _reports(root)
+    sh = json.loads((root / "shadow.json").read_text())
+    sh["window"] = {"date_min": "2026-08-10", "date_max": "2026-08-28",
+                    "episodes": 2000, "population_episodes": 111400}
+    (root / "shadow.json").write_text(json.dumps(sh))
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(root))
+    bn = [f for f in rep["findings"] if f["key"] == "learning bottleneck"][0]
+    assert bn["current"] == "CALENDAR", bn["evidence"]
+    assert "5,863 episodes/day" in bn["evidence"]      # 111400 / 19

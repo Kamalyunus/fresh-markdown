@@ -220,12 +220,6 @@ def drift_by_window(d, cfg, freq="W"):
             continue
         r, ok = fit_r(g.units_sold.to_numpy(), g.mu_hat.to_numpy(),
                       g.censored.to_numpy(), bounds)
-        sizes = g.groupby("episode_id")["resid"].size()
-        sub = g[g.episode_id.isin(sizes[sizes >= 3].index)]
-        total = sub["resid"].var(ddof=1) if len(sub) > 1 else 0.0
-        rho_w = (float(np.clip(sub.groupby("episode_id")["resid"].mean()
-                               .var(ddof=1) / total, 0.0, 0.95))
-                 if total and total > 0 else None)
         pear = pearson_dispersion(g.units_sold.to_numpy(), g.mu_hat.to_numpy())
         # An r near the search bound is the estimator FAILING, not a large r:
         # under-dispersed data (Pearson < 1) cannot be expressed by any NB
@@ -234,12 +228,15 @@ def drift_by_window(d, cfg, freq="W"):
         # mistake this block exists to prevent someone making.
         at_bound = bool(ok and (r >= bounds[1] * 0.99 or r <= bounds[0] * 1.01))
         usable = bool(ok and pear >= 1.0 and not at_bound)
+        # the ONE rho estimator (ANOVA ICC); this block still ran the biased
+        # var(means)/var(all) after the frozen fit moved off it, so the drift
+        # baseline and the frozen value disagreed by ~(1-rho)/m
         sizes = g.groupby("episode_id")["resid"].size()
-        sub = g[g.episode_id.isin(sizes[sizes >= 3].index)]
-        total = sub["resid"].var(ddof=1) if len(sub) > 1 else 0.0
-        rho_w = (float(np.clip(sub.groupby("episode_id")["resid"].mean()
-                               .var(ddof=1) / total, 0.0, 0.95))
-                 if total and total > 0 else None)
+        sub = g[g.episode_id.isin(
+            sizes[sizes >= cfg["assurance"]["rho_min_hours_per_episode"]].index)]
+        rho_w = (intraclass_correlation(sub["resid"], sub["episode_id"],
+                                        dc["rho_clip_max"])
+                 if sub.episode_id.nunique() > 1 else None)
         by_window[label] = {
             "rows": int(len(g)),
             "r": round(r, 4) if ok else None,

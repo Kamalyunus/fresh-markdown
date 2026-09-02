@@ -106,9 +106,10 @@ def intraclass_correlation(residuals, groups, clip_max=0.95):
     of pure estimator artifact. The ANOVA form subtracts MSW, which is
     exactly that term, and recovers rho at every m.
     """
-    s = pd.Series(np.asarray(residuals, dtype=float))
+    s = pd.Series(np.asarray(residuals, dtype=float)).reset_index(drop=True)
     g = pd.Series(np.asarray(groups)).reset_index(drop=True)
-    s = s.reset_index(drop=True)
+    finite = np.isfinite(s.to_numpy())          # one NaN poisons every sum
+    s, g = s[finite].reset_index(drop=True), g[finite].reset_index(drop=True)
     sizes = g.groupby(g).size().to_numpy()
     k, n = len(sizes), len(s)
     if k < 2 or n <= k:

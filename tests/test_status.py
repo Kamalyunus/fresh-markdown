@@ -345,3 +345,22 @@ def test_report_vintages_names_the_config_values_that_moved(cfg, tmp_path):
                                     "config_version": "0.0.1"}}
     row = status._vintages(cfg, state, {"backtest": legacy})
     assert row["verdict"] == status.WARN and "pre-fingerprint" in row["detail"]
+
+
+def test_a_null_tau_derivation_is_reported_not_crashed(cfg):
+    """A backtest that ran before any gate passed writes
+    `tau_initial_derivation: null`; `.get` on None crashed the whole status
+    page, which is the one surface meant to say what is missing."""
+    live = dict(cfg, exploration=dict(cfg["exploration"], tau_initial=None))
+    row = status._tau(live, {"tau_initial_derivation": None}, None)
+    assert row["verdict"] == status.FAIL
+    assert "no derivation" in row["detail"]
+
+
+def test_an_unmeasured_guardrail_floor_warns_never_passes(cfg, tmp_path):
+    """"insufficient history" is not a blocking verdict, but a floor nobody
+    could measure is a floor nobody checked. It read PASS."""
+    _write(tmp_path, "thresholds", {"guardrail_threshold_recommendation": {
+        "scrap": {"verdict": "insufficient history on either basis"}}})
+    assert _verdicts(status.collect(cfg, str(tmp_path)))[
+        "guardrail floors"] == status.WARN

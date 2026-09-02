@@ -92,7 +92,7 @@ def pre_window_il_history(d, cfg, before):
     scrap = (last.cost.to_numpy()
              * (leftover.to_numpy()
                 + shrink.reindex(last.episode_id.to_numpy()).fillna(0).to_numpy())
-             * (kind == episodes.COMPLETED).to_numpy())
+             * (kind != episodes.NOT_CLOSED).to_numpy())
     # a NULL unit cost makes IL nan, and nan fails every `>` comparison
     # downstream -- the budget then reads "within budget -- nanx" instead of
     # refusing. Drop the episode from the base and let the count show up.
@@ -135,11 +135,9 @@ def weekly_refit_schedule(d_full, cfg, model, r_lookup, start, end):
         w0 = w.start_time
         if w0 < lo_w or w0 > hi_w:
             continue
-        lo = w0 - pd.Timedelta(weeks=weeks_back)
-        # STRICTLY BEFORE this week: no look-ahead inside the replay
-        window = scope[(wk.dt.start_time >= lo) & (wk.dt.start_time < w0)]
-        weeks_seen = int(wk[(wk.dt.start_time >= lo)
-                            & (wk.dt.start_time < w0)].nunique())
+        # STRICTLY BEFORE this week: no look-ahead inside the replay; the
+        # same whole-episode cut the artifact schedule uses
+        window, weeks_seen = episodes.trailing_weeks_window(scope, w0, weeks_back)
         fitted = _solve_level_factors(
             window.copy(), cfg, model, bm["calibration_shrinkage_units"],
             bm["calibration_min_anchor_rows"], cfg["pricing"]["tier_step"],
@@ -679,8 +677,11 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     kind = episodes.classify_last(last)
     leftover = episodes.leftover_units(last.starting_inventory, last.units_sold)
     scrap_units = leftover.to_numpy() + last.shrink.to_numpy()
-    completed = (kind == episodes.COMPLETED).to_numpy()
-    scrap_per_ep = (last.cost.to_numpy() * scrap_units) * completed
+    # CLOSED, not COMPLETED: a sold-out-early episode (leftover 0) can still
+    # have vanished units mid-window, and episodes.scrap_units counts them.
+    # Gating on COMPLETED zeroed that scrap on the budget base alone.
+    closed_ep = (kind != episodes.NOT_CLOSED).to_numpy()
+    scrap_per_ep = (last.cost.to_numpy() * scrap_units) * closed_ep
     il_scrap = float(scrap_per_ep.sum())
     il_unknown_scrap = int((kind == episodes.NOT_CLOSED).sum())
     markdown_il = il_discount + il_scrap
@@ -904,6 +905,10 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
                 c["week"] for c in refit_cov if c.get("partial")],
             "weeks_unfitted_held_at_anchor": [
                 c["week"] for c in refit_cov if c.get("fitted") is False],
+            # a re-fit that raised is a MISSING reading, and the cadence
+            # question then cannot be answered -- say so where tune reads
+            "refit_error": next((c["error"] for c in refit_cov
+                                 if "error" in c), None),
             "note": ("Same rows, legacy price, censored basis -- only the "
                      "level factor differs. Both ~1.0 = level held; only "
                      "frozen off = the anchor went stale (weekly re-fit earns "

@@ -322,7 +322,14 @@ def run(decisions, outcomes, cfg):
     }
     report["failing"] = sorted(k for k, v in report.items()
                                if isinstance(v, dict) and v.get("verdict") == "FAIL")
-    report["verdict"] = "FAIL" if report["failing"] else "PASS"
+    report["insufficient"] = sorted(
+        k for k, v in report.items()
+        if isinstance(v, dict) and v.get("verdict") == "INSUFFICIENT")
+    # a check that saw almost nothing is not one that looked and found
+    # nothing: the whole report is INSUFFICIENT until every check ran
+    report["verdict"] = ("FAIL" if report["failing"]
+                         else "INSUFFICIENT" if report["insufficient"]
+                         else "PASS")
     return report
 
 

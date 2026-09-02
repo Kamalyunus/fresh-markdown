@@ -322,3 +322,57 @@ def test_the_guardrail_is_not_inert_before_the_ab(tmp_path):
     # and with both arms system-priced the deviation is exactly zero --
     # which is precisely why this basis must not be the pre-A/B default
     assert during["scrap_deterioration"]["latest"] == 0.0
+
+
+def test_a_discount_outside_percent_range_is_refused():
+    """The feed discount is PERCENT. A fraction (0.30) would be 0.3% and
+    price the hour at full list; 100+ prices it at or below zero."""
+    feed = _feed([{"start": 3, "sold": 1, "end": 2, "disc": 100.0},
+                  {"hour": 18, "start": 2, "sold": 1, "end": 1, "disc": -5.0},
+                  {"hour": 19, "start": 1, "sold": 0, "end": 1, "disc": 99.0}])
+    outs, rep = build_outcomes(
+        [_dec(1), _dec(2, hour=18), _dec(3, hour=19)], feed)
+    assert [o["decision_id"] for o in outs] == ["D3"]
+    assert rep["unusable_feed_rows"] == 2
+    assert all("total_discount" in x["reason"] for x in rep["unusable_examples"])
+
+
+def test_the_guardrail_series_is_keyed_on_the_trading_day():
+    """An hour-23 decision on day D carries a UTC timestamp that may read as
+    D+1. Bucketing on the wall clock split the daily scrap series at
+    midnight UTC while IL and the budget were keyed on the trading day."""
+    from common.config import load_config
+    from pipeline.monitor import guardrail_series
+
+    cfg = load_config()
+    decisions = [{
+        "decision_id": "late", "episode_id": "EP-L", "sku_id": "s", "fc": "f",
+        "date": "2026-08-19", "hour_of_day": 23,
+        "timestamp": "2026-08-20T02:00:00+00:00",      # UTC is already D+1
+        "hours_remaining": 1, "cost": 100.0}]
+    outcomes = [{"decision_id": "late", "starting_inventory": 4,
+                 "units_sold": 1, "ending_inventory": 0,
+                 "applied_price": 500.0}]
+    g = guardrail_series(decisions, outcomes, cfg)
+    assert list(g["daily_scrap_rate"]) == ["2026-08-19"]
+
+
+def test_price_mismatch_is_a_rate_over_compared_pairs():
+    """Dividing by every outcome let unmatched outcomes dilute the rate
+    below the stop threshold."""
+    from pipeline.monitor import safety_metrics
+
+    class _Store:
+        duplicate_counts = {"decision": 0, "outcome": 0}
+        def load_quarantine(self):
+            return []
+
+    decisions = [{"decision_id": "D1", "applied_price": 100.0,
+                  "expected_denominator": 1.0, "original_price": 100.0}]
+    outcomes = [{"decision_id": "D1", "applied_price": 90.0, "units_sold": 1,
+                 "is_stockout": False}]
+    outcomes += [{"decision_id": f"orphan{i}", "applied_price": 1.0,
+                  "units_sold": 0, "is_stockout": False} for i in range(9)]
+    s = safety_metrics(_Store(), decisions, outcomes)
+    assert s["applied_vs_recommended_price_mismatch"] == 1.0
+    assert s["unmatched_outcome_count"] == 9

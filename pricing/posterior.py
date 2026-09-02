@@ -115,7 +115,11 @@ class PosteriorStore:
         GLOBAL permanently.
         """
         routed = set(cell_of.values())
-        active = [r["std"] for c, r in cells.items() if c in routed]
+        # routed now, OR has taken outcomes (routing can move after a
+        # re-initialise; a cell that learned something still has a std to
+        # budget for)
+        active = [r["std"] for c, r in cells.items()
+                  if c in routed or r.get("n_obs", 0) > 0]
         return max(active) if active else max(r["std"] for r in cells.values())
 
     def widest_std(self):

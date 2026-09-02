@@ -96,6 +96,11 @@ def build_outcomes(decisions, feed, failures=None, now=None):
             disc = float(r.total_discount)
             if not (np.isfinite(base) and np.isfinite(disc)) or base <= 0:
                 raise ValueError(f"unusable price (original_price={base!r})")
+            # the feed's discount is PERCENT: 0.30 here would be 0.3%, and
+            # 100+ prices the hour at or below zero
+            if not 0 <= disc < 100:
+                raise ValueError(f"discount out of [0, 100) percent "
+                                 f"(total_discount={disc!r})")
         except (TypeError, ValueError) as exc:
             unusable.append({"decision_id": dec["decision_id"],
                              "reason": f"{type(exc).__name__}: {exc}"})

@@ -23,6 +23,25 @@ CLOSE_CENSORED = "censored"              # leftover == 0
 CLOSE_RESTOCK = "final_hour_restock"     # leftover < 0 -- same name as the DP gate
 
 
+def trailing_weeks_window(d, week_start, weeks_back):
+    """The rows a factor fit for the week starting `week_start` may read:
+    WHOLE episodes that opened in the `weeks_back` weeks strictly before it,
+    plus how many distinct opening weeks that window actually holds.
+
+    The one cut shared by the artifact schedule (train_baseline) and the
+    shadow re-fit; a row-level week cut in either truncated windows at the
+    midnight seam and the two solved on different rows."""
+    w0 = pd.Timestamp(week_start)
+    lo = w0 - pd.Timedelta(weeks=int(weeks_back))
+    window = window_slice(d, lo.strftime("%Y-%m-%d"),
+                          (w0 - pd.Timedelta(days=1)).strftime("%Y-%m-%d"))
+    if not len(window):
+        return window, 0
+    opened = pd.to_datetime(window.groupby("episode_id")["date"]
+                            .transform("min"))
+    return window, int(opened.dt.to_period("W").nunique())
+
+
 def window_slice(d, start=None, end=None):
     """Episodes whose WINDOW STARTED in [start, end] -- whole, never sliced.
 

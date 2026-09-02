@@ -57,6 +57,13 @@ def verdict_is_blocking(verdict):
     return v.startswith("TOO") or "BLOCKED" in v or "INERT" in v
 
 
+def verdict_is_insufficient(verdict):
+    """derive_thresholds' "insufficient history" verdicts: not blocking, and
+    NOT a pass -- a floor nobody could measure is a floor nobody checked.
+    status reads them as WARN and tune names them, on this one test."""
+    return str(verdict or "").lower().startswith("insufficient")
+
+
 def floor_is_unusable(floor, basis):
     """A floor a threshold cannot be set above -- the guardrail is BLOCKED.
     On the RELATIVE basis a floor >= 1.0 means ordinary daily swing exceeds
