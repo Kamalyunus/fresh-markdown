@@ -23,6 +23,7 @@ from common.episodes import adjustment_reason
 from bootstrap.train_baseline import BaselineModel
 from bootstrap.fit_dispersion import lookup_r
 from events.store import EventStore
+from pricing import dp as dp_mod
 from pricing import explore
 from pricing.demand import expected_min_demand_inventory_vec
 from inference.decide import decide, StateRejected
@@ -139,7 +140,7 @@ def weekly_refit_schedule(d_full, cfg, model, r_lookup, start, end):
         # same whole-episode cut the artifact schedule uses
         window, weeks_seen = episodes.trailing_weeks_window(scope, w0, weeks_back)
         fitted = _solve_level_factors(
-            window.copy(), cfg, model, bm["calibration_shrinkage_units"],
+            window.copy(), model, bm["calibration_shrinkage_units"],
             bm["calibration_min_anchor_rows"], cfg["pricing"]["tier_step"],
             cfg["pricing"]["negbin_max_k"], r_lookup) if len(window) else None
         if fitted is None:                 # too thin: that week keeps the anchor
@@ -459,7 +460,7 @@ def _shadow_one(ep, ctx):
             out["empty_affordable"] += 1
         out["rec_disc"] += evt["applied_discount"]
         out["leg_disc"] += legacy_d
-        if abs(evt["applied_discount"] - legacy_d) > 1e-9:
+        if abs(evt["applied_discount"] - legacy_d) > dp_mod.TIER_EPS:
             out["differs"] += 1
 
         # outcome = what actually happened under the LEGACY price

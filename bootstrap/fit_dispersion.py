@@ -17,7 +17,7 @@ import pandas as pd
 from scipy.optimize import minimize_scalar
 from scipy.stats import nbinom
 
-from common.config import (design_effect, intraclass_correlation,
+from common.config import (intraclass_correlation,
                            load_config)
 from common import episodes
 from common.provenance import stamp
@@ -163,11 +163,6 @@ def fit_dispersion(d, cfg):
     rho = intraclass_correlation(sub_d["resid"], sub_d["episode_id"],
                                  dc["rho_clip_max"])
 
-    hours = calib.groupby("episode_id").size()
-    changed = calib.groupby("episode_id")["total_discount"].nunique() > 1
-    hours_forced = hours[changed[changed].index]
-    h_forced = float(hours_forced.mean()) if len(hours_forced) else float(hours.mean())
-
     dates = pd.to_datetime(calib.date)
     rho_out = {"rho": round(rho, 4),
                "rho_method": "variance_decomposition_on_fitted_mu_residuals",
@@ -175,14 +170,7 @@ def fit_dispersion(d, cfg):
                "fit_window_dates": [str(dates.min().date()),
                                     str(dates.max().date())],
                "fit_rows": int(len(calib)),
-               "fit_episodes": int(calib.episode_id.nunique()),
-               # DIAGNOSTIC ONLY, and not "forced hours": the mean LENGTH of
-               # legacy episodes whose discount changed. Production measures
-               # the real m per batch (common.config.deff_from_episodes),
-               # because it moves with the exploration rate by construction.
-               "legacy_mean_hours_per_changing_episode": round(h_forced, 3),
-               "implied_deff_at_that_length": round(
-                   design_effect(rho, h_forced), 3)}
+               "fit_episodes": int(calib.episode_id.nunique())}
     return r_lookup, rho_out
 
 
@@ -344,10 +332,8 @@ def main():
 
     print(f"r by subcategory : {len(r_lookup['subcategory'])} groups, "
           f"global r = {r_lookup['global']:.3f}, clamp at {r_lookup['clamp_at']:.3f}")
-    print(f"rho              : {rho_out['rho']}  "
-          f"(legacy episode length "
-          f"{rho_out['legacy_mean_hours_per_changing_episode']}, "
-          f"deff {rho_out['implied_deff_at_that_length']})")
+    print(f"rho              : {rho_out['rho']}  (m is measured per batch "
+          "in production -- common.config.deff_from_episodes)")
     dr = rho_out["drift_by_window"]
     if dr.get("windows_fitted"):
         print(f"drift ({dr['freq']})       : r {dr['r_median']} +-{dr['r_spread']} | "

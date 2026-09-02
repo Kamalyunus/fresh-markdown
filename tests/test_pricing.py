@@ -384,36 +384,6 @@ def test_a_feed_with_no_closure_sentinel_reads_unclosed_and_says_so():
     assert pd.isna(episodes.scrap_units(mixed)["a"])
 
 
-def test_closure_and_outcome_are_independent_axes():
-    """`ending == 0` says WHETHER it closed; the UNCLIPPED leftover says with
-    what. Entangling them is how a restocked close read as a clean sell-out:
-    `max(0, starting - sold)` folds `< 0` into `== 0`."""
-    from common import episodes
-
-    d = _last_row_frame([
-        ("scrap",     9, 9, 4, 0),   # closed, leftover +5
-        ("censored",  9, 5, 5, 0),   # closed, leftover  0 -- shelf emptied
-        ("restocked", 9, 3, 7, 0),   # closed, leftover -4 -- stock ARRIVED
-        ("open",      9, 9, 4, 5),   # not closed
-    ])
-
-    out = episodes.close_outcome(d)
-    assert out["scrap"] == episodes.CLOSE_SCRAP
-    assert out["censored"] == episodes.CLOSE_CENSORED
-    assert out["restocked"] == episodes.CLOSE_RESTOCK
-    # the outcome axis does not consult closure at all
-    assert out["open"] == episodes.CLOSE_SCRAP
-
-    kind = episodes.classify(d)
-    assert kind["restocked"] == episodes.COMPLETED       # it DID close
-    assert kind["censored"] == episodes.SOLD_OUT_EARLY
-    assert kind["open"] == episodes.NOT_CLOSED
-
-    # ...but HOW MUCH it scrapped is unknowable, and that is what gates
-    assert pd.isna(episodes.scrap_units(d)["restocked"])
-    assert episodes.scrap_units(d)["scrap"] == 5
-
-
 def test_state_rejected_when_planning_horizon_disagrees_with_recorded_one():
     """A window truncated at a date boundary looks exactly like this: the
     caller believes the episode runs longer than the path it supplied."""
@@ -1068,3 +1038,16 @@ def test_dispersion_drift_separates_a_failed_fit_from_a_moved_parameter():
     # and when most windows are unfittable the verdict says THAT, not "drift"
     if drift["r_unusable_share"] > 0.34:
         assert "NOT FITTABLE AT THIS CADENCE" in drift["verdict"]
+
+
+def test_the_tier_epsilon_has_one_home():
+    """Seven modules carried their own 1e-9 for "is this the same tier"."""
+    import inspect
+    from pricing import dp
+    from inference import decide
+    from pipeline import shadow
+    assert dp.TIER_EPS == 1e-9
+    for fn in (dp.feasible_tiers, dp.entry_action_set, dp.solve):
+        assert "1e-9" not in inspect.getsource(fn), fn.__name__
+    assert "TIER_EPS" in inspect.getsource(decide)
+    assert "TIER_EPS" in inspect.getsource(shadow)

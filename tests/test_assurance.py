@@ -347,3 +347,16 @@ def test_icc_survives_a_nan_residual():
     dirty[7] = np.nan
     assert clean > 0.5
     assert intraclass_correlation(dirty, groups) == pytest.approx(clean, abs=0.05)
+
+
+def test_assurance_grades_only_prices_that_were_actually_charged(cfg):
+    """A failed push sold at a price we did not choose. Grading r on it
+    indicts the model for the integration's miss -- the learning path
+    already excluded those; assurance paired every outcome."""
+    from events.pairs import match_pairs
+    decs, outs = _demand_pairs(cfg, 30, r_true=R, seed=4)
+    for o in outs[:10]:
+        o["execution_status"] = "failed"
+    assert len(match_pairs(decs, outs)) == 30
+    assert len(match_pairs(decs, outs, learnable=True)) == 20
+    assert len(assurance._pairs(decs, outs)) == 20

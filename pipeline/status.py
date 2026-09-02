@@ -11,8 +11,8 @@ import argparse
 import json
 import os
 
-from common.config import (RUNTIME_REQUIRED, artifact_mirror_drift,
-                           config_get, load_config)
+from common.config import (OWN_DATA_WEIGHT, RUNTIME_REQUIRED,
+                           artifact_mirror_drift, config_get, load_config)
 from common import provenance
 from common.guardrail import verdict_is_blocking, verdict_is_insufficient
 from pricing import explore
@@ -48,7 +48,7 @@ def _launch_blockers(cfg):
                 "config.yaml")
 
 
-def _bundle(cfg, state):
+def _bundle(state):
     """Do the frozen artifacts form one bundle, unedited since sealing?"""
     if state["verdict"] == "INSUFFICIENT":
         return _row("artifact bundle", NONE, "no stamped artifacts",
@@ -206,7 +206,7 @@ def _prior(cfg):
         return _row("elasticity prior", NONE, "no prior artifact")
     per = prior.get("per_category", {})
     own = sum(1 for v in per.values()
-              if v.get("own_information_weight", 0) >= 0.999
+              if v.get("own_information_weight", 0) >= OWN_DATA_WEIGHT
               and not v.get("wrong_sign"))
     wrong = len(prior.get("wrong_sign_categories", []))
     # a pooled or uniform prior is the DESIGNED outcome, not a failure (9.3/9.5)
@@ -394,7 +394,7 @@ def collect(cfg, root="reports"):
     state = provenance.verify(cfg, provenance.load_seal(cfg))
     rows = [
         _launch_blockers(cfg),
-        _bundle(cfg, state),
+        _bundle(state),
         _mirrors(cfg),
         _config_vs_reports(cfg, root),
         _vintages(cfg, state, reports),

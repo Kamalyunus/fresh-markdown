@@ -192,7 +192,7 @@ def control_arm_noise(d, cfg):
     for metric, worse_high, key in (("scrap_rate", True, "scrap"),
                                     ("margin_rate", False, "margin")):
         smooth = sm[key]
-        basis = guardrail.basis_for(cfg, key)
+        basis = guardrail.basis_for(key)
         # smooth each arm FIRST, then intersect and difference -- monitor's
         # order; anything else measures a floor the live comparison never sees
         t = _smooth(arms["treatment"][metric], smooth)
@@ -238,7 +238,7 @@ def recommend_thresholds(trailing, control_arm, cfg):
                   (c_floor, c_label, "control_arm")) if f is not None]
         threshold = sc[key]
         metric_key = "scrap" if metric == "scrap_rate" else "margin"
-        dev_basis = guardrail.basis_for(cfg, metric_key)
+        dev_basis = guardrail.basis_for(metric_key)
         rec = {"config_key": f"monitoring.stop_conditions.{key}",
                "deterioration_basis": dev_basis,
                "units": guardrail.units_of(dev_basis),
@@ -360,9 +360,9 @@ def guardrail_noise(d, cfg):
     sc = cfg["monitoring"]["stop_conditions"]
     sm = sc["deterioration_smoothing_days"]
     scrap = noise(day.scrap_rate, sm["scrap"],
-                  guardrail.basis_for(cfg, "scrap"))
+                  guardrail.basis_for("scrap"))
     margin = noise(day.margin_rate, sm["margin"],
-                   guardrail.basis_for(cfg, "margin"))
+                   guardrail.basis_for("margin"))
 
     def verdict(block, key):
         """Grades against the TRAILING floor only (pre-A/B basis). Necessary,
@@ -575,7 +575,8 @@ def main():
     if ab["recommended_duration_weeks"]:
         print(f"recommended duration   : {ab['recommended_duration_weeks']} weeks "
               f"({ab['recommended_duration_days']} days) "
-              "-> paste into ab_test.duration_days")
+              "-> the A/B window length is the owner's call; run it at "
+              "least this long (no config key -- it is a calendar decision)")
     elif mde is not None:
         print("NO candidate duration meets the target MDE -- "
               "loosen the MDE or extend the window (design 5.3)")

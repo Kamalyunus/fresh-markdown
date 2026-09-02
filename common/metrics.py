@@ -130,7 +130,7 @@ def fidelity_decomposition(d, cfg, pred_col="predicted_units"):
         pred = g[pred_col].sum()
         return round(float(g.units_sold.sum() / pred), 4) if pred > 0 else None
 
-    at_anchor = d[d.gap.abs() <= tier_step / 2]
+    at_anchor = d[episodes.is_anchor_row(d, tier_step)]
 
     # ratio by distance from the anchor, in tier-width bins
     bins = np.arange(-0.20, 0.225, 0.05)

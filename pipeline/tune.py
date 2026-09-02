@@ -129,7 +129,7 @@ def _close(a, b, rel=1e-3):
 
 # --------------------------------------------------------------- the checks
 
-def _blocks(cfg, backtest, shadow, calibration, root):
+def _blocks(cfg, backtest, shadow, calibration):
     """Invariants that make every other reading meaningful. Checked first."""
     out = []
 
@@ -564,7 +564,7 @@ def collect(cfg, root="reports"):
     missing = [n for n, r in (("backtest", backtest), ("shadow", shadow),
                               ("thresholds", thresholds))
                if r is None]
-    blocks = _blocks(cfg, backtest, shadow, calibration, root)
+    blocks = _blocks(cfg, backtest, shadow, calibration)
     if missing:
         blocks.insert(0, _finding(
             "reports present", BLOCK, ACT, f"missing: {', '.join(missing)}",
@@ -608,7 +608,7 @@ def set_scalar(text, path, value):
     return "".join(lines)
 
 
-def apply(cfg, report, config_path="config.yaml", out_dir="artifacts"):
+def apply(report, config_path="config.yaml", out_dir="artifacts"):
     """Paste the MEASURED values, back up the config, write the decision
     log. OWNER values are never touched."""
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -706,7 +706,7 @@ def main():
                 "\nrefusing to apply: the blocking checks above must pass "
                 "first. Tuning against a stale or unconverged chain writes "
                 "numbers that describe a pipeline nobody ran.")
-        res = apply(cfg, report, args.config)
+        res = apply(report, args.config)
         print(f"\nbacked up   {res['backup']}")
         print(f"decisions   {res['log']}")
         for f_ in res["applied"]:

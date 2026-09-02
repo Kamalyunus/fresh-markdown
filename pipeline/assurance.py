@@ -18,6 +18,7 @@ from scipy.stats import nbinom
 from common.config import (design_effect, intraclass_correlation,
                            load_config)
 from events.store import EventStore
+from events.pairs import match_pairs
 from common.provenance import config_fingerprint
 from pricing import dp as dp_mod
 from pricing.explore import affordable_set
@@ -112,14 +113,11 @@ def reproduction(decisions, cfg):
 
 # -------------------------------------------------------------- 2 · dispersion
 def _pairs(decisions, outcomes):
-    """(decision, outcome) for finalized outcomes that name a known decision."""
-    dec = {d["decision_id"]: d for d in decisions}
-    out = []
-    for o in outcomes:
-        d = dec.get(o.get("decision_id"))
-        if d is not None and o.get("starting_inventory", 0) >= 1:
-            out.append((d, o))
-    return out
+    """Pairs with stock on hand whose push SUCCEEDED: a failed push sold at
+    a price we did not choose, and grading r or rho on it indicts the model
+    for the integration's miss."""
+    return [(d, o) for d, o in match_pairs(decisions, outcomes, learnable=True)
+            if o.get("starting_inventory", 0) >= 1]
 
 
 def dispersion_fit(decisions, outcomes, cfg):

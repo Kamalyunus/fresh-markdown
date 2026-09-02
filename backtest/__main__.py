@@ -51,7 +51,11 @@ def main():
     pol, ep, ledger = policy_replay(d_pred, cfg,
                                     max_episodes=args.policy_episodes,
                                     seed=args.seed, workers=args.workers)
-    tau = derive_tau_initial(ledger, ep, cfg)
+    # the widest launch cell: GLOBAL's std is the widest member's, so the
+    # max over categories is the day-one widest_std whatever the routing
+    tau = derive_tau_initial(
+        ledger, ep, cfg,
+        max(v["std"] for v in prior["per_category"].values()))
 
     out = {
         "population": {

@@ -234,7 +234,7 @@ def train(d, cfg):
     return schema
 
 
-def _solve_level_factors(calib, cfg, model, k_shrink, min_anchor,
+def _solve_level_factors(calib, model, k_shrink, min_anchor,
                          tier_step, max_k, r_lookup):
     """Factors for one fit window (shared by the anchor fit and every schedule
     week). Returns (factors, detail, global_factor), or None when the window
@@ -282,8 +282,7 @@ def _solve_level_factors(calib, cfg, model, k_shrink, min_anchor,
         w = evidence / (evidence + k_shrink)
         return float(np.exp(w * np.log(cell) + (1 - w) * np.log(parent)))
 
-    anchor_all = calib[(calib.total_discount - calib.d_ref).abs()
-                       <= tier_step / 2]
+    anchor_all = calib[episodes.is_anchor_row(calib, tier_step)]
     if len(anchor_all) < min_anchor or anchor_all["mu_ref_hat"].sum() <= 0:
         return None
 
@@ -355,11 +354,10 @@ def fit_level_calibration(d, cfg):
     min_anchor = cfg["baseline_model"]["calibration_min_anchor_rows"]
     k_shrink = cfg["baseline_model"]["calibration_shrinkage_units"]
 
-    fitted = _solve_level_factors(calib, cfg, model, k_shrink, min_anchor,
+    fitted = _solve_level_factors(calib, model, k_shrink, min_anchor,
                                   tier_step, max_k, r_lookup)
     if fitted is None:
-        anchors = len(calib[(calib.total_discount - calib.d_ref).abs()
-                            <= tier_step / 2])
+        anchors = int(episodes.is_anchor_row(calib, tier_step).sum())
         raise RuntimeError(
             f"fit window has only {anchors} anchor rows (need {min_anchor})"
             " -- widen calibration_fit_trailing_weeks")
@@ -376,7 +374,7 @@ def fit_level_calibration(d, cfg):
             scope, w.start_time, weeks_back)
         if not len(window):
             continue
-        f = _solve_level_factors(window.copy(), cfg, model, k_shrink,
+        f = _solve_level_factors(window.copy(), model, k_shrink,
                                  min_anchor, tier_step, max_k, r_lookup)
         if f is None:                       # too thin: hold 1.0, say so
             coverage.append({"week": str(w.start_time.date()),

@@ -7,7 +7,6 @@ constant: uninformative categories shrink to a pooled density measured on the
 right-signed categories. Spec: docs/design.md 5.6; history: docs/learnings.md.
 """
 
-import copy
 
 import numpy as np
 import pandas as pd
@@ -19,7 +18,7 @@ from common import episodes
 from bootstrap.prepare_data import population, split_frames
 
 
-def scored_rows(frame, cfg):
+def scored_rows(frame):
     """ENTRY ROWS -- one per episode, its first hour, before any
     within-episode selection has happened (rule 7; alternatives are gone,
     see learnings.md)."""
@@ -150,7 +149,7 @@ def build_curves(d, cfg, model, grid, window):
     diverge in how they build rows."""
     pc = cfg["posterior"]["prior"]
     frame = population(split_frames(d, cfg)[window], cfg)
-    rows = scored_rows(frame, cfg)
+    rows = scored_rows(frame)
     out = {}
     for cat, g in rows.groupby("category"):
         deff, rho, m = deflation_deff(g, model, cfg)
@@ -209,7 +208,7 @@ def fold_spread(d, cfg, model, grid, folds=3):
         if not len(chunk):
             continue
         sl = train[train.date.astype(str).isin(set(chunk))]
-        rows = scored_rows(sl, cfg)
+        rows = scored_rows(sl)
         for cat, g in rows.groupby("category"):
             if len(g) < 50:
                 continue

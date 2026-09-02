@@ -16,6 +16,7 @@ import pandas as pd
 from common.ab import arm
 from common.config import load_config, deff_from_episodes
 from events.store import EventStore
+from events.pairs import match_pairs, decision_day, price_matches
 from pricing.posterior import PosteriorStore
 from pipeline import assurance as assurance_mod
 from pipeline import update as update_mod
@@ -34,28 +35,16 @@ def _still_running(ep):
     return set(kind.index[kind == episodes.NOT_CLOSED])
 
 
-def _decision_day(d):
-    """The TRADING date a decision priced -- the day key every per-day
-    series here shares with update.latest_priced_day. The UTC wall clock is
-    a different day for late hours and split the guardrail's daily series
-    at midnight UTC while IL and the budget were keyed on the trading day."""
-    return str(d.get("date") or pd.Timestamp(d["timestamp"]).date())
-
-
 def business_metrics(decisions, outcomes, cfg):
     if not outcomes:
         return {"note": "no finalized outcomes yet"}
-    dec = {d["decision_id"]: d for d in decisions}
     rows = []
-    for o in outcomes:
-        d = dec.get(o["decision_id"])
-        if not d:
-            continue
+    for d, o in match_pairs(decisions, outcomes):
         rows.append({
             "episode_id": d["episode_id"], "category": d["category"],
             "fc": d["fc"], "sku_id": d["sku_id"],
             "timestamp": d.get("timestamp"),
-            "date": _decision_day(d),
+            "date": decision_day(d),
             "hours_remaining": d["hours_remaining"],
             "original_price": d["original_price"], "cost": d["cost"],
             "units_sold": o["units_sold"],
@@ -132,14 +121,10 @@ def guardrail_series(decisions, outcomes, cfg):
     hash-LABELLED into arms, so an arm comparison there is
     treatment-vs-treatment: a catalogue-wide deterioration cancels exactly and
     the guardrail cannot fire (design 12)."""
-    dec = {d["decision_id"]: d for d in decisions}
     rows = []
-    for o in outcomes:
-        d = dec.get(o["decision_id"])
-        if not d:
-            continue
+    for d, o in match_pairs(decisions, outcomes):
         rows.append({
-            "date": _decision_day(d),
+            "date": decision_day(d),
             "timestamp": d["timestamp"],
             "episode_id": d["episode_id"],
             "arm": arm(d["sku_id"], d["fc"], cfg["ab_test"]["allocation"]),
@@ -242,7 +227,7 @@ def guardrail_series(decisions, outcomes, cfg):
                                  for k, v in overall.margin_rate.dropna().items()}}
     for metric, worse_high, key in (("scrap_rate", True, "scrap"),
                                     ("margin_rate", False, "margin")):
-        dev_basis = guard.basis_for(cfg, key)
+        dev_basis = guard.basis_for(key)
         dev, basis, note = deterioration(metric, worse_high, smoothing[key],
                                          dev_basis)
         out[f"{key}_deterioration"] = {
@@ -339,16 +324,12 @@ def learning_metrics(decisions, posterior, cfg, outcomes=()):
 
 def safety_metrics(store, decisions, outcomes):
     matched = {o["decision_id"] for o in outcomes}
-    mismatches, compared = 0, 0
     dec = {d["decision_id"]: d for d in decisions}
+    pairs = match_pairs(decisions, outcomes)
+    compared = len(pairs)
+    mismatches = sum(1 for d, o in pairs if not price_matches(d, o))
     expected_denom, realised_denom = 0.0, 0.0
-    for o in outcomes:
-        d = dec.get(o["decision_id"])
-        if not d:
-            continue
-        compared += 1
-        if abs(o["applied_price"] - d["applied_price"]) > 1e-6:
-            mismatches += 1
+    for d, o in pairs:
         expected_denom += d["expected_denominator"]
         realised_denom += d["original_price"] * o["units_sold"]
     n_out = max(len(outcomes), 1)

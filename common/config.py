@@ -96,6 +96,11 @@ def reference_discount(cfg, category):
     return float(table.get(key, table["_default"]))
 
 
+# a category's prior is "own data" when the pooled term carries nothing:
+# estimate_prior labels it and status counts it on this one threshold
+OWN_DATA_WEIGHT = 0.999
+
+
 def intraclass_correlation(residuals, groups, clip_max=0.95):
     """One-way random-effects ICC -- the ONE home for rho.
 

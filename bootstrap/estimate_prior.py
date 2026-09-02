@@ -15,7 +15,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from common.config import load_config
+from common.config import OWN_DATA_WEIGHT, load_config
 from common.provenance import stamp
 from bootstrap.prepare_data import population, split_frames
 from bootstrap.train_baseline import BaselineModel
@@ -33,7 +33,7 @@ def _episodes_per_week(d, cfg):
     return {str(k): round(float(v), 1) for k, v in per.items()}
 
 
-def estimate_prior(d, cfg, seed=0, fast=False):
+def estimate_prior(d, cfg, fast=False):
     """The prior as a density per category, with its own evidence attached."""
     pc = cfg["posterior"]["prior"]
     model = BaselineModel(cfg)
@@ -104,7 +104,7 @@ def _print(prior):
     for cat, v in prior["per_category"].items():
         note = ("WRONG SIGN -- pooled" if v.get("wrong_sign")
                 else "NO PRICE VARIATION -- pooled" if "no_price_variation" in v
-                else "own data" if v["own_information_weight"] >= 0.999
+                else "own data" if v["own_information_weight"] >= OWN_DATA_WEIGHT
                 else f"{v['own_information_weight']:.0%} own, rest pooled")
         u2 = v.get("unconstrained_argmax") or {}
         peak = max(u2.values()) if u2 else float("nan")
@@ -127,7 +127,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--config", default="config.yaml")
-    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--fast", action="store_true",
                     help="skip the diagnostics that cannot move the "
                          "calibration<->dispersion fixed point (~70% of the "
@@ -138,7 +137,7 @@ def main():
 
     cfg = load_config(args.config)
     d = pd.read_parquet(args.input)
-    prior = estimate_prior(d, cfg, seed=args.seed, fast=args.fast)
+    prior = estimate_prior(d, cfg, fast=args.fast)
 
     stamp(prior, cfg, BaselineModel(cfg).version, "bootstrap.estimate_prior")
     path = cfg["posterior"]["prior"]["path"]

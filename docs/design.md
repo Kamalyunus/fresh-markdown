@@ -981,7 +981,7 @@ artifact:
 The schedule runs through the whole extract (production re-fits weekly and
 a forward replay at week *k* legitimately reads weeks < *k* — no
 look-ahead). But a factor re-fit *inside* the graded window has read the
-rows it is graded on, so `backtest.fidelity` calls
+rows it is graded on, so `backtest.replay.fidelity` calls
 `model.freeze_calibration_from(gate_start)` and prices the graded window
 off the anchor, reporting the mechanism reading beside it as
 `fidelity.weekly_refit`. The spread between them is what weekly re-fitting

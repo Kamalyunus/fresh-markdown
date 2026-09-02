@@ -88,10 +88,6 @@ class SpreadLedger:
             self._chunks.append(np.asarray(self._buf, dtype=np.float64))
             self._buf = []
 
-    def sink(self, day):
-        """A one-argument callable for `inference.decide(spread_sink=...)`."""
-        return lambda costs: self.add(day, costs)
-
     def _build(self):
         if self._buf:
             self._chunks.append(np.asarray(self._buf, dtype=np.float64))

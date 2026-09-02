@@ -195,7 +195,7 @@ def test_owner_values_are_never_written(cfg, tmp_path):
 
     work = tmp_path / "config.yaml"
     work.write_text(open(os.path.join(ROOT, "config.yaml")).read())
-    res = tune.apply(c, rep, str(work), out_dir=str(tmp_path / "out"))
+    res = tune.apply(rep, str(work), out_dir=str(tmp_path / "out"))
     written = yaml.safe_load(work.read_text())
     assert written["exploration"]["tau_initial"] == 1234.5
     assert (written["ab_test"]["min_detectable_effect_pct"]
@@ -316,7 +316,7 @@ def test_apply_names_the_minimum_rerun_and_never_asks_for_a_retrain(
     work.write_text(open(os.path.join(ROOT, "config.yaml")).read())
 
     rep = tune.collect(c, str(reports))
-    res = tune.apply(c, rep, str(work), out_dir=str(tmp_path / "out"))
+    res = tune.apply(rep, str(work), out_dir=str(tmp_path / "out"))
 
     # runtime-only values require nothing; the message must not send anyone
     # back to the bootstrap
@@ -531,7 +531,7 @@ def test_a_not_run_measurement_is_an_act_never_silence(cfg, tmp_path):
     # and the paster refuses it instead of writing "None" into config.yaml
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(open(os.path.join(ROOT, "config.yaml")).read())
-    log = tune.apply(cfg, rep, config_path=str(cfg_path),
+    log = tune.apply(rep, config_path=str(cfg_path),
                      out_dir=str(tmp_path / "art"))
     text = cfg_path.read_text()
     assert "information_increment: None" not in text

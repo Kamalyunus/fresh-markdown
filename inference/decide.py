@@ -50,7 +50,7 @@ def validate_state(s, tiers, anchor_discount, mu_ref_path):
             f"{s['hours_remaining']}: the planning horizon and the recorded "
             "horizon must be the same window")
     if anchor_discount is not None and tiers \
-            and not any(d >= anchor_discount - 1e-9 for d in tiers):
+            and not any(d >= anchor_discount - dp_mod.TIER_EPS for d in tiers):
         failures.append("no feasible tier at or below the current anchor price")
     return failures
 

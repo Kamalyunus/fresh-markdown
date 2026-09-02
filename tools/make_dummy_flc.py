@@ -28,6 +28,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from pricing.dp import TIER_EPS
+
 # --------------------------------------------------------------------------
 # Catalog definition. Reference discounts mirror config.yaml's reference_discount.
 # --------------------------------------------------------------------------
@@ -173,7 +175,7 @@ def randomized_discount_path(entry_d, n_hours, d_max, rng, tier=0.025):
     d = entry_d
     for h in range(n_hours):
         if h >= 1 and rng.random() < 0.35:
-            deeper = np.arange(d + tier, d_max + 1e-9, tier)
+            deeper = np.arange(d + tier, d_max + TIER_EPS, tier)
             if len(deeper):
                 # bias toward the deep end: information scales with (log ratio)^2
                 w = np.linspace(1.0, 3.0, len(deeper))

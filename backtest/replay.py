@@ -46,7 +46,7 @@ def _attach_predictions(d, cfg, model, prior, r_lookup):
     return d
 
 
-def _fidelity_metrics(d, cfg):
+def _fidelity_metrics(d):
     err = d.predicted_units - d.units_sold
     nz = d[d.units_sold > 0]
     return {
@@ -74,7 +74,7 @@ def level_mix_decomposition(d, cfg):
     tier_step = cfg["pricing"]["tier_step"]
     min_unit_rows = cfg["baseline_model"]["mix_decomposition_min_unit_rows"]
 
-    a = d[(d.total_discount - d.d_ref).abs() <= tier_step / 2].copy()
+    a = d[episodes.is_anchor_row(d, tier_step)].copy()
     if not len(a) or a.predicted_units.sum() <= 0:
         return "NOT RUN -- no anchor rows"
     a["week"] = pd.to_datetime(a.date).dt.to_period("W").astype(str)
@@ -156,7 +156,7 @@ def calibration_window_sweep(d, cfg):
     tier_step = cfg["pricing"]["tier_step"]
     windows = cfg["baseline_model"]["calibration_window_sweep_weeks"]
 
-    a = d[(d.total_discount - d.d_ref).abs() <= tier_step / 2].copy()
+    a = d[episodes.is_anchor_row(d, tier_step)].copy()
     if not len(a):
         return "NOT RUN -- no anchor rows"
     a["week"] = pd.to_datetime(a.date).dt.to_period("W")
@@ -313,7 +313,7 @@ def fidelity(d, cfg, model, prior, r_lookup):
     if not len(gate_d) or gate_d.predicted_units.sum() <= 0:
         gate_d, gate_window = d, "all (configured gate window empty)"
 
-    block = _fidelity_metrics(gate_d, cfg)
+    block = _fidelity_metrics(gate_d)
     sold_ratio = block["fidelity_episode_sold_ratio"]
     block["gate_window"] = gate_window
     block["by_window"] = {
@@ -336,7 +336,7 @@ def fidelity(d, cfg, model, prior, r_lookup):
     if "sku_ref_sales_rate_30d" in gate_d.columns:
         tier_step = cfg["pricing"]["tier_step"]
         anchor_rows = gate_d[
-            (gate_d.total_discount - gate_d.d_ref).abs() <= tier_step / 2]
+            episodes.is_anchor_row(gate_d, tier_step)]
         has_hist = anchor_rows.sku_ref_sales_rate_30d.notna()
 
         def _ratio(g):
@@ -847,7 +847,7 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
     return block, ep, ledger
 
 
-def derive_tau_initial(ledger, ep, cfg):
+def derive_tau_initial(ledger, ep, cfg, launch_std):
     """Section 12.3: tau_initial is the currency amount (never a rate) whose
     implied daily exploration spend matches budget_share_of_il of daily
     markdown IL. Reports 1.00x by construction -- evidence a tau EXISTS, not
@@ -858,8 +858,10 @@ def derive_tau_initial(ledger, ep, cfg):
     # the launch constant solves against the window's MEAN daily IL;
     # production budgets on the trailing basis and tau_next walks tau with it
     daily_il = pd.DataFrame(ep).groupby("date")["actual_il"].sum()
-    budget_per_day = float(cfg["exploration"]["budget_share_of_il"]
-                           * daily_il.mean())
+    # production's own budget rule at the launch posterior width -- the
+    # bare share ignored the std scale and disagreed with day one whenever
+    # the launch prior is narrower than budget_scale_ref_std
+    budget_per_day = float(explore.budget_today(daily_il.mean(), launch_std, cfg))
     n_days = len(ledger.days)
     tau = ledger.solve_tau(budget_per_day, n_days=n_days)
     if tau is None:
@@ -873,9 +875,11 @@ def derive_tau_initial(ledger, ep, cfg):
             "implied_daily_spend": round(
                 ledger.implied_daily_spend(tau, n_days), 1),
             "daily_budget": round(budget_per_day, 1),
-            "budget_basis": ("window mean daily IL for this launch constant; "
-                             "production budgets on the trailing "
-                             "budget_il_window_days mean"),
+            "budget_scale_std": round(float(launch_std), 4),
+            "budget_basis": ("explore.budget_today at the widest launch prior "
+                             "std on the window's mean daily IL; production "
+                             "budgets on the trailing budget_il_window_days "
+                             "mean"),
             "cost_distribution_quantile": round(ledger.quantile_of(tau), 4),
             "spread_decisions": ledger.decisions,
             "basis": ("every decision hour on the exploit-only replay path. "

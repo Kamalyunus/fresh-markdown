@@ -705,7 +705,7 @@ def test_the_prior_entry_row_is_the_first_HOUR_not_the_lowest_clock_time(cfg):
               ending_inventory=4, category="VEG", subcategory="LEAFY",
               original_price=1e4, cost=4e3, fc="F1", d_ref=0.30)
 
-    row = scored_rows(ep, cfg)
+    row = scored_rows(ep)
     assert len(row) == 1
     assert (row.date.iloc[0], int(row.hour_of_day.iloc[0])) == ("2026-07-01", 22)
     assert row.total_discount.iloc[0] == 0.10      # the entry price, not 0.25

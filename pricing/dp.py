@@ -21,6 +21,11 @@ import numpy as np
 
 from pricing.demand import mu_at, nb_pmf_vector
 
+# float noise on the discount grid: tiers are round(k * step, 6), so two
+# discounts closer than this ARE the same tier. Every "is this on / at /
+# below a tier" comparison in the repo uses this one epsilon.
+TIER_EPS = 1e-9
+
 
 def feasible_tiers(original_price, cost, tier_step):
     """{k * tier_step : 0 <= k * tier_step <= d_max}, ascending discounts.
@@ -33,7 +38,7 @@ def feasible_tiers(original_price, cost, tier_step):
     d_max = 1.0 - cost / original_price
     if d_max < 0:
         return [], d_max
-    n = int(np.floor(d_max / tier_step + 1e-9))
+    n = int(np.floor(d_max / tier_step + TIER_EPS))
     tiers = [round(k * tier_step, 6) for k in range(n + 1)]
     return [d for d in tiers if d < 1.0], d_max
 
@@ -62,10 +67,10 @@ def entry_action_set(tiers, d_ref, d_max, pcfg):
     allowed = []
     for offset in pcfg["entry_offsets"]:
         target = d_ref + offset
-        if target < -1e-9 or target > d_max + 1e-9:
+        if target < -TIER_EPS or target > d_max + TIER_EPS:
             continue
         j = min(range(len(tiers)), key=lambda i: abs(tiers[i] - target))
-        if abs(tiers[j] - target) <= step / 2 + 1e-9 and j not in allowed:
+        if abs(tiers[j] - target) <= step / 2 + TIER_EPS and j not in allowed:
             allowed.append(j)
     if not allowed:
         allowed = [len(tiers) - 1]
@@ -145,7 +150,7 @@ def solve(original_price, cost, q0, mu_ref_path, d_ref, epsilon, r, cfg,
     else:
         if anchor_discount is None:
             raise ValueError("hourly decision requires anchor_discount")
-        allowed = [j for j, d in enumerate(tiers) if d >= anchor_discount - 1e-9]
+        allowed = [j for j, d in enumerate(tiers) if d >= anchor_discount - TIER_EPS]
         if not allowed:
             raise ValueError("no feasible tier at or below the current anchor price")
 

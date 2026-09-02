@@ -355,6 +355,8 @@ def add_ref_rate_features(d, cfg):
     window = cfg["baseline_model"]["ref_rate_window_days"]
 
     d = d.copy()
+    # its OWN band (ref_rate_anchor_band), wider than episodes.is_anchor_row's
+    # half-tier on purpose: a demand-rate feature wants more hours
     anchor = ((d.total_discount - d.d_ref).abs() <= band + 1e-9) \
         & (d.starting_inventory >= 1)
     day = (pd.DataFrame({

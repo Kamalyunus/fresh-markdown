@@ -20,6 +20,7 @@ from scipy.stats import nbinom
 from common.config import load_config, deff_from_episodes
 from common import episodes
 from events.store import EventStore
+from events.pairs import match_pairs, decision_day, is_learnable, price_matches
 from pricing import explore
 from pricing.posterior import PosteriorStore, bounded_step
 
@@ -34,13 +35,11 @@ def collect_batch(store, posterior, cfg):
     outcomes = store.load_outcomes()
 
     unmatched = [o for o in outcomes if o["decision_id"] not in decisions]
-    matched = [o for o in outcomes if o["decision_id"] in decisions]
+    pairs = match_pairs(decision_list, outcomes)
     n_events = max(len(outcomes), 1)
 
-    mismatch = sum(
-        1 for o in matched
-        if abs(o["applied_price"] - decisions[o["decision_id"]]["applied_price"])
-        > 1e-6) / max(len(matched), 1)
+    mismatch = (sum(1 for d, o in pairs if not price_matches(d, o))
+                / max(len(pairs), 1))
     dup_or_unmatched = (store.duplicate_counts["decision"]
                         + store.duplicate_counts["outcome"]
                         + len(unmatched)) / n_events
@@ -58,17 +57,16 @@ def collect_batch(store, posterior, cfg):
     }
 
     per_cell = {}
-    for o in matched:
+    for dec, o in pairs:
         if posterior.is_processed(o["outcome_id"]):
             continue
-        dec = decisions[o["decision_id"]]
         if not dec["is_exploration"]:      # MVP: exploration outcomes only
             continue
         ratio = (1 - dec["applied_discount"]) / (1 - dec["reference_discount"])
         ok = (dec["reference_mu"] > 0 and dec["dispersion_r"] > 0
               and ratio > 0 and all(math.isfinite(x) for x in
                                     (dec["reference_mu"], dec["dispersion_r"], ratio)))
-        if not ok or o.get("execution_status") not in (None, "ok", "success"):
+        if not ok or not is_learnable(o):
             continue
         cell = posterior.cell_name(dec["category"])
         per_cell.setdefault(cell, []).append((dec, o, ratio))
@@ -168,10 +166,8 @@ def latest_priced_day(decisions, outcomes):
     ratcheted tau up 25% a day on that basis, and `tau_calibrated_through`
     then guaranteed the other 23 hours were never priced at all.
     """
-    dec = {d["decision_id"]: d for d in decisions}
-    days = [str(dec[o["decision_id"]]["date"]) for o in outcomes
-            if o.get("decision_id") in dec and o.get("finalized_at")
-            and dec[o["decision_id"]].get("date")]
+    days = [decision_day(d) for d, o in match_pairs(decisions, outcomes)
+            if o.get("finalized_at")]
     return max(days) if days else None
 
 
@@ -180,14 +176,11 @@ def daily_exploration_spend(decisions, outcomes):
     by the tau controller and the monitor's stop condition, on the same day
     key `latest_priced_day` uses, so the correction and its backstop cannot
     drift apart. Counts a forced decision once its outcome has finalized."""
-    dec = {d["decision_id"]: d for d in decisions}
     by_day = {}
-    for o in outcomes:
-        d = dec.get(o["decision_id"])
-        if (not d or not d.get("is_exploration") or not o.get("finalized_at")
-                or not d.get("date")):
+    for d, o in match_pairs(decisions, outcomes):
+        if not d.get("is_exploration") or not o.get("finalized_at"):
             continue
-        day = str(d["date"])
+        day = decision_day(d)
         by_day[day] = by_day.get(day, 0.0) + float(d["exploration_cost"])
     return by_day
 

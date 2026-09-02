@@ -4,7 +4,6 @@ Read them together: delta_min is set from the LARGEST, and each one alone
 understates in a different way.
 """
 import json
-import sys
 
 import numpy as np
 import yaml

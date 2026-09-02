@@ -15,12 +15,13 @@ COMPLETED = "completed"
 SOLD_OUT_EARLY = "sold_out_early"
 NOT_CLOSED = "not_closed"
 
-# WHAT THE CLOSE WAS -- decided by the SIGN of the unclipped last-row leftover.
-# A separate axis from the one above, on purpose: an episode can be censored
-# and unclosed at once, and one three-way label could not say so.
-CLOSE_SCRAP = "scrap"                    # leftover > 0
-CLOSE_CENSORED = "censored"              # leftover == 0
-CLOSE_RESTOCK = "final_hour_restock"     # leftover < 0 -- same name as the DP gate
+
+def is_anchor_row(d, tier_step):
+    """Rows priced AT the reference discount (within half a tier): the level
+    fit, the fidelity anchor ratio and the gate's anchor share all mean
+    this one mask. (`ref_rate_anchor_band` in prepare_data is a wider,
+    separately configured band for the demand-rate features.)"""
+    return (d.total_discount - d.d_ref).abs() <= tier_step / 2
 
 
 def trailing_weeks_window(d, week_start, weeks_back):
@@ -328,19 +329,6 @@ def _last_index(last):
     return last.episode_id.to_numpy() if "episode_id" in last else last.index
 
 
-def close_outcome(last):
-    """What the close WAS, from the sign of the unclipped last-row leftover.
-
-    Orthogonal to `classify_last` (whether it closed at all) -- independent
-    axes, so a censored close on a still-running window is expressible.
-    """
-    net = net_leftover(last.starting_inventory, last.units_sold).to_numpy()
-    return pd.Series(np.where(net > 0, CLOSE_SCRAP,
-                              np.where(net == 0, CLOSE_CENSORED,
-                                       CLOSE_RESTOCK)),
-                     index=_last_index(last))
-
-
 def classify_last(last):
     """Did the episode CLOSE, and with what, from a frame of FINAL rows.
 
@@ -372,81 +360,6 @@ def scrap_units(d):
     """
     flow = episode_flow(d)
     return flow.scrap.astype(float).where(flow.eligible, np.nan)
-
-
-def _unknown_by(last, kind, left, by, top=8):
-    """Unclosed episodes and the units they hold, grouped by month or category.
-
-    Months in order; categories by units descending, capped at `top`, with the
-    remainder folded into `other` rather than dropped.
-    """
-    ids = last.episode_id.to_numpy() if "episode_id" in last else last.index
-    key = (pd.Series(pd.to_datetime(last.date).dt.strftime("%Y-%m").to_numpy(),
-                     index=ids) if by == "month"
-           else pd.Series(last[by].astype(str).to_numpy(), index=ids))
-    sel = kind == NOT_CLOSED
-    if not sel.any():
-        return {}
-    g = pd.DataFrame({"key": key[sel], "units": left[sel]}).groupby("key")
-    out = [(k, {"episodes": int(len(v)), "leftover_units": int(v.units.sum())})
-           for k, v in g]
-    if by == "month":
-        return dict(sorted(out))
-    out.sort(key=lambda kv: -kv[1]["leftover_units"])
-    head, tail = out[:top], out[top:]
-    if tail:
-        head.append(("other", {
-            "episodes": sum(v["episodes"] for _, v in tail),
-            "leftover_units": sum(v["leftover_units"] for _, v in tail)}))
-    return dict(head)
-
-
-def ending_summary(d):
-    """Share of each ending type, and the scrap at stake in the unknown one."""
-    last = last_rows(d)
-    kind = classify_last(last)
-    left = pd.Series(
-        leftover_units(last.starting_inventory, last.units_sold).to_numpy(),
-        index=last.episode_id.to_numpy())
-    hr = pd.Series(last.hours_remaining.to_numpy(),
-                   index=last.episode_id.to_numpy())
-    counts = kind.value_counts()
-    outcome = close_outcome(last).value_counts()
-    n = max(len(last), 1)
-    return {
-        "episodes": int(len(last)),
-        # Read FIRST: FALSE means the feed is not marking closure at all, and
-        # every episode below reads not_closed -- deliberately, no fallback.
-        "write_off_convention_in_force": write_off_convention(last),
-        # the outcome axis, independent of closure: scrap / censored /
-        # final_hour_restock by the SIGN of the unclipped last-row leftover
-        "close_outcomes": {str(k): int(v) for k, v in outcome.items()},
-        "final_rows_without_closure_sentinel": int(
-            (last.ending_inventory.to_numpy() != 0).sum()),
-        "shares": {k: round(float(counts.get(k, 0)) / n, 4)
-                   for k in (SOLD_OUT_EARLY, COMPLETED, NOT_CLOSED)},
-        "scrap_units_completed": int(left[kind == COMPLETED].sum()),
-        "scrap_units_unknown_not_closed": int(left[kind == NOT_CLOSED].sum()),
-        # WHERE the unknowns sit: last month = extract boundary; one earlier
-        # month = incident; every month = standing feed property; few
-        # categories = a subset whose feed never writes off.
-        "not_closed_by_month": _unknown_by(last, kind, left, "month"),
-        "not_closed_by_category": _unknown_by(last, kind, left, "category"),
-        "share_episodes_ending_by_write_off": round(float(
-            ((kind == COMPLETED) & (left > 0)).mean()), 4),
-        # the diagnostic that caught the original misclassification: if the
-        # counter almost never reaches zero, any rule keyed to it is wrong
-        "share_last_row_counter_at_zero": round(float((hr <= 0).mean()), 4),
-        "share_completed_with_counter_still_positive": round(float(
-            ((kind == COMPLETED) & (hr > 0)).mean()), 4),
-        "last_row_ending_inventory_ever_positive": bool(
-            (last.ending_inventory > 0).any()),
-        "note": ("Scrap = max(0, starting - sold) on the last row, never "
-                 "ending_inventory (zeroed at write-off). Closure is the "
-                 "source's own sentinel, never hours_remaining. Unclosed "
-                 "episodes are KEPT; edge_truncated splits boundary cases "
-                 "from feed problems."),
-    }
 
 
 def extend_to_window(d, feature_cols=(), max_tail_hours=None):

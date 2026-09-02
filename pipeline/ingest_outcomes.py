@@ -55,7 +55,7 @@ def load_failures(path):
             (r.get("reason") or "unspecified") for r in rows}
 
 
-def build_outcomes(decisions, feed, failures=None, now=None):
+def build_outcomes(decisions, feed, failures=None):
     """One outcome per decision, from the feed row for its hour.
 
     Returns (outcomes, report). A decision with no feed row yields no outcome

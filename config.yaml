@@ -35,10 +35,6 @@ data:
   max_window_hours: 120                # SET  upper bound on a plausible FLC window; a longer one is FLAGGED window_too_long, not dropped
   manufacturing_window_hours: 24       # SET  synthetic countdown for SKUs whose flc_window enters already negative
 
-reassessment_gates:                    # SET  phase-0 review gates (design 5.3)
-  max_share_non_explorable: 0.30       # above this, narrow the MVP to the explorable subset
-  max_share_cells_low_variation: 0.50  # above this, expect the prior to degrade toward pooled/uniform (a designed outcome)
-
 baseline_model:
   objective: "tweedie"                 # SET
   tweedie_variance_power: 1.3          # SET
@@ -91,7 +87,6 @@ posterior:
     own_information_saturation: 2.0    # SET  log-lik units that count as informative
     stability_folds: 3                 # SET  disjoint train slices for fold_spread
     search_grid_size: 159              # SET  profile resolution
-    max_rows_per_category: 150000      # SET  row cap per category
     path: "artifacts/prior.json"
 
 pricing:

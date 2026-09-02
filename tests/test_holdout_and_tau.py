@@ -1089,3 +1089,12 @@ def test_the_trailing_fit_window_keeps_episodes_whole_at_the_week_seam():
     assert len(window) == 2 and weeks == 1
     empty, none = episodes.trailing_weeks_window(d, "2026-08-03", 1)
     assert len(empty) == 0 and none == 0
+
+
+def test_anchor_rows_are_one_mask():
+    """Five sites spelled `(total_discount - d_ref).abs() <= tier_step / 2`
+    by hand; the fit, the fidelity ratio and the gate share must agree on
+    what an anchor row is."""
+    d = pd.DataFrame({"total_discount": [0.30, 0.32, 0.33, 0.28],
+                      "d_ref": [0.30] * 4})
+    assert episodes.is_anchor_row(d, 0.05).tolist() == [True, True, False, True]

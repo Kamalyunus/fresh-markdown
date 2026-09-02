@@ -35,7 +35,7 @@ BASIS = {"scrap": RELATIVE,        # strictly positive rate
          "margin": ABSOLUTE_PP}    # can cross zero (relative floor blocked)
 
 
-def basis_for(cfg, metric_key):
+def basis_for(metric_key):
     return BASIS.get(metric_key, RELATIVE)
 
 
