@@ -480,6 +480,78 @@ def _episode_frame(g, unfinished=frozenset()):
     }
 
 
+def _simulate_arm(e, cfg, price_at, eps_world, spread_sink=None):
+    """Forward-simulate one arm under the model's demand with deterministic
+    E[min(D, q)] transitions -- the ONE loop behind the legacy-under-model
+    arm, the DP arm and step_sensitivity's re-solved DP arm (three copies
+    of the clip/shrink/adjustment bookkeeping used to drift apart here).
+    `price_at(t, q_int, anchor)` returns the hour's discount, or None to
+    end the arm. Returns disc_cost, sold, left, shrink (APPLIED), scrap,
+    mean_discount, path."""
+    pcfg = cfg["pricing"]
+    max_k = pcfg["negbin_max_k"]
+    p0, cost = e["original_price"], e["cost"]
+    q, adj, anchor = float(e["q0"]), e["adjustment"], None
+    disc_cost = sold_total = disc_weighted = clip = 0.0
+    path = []
+    for t in range(e["hours"]):
+        q_int = int(round(q))
+        # an empty shelf ends the arm only if nothing more is coming; the DP
+        # never anticipates a delivery -- it learns next hour, as production does
+        if q_int <= 0:
+            path.append(None)
+            clip += max(0.0, -(q + adj[t]))
+            q = max(q + adj[t], 0.0)
+            if q <= 0 and not adj[t + 1:].any():
+                break
+            continue
+        d_t = price_at(t, q_int, anchor)
+        if d_t is None:
+            break
+        anchor = d_t
+        mu = mu_at(e["mu_ref_path"][t], d_t, e["d_ref"], eps_world,
+                   pcfg["demand_floor"])
+        sold = min(expected_min_demand_inventory(mu, e["r"], q_int, max_k), q)
+        disc_cost += p0 * d_t * sold
+        disc_weighted += d_t * sold
+        sold_total += sold
+        path.append(d_t)
+        # a negative adjustment can only take what the SIMULATED shelf still
+        # holds -- units this arm already sold cannot also shrink
+        clip += max(0.0, -(q - sold + adj[t]))
+        q = max(q - sold + adj[t], 0.0)
+    shrink = max(e["shrink"] - clip, 0.0)
+    left = max(q, 0.0)
+    return {"disc_cost": disc_cost, "sold": sold_total, "left": left,
+            "shrink": shrink, "scrap": cost * (left + shrink),
+            "mean_discount": disc_weighted / sold_total if sold_total else 0.0,
+            "path": tuple(path)}
+
+
+def _dp_price(e, cfg, eps_belief, spread_sink=None):
+    """`price_at` for a DP arm: solve at `eps_belief`, hand the Q-spread
+    costs to `spread_sink` at EVERY decision hour (entry-only tau
+    underfunded ~8x) -- on inference.decide's definition and its
+    explorability gate, so the backtest ledger and the shadow ledger are
+    built over the same decision population."""
+    p0, cost = e["original_price"], e["cost"]
+    min_tiers = cfg["exploration"]["min_feasible_tiers"]
+
+    def price_at(t, q_int, anchor):
+        try:
+            res = dp_mod.solve(p0, cost, q_int, list(e["mu_ref_path"][t:]),
+                               e["d_ref"], eps_belief, e["r"], cfg,
+                               anchor_discount=anchor, entry=(t == 0))
+        except ValueError:
+            return None
+        if spread_sink is not None and len(res.q_by_tier) >= min_tiers:
+            _, costs = explore.affordable_set(res, 0.0)
+            spread_sink((e["date"], [c for j, c in costs.items()
+                                     if j != res.optimal_index]))
+        return res.tiers[res.optimal_index]
+    return price_at
+
+
 def _replay_one(e, cfg):
     """One episode's replay: actual path, legacy-under-model arm, DP arm.
     Pure. Returns (row, [(date, q_spread_costs), ...]) or None."""
@@ -500,101 +572,40 @@ def _replay_one(e, cfg):
                if e["outcome_known"] else 0.0)
     a_denom = p0 * float(a_sold.sum())
 
-    # ---- LEGACY path under the MODEL's demand: same generator as the DP arm,
-    # so model bias hits both identically (like-for-like)
-    q = float(e["q0"])
-    adj = e["adjustment"]
-    lg_disc_cost = lg_sold_total = lg_disc_weighted = lg_clip = 0.0
-    for t in range(e["hours"]):
-        q_int = int(round(q))
-        # an empty shelf is not the end if stock is still to arrive
-        if q_int > 0:
-            d_t = float(e["actual_discounts"][t])
-            mu = mu_at(e["mu_ref_path"][t], d_t, e["d_ref"], e["eps"],
-                       pcfg["demand_floor"])
-            sold = min(expected_min_demand_inventory(mu, e["r"], q_int, max_k), q)
-            lg_disc_cost += p0 * d_t * sold
-            lg_disc_weighted += d_t * sold
-            lg_sold_total += sold
-            q -= sold
-        # a negative adjustment can only take what the SIMULATED shelf still
-        # holds -- units this arm already sold cannot also shrink
-        lg_clip += max(0.0, -(q + adj[t]))
-        q = max(q + adj[t], 0.0)
-        if q <= 0 and not adj[t + 1:].any():
-            break
-    # captured before the DP loop reuses `q`
-    lg_q_final = q
-    lg_shrink = max(e["shrink"] - lg_clip, 0.0)
-    lg_scrap = cost * (max(q, 0.0) + lg_shrink)
-
-    # ---- DP path, deterministic expected transitions
-    q = float(e["q0"])
-    anchor = None
-    dp_disc_cost, dp_sold_total, dp_disc_weighted, dp_clip = 0.0, 0.0, 0.0, 0.0
-    for t in range(e["hours"]):
-        q_int = int(round(q))
-        # empty shelf ends the episode only if nothing more is coming; the DP
-        # never anticipates a delivery -- it learns next hour, as production does
-        if q_int <= 0:
-            dp_clip += max(0.0, -(q + adj[t]))
-            q = max(q + adj[t], 0.0)
-            if q <= 0 and not adj[t + 1:].any():
-                break
-            continue
-        try:
-            res = dp_mod.solve(p0, cost, q_int, list(e["mu_ref_path"][t:]),
-                               e["d_ref"], e["eps"], e["r"], cfg,
-                               anchor_discount=anchor, entry=(t == 0))
-        except ValueError:
-            break
-        star = res.optimal_index
-        # spreads collected at EVERY decision hour, not just entry: entry-only
-        # tau underfunded ~8x, invisible here and surfaced only in shadow
-        spreads.append((e["date"], [res.q_by_tier[star] - res.q_by_tier[j]
-                                    for j in res.q_by_tier if j != star]))
-        d_t = res.tiers[star]
-        anchor = d_t
-        mu = mu_at(e["mu_ref_path"][t], d_t, e["d_ref"], e["eps"],
-                   pcfg["demand_floor"])
-        sold = min(expected_min_demand_inventory(mu, e["r"], q_int, max_k), q)
-        dp_disc_cost += p0 * d_t * sold
-        dp_disc_weighted += d_t * sold
-        dp_sold_total += sold
-        dp_clip += max(0.0, -(q - sold + adj[t]))
-        q = max(q - sold + adj[t], 0.0)
-    dp_shrink = max(e["shrink"] - dp_clip, 0.0)
-    dp_scrap = cost * (max(q, 0.0) + dp_shrink)
+    # LEGACY path under the MODEL's demand and the DP path: the same
+    # generator, so model bias hits both identically (like-for-like)
+    lg = _simulate_arm(e, cfg, lambda t, q_int, anchor: float(e["actual_discounts"][t]),
+                       e["eps"])
+    dp = _simulate_arm(e, cfg, _dp_price(e, cfg, e["eps"], spreads.append), e["eps"])
 
     # units emitted as their own fields, never derived downstream from
     # scrap_cost/cost; scrap = leftover + APPLIED shrink. Shrink is exogenous
     # but each simulated arm absorbs only what its own shelf still held --
     # units it already sold cannot also shrink
     a_left = max(e["end_inv"], 0) if e["outcome_known"] else 0
-    lg_left, dp_left = max(lg_q_final, 0.0), max(q, 0.0)
     row = {
         "outcome_known": e["outcome_known"],
         "actual_sold_units": float(a_sold.sum()),
         "actual_leftover_units": float(a_left),
         "actual_scrap_units": float(a_left + (e["shrink"]
                                               if e["outcome_known"] else 0)),
-        "legacy_model_sold_units": float(lg_sold_total),
-        "legacy_model_leftover_units": float(lg_left),
-        "legacy_model_scrap_units": float(lg_left + lg_shrink),
-        "legacy_model_shrink_applied": float(lg_shrink),
-        "dp_sold_units": float(dp_sold_total),
-        "dp_leftover_units": float(dp_left),
-        "dp_scrap_units": float(dp_left + dp_shrink),
-        "dp_shrink_applied": float(dp_shrink),
+        "legacy_model_sold_units": float(lg["sold"]),
+        "legacy_model_leftover_units": float(lg["left"]),
+        "legacy_model_scrap_units": float(lg["left"] + lg["shrink"]),
+        "legacy_model_shrink_applied": float(lg["shrink"]),
+        "dp_sold_units": float(dp["sold"]),
+        "dp_leftover_units": float(dp["left"]),
+        "dp_scrap_units": float(dp["left"] + dp["shrink"]),
+        "dp_shrink_applied": float(dp["shrink"]),
         # per-arm identity: supply = sold + leftover + shrink -- holds by
         # construction, so a nonzero residual is a real defect, not rounding
         "actual_supply_residual": float(
             e["supply"] - a_sold.sum() - a_left
             - (e["shrink"] if e["outcome_known"] else 0)),
         "legacy_model_supply_residual": float(
-            e["supply"] - lg_sold_total - lg_left - lg_shrink),
+            e["supply"] - lg["sold"] - lg["left"] - lg["shrink"]),
         "dp_supply_residual": float(
-            e["supply"] - dp_sold_total - dp_left - dp_shrink),
+            e["supply"] - dp["sold"] - dp["left"] - dp["shrink"]),
         "actual_il": a_disc_cost + a_scrap,
         "actual_discount_cost": a_disc_cost, "actual_scrap_cost": a_scrap,
         "actual_denom": a_denom,
@@ -602,19 +613,17 @@ def _replay_one(e, cfg):
         "actual_mean_discount": float(np.average(
             e["actual_discounts"],
             weights=a_sold if a_sold.sum() else None)),
-        "legacy_model_il": lg_disc_cost + lg_scrap,
-        "legacy_model_discount_cost": lg_disc_cost,
-        "legacy_model_scrap_cost": lg_scrap,
-        "legacy_model_denom": p0 * lg_sold_total,
-        "legacy_model_cleared": lg_sold_total / max(e["supply"], 1),
-        "legacy_model_mean_discount": (lg_disc_weighted / lg_sold_total
-                                       if lg_sold_total else 0.0),
-        "dp_il": dp_disc_cost + dp_scrap,
-        "dp_discount_cost": dp_disc_cost, "dp_scrap_cost": dp_scrap,
-        "dp_denom": p0 * dp_sold_total,
-        "dp_cleared": dp_sold_total / max(e["supply"], 1),
-        "dp_mean_discount": (dp_disc_weighted / dp_sold_total
-                             if dp_sold_total else 0.0),
+        "legacy_model_il": lg["disc_cost"] + lg["scrap"],
+        "legacy_model_discount_cost": lg["disc_cost"],
+        "legacy_model_scrap_cost": lg["scrap"],
+        "legacy_model_denom": p0 * lg["sold"],
+        "legacy_model_cleared": lg["sold"] / max(e["supply"], 1),
+        "legacy_model_mean_discount": lg["mean_discount"],
+        "dp_il": dp["disc_cost"] + dp["scrap"],
+        "dp_discount_cost": dp["disc_cost"], "dp_scrap_cost": dp["scrap"],
+        "dp_denom": p0 * dp["sold"],
+        "dp_cleared": dp["sold"] / max(e["supply"], 1),
+        "dp_mean_discount": dp["mean_discount"],
         "date": e["date"],
         "eps": e["eps"],
         "deepening_threshold": dp_mod.deepening_threshold_epsilon(
@@ -630,49 +639,13 @@ def _replay_one(e, cfg):
 
 
 def _dp_arm(e, cfg, eps_belief, eps_world=None):
-    """The DP arm alone (trace/spreads/other arms stripped), for
-    `step_sensitivity`: the solver prices at `eps_belief` while demand
-    transitions at `eps_world` (default: the same), so a shifted belief is
-    charged only for the prices it changes. Returns (il, mean_discount, path)."""
-    if eps_world is None:
-        eps_world = eps_belief
-    pcfg = cfg["pricing"]
-    max_k = pcfg["negbin_max_k"]
-    p0, cost = e["original_price"], e["cost"]
-    q = float(e["q0"])
-    adj = e["adjustment"]
-    anchor = None
-    disc_cost = sold_total = disc_weighted = clip = 0.0
-    path = []
-    for t in range(e["hours"]):
-        q_int = int(round(q))
-        if q_int <= 0:
-            path.append(None)
-            clip += max(0.0, -(q + adj[t]))
-            q = max(q + adj[t], 0.0)
-            if q <= 0 and not adj[t + 1:].any():
-                break
-            continue
-        try:
-            res = dp_mod.solve(p0, cost, q_int, list(e["mu_ref_path"][t:]),
-                               e["d_ref"], eps_belief, e["r"], cfg,
-                               anchor_discount=anchor, entry=(t == 0))
-        except ValueError:
-            break
-        d_t = res.tiers[res.optimal_index]
-        anchor = d_t
-        mu = mu_at(e["mu_ref_path"][t], d_t, e["d_ref"], eps_world,
-                   pcfg["demand_floor"])
-        sold = min(expected_min_demand_inventory(mu, e["r"], q_int, max_k), q)
-        disc_cost += p0 * d_t * sold
-        disc_weighted += d_t * sold
-        sold_total += sold
-        path.append(d_t)
-        clip += max(0.0, -(q - sold + adj[t]))
-        q = max(q - sold + adj[t], 0.0)
-    # applied shrink only: units this arm already sold cannot also shrink
-    il = disc_cost + cost * (max(q, 0.0) + max(e["shrink"] - clip, 0.0))
-    return il, (disc_weighted / sold_total if sold_total else 0.0), tuple(path)
+    """The DP arm alone, for `step_sensitivity`: the solver prices at
+    `eps_belief` while demand transitions at `eps_world` (default: the
+    same), so a shifted belief is charged only for the prices it changes.
+    Returns (il, mean_discount, path)."""
+    arm = _simulate_arm(e, cfg, _dp_price(e, cfg, eps_belief),
+                        eps_belief if eps_world is None else eps_world)
+    return arm["disc_cost"] + arm["scrap"], arm["mean_discount"], arm["path"]
 
 
 def step_sensitivity(frames, cfg, seed=0, sample=300):
@@ -862,7 +835,7 @@ def derive_tau_initial(ledger, ep, cfg, launch_std):
     # bare share ignored the std scale and disagreed with day one whenever
     # the launch prior is narrower than budget_scale_ref_std
     budget_per_day = float(explore.budget_today(daily_il.mean(), launch_std, cfg))
-    n_days = len(ledger.days)
+    n_days = episodes.calendar_days(pd.DataFrame(ep).date)
     tau = ledger.solve_tau(budget_per_day, n_days=n_days)
     if tau is None:
         return None

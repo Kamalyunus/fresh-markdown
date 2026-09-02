@@ -324,6 +324,7 @@ def test_the_first_shadow_day_carries_the_pre_window_trailing_base(cfg):
         return pd.DataFrame({
             "episode_id": [eid] * 2, "date": [day] * 2, "hour_of_day": [9, 10],
             "total_discount": [0.30] * 2, "original_price": [10_000.0] * 2,
+            "offered_price": [7_000.0] * 2,
             "cost": [4000.0] * 2, "starting_inventory": [start, start - sold],
             "units_sold": [sold, 0], "ending_inventory": [start - sold, end_last],
         })
@@ -354,7 +355,7 @@ def test_a_sold_out_early_episode_still_counts_its_shrink_as_scrap(cfg):
     # sells the last unit -> net leftover 0, closed, SOLD_OUT_EARLY
     d = pd.DataFrame({
         "episode_id": ["e"] * 2, "date": ["2026-08-01"] * 2,
-        "hour_of_day": [9, 10], "total_discount": [0.30] * 2,
+        "hour_of_day": [9, 10], "total_discount": [0.30] * 2, "offered_price": [7_000.0] * 2,
         "original_price": [10_000.0] * 2, "cost": [4000.0] * 2,
         "starting_inventory": [3, 1], "units_sold": [1, 1],
         "ending_inventory": [1, 0],

@@ -24,6 +24,13 @@ def is_anchor_row(d, tier_step):
     return (d.total_discount - d.d_ref).abs() <= tier_step / 2
 
 
+def calendar_days(dates):
+    """Days spanned by `dates`, inclusive, never below 1 -- the one n_days
+    rule for "spend per day" (shadow and the backtest used two)."""
+    ts = pd.to_datetime(pd.Series(dates))
+    return max((ts.max() - ts.min()).days + 1, 1)
+
+
 def week_start(ts):
     """The ISO week (Mon-Sun) holding `ts`, as its Monday."""
     return pd.Timestamp(ts).to_period("W").start_time

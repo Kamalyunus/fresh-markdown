@@ -16,6 +16,7 @@ import pandas as pd
 
 from common.config import load_config, deff_from_episodes, ConfigError
 from common import episodes
+from common import metrics
 from common.io import read_json, write_json
 from common.parallel import map_episodes
 from common.provenance import config_fingerprint
@@ -67,39 +68,10 @@ def pre_window_il_history(d, cfg, before):
     window = int(cfg["exploration"]["budget_il_window_days"])
     lo = (start - pd.Timedelta(days=window)).strftime("%Y-%m-%d")
     hi = start.strftime("%Y-%m-%d")
-    g = d.sort_values(["episode_id", "date", "hour_of_day"])
-    last = g.groupby("episode_id").tail(1)
-    close = last.date.astype(str)
-    last = last[(close >= lo) & (close < hi)]
-    if last.empty:
-        return {}
-    rows = g[g.episode_id.isin(set(last.episode_id))]
-    disc = ((rows.original_price * rows.total_discount * rows.units_sold)
-            .groupby(rows.episode_id).sum())
-    kind = episodes.classify_last(last)
-    leftover = episodes.leftover_units(last.starting_inventory, last.units_sold)
-    # scrap = leftover + shrink, the one definition; `rows` carries every hour
-    # of these episodes, so the shrink is available here
-    shrink = pd.Series(
-        episodes.shrink_by_hour(rows.starting_inventory, rows.units_sold,
-                                rows.ending_inventory,
-                                ~rows.episode_id.duplicated(keep="last")),
-        index=rows.episode_id.to_numpy()).groupby(level=0).sum()
-    scrap = (last.cost.to_numpy()
-             * (leftover.to_numpy()
-                + shrink.reindex(last.episode_id.to_numpy()).fillna(0).to_numpy())
-             * (kind != episodes.NOT_CLOSED).to_numpy())
-    # a NULL unit cost makes IL nan, and nan fails every `>` comparison
-    # downstream -- the budget then reads "within budget -- nanx" instead of
-    # refusing. Drop the episode from the base and let the count show up.
-    scrap = np.where(np.isnan(scrap), 0.0, scrap)
-    closed = (kind != episodes.NOT_CLOSED).to_numpy()
-    out = {}
-    for eid, day, ok, sc in zip(last.episode_id.to_numpy(),
-                                last.date.astype(str).to_numpy(), closed, scrap):
-        if ok:
-            out[day] = out.get(day, 0.0) + float(disc.get(eid, 0.0)) + float(sc)
-    return out
+    econ, _ = metrics.settled(metrics.episode_economics(d))
+    close = econ.close_day.astype(str)
+    econ = econ[(close >= lo) & (close < hi)]
+    return {str(k): float(v) for k, v in econ.groupby("close_day").il.sum().items()}
 
 
 # episodes are independent (tau is fixed; the controller walk is
@@ -213,8 +185,7 @@ def derive_tau0(d_full, cfg, start, model, posterior, r_lookup, il_history,
     if max_episodes and n_pop > max_episodes:
         keep = rng.choice(pre_ids, max_episodes, replace=False)
         pre = pre[pre.episode_id.isin(keep)]
-    n_days = max((pd.Timestamp(pre.date.max())
-                  - pd.Timestamp(pre.date.min())).days + 1, 1)
+    n_days = episodes.calendar_days(pre.date)
     _, groups, items = _prepare_items(pre, cfg, model, r_lookup)
     # tau None: nothing explores, and the ledger does not care -- spreads are
     # recorded before the draw, independent of the tau in force
@@ -381,15 +352,17 @@ def _shadow_one(ep, ctx):
         "would_be_cost": 0.0, "raw_information": 0.0,
         # info is quadratic in the log price move, linear in demand
         "abs_log_ratio": 0.0, "forced_mu": 0.0, "forced_discount_gap": 0.0,
-        "rec_disc": 0.0, "leg_disc": 0.0, "differs": 0,
-        "ep_discount_cost": 0.0, "latencies": [],
+        "rec_disc": 0.0, "leg_disc": 0.0, "differs": 0, "latencies": [],
         # date/cell ride along so the drift ratio can be re-read under a
         # weekly re-fit (a factor swap is an exact rescale of mu)
         "drift": {"mu": [], "r": [], "q": [], "sold": [], "date": [],
                   "cell": []},
-        "last_row": None,
+        # every OBSERVED hour in the prepared-frame vocabulary, so the
+        # budget base is metrics.episode_economics -- the same IL the
+        # guardrail floors and il_pct measure, not a third approximation
+        "hours": [],
     }
-    anchor, last_obs, hours_seen = None, None, []
+    anchor = None
 
     for t in range(n):
         if not ep["is_observed"][t]:      # window tail: no outcome to record
@@ -404,11 +377,16 @@ def _shadow_one(ep, ctx):
         sold = int(ep["units_sold"][t])
         ending = int(ep["ending_inventory"][t])
 
-        # legacy IL, unconditioned on decision success, attributed to close day
-        out["ep_discount_cost"] = out.get("ep_discount_cost", 0.0) + \
-            float(ep["original_price"][t]) * legacy_d * sold
-        last_obs = (q, sold, float(ep["cost"][t]), ending, row_day)
-        hours_seen.append((q, sold, ending))
+        # legacy IL is unconditioned on decision success: recorded here,
+        # before decide() can reject the state
+        out["hours"].append({
+            "episode_id": ep["episode_id"], "date": row_day,
+            "hour_of_day": int(ep["hour_of_day"][t]),
+            "starting_inventory": q, "units_sold": sold,
+            "ending_inventory": ending,
+            "original_price": float(ep["original_price"][t]),
+            "offered_price": float(ep["original_price"][t]) * (1 - legacy_d),
+            "cost": float(ep["cost"][t])})
 
         state = {
             "episode_id": ep["episode_id"], "sku_id": int(ep["sku_id"][t]),
@@ -489,24 +467,6 @@ def _shadow_one(ep, ctx):
 
         anchor = legacy_d                 # reality's price is the next anchor
 
-    # scrap is end-of-episode: keep the final row and classify after the
-    # loop, all episodes together in one frame
-    if last_obs is not None:
-        start, sold_last, unit_cost, ending_last, close_day = last_obs
-        # SCRAP = leftover + shrink (episodes.scrap_units). The budget base
-        # read leftover only, so the day-one budget and tau_recommended were
-        # sized on a smaller IL than the guardrail floors and il_pct measure.
-        starts, solds, endings = (list(x) for x in zip(*hours_seen))
-        is_last = [False] * (len(hours_seen) - 1) + [True]
-        shrink = int(episodes.shrink_by_hour(starts, solds, endings,
-                                             is_last).sum())
-        out["last_row"] = {"episode_id": ep["episode_id"],
-                           "discount_cost": out.get("ep_discount_cost", 0.0),
-                           "starting_inventory": start,
-                           "units_sold": sold_last, "cost": unit_cost,
-                           "ending_inventory": ending_last,
-                           "shrink": shrink,
-                           "close_day": close_day}
     return out
 
 
@@ -567,13 +527,12 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     forced_episode_ids = []
     # markdown IL on the SAME episodes/window as the spend, so budget and
     # spend share a population; accumulated as scalars, not rows
-    il_discount = 0.0
     # Q-spreads for every decision on THIS path, so tau is re-derived on the
     # population that will actually run (not the replay's entry-only one)
     ledger = explore.SpreadLedger()
     # one FINAL row per episode (source ending_inventory, not simulated) so
     # scrap is classified by common.episodes.classify_last, not a copy of it
-    last_rows = []
+    hours = []
     latencies = []
     drift = {"mu": [], "r": [], "q": [], "sold": [], "date": [],
              "cell": []}
@@ -600,11 +559,9 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         latencies.extend(out["latencies"])
         for key in drift:
             drift[key].extend(out["drift"][key])
-        il_discount += out["ep_discount_cost"]
         for day, costs in out["spreads"]:
             ledger.add(day, costs)
-        if out["last_row"] is not None:
-            last_rows.append(out["last_row"])
+        hours.extend(out["hours"])
         # the parent commits through the real store, in episode order, so
         # dedup and quarantine (which the gate measures) run where they ran
         for decision, outcome in out["events"]:
@@ -667,32 +624,22 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     # solves on the exploit-only path, but shadow's anchored path has
     # different affordable sets, so the same tau buys different exploration.
     # Both sides here cover the same episodes over the same days.
-    n_days = max((pd.Timestamp(d.date.max()) - pd.Timestamp(d.date.min())).days + 1, 1)
-    last = pd.DataFrame(last_rows)
-    kind = episodes.classify_last(last)
-    leftover = episodes.leftover_units(last.starting_inventory, last.units_sold)
-    scrap_units = leftover.to_numpy() + last.shrink.to_numpy()
-    # CLOSED, not COMPLETED: a sold-out-early episode (leftover 0) can still
-    # have vanished units mid-window, and episodes.scrap_units counts them.
-    # Gating on COMPLETED zeroed that scrap on the budget base alone.
-    closed_ep = (kind != episodes.NOT_CLOSED).to_numpy()
-    scrap_per_ep = (last.cost.to_numpy() * scrap_units) * closed_ep
-    il_scrap = float(scrap_per_ep.sum())
-    il_unknown_scrap = int((kind == episodes.NOT_CLOSED).sum())
+    n_days = episodes.calendar_days(d.date)
+    # SCRAP = leftover + shrink on settled episodes (episodes.scrap_units);
+    # an unsettled one contributes nothing until it closes, which is what
+    # makes the trailing budget base knowable at the start of each day
+    econ, excluded = metrics.settled(metrics.episode_economics(pd.DataFrame(hours)))
+    il_discount = float(econ.discount_cost.sum())
+    il_scrap = float((econ.cost * econ.scrap).sum())
+    il_unknown_scrap = excluded["episodes_excluded_not_closed"]
     markdown_il = il_discount + il_scrap
-    # a day's realised IL = IL (discount AND scrap) of episodes that CLOSED
-    # that day; unclosed episodes contribute nothing until close, so the
-    # trailing budget base is knowable at the start of each day
-    closed = (kind != episodes.NOT_CLOSED).to_numpy()
-    ep_il = last.discount_cost.to_numpy() + scrap_per_ep
     # pre-window IL seed, SCALED TO THE SAMPLE (it is measured on the full
     # frame; unscaled it inflates the first days' budgets by 1/fraction)
     seed_scale = len(groups) / max(len(population), 1)
     il_by_day = {day: amount * seed_scale
                  for day, amount in (prior_il_by_day or {}).items()}
-    for day, amount, ok in zip(last.close_day.to_numpy(), ep_il, closed):
-        if ok:
-            il_by_day[day] = il_by_day.get(day, 0.0) + float(amount)
+    for day, amount in econ.groupby("close_day").il.sum().items():
+        il_by_day[str(day)] = il_by_day.get(str(day), 0.0) + float(amount)
 
     # production's budget_today, not a simplified one: it scales the share
     # down as the posterior narrows (constant here, but the same quantity
