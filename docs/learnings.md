@@ -69,6 +69,13 @@ now. Dates are owner sign-off, 2026-08.
   elasticity −1.0 → −1.5 moved ρ 0.31 → 0.42 and deff by 26% of the
   learning rate. `fit_dispersion` now reads the prior's means and records
   the basis.
+- **`var(group means)/var(all)` → the ANOVA ICC.** The ratio estimates
+  ρ + (1−ρ)/m, not ρ: on independent hours it returns 1/m (measured 0.164
+  at m = 6), so deff deflated every posterior step by ~1.8× of pure
+  estimator artefact. The frozen fit moved to the ICC first; two copies of
+  the biased form survived in `drift_by_window` and the prior-density
+  deflation, so the drift baseline and the frozen value disagreed by
+  (1−ρ)/m until `common.config.intraclass_correlation` became the one home.
 
 ## Population and data quality
 
@@ -144,8 +151,28 @@ now. Dates are owner sign-off, 2026-08.
   corrects. Fixed by theorem on both paths.
 - **Scrap through a local copy.** An inline scrap rule in the budget base
   dropped ALL scrap on a sentinel-free feed, understated the budget 10× and
-  flipped the verdict to WOULD SUSPEND. Scrap goes through
-  `common.episodes.classify_last`, nowhere else.
+  flipped the verdict to WOULD SUSPEND. Five hand-synced copies of the
+  episode groupby (business metrics, live guardrail, the two noise floors,
+  `il_pct`) were then found kept equal by comments; all of them, and
+  shadow's budget base, now read `common.metrics.episode_economics` over
+  `episodes.scrap_units`.
+- **Day key from the outcome's finalize time → the decision's trading
+  day.** An hour-23 decision finalizes at D+1T00:00Z; keying spend on that
+  put the controller a day ahead of the IL side, graded ONE hour of spend
+  against a full day's budget, ratcheted tau up 25%/day, and
+  `tau_calibrated_through` then guaranteed the other 23 hours were never
+  priced. `events.pairs.decision_day` keys both sides.
+- **Zero spend held tau still → raises it.** "No exploration is an absence
+  of signal" was wrong on a priced day: nothing was affordable, which is
+  the under-spend design 5.8 raises tau on, and the only way a tau cut
+  below the smallest spread ever recovers. Shadow's trace already walked
+  that rule; production held still and the two disagreed on one log.
+- **Backtest tau on its own budget rule → production's.** The backtest
+  solved against the bare `budget_share_of_il` share, collected Q-spreads
+  without `inference.decide`'s explorability gate, and counted `n_days` as
+  days-with-decisions while shadow used the calendar span — three ways for
+  its cross-check to disagree with the value it checks. All three now
+  share production's definitions.
 
 ## Evaluation
 
@@ -160,6 +187,18 @@ now. Dates are owner sign-off, 2026-08.
 - **Per-run counters live on the store; files accumulate.** Reading
   `quarantined_event_count` from the cumulative file made serial and
   parallel runs "disagree".
+- **Two gates on one expression.** Shadow's `matched_decision_rate` was
+  `event_completeness` under a second name and threshold; a gate that
+  cannot disagree with another is not a second check. Dropped.
+- **Rounded for reading, compared for real.** The monitor rounded the
+  price-mismatch rate to 4 dp before the stop condition compared it, while
+  the operator gate compared unrounded — the same log, two answers at the
+  boundary. Stops compare exact counts.
+- **Source-pinned tests.** Dozens of `inspect.getsource` substring
+  assertions failed on identical behaviour whenever a helper was
+  extracted, and blocked the consolidation they were guarding against.
+  Where a behaviour exists it is tested by calling the function; a source
+  assertion is kept only for an architecture ban no behaviour can express.
 
 ## The lesson under all of it
 

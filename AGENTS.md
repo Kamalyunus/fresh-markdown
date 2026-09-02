@@ -92,18 +92,39 @@ And the standing prohibitions:
   secret. Redshift credentials come only from `~/.env` as `REDSHIFT_*` —
   no hostname or credential in config, code, or a commit.
 - Never hand-edit `artifacts/posterior.json` (production learning state).
-- Never re-derive logic that has one home: the population filter
-  (`bootstrap.prepare_data.population`), the window cut
-  (`common.episodes.window_slice`), outcome reconciliation
-  (`common.episodes.adjustment_reason`), scrap
-  (`common.episodes.leftover_units` / `classify_last`), guardrail deviation
-  (`common.guardrail.deviation`), spread accounting
-  (`pricing.explore.SpreadLedger`).
+- Never re-derive logic that has one home. The homes, and what each
+  replaced (a second copy of any of these is a review failure):
+  - population filter — `bootstrap.prepare_data.population`
+  - episode-scoped cuts — `common.episodes.window_slice`,
+    `trailing_weeks_window` (both factor-fit schedules), `week_key`,
+    `calendar_days` (the one `n_days`)
+  - outcome reconciliation — `common.episodes.adjustment_reason`
+  - scrap, IL, margin at episode grain — `common.metrics.episode_economics`
+    (+ `settled`, `daily_rates`) over `common.episodes.scrap_units`;
+    live events enter it through `pipeline.monitor.event_frame`. The
+    floors, the live guardrail, `il_pct`, the business metrics and
+    shadow's budget base all read this one frame
+  - decision↔outcome pairing and the trading day —
+    `events.pairs.match_pairs` (`learnable=` excludes failed pushes),
+    `decision_day`, `price_matches`
+  - anchor rows — `common.episodes.is_anchor_row`
+  - guardrail deviation and verdicts — `common.guardrail.deviation`,
+    `verdict_is_blocking`, `verdict_is_insufficient`
+  - spread accounting — `pricing.explore.SpreadLedger`; the backtest's
+    forward simulation — `backtest.replay._simulate_arm` (+ `_dp_price`)
+  - rho — `common.config.intraclass_correlation`; `m` per batch —
+    `deff_from_episodes`
+  - JSON in/out — `common.io.read_json` / `write_json` (NaN-safe)
+  - the discount-grid epsilon — `pricing.dp.TIER_EPS`; own-data prior
+    weight — `common.config.OWN_DATA_WEIGHT`
+  - pastable config keys — `pipeline.tune.KEYS` (anchor, measured, rerun);
+    the status "not run" prologue — `pipeline.status._needs`
 - Never invent a SET BY OWNER value; never drive a quarantine count to zero
   with a catch-all reason.
 - Quote the sampling caveat with any sampled-run count — a zero over a
   sample is not a proof over the window.
-- `python3 -m pytest tests/` must pass before any push (~3 min).
+- `python3 -m pytest tests/` must pass before any push (~5.5 min; the
+  end-to-end module runs the bootstrap chain in subprocesses).
 
 ## Setup
 
@@ -129,7 +150,10 @@ python3 -m pipeline.shadow --input data/prepared.parquet --out reports/shadow.js
 
 `bootstrap.run` is the whole bootstrap: it runs 1 and 3, then **iterates
 3b–5b until the fixed point CONVERGES**, then 6, 6b, 11 and `status`. It
-exits non-zero if the loop never settles.
+exits non-zero if the loop never settles. The `status` it ends on is
+ADVISORY at that point — `tau_initial` is null and shadow has not run, so
+red rows there are the next steps, not a broken bundle; `status` gates the
+pilot (RUNBOOK), never the bootstrap.
 
 **Why this is not optional.** Steps 3b–5 are one TURN of a fixed-point
 iteration, not three steps in a line: the factor solve consumes `r`, while
@@ -249,6 +273,12 @@ Every paste has one source and one checker:
   submission order and only the parent touches the event store.
 - Each episode draws from its own RNG seeded by episode id — draws are
   order-independent by design.
+- Tests: shared builders live in `tests/conftest.py` (`cfg`,
+  `decision_event`/`outcome_event`, `episode_frame`, `_reports`,
+  `reports_dir`) — extend those, never add a per-file copy. Test a
+  behaviour by calling the function; an `inspect.getsource` assertion is
+  reserved for an architecture ban (no second copy of X, no shared state in
+  a worker) that no behavioural test can express.
 - Synthetic fixtures: `tools/make_dummy_flc.py` (`--policy randomized` =
   recoverable elasticity, `--policy legacy` = the production confound). It
   must keep emitting both source inventory conventions — regenerate the

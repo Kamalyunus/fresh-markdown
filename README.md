@@ -27,7 +27,9 @@ itself is learned in production from IL-budgeted randomized exploration.
 | `inference/decide.py` | 5.10 | State validation (reject, never an unsafe price), decision event emission. |
 | `events/store.py` | 5.10 | Append-only JSONL: dedup, quarantine with reasons, replay. |
 | `pipeline/` | 5.11–5.15 | `update.py` (censored NB grid update, operator gate), `monitor.py`, `shadow.py` (phase-1 harness), `assurance.py` (frozen artifacts vs the live world), `status.py` (exit 1 on FAIL), `tune.py` (the config loop as code), `ingest_outcomes.py` (outcome events built from the hourly feed — the minimal integration), `export_events.py` (decision/outcome tables for the warehouse — derived, never the record). |
-| `common/metrics.py` | 2.3 | `il_pct` and `fidelity_decomposition`, shared by their two consumers. |
+| `common/metrics.py` | 2.3 | `episode_economics` — the one episode-grain IL/scrap/margin frame behind `il_pct`, the noise floors, the live guardrail, the business metrics and shadow's budget base; `fidelity_decomposition`. |
+| `common/io.py` | — | `read_json` / `write_json`: the one NaN-safe way an artifact or report is read and written. |
+| `events/pairs.py` | 5.10 | The one decision↔outcome pairing (`match_pairs`, `learnable=` excludes failed pushes) and the trading-day key (`decision_day`). |
 | `common/parallel.py` | — | `--workers N` for backtest/shadow; reports byte-identical serial or parallel. |
 | `tools/make_dummy_flc.py` | 6 | Synthetic FLC generator (legacy + randomized policies, known ground-truth elasticity); span defaults to covering `data.split`. |
 

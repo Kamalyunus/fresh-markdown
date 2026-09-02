@@ -51,7 +51,9 @@ Then, in order:
      `tau_initial_derivation.tau_initial` (shadow derives it itself on the
      trailing pre-window week, so this paste happens AFTER step 6 and feeds
      the pilot, not the shadow run; a stale or mismatched paste is refused,
-     by design).
+     by design). `python3 -m pipeline.tune` names every paste and its
+     source; a report that could not measure a key reads ACT with no value,
+     and `--apply` refuses to paste it — re-run the report instead.
 4. **Owner sets the `SET BY OWNER` keys** (`scrap_deterioration_pct`,
    `margin_deterioration_pct`, `min_detectable_effect_pct`, and
    `ab_test.active` — leave it `false` until the A/B genuinely starts, or the
@@ -69,8 +71,9 @@ Then, in order:
    `python3 -m pipeline.shadow --input data/prepared.parquet --max-episodes 0`
    for the launch record. It derives its own launch tau on the trailing
    pre-window week (`tau_initial_derivation` in the report — this is the
-   value to paste in step 3 for the pilot). Exit gate: completeness ≥ 99%,
-   matched ≥ 99%, **zero** cost-floor violations. Also read
+   value to paste in step 3 for the pilot). Exit gate: completeness ≥ 99%
+   (outcomes accepted per decision emitted) and **zero** cost-floor
+   violations. Also read
    `exploration_budget.spend_over_budget` (over 2× → do not launch at this
    tau; re-derive) and `tau_controller_trace` — day one is an out-of-sample
    test of the derived tau.
@@ -177,14 +180,16 @@ exactly once per day — a second run in the same day is a no-op, not a bug.
 
 | Line | Response |
 | --- | --- |
-| stop condition fired (overspend >2×, mismatch, duplicates, missing stockout field) | exploration suspends for the cohort automatically; **exploitation pricing continues**. Investigate, don't restart blindly |
+| stop condition fired (overspend >2×, mismatch, duplicates) | exploration suspends for the cohort automatically; **exploitation pricing continues**. Investigate, don't restart blindly |
+| `config mirrors reports` FAIL | a MEASURED paste disagrees with the report that derives it, or the report could not measure it (NOT RUN). `python3 -m pipeline.tune` prints the reason; `--apply` pastes what it can |
+| `guardrail floors` WARN | "insufficient history" — nobody measured the floor, so the stop was not checked. Not a pass: more closed-episode history, then re-run `derive_thresholds` |
 | `assurance · reproduction` FAIL | something moved under the solver (config edit, artifact swap, deploy, library). Diff the bundle first: `artifact bundle` line, then `artifact mirrors` |
-| `artifact mirrors` FAIL | config paste and its source disagree (rho, forced hours). Read the **bundle** line before re-pasting — the stale side is not always config |
+| `artifact mirrors` FAIL | config paste and its source disagree (rho). Read the **bundle** line before re-pasting — the stale side is not always config |
 | `report vintages` FAIL | backtest/shadow report was produced against a model no longer on disk — its gate rows grade a ghost. Re-run that report; do not launch on it |
 | `calibration_coverage` says `STALE FACTORS IN USE` | the weekly re-fit was missed: the schedule ran out and rows were priced on frozen factors. Re-run `--fit-calibration`, re-seal, re-run the report |
 | posterior std flat ≥ alert days | the loop is dead: no committed update. Check batch age, tau, volumes — in that order |
 | guardrail breach (scrap/margin, 2 consecutive days) | business decision, not a code fix — escalate to the owner with the monitor's arm comparison |
-| `INSUFFICIENT` verdicts | not a pass. A thin window said so; widen or wait |
+| `INSUFFICIENT` verdicts | not a pass. A thin window said so; widen or wait. Assurance's top line stays `INSUFFICIENT` until every check ran |
 
 **Never** hand-edit `artifacts/posterior.json`, re-derive filter logic
 outside `prepare_data.population`, or drive a quarantine count to zero by

@@ -23,7 +23,7 @@ are worth reading as the specification.
 
 | File | What to verify |
 | --- | --- |
-| `pipeline/update.py` | Only exploration outcomes are eligible; the censored NB likelihood on the grid; information in NB units (`μL²·r/(r+μ)`) deflated by deff; the trigger evaluates the **unconsumed batch**, never a running counter; `predictive_check` scores the batch against the pre-update posterior; tau calibrates on spend, exactly once per day |
+| `pipeline/update.py` | Only exploration outcomes are eligible; the censored NB likelihood on the grid; information in NB units (`μL²·r/(r+μ)`) deflated by deff; the trigger evaluates the **unconsumed batch**, never a running counter; `predictive_check` scores the batch against the pre-update posterior; tau calibrates on spend, exactly once per day, keyed by the decision's TRADING day (`events.pairs.decision_day`, never the outcome's UTC finalize time), and zero spend on a priced day raises it — under-spend, not absence of signal |
 | `pricing/posterior.py` | The bounded step (mean ≤ 0.15, std shrink ≤ 25%, floored); revision + consumed outcome IDs commit in **one atomic write** — a crash between them cannot double-count; re-applying with nothing new is a verified no-op |
 
 The review question: *can evidence be spent twice, or a belief move more
@@ -42,8 +42,12 @@ population every other number is measured on, and its rules are
 cross-checked against the docs by `test_docs_match_the_code.py`.
 
 `common/` is shared definitions (episodes, config loading, guardrail
-comparison); read `common/episodes.py` if you touch anything that counts
-inventory — it is the single source of closure/scrap/censoring truth.
+comparison, JSON I/O); read `common/episodes.py` if you touch anything that
+counts inventory — it is the single source of closure/scrap/censoring truth
+— and `common/metrics.py::episode_economics`, the one episode-grain frame
+every IL, scrap and margin figure (floors, live guardrail, `il_pct`,
+business metrics, shadow's budget base) is built on. `events/pairs.py` is
+the one decision↔outcome pairing.
 
 ## Out of review scope
 
@@ -51,5 +55,5 @@ inventory — it is the single source of closure/scrap/censoring truth.
 reviewers' asset, not their burden: every non-obvious rule named above has a
 test whose docstring states it in prose.
 
-CI runs `python3 -m pytest tests/` (~3 min) and `python3 -m pipeline.status`
+CI runs `python3 -m pytest tests/` (~5.5 min) and `python3 -m pipeline.status`
 on deploy (exit code 1 on any FAIL).

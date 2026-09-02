@@ -558,9 +558,14 @@ tends to 1 as history accumulates, so a day at ten times budget moves τ by
 `monitoring.exploration_cost_vs_budget` compares the same two numbers by
 design, the backstop goes blind at exactly the same rate. `il_by_close_day`
 (monitor) and `daily_exploration_spend` (update) are the one definition of
-each side; `pipeline.shadow`'s controller trace walks the same arithmetic, so
-"would the pilot survive its first week" grades the controller production
-actually runs. The
+each side, both keyed by the decision's TRADING day
+(`events.pairs.decision_day`) — never the outcome's UTC finalize time,
+which for an hour-23 decision is D+1 and put the controller a day ahead of
+the IL side. Zero realised spend on a priced day is under-spend, not
+absence of signal: nothing was affordable, τ rises by the clip, and that is
+the only way a τ cut below the smallest spread recovers. `pipeline.shadow`'s
+controller trace walks the same arithmetic, so "would the pilot survive its
+first week" grades the controller production actually runs. The
 calibration commits inside `pipeline.update --apply` — τ moves on
 **spend**, not evidence, exactly once per day (`tau_calibrated_through`).
 τ persists in the posterior artifact; `exploration.tau_initial` is only the
@@ -654,7 +659,8 @@ takes moments.
   which binds first, and `backtest.step_sensitivity` prices the step on
   real episodes (re-solving the DP at ε ± step). A human approves each
   day's update; the apply refuses while event-quality gates fail
-  (duplicates/unmatched > 1%, price mismatch > 1%) or when
+  (duplicates/unmatched > 1%, price mismatch > 1% — compared on exact
+  counts, never the rounded rate the report prints) or when
   `calibration_current` finds the factor schedule no longer reaches the
   week being priced (a missed weekly re-fit silently reverts production to
   stale factors).
@@ -686,16 +692,16 @@ affected cohort — exploitation pricing continues**.
 Runs the complete production decision path against live data while legacy
 keeps pricing: state from reality (the anchor entering hour *t* is the
 legacy price from *t−1*), full decision events logged, outcomes stamped
-ineligible for learning. Exit gate: event completeness > 99%, matched
-decision rate > 99%, **zero** cost-floor violations.
+ineligible for learning. Exit gate: event completeness > 99% (outcomes
+accepted per decision emitted; the gap is quarantine plus duplicates) and
+**zero** cost-floor violations.
 
 **The hold-out run is the DEFAULT.** `data.holdout` names a window after
 `test_end` that no artifact was fit on and no gate was decided on; shadow
 runs it with no flag. Every other window grades something fitted to it.
 `--all` sweeps the whole extract and stamps `shadow_gate.in_sample_caveat`
 naming which numbers it flatters (drift ratio, `tau_recommended`, learning
-yield) and which it does not (completeness, matched rate, cost-floor —
-plumbing). A missing `data.holdout` is an error, never a silent full run.
+yield) and which it does not (completeness, cost-floor — plumbing). A missing `data.holdout` is an error, never a silent full run.
 The hold-out is **one-shot**: tune a value on it and it becomes a second
 calibration set. Date cuts are episode-scoped
 (`common.episodes.window_slice`, by the date a window opened).
@@ -724,8 +730,10 @@ that no longer matches its derivation). Shadow also reports
 cross-check) and `tau_controller_trace` (day-by-day walk: `tau_next` reads
 only the day just closed, so a tau 8× too generous suspends exploration
 before the controller can correct). The trace seeds its trailing-IL base
-with pre-window closed-episode IL, scaled to the sample. The budget charges
-scrap through `common.episodes.classify_last`, never a local copy.
+with pre-window closed-episode IL, scaled to the sample. The budget base —
+seed and in-window — is `common.metrics.episode_economics` over every
+observed hour: the same scrap and IL the guardrail floors, `il_pct` and
+the monitor read, never a local copy.
 
 `realised_vs_predicted_sold_ratio_at_legacy_price` is the production
 continuation of the calibration diagnostic — the first place frozen-
@@ -828,7 +836,8 @@ statistics that survive censoring exactly (`P(sold=0) = P(D=0)`,
 frozen on (the working elasticity via the shared
 `fit_dispersion._working_elasticity`). None of these suspend pricing —
 they are read at the operator gate. Thin windows report `INSUFFICIENT`,
-never `PASS`.
+never `PASS`, and the report's top-line verdict stays `INSUFFICIENT` until
+every check has run.
 
 ## 6. Data foundation
 
@@ -1121,8 +1130,8 @@ exploration.
 
 ### 9.4 Shadow gate (blocking) — is the pipeline production-ready?
 
-Event completeness > 99%, matched decisions > 99%, zero cost-floor
-violations, before any price is applied. The verdict "proceed to
+Event completeness > 99% and zero cost-floor violations, before any price
+is applied. The verdict "proceed to
 exploit-only pilot" is the phase-2 entry condition, not permission to apply
 prices in phase 1.
 
@@ -1204,7 +1213,9 @@ zero**, and a ratio to a sign-changing mean has no scale (measured: a
 not as a number** (`floor_is_unusable`): ordinary daily swing exceeds the
 series' own level and no threshold on that basis is both safe and useful.
 `TOO TIGHT` (below the floor: false-fires and silently suspends
-exploration) and `CLEARS THE FLOOR BUT LIKELY INERT` (> 3× the floor: a
+exploration), `insufficient history` (nobody measured the floor — `status`
+reads WARN, never PASS, and `tune` names it rather than skipping it) and
+`CLEARS THE FLOOR BUT LIKELY INERT` (> 3× the floor: a
 guardrail that cannot fire is absent, not conservative) are both blocking
 verdicts. **The persistence rule is load-bearing**:
 `persistence_days` (2) means a condition fires only after consecutive days
@@ -1252,7 +1263,9 @@ scrap for every episode (IL collapses to discount cost — what this repo did
 until the quirk surfaced); treating the broken chain as a data error and
 dropping those episodes discards essentially all genuine waste. True
 leftover is `max(0, starting − sold)` on the last row —
-`common.episodes.leftover_units` is the single definition, used everywhere.
+`common.episodes.leftover_units` is the single definition; every IL and
+scrap figure reads it through `episodes.scrap_units` and
+`metrics.episode_economics`.
 
 The convention, stated positively: **`ending_inventory` is the final
 quantity on hand at the close of the hour, after anything that arrived
@@ -1323,7 +1336,7 @@ Unclosed episodes are **flagged, not dropped** (`edge_truncated` splits the
 extract-boundary cases from the residue): their observed hours are ordinary
 priced demand, only the ending is missing, and every consumer of an ending
 already excludes it on its own (`scrap_units` NaN, replay's
-`outcome_known`, shadow's `COMPLETED`). They are also the largest,
+`outcome_known`, shadow via `metrics.settled`). They are also the largest,
 slowest-clearing windows in the extract. Read
 `share_of_unclosed_explained_by_edge`: near 1.0 and the unknown-scrap
 problem is purely the extract cut; the residue is a feed gap or a subset
@@ -1341,6 +1354,12 @@ calls the same classifier.
 episodes opened on or before `split.test_end` before anything reads the
 frame (previously `policy_replay` and `derive_tau_initial` ran on the whole
 frame, so `tau_initial` was partly fitted on the hold-out).
+`derive_tau_initial` solves production's own equation: the budget is
+`explore.budget_today` at the widest launch prior std, Q-spreads are
+collected under `inference.decide`'s explorability gate, and `n_days` is
+the calendar span (`episodes.calendar_days`) — the same three definitions
+shadow's derivation uses, so the cross-check can only disagree on the
+path, never on the bookkeeping.
 
 ### The horizon comes from the window, not from the row count
 
