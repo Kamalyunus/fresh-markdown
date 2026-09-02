@@ -4,21 +4,11 @@ The sweep ranks the calibration fit window, and pipeline.tune pastes the
 winner -- so the comparison it runs has to be a fair one.
 """
 import copy
-import os
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from backtest.replay import calibration_window_sweep
-from common.config import load_config
-
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-@pytest.fixture
-def cfg():
-    return load_config(os.path.join(ROOT, "config.yaml"))
 
 
 def _anchor_rows(weeks, categories=("VEG", "FRUIT"), seed=7):

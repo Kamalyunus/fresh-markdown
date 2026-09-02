@@ -3,17 +3,8 @@ import json
 
 import pytest
 
-from common.config import load_config
+from conftest import _cfg_with, _reports, _write
 from pipeline import status
-
-
-@pytest.fixture(scope="module")
-def cfg():
-    return load_config()
-
-
-def _write(root, name, payload):
-    (root / f"{name}.json").write_text(json.dumps(payload))
 
 
 def _verdicts(report):
@@ -229,9 +220,8 @@ def test_a_measured_value_that_disagrees_with_its_report_fails(cfg, tmp_path):
     import copy as _copy
 
     from pipeline import tune
-    from tests.test_tune import _cfg_with, _reports as tune_reports
 
-    tune_reports(tmp_path)                       # a complete, block-free set
+    _reports(tmp_path)                           # a complete, block-free set
     # artifacts that MATCH config, so only the drift under test shows up
     cfg = _cfg_with(cfg, tmp_path,
                     rho={"rho": cfg["dispersion"]["rho"]})
@@ -364,3 +354,84 @@ def test_an_unmeasured_guardrail_floor_warns_never_passes(cfg, tmp_path):
         "scrap": {"verdict": "insufficient history on either basis"}}})
     assert _verdicts(status.collect(cfg, str(tmp_path)))[
         "guardrail floors"] == status.WARN
+
+
+# -------------------------------------------------------- tau provenance
+
+def _cfg_with_tau(cfg, tau):
+    return dict(cfg, exploration=dict(cfg["exploration"], tau_initial=tau))
+
+
+def _derivation(tau, scoped=True):
+    block = {"tau_initial": tau}
+    if scoped:
+        block["spread_decisions"] = 12345
+    return {"tau_initial_derivation": block}
+
+
+def test_a_matching_paste_from_a_current_backtest_is_clean(cfg):
+    from pricing.explore import tau_provenance_error
+    assert tau_provenance_error(_cfg_with_tau(cfg, 410.74),
+                                _derivation(410.74)) is None
+
+
+def test_a_null_tau_is_not_this_check_s_business(cfg):
+    from pricing.explore import tau_provenance_error
+    # the null case is _require_shadow_config's, and it is louder
+    assert tau_provenance_error(_cfg_with_tau(cfg, None), None) is None
+
+
+def test_a_paste_with_no_derivation_on_disk_is_refused(cfg):
+    from pricing.explore import tau_provenance_error
+    assert "no backtest derivation" in tau_provenance_error(
+        _cfg_with_tau(cfg, 410.74), None)
+
+
+def test_a_derivation_predating_the_scoping_fix_is_refused(cfg):
+    from pricing.explore import tau_provenance_error
+    err = tau_provenance_error(_cfg_with_tau(cfg, 410.74),
+                               _derivation(410.74, scoped=False))
+    assert "ENTRY decisions only" in err
+
+
+def test_a_paste_that_no_longer_matches_its_source_is_refused(cfg):
+    from pricing.explore import tau_provenance_error
+    err = tau_provenance_error(_cfg_with_tau(cfg, 500.0), _derivation(410.74))
+    assert "500.0" in err and "410.74" in err
+
+
+def test_shadow_refuses_to_start_on_a_stale_tau(cfg, tmp_path):
+    from common.config import ConfigError
+    from pipeline import shadow
+    cfg = _cfg_with_tau(cfg, 410.74)
+    path = tmp_path / "backtest.json"
+    none = str(tmp_path / "missing.json")
+    path.write_text(json.dumps(_derivation(410.74, scoped=False)))
+    with pytest.raises(ConfigError, match="stale tau"):
+        shadow._require_shadow_config(cfg, backtest_path=str(path),
+                                      shadow_path=none)
+    path.write_text(json.dumps(_derivation(410.74)))
+    shadow._require_shadow_config(cfg, backtest_path=str(path),
+                                  shadow_path=none)   # now fine
+
+
+def test_a_shadow_derivation_is_the_trusted_paste_source(cfg):
+    """The anchored-path derivation outranks the backtest's exploit-only one:
+    a paste matching shadow is clean even when the backtest disagrees, and a
+    paste matching only the backtest is refused once shadow has derived."""
+    from pricing.explore import tau_provenance_error
+    shadow = {"tau_initial_derivation": {"tau_initial": 257.48,
+                                         "fallback": False}}
+    assert tau_provenance_error(_cfg_with_tau(cfg, 257.48),
+                                _derivation(410.74), shadow) is None
+    err = tau_provenance_error(_cfg_with_tau(cfg, 410.74),
+                               _derivation(410.74), shadow)
+    assert "257.48" in err and "shadow" in err
+
+
+def test_a_fallback_shadow_block_defers_to_the_backtest_checks(cfg):
+    # a shadow run that itself fell back to the paste is not a paste source
+    from pricing.explore import tau_provenance_error
+    shadow = {"tau_initial_derivation": {"tau_initial": None, "fallback": True}}
+    assert tau_provenance_error(_cfg_with_tau(cfg, 410.74),
+                                _derivation(410.74), shadow) is None

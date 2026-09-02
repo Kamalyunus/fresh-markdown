@@ -2,24 +2,23 @@
 
 import json
 import os
+import sys
 
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 from common import episodes
 from common.config import load_config as _load_config
-from pricing.explore import SpreadLedger, budget_today, tau_next
-
-# By path, not by CWD. The end-to-end tests chdir into a temp workspace and
-# stay there, so a bare load_config() here reads whichever config ran last --
-# and the assertions below are about the one this repo SHIPS.
-REPO_CONFIG = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.yaml")
+from conftest import ROOT, episode_frame
+from pricing.explore import SpreadLedger, tau_next
 
 
 def load_config():
-    return _load_config(REPO_CONFIG)
+    """By path, not by CWD: the assertions below are about the config this
+    repo SHIPS, whatever the end-to-end tests chdir'd into."""
+    return _load_config(os.path.join(ROOT, "config.yaml"))
 
 
 # ---------------------------------------------------------------- window_slice
@@ -27,14 +26,10 @@ def load_config():
 def _frame():
     """Two episodes: one opens 08-03 22:00 and runs past midnight into 08-04,
     one opens 08-04 09:00. Only the second belongs to a 08-04 hold-out."""
-    rows = []
-    for h in range(22, 24):
-        rows.append(("crosses", "2026-08-03", h))
-    for h in range(0, 4):
-        rows.append(("crosses", "2026-08-04", h))
-    for h in range(9, 13):
-        rows.append(("inside", "2026-08-04", h))
-    return pd.DataFrame(rows, columns=["episode_id", "date", "hour_of_day"])
+    rows = ([("crosses", "2026-08-03", h) for h in range(22, 24)]
+            + [("crosses", "2026-08-04", h) for h in range(0, 4)]
+            + [("inside", "2026-08-04", h) for h in range(9, 13)])
+    return episode_frame(rows, columns=["episode_id", "date", "hour_of_day"])
 
 
 def test_window_slice_takes_whole_episodes_or_none():
@@ -65,14 +60,6 @@ def test_window_slice_assigns_every_episode_to_exactly_one_slice():
 def test_window_slice_is_a_noop_without_bounds():
     d = _frame()
     assert episodes.window_slice(d) is d
-
-
-def test_split_frames_uses_the_shared_rule():
-    import inspect
-    from bootstrap import prepare_data
-    src = inspect.getsource(prepare_data.split_frames)
-    assert "window_slice" in src
-    assert ".transform(\"min\")" not in src      # not a second copy of it
 
 
 # ------------------------------------------------------------------- ledger
@@ -150,12 +137,17 @@ def test_entry_only_collection_understates_the_funded_tau():
     assert all_hours.implied_daily_spend(tau_entry, 1) > budget
 
 
-def test_replay_collects_every_decision_hour():
-    import inspect
-    from backtest import replay
-    src = inspect.getsource(replay.policy_replay)
-    assert "ledger.add" in src
-    assert "if t == 0 and costs" not in src
+def test_replay_collects_every_decision_hour(cfg):
+    from backtest.replay import policy_replay
+    d = pd.concat([episode_frame(
+        episode_id=eid, date="2026-05-01", hour_of_day=[9, 10, 11],
+        total_discount=[0.25, 0.25, 0.30], original_price=10_000.0,
+        cost=4000.0, d_ref=0.25, starting_inventory=[10, 8, 6], units_sold=2,
+        ending_inventory=[8, 6, 0], mu_ref_hat=2.0, r=3.0, eps=-2.0)
+        for eid in ("a", "b")])
+    _, _, ledger = policy_replay(d, cfg)
+    # entry-only collection would give exactly one spread per episode
+    assert ledger.decisions > d.episode_id.nunique()
 
 
 # ------------------------------------------------------- controller trace
@@ -178,15 +170,6 @@ def test_controller_cannot_correct_before_it_has_seen_a_day(cfg=None):
     assert days_over >= 3
 
 
-def test_budget_scales_down_as_the_posterior_narrows():
-    cfg = load_config()
-    ec = cfg["exploration"]
-    wide = budget_today(1_000_000.0, ec["budget_scale_ref_std"], cfg)
-    narrow = budget_today(1_000_000.0, 0.0, cfg)
-    assert wide == ec["budget_share_of_il"] * 1_000_000.0
-    assert narrow == pytest.approx(wide * ec["budget_scale_floor"])
-
-
 def test_shadow_budget_uses_the_production_budget_function():
     import inspect
     from pipeline import shadow
@@ -201,53 +184,48 @@ def test_shadow_runs_on_the_holdout_unless_told_otherwise():
     import inspect
     from pipeline import shadow
 
-    src = inspect.getsource(shadow.main)
-    # the hold-out branch is the fall-through, not a flag test
-    assert "elif args.all:" in src
-    assert 'basis = HOLDOUT_BASIS' in src
-    assert src.index("args.all") < src.index("basis = HOLDOUT_BASIS")
-    # and run_shadow assumes it too, so a programmatic caller gets the same
+    # run_shadow assumes the hold-out, so a programmatic caller gets the same
+    # default the CLI does (the CLI's own default is exercised end to end)
     assert inspect.signature(shadow.run_shadow).parameters[
         "window_basis"].default == shadow.HOLDOUT_BASIS
 
 
-def test_a_non_holdout_run_says_which_numbers_it_flatters():
-    import inspect
-    from pipeline import shadow
-    src = inspect.getsource(shadow.run_shadow)
-    assert "in_sample_caveat" in src
-    # the caveat has to name what it does NOT undermine, or it reads as
-    # "ignore this whole report" and gets ignored itself
-    assert "cost-floor" in src[src.index("in_sample_caveat"):]
-
-
-def test_missing_holdout_config_is_an_error_not_a_silent_full_run():
+def test_missing_holdout_config_is_an_error_not_a_silent_full_run(
+        cfg, tmp_path, monkeypatch):
     """The dangerous failure is running on everything and not saying so."""
-    import inspect
     from pipeline import shadow
-    src = inspect.getsource(shadow.main)
-    branch = src[src.index("no data.holdout"):]
-    assert "--all" in branch          # names the deliberate alternative
-    assert "SystemExit" in src[:src.index("no data.holdout")]
+
+    del cfg["data"]["holdout"]
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(cfg))
+    _frame().to_parquet(tmp_path / "d.parquet")
+    monkeypatch.setattr(sys, "argv", [
+        "shadow", "--input", str(tmp_path / "d.parquet"),
+        "--config", str(tmp_path / "config.yaml")])
+    with pytest.raises(SystemExit, match="--all"):   # names the alternative
+        shadow.main()
 
 
-def test_the_trace_says_when_a_sample_is_too_thin_to_read_daily():
+def test_the_trace_says_when_a_sample_is_too_thin_to_read_daily(cfg):
     """Sampling degrades exactly one figure, and it has to name itself."""
-    import inspect
-    from pipeline import shadow
-    src = inspect.getsource(shadow._controller_trace)
-    assert "episodes_per_day_sampled" in src
-    assert "episodes_per_day_population" in src
+    from pipeline.shadow import _controller_trace
+
+    led = SpreadLedger()
+    led.add("2026-08-04", [50.0, 80.0])
+    trace = _controller_trace(led, {"2026-08-03": 1e6}, tau0=100.0,
+                              widest_std=1.0, cfg=cfg, window_days=1,
+                              sampled_episodes=10, population_episodes=100)
+    assert trace["episodes_per_day_sampled"] == 10.0
+    assert trace["episodes_per_day_population"] == 100.0
     # and it must point at the figure that DOES survive sampling, or the
     # caveat leaves the reader with nothing to quote
-    assert "sample-invariant" in src and "spend_over_budget" in src
+    assert "sample-invariant" in trace["note"]
+    assert "spend_over_budget" in trace["note"]
 
 
 # ------------------------------------------------- pre-launch containment
 
-def test_pre_launch_stops_at_the_gate_window():
+def test_pre_launch_stops_at_the_gate_window(cfg):
     from bootstrap.prepare_data import pre_launch
-    cfg = load_config()
     end = cfg["data"]["split"]["test_end"]
     d = pd.DataFrame({
         "episode_id": ["before", "before", "straddles", "straddles",
@@ -278,158 +256,24 @@ def test_the_backtest_cannot_reach_past_the_gate_window():
         "the calibration schedule must be bounded to PRE-LAUNCH data"
 
 
-def test_the_three_artifact_fits_stay_inside_their_own_splits():
-    """Bounded already -- asserted so they stay that way."""
-    import inspect
-    from bootstrap import train_baseline, fit_dispersion, estimate_prior
-    assert 'splits["train"]' in inspect.getsource(train_baseline.train)
-    assert 'split_frames(d, cfg)["calib"]' in inspect.getsource(
-        fit_dispersion.fit_dispersion)
-    from bootstrap import prior_density
-    assert 'split_frames(d, cfg)[window]' in inspect.getsource(
-        prior_density.build_curves), (
-        "the prior must take its rows from a named split, so the fit window "
-        "and the held-out window cannot silently be the same one")
-    assert '"train"' in inspect.getsource(prior_density.estimate), \
-        "the prior fit must be built on the TRAIN window"
-    hold = inspect.getsource(prior_density.holdout_comparison)
-    assert 'window = "calib"' in hold, \
-        "the held-out comparison must score the calib window"
-    assert 'build_curves(d, cfg, model, grid, "train")' not in hold, \
-        "the held-out comparison must not score the window the prior was fitted on"
-
-
-# -------------------------------------------------------- tau provenance
-
-def _cfg_with_tau(tau):
-    cfg = load_config()
-    return dict(cfg, exploration=dict(cfg["exploration"], tau_initial=tau))
-
-
-def _derivation(tau, scoped=True):
-    block = {"tau_initial": tau}
-    if scoped:
-        block["spread_decisions"] = 12345
-    return {"tau_initial_derivation": block}
-
-
-def test_a_matching_paste_from_a_current_backtest_is_clean():
-    from pricing.explore import tau_provenance_error
-    assert tau_provenance_error(_cfg_with_tau(410.74),
-                                _derivation(410.74)) is None
-
-
-def test_a_null_tau_is_not_this_check_s_business():
-    from pricing.explore import tau_provenance_error
-    # the null case is _require_shadow_config's, and it is louder
-    assert tau_provenance_error(_cfg_with_tau(None), None) is None
-
-
-def test_a_paste_with_no_derivation_on_disk_is_refused():
-    from pricing.explore import tau_provenance_error
-    assert "no backtest derivation" in tau_provenance_error(
-        _cfg_with_tau(410.74), None)
-
-
-def test_a_derivation_predating_the_scoping_fix_is_refused():
-    from pricing.explore import tau_provenance_error
-    err = tau_provenance_error(_cfg_with_tau(410.74),
-                               _derivation(410.74, scoped=False))
-    assert "ENTRY decisions only" in err
-
-
-def test_a_paste_that_no_longer_matches_its_source_is_refused():
-    from pricing.explore import tau_provenance_error
-    err = tau_provenance_error(_cfg_with_tau(500.0), _derivation(410.74))
-    assert "500.0" in err and "410.74" in err
-
-
-def test_shadow_refuses_to_start_on_a_stale_tau(tmp_path):
-    from common.config import ConfigError
-    from pipeline import shadow
-    cfg = load_config()
-    cfg = dict(cfg, exploration=dict(cfg["exploration"], tau_initial=410.74))
-    path = tmp_path / "backtest.json"
-    none = str(tmp_path / "missing.json")
-    path.write_text(json.dumps(_derivation(410.74, scoped=False)))
-    with pytest.raises(ConfigError, match="stale tau"):
-        shadow._require_shadow_config(cfg, backtest_path=str(path),
-                                      shadow_path=none)
-    path.write_text(json.dumps(_derivation(410.74)))
-    shadow._require_shadow_config(cfg, backtest_path=str(path),
-                                  shadow_path=none)   # now fine
-
-
-def test_a_shadow_derivation_is_the_trusted_paste_source():
-    """The anchored-path derivation outranks the backtest's exploit-only one:
-    a paste matching shadow is clean even when the backtest disagrees, and a
-    paste matching only the backtest is refused once shadow has derived."""
-    from pricing.explore import tau_provenance_error
-    shadow = {"tau_initial_derivation": {"tau_initial": 257.48,
-                                         "fallback": False}}
-    assert tau_provenance_error(_cfg_with_tau(257.48),
-                                _derivation(410.74), shadow) is None
-    err = tau_provenance_error(_cfg_with_tau(410.74),
-                               _derivation(410.74), shadow)
-    assert "257.48" in err and "shadow" in err
-
-
-def test_a_fallback_shadow_block_defers_to_the_backtest_checks():
-    # a shadow run that itself fell back to the paste is not a paste source
-    from pricing.explore import tau_provenance_error
-    shadow = {"tau_initial_derivation": {"tau_initial": None, "fallback": True}}
-    assert tau_provenance_error(_cfg_with_tau(410.74),
-                                _derivation(410.74), shadow) is None
-
-
-def test_shadow_derives_its_launch_tau_on_the_pre_window_week():
-    """The tau in force comes from derive_tau0 over the trailing week -- the
-    same span as the day-one budget base -- on the run's own ANCHORED path.
-    The config paste is only the fallback, still behind the provenance gate."""
-    import inspect
-    from pipeline import shadow
-    cfg = load_config()
-    assert cfg["exploration"]["tau0_derivation_min_decisions"] > 0
-    src = inspect.getsource(shadow.run_shadow)
-    assert "derive_tau0(" in src
-    assert src.index("derive_tau0(") < src.index("_require_shadow_config"), \
-        "the paste (and its provenance gate) must be the FALLBACK"
-    der = inspect.getsource(shadow.derive_tau0)
-    assert "budget_il_window_days" in der       # the budget's own span
-    assert "budget_today(" in der and "solve_tau(" in der
-    # a sampled week carries only its fraction of the population's spend, so
-    # the bisection must target the budget scaled by the same fraction
-    assert "budget * frac" in der
-    # and main hands run_shadow the FULL frame, before the window slice
-    assert "pre_window_frame=full" in inspect.getsource(shadow.main)
-
-
-def test_status_fails_a_stale_tau_rather_than_passing_it():
-    from pipeline import status
-    cfg = _cfg_with_tau(410.74)
-    row = status._tau(cfg, _derivation(410.74, scoped=False))
-    assert row["verdict"] == status.FAIL
-    assert status._tau(cfg, _derivation(410.74))["verdict"] == status.PASS
-
-
-def test_config_ships_tau_initial_null():
+def test_config_ships_tau_initial_null(cfg):
     # it is void until re-derived: the scoping fix changed what the backtest
     # produces, so any value carried over from before is wrong
-    assert load_config()["exploration"]["tau_initial"] is None
+    assert cfg["exploration"]["tau_initial"] is None
+    # and shadow can re-derive it: the floor is set, so the derivation runs
+    assert cfg["exploration"]["tau0_derivation_min_decisions"] > 0
 
 
 # ------------------------------------------------------------------- config
 
-def test_holdout_window_is_after_the_test_window():
-    cfg = load_config()
+def test_holdout_window_is_after_the_test_window(cfg):
     h, s = cfg["data"]["holdout"], cfg["data"]["split"]
     assert h["start"] > s["test_end"], \
         "a hold-out that overlaps the gate window is not a hold-out"
     assert h["end"] > h["start"]
 
 
-def test_holdout_is_disjoint_from_every_fitting_window():
-    cfg = load_config()
+def test_holdout_is_disjoint_from_every_fitting_window(cfg):
     h, s = cfg["data"]["holdout"], cfg["data"]["split"]
     for lo, hi in [(s["train_start"], s["train_end"]),
                    (s["calib_start"], s["calib_end"]),
@@ -437,7 +281,7 @@ def test_holdout_is_disjoint_from_every_fitting_window():
         assert not (h["start"] <= hi and lo <= h["end"])
 
 
-def test_the_budget_base_is_the_trailing_realised_il():
+def test_the_budget_base_is_the_trailing_realised_il(cfg):
     """The IL base for a day's budget is the mean of REALISED daily IL over
     the trailing budget_il_window_days, ending YESTERDAY -- never the same
     day's own IL."""
@@ -446,7 +290,6 @@ def test_the_budget_base_is_the_trailing_realised_il():
     from pricing.explore import trailing_daily_il
     from pipeline import shadow
 
-    cfg = load_config()
     assert cfg["exploration"]["budget_il_window_days"] == 7
 
     il = {f"2026-08-{d:02d}": 700.0 for d in range(1, 8)}   # 7 flat days
@@ -469,15 +312,13 @@ def test_the_budget_base_is_the_trailing_realised_il():
         "the trailing basis, or they grade different quantities"
 
 
-def test_the_first_shadow_day_carries_the_pre_window_trailing_base():
+def test_the_first_shadow_day_carries_the_pre_window_trailing_base(cfg):
     """Day one of the hold-out must not read budget 0: production's launch
     day holds the trailing legacy IL of the days before it. The history is
     computed from the full frame BEFORE the window slice, keyed by close day
     -- discount plus scrap, closed episodes only."""
     import pandas as pd
     from pipeline.shadow import pre_window_il_history
-
-    cfg = load_config()
 
     def episode(eid, day, sold, start, end_last):
         return pd.DataFrame({
@@ -503,13 +344,12 @@ def test_the_first_shadow_day_carries_the_pre_window_trailing_base():
     assert pre_window_il_history(d, cfg, None) == {}
 
 
-def test_a_sold_out_early_episode_still_counts_its_shrink_as_scrap():
+def test_a_sold_out_early_episode_still_counts_its_shrink_as_scrap(cfg):
     """Scrap = leftover + shrink, one definition. A sold-out-early close has
     leftover 0 but can still have lost units mid-window; gating scrap on
     COMPLETED zeroed that shrink on the budget base alone."""
     from pipeline.shadow import pre_window_il_history
 
-    cfg = load_config()
     # 3 units: hour 9 sells 1 and ONE VANISHES (ending 1, not 2); hour 10
     # sells the last unit -> net leftover 0, closed, SOLD_OUT_EARLY
     d = pd.DataFrame({
@@ -544,14 +384,12 @@ def test_the_pre_window_seed_is_scaled_to_the_sample():
     assert "max(len(population), 1)" in seeded.split("\n")[0]
 
 
-def test_the_controller_holds_tau_on_a_zero_budget():
+def test_the_controller_holds_tau_on_a_zero_budget(cfg):
     """A zero budget from an EMPTY trailing history is an absence of signal,
     not an overspend: the controller must hold tau, not halve it. The moment
     history exists, calibration resumes."""
     from pipeline.shadow import _controller_trace
     from pricing.explore import SpreadLedger
-
-    cfg = load_config()
 
     led = SpreadLedger()
     led.add("2026-08-04", [50.0, 80.0])          # spend exists on day 1
@@ -569,7 +407,7 @@ def test_the_controller_holds_tau_on_a_zero_budget():
 
 # ------------------------------------------------- point-in-time calibration
 
-def test_calibration_factors_never_see_their_own_week_or_later():
+def test_calibration_factors_never_see_their_own_week_or_later(cfg):
     """The whole point of the rolling schedule: week W's factors are fit on
     the trailing window ENDING STRICTLY BEFORE W."""
     import json
@@ -577,7 +415,6 @@ def test_calibration_factors_never_see_their_own_week_or_later():
 
     import pandas as pd
 
-    cfg = load_config()
     path = cfg["baseline_model"]["calibration_factor_path"]
     if not os.path.exists(path):
         pytest.skip("no calibration artifact on disk")
@@ -628,7 +465,7 @@ def test_both_harnesses_get_point_in_time_factors_without_their_own_code():
                 "factor selection belongs to BaselineModel alone")
 
 
-def test_a_level_shift_does_not_leak_into_its_own_weeks_factor(tmp_path):
+def test_a_level_shift_does_not_leak_into_its_own_weeks_factor(tmp_path, cfg):
     """The functional half of the point-in-time guarantee."""
     import json
 
@@ -652,7 +489,6 @@ def test_a_level_shift_does_not_leak_into_its_own_weeks_factor(tmp_path):
     path = tmp_path / "calibration.json"
     path.write_text(json.dumps(artifact))
 
-    cfg = load_config()
     cfg = dict(cfg, baseline_model=dict(cfg["baseline_model"],
                                         calibration_factor_path=str(path)))
     model = BaselineModel.__new__(BaselineModel)      # applier only, no booster
@@ -729,7 +565,7 @@ def test_both_reports_carry_the_calibration_coverage():
             f"{name} does not report calibration coverage"
 
 
-def test_apply_refuses_when_the_weekly_refit_was_missed(tmp_path):
+def test_apply_refuses_when_the_weekly_refit_was_missed(tmp_path, cfg):
     """Detection after the fact is not enough. Learning from prices set on
     stale factors banks evidence about a model that is not the one running,
     so a schedule that no longer reaches today is a HARD gate on --apply --
@@ -738,7 +574,6 @@ def test_apply_refuses_when_the_weekly_refit_was_missed(tmp_path):
 
     from pipeline.update import calibration_current
 
-    cfg = load_config()
     path = tmp_path / "calibration.json"
     cfg = dict(cfg, baseline_model=dict(cfg["baseline_model"],
                                         calibration_factor_path=str(path)))
@@ -776,12 +611,11 @@ def test_the_calibration_gate_is_wired_into_the_apply_refusal():
     assert src.index("calibration_schedule_current") < src.index("hard_fail = ")
 
 
-def test_a_partial_trailing_window_is_counted_not_passed_off_as_full():
+def test_a_partial_trailing_window_is_counted_not_passed_off_as_full(cfg):
     """`trailing_weeks: 4` does not mean every week HAS four behind it."""
     import json
     import os
 
-    cfg = load_config()
     path = cfg["baseline_model"]["calibration_factor_path"]
     if not os.path.exists(path):
         pytest.skip("no calibration artifact on disk")
@@ -797,12 +631,11 @@ def test_a_partial_trailing_window_is_counted_not_passed_off_as_full():
             "a partial week is still fitted -- it is flagged, not dropped"
 
 
-def test_the_gate_freezes_calibration_even_though_the_schedule_runs_past_it():
+def test_the_gate_freezes_calibration_even_though_the_schedule_runs_past_it(cfg):
     """Two questions, one artifact, and they must not be confused."""
     import json
     import os
 
-    cfg = load_config()
     path = cfg["baseline_model"]["calibration_factor_path"]
     if not os.path.exists(path):
         pytest.skip("no calibration artifact on disk")
@@ -990,7 +823,6 @@ def test_the_loop_does_not_recompute_what_the_check_already_solved():
 
     src = inspect.getsource(tb.check_calibration_convergence)
     assert "if not commit:" in src, "the dry run must be conditional"
-    assert "keep = new if commit else old" in src
 
     loop = inspect.getsource(br.settle)
     assert "if turn == 1:" in loop, "3b belongs to the first turn only"

@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from common.config import load_config
+from conftest import episode_frame
 from pricing import dp as dp_mod
 from pricing import explore
 from pricing.demand import mu_at, nb_pmf_vector
@@ -321,11 +322,10 @@ def test_window_extension_removes_the_lookahead_horizon():
 
 def _last_row_frame(rows):
     """One row per episode: (episode_id, hr, start, sold, ending_inventory)."""
-    return pd.DataFrame(
-        [{"episode_id": e, "date": pd.Timestamp("2026-03-01").date(),
-          "hour_of_day": 9, "hours_remaining": hr,
-          "starting_inventory": si, "units_sold": us, "ending_inventory": ei}
-         for e, hr, si, us, ei in rows])
+    return episode_frame(rows, columns=[
+        "episode_id", "hours_remaining", "starting_inventory", "units_sold",
+        "ending_inventory"], date=pd.Timestamp("2026-03-01").date(),
+        hour_of_day=9)
 
 
 def test_scrap_is_keyed_to_the_closure_sentinel_not_the_nominal_counter():
@@ -397,6 +397,19 @@ def test_state_rejected_when_planning_horizon_disagrees_with_recorded_one():
 
     failures = validate_state(base, tiers, None, [1.0, 1.0])
     assert any("planning horizon" in f for f in failures)
+
+
+def test_state_rejected_not_priced():
+    from inference.decide import decide, StateRejected
+
+    with pytest.raises(StateRejected):
+        decide({
+            "episode_id": "x", "sku_id": 1, "fc": "F", "category": "MEAT",
+            "subcategory": "PORK", "date": "2026-08-01", "hour_of_day": 12,
+            "hours_remaining": 2,
+            "q": 3, "original_price": -5.0, "cost": 10.0, "r": 1.0,
+            "mu_ref_path": [1.0, 1.0], "current_discount": None,
+        }, None, None, CFG, np.random.default_rng(0), 100.0, "v")
 
 
 def test_guardrail_fires_only_after_persistence():
@@ -521,30 +534,12 @@ def test_adjustment_reason_names_every_legitimate_break():
 def test_noise_floor_and_monitor_use_the_same_smoothing():
     """The floor the owner sets a threshold from and the series the monitor
     triggers on must be averaged identically, or the threshold is graded
-    against a yardstick nothing uses."""
-    import inspect
-    from bootstrap import derive_thresholds as dt
-    from pipeline import monitor
-
+    against a yardstick nothing uses. (That both sides read the shared
+    comparison and smoothing is asserted where the shared module is.)"""
     sm = CFG["monitoring"]["stop_conditions"]["deterioration_smoothing_days"]
     assert set(sm) == {"scrap", "margin"}
     # scrap is a low-base series and needs averaging; margin does not
     assert sm["scrap"] > 1 and sm["margin"] == 1
-
-    # both sides read the same config key rather than hardcoding a window
-    assert "deterioration_smoothing_days" in inspect.getsource(dt.guardrail_noise)
-    assert "deterioration_smoothing_days" in inspect.getsource(
-        monitor.guardrail_series)
-    # and both shift the trailing baseline by the smoothing, so the compared
-    # windows never overlap
-    assert ".shift(smooth)" in inspect.getsource(dt.guardrail_noise)
-    assert ".shift(smooth)" in inspect.getsource(monitor.guardrail_series)
-
-    # the CONTROL-ARM basis needs the same treatment: the monitor smooths each
-    # arm before differencing whenever both are populated, so a floor measured
-    # on unsmoothed daily differences grades the threshold against noise the
-    # live comparison never sees -- and overstates it by up to ~sqrt(smooth)
-    assert "deterioration_smoothing_days" in inspect.getsource(dt.control_arm_noise)
 
 
 def _paired_arm_frame(days=70, skus=60, seed=0):

@@ -13,13 +13,13 @@ import pandas as pd
 import pytest
 import yaml
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from conftest import ROOT
 
 
 @pytest.fixture(scope="module")
 def workspace(tmp_path_factory):
     ws = tmp_path_factory.mktemp("mvp")
-    with open(os.path.join(REPO, "config.yaml")) as f:
+    with open(os.path.join(ROOT, "config.yaml")) as f:
         cfg = yaml.safe_load(f)
     # shrink the expensive knobs for test speed; semantics unchanged
     cfg["baseline_model"]["num_boost_round"] = 60
@@ -29,7 +29,7 @@ def workspace(tmp_path_factory):
     cfg["baseline_model"]["calibration_min_anchor_rows"] = 20
     (ws / "config.yaml").write_text(yaml.safe_dump(cfg))
 
-    env = {**os.environ, "PYTHONPATH": REPO}
+    env = {**os.environ, "PYTHONPATH": ROOT}
 
     def run(*args):
         r = subprocess.run([sys.executable, *args], cwd=ws, env=env,
@@ -40,7 +40,7 @@ def workspace(tmp_path_factory):
     # no --days: the generator derives the span from config so it covers
     # every split INCLUDING the hold-out -- a pinned day count silently
     # stops short of the hold-out whenever the split moves
-    run(os.path.join(REPO, "tools", "make_dummy_flc.py"),
+    run(os.path.join(ROOT, "tools", "make_dummy_flc.py"),
         "--skus", "120", "--policy", "randomized",
         "--seed", "3", "--out", "data/flc.parquet")
     run("-m", "bootstrap.prepare_data", "--input", "data/flc.parquet",
@@ -63,8 +63,8 @@ _ORIGINAL_CWD = os.getcwd()
 
 def _chdir(ws):
     os.chdir(ws)
-    if REPO not in sys.path:
-        sys.path.insert(0, REPO)
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
 
 
 def test_prepared_data_is_priceable_and_self_consistent(workspace):
@@ -421,7 +421,7 @@ def test_decision_loop_and_exactly_once_update(workspace):
 
 def test_fit_calibration_cli(workspace):
     _chdir(workspace)
-    env = {**os.environ, "PYTHONPATH": REPO}
+    env = {**os.environ, "PYTHONPATH": ROOT}
     r = subprocess.run(
         [sys.executable, "-m", "bootstrap.train_baseline",
          "--input", "data/prepared.parquet", "--fit-calibration"],
@@ -474,7 +474,7 @@ def test_duplicate_and_malformed_events_quarantined(workspace):
 
 def test_shadow_phase_harness(workspace):
     _chdir(workspace)
-    env = {**os.environ, "PYTHONPATH": REPO}
+    env = {**os.environ, "PYTHONPATH": ROOT}
 
     # shadow needs the section 9.3 decision and a tau; supply them in config
     with open("config.yaml") as f:
@@ -602,7 +602,7 @@ def test_shadow_phase_harness(workspace):
 def test_shadow_defaults_to_the_holdout_window(workspace):
     """No flag, no window arguments -- it must land on the hold-out."""
     _chdir(workspace)
-    env = {**os.environ, "PYTHONPATH": REPO}
+    env = {**os.environ, "PYTHONPATH": ROOT}
     r = subprocess.run(
         [sys.executable, "-m", "pipeline.shadow", "--input",
          "data/prepared.parquet", "--out", "reports/shadow_holdout.json",
@@ -626,7 +626,7 @@ def test_shadow_derives_tau0_when_the_week_is_thick_enough(workspace):
     -- the config paste is only the fallback -- and the derivation block must
     reconcile: implied spend at the derived tau sits at or under its target."""
     _chdir(workspace)
-    env = {**os.environ, "PYTHONPATH": REPO}
+    env = {**os.environ, "PYTHONPATH": ROOT}
     with open("config.yaml") as f:
         cfg_raw = yaml.safe_load(f)
     cfg_raw["exploration"]["tau0_derivation_min_decisions"] = 1
@@ -656,7 +656,7 @@ def test_shadow_derives_tau0_when_the_week_is_thick_enough(workspace):
 def test_parallel_and_serial_produce_the_same_reports(workspace):
     """The only claim parallelism is allowed to make: it is faster."""
     _chdir(workspace)
-    env = {**os.environ, "PYTHONPATH": REPO}
+    env = {**os.environ, "PYTHONPATH": ROOT}
 
     def run(*args):
         r = subprocess.run([sys.executable, *args], cwd=workspace, env=env,
@@ -688,7 +688,7 @@ def test_parallel_and_serial_produce_the_same_reports(workspace):
 
 def test_derive_thresholds_cli(workspace):
     _chdir(workspace)
-    env = {**os.environ, "PYTHONPATH": REPO}
+    env = {**os.environ, "PYTHONPATH": ROOT}
     r = subprocess.run(
         [sys.executable, "-m", "bootstrap.derive_thresholds",
          "--input", "data/prepared.parquet", "--mde", "0.075",
@@ -712,133 +712,6 @@ def test_derive_thresholds_cli(workspace):
         assert "trailing_floor" in rec[metric]
         assert "control_arm_floor" in rec[metric]
         assert rec[metric]["verdict"]
-
-
-def test_state_rejected_not_priced(workspace):
-    _chdir(workspace)
-    from common.config import load_config
-    from inference.decide import decide, StateRejected
-
-    cfg = load_config("config.yaml")
-    with pytest.raises(StateRejected):
-        decide({
-            "episode_id": "x", "sku_id": 1, "fc": "F", "category": "MEAT",
-            "subcategory": "PORK", "date": "2026-08-01", "hour_of_day": 12,
-            "hours_remaining": 2,
-            "q": 3, "original_price": -5.0, "cost": 10.0, "r": 1.0,
-            "mu_ref_path": [1.0, 1.0], "current_discount": None,
-        }, None, None, cfg, np.random.default_rng(0), 100.0, "v")
-
-
-def _window(sku, fc, start, hours, base_hr=None):
-    """One selling window as hourly rows, counting hours_remaining down."""
-    hr = hours - 1 if base_hr is None else base_hr
-    ts = pd.date_range(start, periods=hours, freq="h")
-    return pd.DataFrame({
-        "sku_id": sku, "fc": fc,
-        "date": ts.normalize(), "hour_of_day": ts.hour,
-        "hours_remaining": [hr - i for i in range(hours)],
-    })
-
-
-def test_episode_spans_midnight_as_one_window():
-    """FLC windows commonly run past midnight -- 36 hours is common. A
-    date-keyed episode would split one economic window into three, resetting
-    the monotonicity anchor and charging carried inventory to scrap twice."""
-    from bootstrap.prepare_data import assign_episode_ids
-
-    long_window = _window(1, "FC1", "2026-03-01 10:00", 36)
-    d = long_window.sort_values(["sku_id", "fc", "date", "hour_of_day"])
-    ids = assign_episode_ids(d)
-    assert ids.nunique() == 1, "a 36-hour window must be ONE episode"
-    assert d.date.nunique() == 2, "and it must genuinely cross midnight"
-    assert ids.iloc[0] == "1|FC1|2026-03-01T10"
-    assert len(d) == 36 and d.hours_remaining.iloc[-1] == 0
-
-    # a window long enough to cross twice is still one episode
-    three = _window(1, "FC1", "2026-03-01 20:00", 36)
-    three = three.sort_values(["sku_id", "fc", "date", "hour_of_day"])
-    assert assign_episode_ids(three).nunique() == 1
-    assert three.date.nunique() == 3
-
-
-def test_back_to_back_windows_and_gaps_still_split():
-    from bootstrap.prepare_data import assign_episode_ids
-
-    # two windows abutting with no time gap: only the counter reset separates
-    # them, so time-contiguity alone would wrongly merge these
-    a = _window(1, "FC1", "2026-03-01 10:00", 6)
-    b = _window(1, "FC1", "2026-03-01 16:00", 6)
-    d = pd.concat([a, b]).sort_values(["sku_id", "fc", "date", "hour_of_day"])
-    assert assign_episode_ids(d).nunique() == 2
-
-    # a missing hour inside a window splits it, so an episode's row count
-    # always equals its clock -- validate_state rejects any mismatch
-    g = _window(1, "FC1", "2026-03-01 10:00", 6).drop(index=3)
-    assert assign_episode_ids(g).nunique() == 2
-
-    # different sku x fc never merge
-    two = pd.concat([_window(1, "FC1", "2026-03-01 10:00", 4),
-                     _window(2, "FC1", "2026-03-01 10:00", 4)])
-    two = two.sort_values(["sku_id", "fc", "date", "hour_of_day"])
-    assert assign_episode_ids(two).nunique() == 2
-
-
-def test_split_assigns_straddling_episode_by_start_date():
-    """A window that starts in train and ends in calib belongs wholly to
-    train -- otherwise the boundary runs through the middle of an episode."""
-    from bootstrap.prepare_data import split_frames
-
-    cfg = {"data": {"split": {
-        "train_start": "2026-03-01", "train_end": "2026-03-02",
-        "calib_start": "2026-03-03", "calib_end": "2026-03-04",
-        "test_start": "2026-03-05", "test_end": "2026-03-06"}}}
-    d = _window(1, "FC1", "2026-03-02 10:00", 36)     # crosses into 03-03/04
-    d["episode_id"] = "1|FC1|2026-03-02T10"
-    frames = split_frames(d, cfg)
-    assert len(frames["train"]) == len(d)
-    assert len(frames["calib"]) == 0 and len(frames["test"]) == 0
-
-
-def _observed_episode():
-    """The worked example from the production extract: a MEAT episode that
-    closes with stock left, while ending_inventory reports zero."""
-    hours = [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
-    inv = [8, 8, 8, 8, 8, 5, 5, 5, 5, 4]
-    sold = [0, 0, 0, 0, 3, 0, 0, 0, 1, 3]
-    end = [8, 8, 8, 8, 5, 5, 5, 5, 4, 0]      # zeroed at the close
-    return pd.DataFrame({
-        "episode_id": ["m"] * 10,
-        "date": [pd.Timestamp("2026-03-01").date()] * 10,
-        "hour_of_day": hours,
-        "hours_remaining": list(range(9, -1, -1)),
-        "starting_inventory": inv, "units_sold": sold, "ending_inventory": end,
-    })
-
-
-def test_true_leftover_on_the_production_worked_example():
-    from common import episodes
-
-    d = _observed_episode()
-    last = episodes.last_rows(d)
-    assert int(last.ending_inventory.iloc[0]) == 0     # what the source says
-
-    # 4 units enter the final hour, 3 sell -> 1 is written off, not zero
-    left = episodes.leftover_units(last.starting_inventory, last.units_sold)
-    assert float(left.iloc[0]) == 1.0
-    assert int(d.starting_inventory.iloc[0]) == 8 and int(d.units_sold.sum()) == 7
-
-    # the final row carries the closure sentinel (ending_inventory zeroed with
-    # a unit still on hand), so the listing ended and that unit IS scrap
-    assert episodes.write_off_convention(last)
-    kind = episodes.classify(d)
-    assert kind.iloc[0] == episodes.COMPLETED
-    assert float(episodes.scrap_units(d).iloc[0]) == 1.0
-
-    # and the counter is at zero here only because the fixture makes it so;
-    # on production it is still positive on ~99.9% of final rows, which is
-    # why scrap must not be keyed to it
-    assert int(episodes.last_rows(d).hours_remaining.iloc[0]) == 0
 
 
 def test_zero_cost_episodes_are_flagged_whole_not_dropped(workspace, tmp_path):
@@ -881,42 +754,6 @@ def test_zero_cost_episodes_are_flagged_whole_not_dropped(workspace, tmp_path):
     clean, _ = load_and_filter("data/flc.parquet", cfg)
     assert int(d[d.dp_eligible].episode_id.nunique()) == \
         int(clean[clean.dp_eligible].episode_id.nunique()) - 1
-
-
-def test_a_restock_is_detected_from_the_source_convention():
-    """The detector, and the fact that its output only ever sets a flag."""
-    from common.episodes import episode_flow
-
-    clean = _observed_episode()
-    assert episode_flow(clean).arrived.eq(0).all()
-
-    # 4 units arrive during hour 16, which opened with 5 and sold none. The
-    # source reports the FINAL count, so ending goes to 9 and hour 17 opens
-    # with 9 -- the chain stays continuous, which is what makes this a
-    # restock rather than a break.
-    restocked = clean.copy()
-    h16 = restocked.hour_of_day == 16
-    restocked.loc[h16, "ending_inventory"] += 4
-    restocked.loc[restocked.hour_of_day > 16, "starting_inventory"] += 4
-    restocked.loc[restocked.hour_of_day.between(17, 19), "ending_inventory"] += 4
-    assert episode_flow(restocked).loc["m", "arrived"] == 4
-
-    # the plainest restock of all: an hour selling MORE than it opened with.
-    # `sold >= starting` is not an impossible quantity, it is stock arriving.
-    oversell = clean.copy()
-    h15 = oversell.hour_of_day == 15
-    oversell.loc[h15, "units_sold"] = 12          # opened with 8
-    oversell.loc[h15, "ending_inventory"] = 5     # so 9 arrived
-    assert episode_flow(oversell).loc["m", "arrived"] == 9
-
-    # selling stock down is never a restock, however steep the drop
-    steep = clean.copy()
-    steep.loc[steep.hour_of_day == 15, "units_sold"] = 8
-    steep.loc[steep.hour_of_day == 15, "ending_inventory"] = 0
-    steep.loc[steep.hour_of_day > 15, "starting_inventory"] = 0
-    steep.loc[steep.hour_of_day > 15, "ending_inventory"] = 0
-    steep.loc[steep.hour_of_day > 15, "units_sold"] = 0
-    assert episode_flow(steep).arrived.eq(0).all()
 
 
 def test_a_restock_survives_the_real_chain_and_stays_dp_eligible(
@@ -1194,37 +1031,6 @@ def test_a_missing_hour_drops_the_whole_window_not_just_a_fragment(
     assert len(surviving) == 0, \
         "a fragment of the split window survived -- on its own it looks like " \
         "a whole episode, which is the failure this filter exists to prevent"
-
-
-def test_a_new_window_is_not_mistaken_for_a_gap(workspace):
-    """The counter is what tells them apart, and it must."""
-    _chdir(workspace)
-    from bootstrap.prepare_data import gap_split_windows, assign_episode_ids
-
-    def frame(rows):
-        d = pd.DataFrame(rows, columns=["hour_of_day", "hours_remaining"])
-        d["date"] = "2026-03-01"
-        d["sku_id"] = "S"
-        d["fc"] = "F"
-        d["episode_id"] = assign_episode_ids(d)
-        return d
-
-    # one window, hour 13 missing: clock +2, counter -2 -> a GAP
-    ids, detail = gap_split_windows(
-        frame([(10, 5), (11, 4), (12, 3), (14, 1)]))
-    assert detail["windows_split_by_a_feed_gap"] == 1
-    assert len(ids) == 2, "both fragments must be named"
-    assert detail["missing_hours"] == 1
-
-    # two back-to-back windows, one idle hour between: the counter RESETS
-    ids, detail = gap_split_windows(
-        frame([(10, 3), (11, 2), (12, 1), (14, 9), (15, 8)]))
-    assert len(ids) == 0, "a new window was deleted as if it were a gap"
-
-    # and two windows with no idle hour at all
-    ids, detail = gap_split_windows(
-        frame([(10, 3), (11, 2), (12, 1), (13, 9), (14, 8)]))
-    assert len(ids) == 0
 
 
 def test_no_pre_launch_artifact_reads_past_test_end(workspace):

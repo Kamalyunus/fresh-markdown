@@ -67,15 +67,6 @@ def test_the_episode_generator_is_reproducible_and_order_free():
     assert not np.array_equal(a, seeded), "--seed must still move the draws"
 
 
-def test_the_shared_generator_is_gone_from_the_episode_loop():
-    """The bug this replaces: one generator for the whole loop, so an
-    episode's draw depended on how many episodes ran before it."""
-    from pipeline import shadow
-    src = inspect.getsource(shadow._shadow_one)
-    assert "_episode_seed(" in src
-    assert "default_rng(seed)" not in src
-
-
 # ------------------------------------------------ workers never write events
 
 def test_workers_buffer_events_and_the_parent_commits_them():

@@ -6,18 +6,12 @@ import numpy as np
 import pytest
 from scipy.stats import nbinom
 
-from common.config import load_config
 from pipeline import assurance
 from pricing import dp as dp_mod
 from pricing.demand import mu_at
 
 
 P0, COST, D_REF, R = 10000.0, 4000.0, 0.30, 0.919
-
-
-@pytest.fixture(scope="module")
-def cfg():
-    return load_config()
 
 
 def _decision(cfg, q, path, eps=-1.0, anchor=0.0, tau=None, rng=None,

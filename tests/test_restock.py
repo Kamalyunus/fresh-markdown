@@ -4,52 +4,33 @@
 import numpy as np
 import pytest
 
-from common.config import load_config
+from conftest import P0, decision_event, outcome_event
 from events.store import EventStore
 from pipeline import monitor as mon
 from common.episodes import adjustment_reason
 from pipeline.update import grid_update
 
-P0, COST, PRICE = 10000.0, 4000.0, 7000.0
-
-
-@pytest.fixture(scope="module")
-def cfg():
-    return load_config()
+PRICE = 7000.0
 
 
 def _decision(i, hours_remaining, q):
-    return {
-        "event": "decision", "decision_id": f"D{i}", "episode_id": "EP-R",
-        "is_entry": i == 0, "sku_id": "S1", "fc": "FC-04",
-        "category": "vegetables", "subcategory": "leafy_greens",
-        "date": "2026-08-19", "hour_of_day": 16 + i,
-        "hours_remaining": hours_remaining,
-        "q_remaining": q, "original_price": P0, "cost": COST,
-        "d_max": 0.6, "feasible_tier_count": 25, "action_set_size": 5,
-        "optimal_price": PRICE, "optimal_discount": 1 - PRICE / P0,
-        "expected_il": 1000.0, "expected_denominator": 5000.0,
-        "applied_price": PRICE, "applied_discount": 1 - PRICE / P0,
-        "is_exploration": False, "exploration_cost": 0.0,
-        "affordable_set_size": 0, "tau_current": 3202.33,
-        "epsilon_posterior_mean": -1.0, "epsilon_posterior_std": 0.6,
-        "reference_discount": 0.3, "reference_mu": 0.8,
-        "mu_ref_path": [0.8] * hours_remaining,
-        "anchor_discount": None if i == 0 else 0.3, "dispersion_r": 0.919,
-        "baseline_model_version": "b", "posterior_version": 0,
-        "config_version": "1.0.0",
-        "timestamp": f"2026-08-19T{16 + i:02d}:00:00+00:00",
-    }
+    """Hour `i` of ONE episode, exploiting at PRICE with the anchor in force."""
+    return decision_event(
+        decision_id=f"D{i}", episode_id="EP-R", is_entry=i == 0, sku_id="S1",
+        hour_of_day=16 + i, hours_remaining=hours_remaining, q_remaining=q,
+        optimal_price=PRICE, optimal_discount=1 - PRICE / P0,
+        applied_price=PRICE, applied_discount=1 - PRICE / P0,
+        tau_current=3202.33, mu_ref_path=[0.8] * hours_remaining,
+        anchor_discount=None if i == 0 else 0.3,
+        timestamp=f"2026-08-19T{16 + i:02d}:00:00+00:00")
 
 
 def _outcome(i, sold, start, end):
-    evt = {
-        "event": "outcome", "outcome_id": f"O{i}", "decision_id": f"D{i}",
-        "units_sold": sold, "starting_inventory": start,
-        "ending_inventory": end, "applied_price": PRICE,
-        "is_stockout": sold >= start, "execution_status": "ok",
-        "finalized_at": f"2026-08-19T{17 + i:02d}:00:00+00:00",
-    }
+    evt = outcome_event(
+        outcome_id=f"O{i}", decision_id=f"D{i}", units_sold=sold,
+        starting_inventory=start, ending_inventory=end, applied_price=PRICE,
+        is_stockout=sold >= start,
+        finalized_at=f"2026-08-19T{17 + i:02d}:00:00+00:00")
     # the producer's job, and the one thing that must not be skipped
     reason = adjustment_reason(start, sold, end)
     if reason:

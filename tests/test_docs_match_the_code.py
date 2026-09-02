@@ -1,13 +1,13 @@
 """The docs describe a filter chain. This checks it is THIS filter chain."""
 
+import os
 import pathlib
 
 import pytest
 
 from bootstrap.prepare_data import DP_INELIGIBLE, load_and_filter
 from common.config import load_config
-
-ROOT = pathlib.Path(__file__).resolve().parent.parent
+from conftest import ROOT
 
 # Every doc that describes the filter chain and therefore has to keep up. A
 # doc that merely mentions the pipeline is not listed -- the point is to catch
@@ -34,14 +34,14 @@ RETIRED = [
 
 @pytest.fixture(scope="module")
 def stages():
-    _, wf = load_and_filter(str(ROOT / "data" / "flc_synth.parquet"),
-                            load_config(str(ROOT / "config.yaml")))
+    _, wf = load_and_filter(os.path.join(ROOT, "data", "flc_synth.parquet"),
+                            load_config(os.path.join(ROOT, "config.yaml")))
     return [t[0] for t in wf]
 
 
 @pytest.fixture(scope="module")
 def docs():
-    return {f: (ROOT / f).read_text() for f in CHAIN_DOCS}
+    return {f: pathlib.Path(ROOT, f).read_text() for f in CHAIN_DOCS}
 
 
 def test_every_waterfall_stage_is_documented(stages, docs):
@@ -124,7 +124,7 @@ def test_agents_md_stays_a_router_not_a_reference():
     that way -- new material goes to design.md (spec), learnings.md
     (history), or docs/maintaining_docs.md (doc tooling), with at most a
     one-liner and a pointer here."""
-    text = (ROOT / "AGENTS.md").read_text()
+    text = pathlib.Path(ROOT, "AGENTS.md").read_text()
     lines = text.count("\n") + 1
     assert lines <= 400, (
         f"AGENTS.md is {lines} lines, over the 400-line router budget -- "

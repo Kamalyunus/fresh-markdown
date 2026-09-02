@@ -5,83 +5,8 @@ import os
 import pytest
 import yaml
 
-from common.config import load_config
+from conftest import ROOT, _cfg_with, _reports
 from pipeline import tune
-
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-@pytest.fixture
-def cfg():
-    return load_config(os.path.join(ROOT, "config.yaml"))
-
-
-def _reports(root, **over):
-    base = {
-        "backtest.json": {
-            "artifact_versions": {"baseline_model_version": "m1"},
-            "fidelity": {"calibration_window_sweep": {
-                "recommended_fit_window": "trailing_1w",
-                # every candidate present, so the band finding resolves
-                # whatever W config happens to ship
-                "trailing_1w": {"mean_abs_log_error": 0.001,
-                                "share_weeks_in_band": 0.99},
-                "trailing_2w": {"mean_abs_log_error": 0.02,
-                                "share_weeks_in_band": 0.80},
-                "trailing_4w": {"mean_abs_log_error": 0.02,
-                                "share_weeks_in_band": 0.80},
-                "trailing_8w": {"mean_abs_log_error": 0.02,
-                                "share_weeks_in_band": 0.80}}},
-            "policy_deltas": {"step_sensitivity": {
-                "deeper_belief": {"share_prices_changed": 0.02,
-                                  "il_delta_pct": -0.0004}}},
-        },
-        "shadow.json": {
-            "artifact_versions": {"baseline_model_version": "m1"},
-            "tau_initial_derivation": {"tau_initial": 1234.5},
-            "calibration_regimes": {"frozen_anchor": 1.0002,
-                                    "weekly_refit": 0.9762},
-            "learning_yield_would_be": {"episodes_per_bounded_update": 741.0,
-                                        "calendar_floor_days_per_0.15_of_mean": 1},
-            "window": {"date_min": "2026-08-10", "date_max": "2026-08-28",
-                       "episodes": 111400},
-        },
-        "thresholds.json": {
-            "information_increment_recommendation": {
-                "recommended": 0.341, "verdict": "measured"},
-            "bounded_step_recommendation": {
-                "consistent_max_mean_step": 0.485,
-                "verdict": "MEAN RAIL BINDS FIRST"},
-            "guardrail_threshold_recommendation": {
-                "scrap_rate": {
-                    "config_key": "monitoring.stop_conditions.scrap_deterioration_pct",
-                    "binding_floor": 0.2656, "binding_label": "3-sigma",
-                    "binding_basis": "control_arm", "verdict": "null"}},
-            "ab_duration": {"target_mde_rel": 0.075, "by_duration": {
-                "4w": {"detectable_mde_rel": 0.241,
-                       "meets_target": "False"}}},
-        },
-    }
-    base.update(over)
-    for name, payload in base.items():
-        (root / name).write_text(json.dumps(payload))
-    return str(root)
-
-
-def _cfg_with(cfg, tmp_path, cal=None, rho=None):
-    cal_path = tmp_path / "calibration.json"
-    cal_path.write_text(json.dumps(cal if cal is not None else {
-        "provenance": {"bundle": "m1"},
-        "convergence": {"converged": True, "max_abs_dlog": 0.001,
-                        "tol_log": 0.02}}))
-    rho_path = tmp_path / "rho.json"
-    rho_path.write_text(json.dumps(rho or {"rho": 0.2436,
-                                           "mean_forced_hours_per_episode": 5.909}))
-    return dict(
-        cfg,
-        baseline_model=dict(cfg["baseline_model"],
-                            calibration_factor_path=str(cal_path)),
-        dispersion=dict(cfg["dispersion"], rho_path=str(rho_path)))
 
 
 def test_a_missing_report_blocks_tuning_rather_than_tuning_on_nothing(cfg, tmp_path):
@@ -90,82 +15,69 @@ def test_a_missing_report_blocks_tuning_rather_than_tuning_on_nothing(cfg, tmp_p
     assert rep["blocked"] and not rep["to_paste"]
 
 
-def test_reports_from_two_different_models_block(cfg, tmp_path):
-    reports = tmp_path / "r"
-    reports.mkdir()
-    _reports(reports)
-    (reports / "shadow.json").write_text(json.dumps(
+def test_reports_from_two_different_models_block(cfg, tmp_path, reports_dir):
+    (reports_dir / "shadow.json").write_text(json.dumps(
         {"artifact_versions": {"baseline_model_version": "OTHER"}}))
-    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports))
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports_dir))
     assert rep["blocked"]
     assert any("rule 1" in f["evidence"] for f in rep["findings"])
 
 
-def test_an_unconverged_loop_blocks(cfg, tmp_path):
-    reports = tmp_path / "r"
-    reports.mkdir()
-    _reports(reports)
+def test_an_unconverged_loop_blocks(cfg, tmp_path, reports_dir):
     c = _cfg_with(cfg, tmp_path, cal={
         "provenance": {"bundle": "m1"},
         "convergence": {"converged": False, "max_abs_dlog": 0.09,
                         "tol_log": 0.02}})
-    rep = tune.collect(c, str(reports))
+    rep = tune.collect(c, str(reports_dir))
     assert rep["blocked"]
     assert any("NOT CONVERGED" in f["evidence"] for f in rep["findings"])
 
 
-def test_a_measurable_value_is_pasted_not_left_to_a_human(cfg, tmp_path):
+def test_a_measurable_value_is_pasted_not_left_to_a_human(cfg, tmp_path, reports_dir):
     """A value the data can decide should not wait on a decision (owner,
     2026-08-30). The guardrail stops are 3-sigma of the control arm's own
     noise -- a measurement, not a preference -- so they paste."""
-    reports = tmp_path / "r"
-    reports.mkdir()
-    _reports(reports)
     c = _cfg_with(cfg, tmp_path)
     # nothing set yet: this test is about what the tool decides, not about
     # what the shipped config happens to carry today
     c["monitoring"]["stop_conditions"].update(
         scrap_deterioration_pct=None, margin_deterioration_pct=None)
     c["baseline_model"]["calibration_fit_trailing_weeks"] = 2
-    rep = tune.collect(c, str(reports))
+    rep = tune.collect(c, str(reports_dir))
     pasted = {f["key"] for f in rep["to_paste"]}
     assert "monitoring.stop_conditions.scrap_deterioration_pct" in pasted
     assert "baseline_model.calibration_fit_trailing_weeks" in pasted
 
 
-def test_the_rail_paste_is_gated_on_the_price_consequence(cfg, tmp_path):
+def test_the_rail_paste_is_gated_on_the_price_consequence(cfg, tmp_path, reports_dir):
     """`consistent_max_mean_step` is measured, but raising the rail re-prices
     real episodes -- so it pastes only when step_sensitivity agrees, and
     returns to the owner when the re-price is large."""
-    reports = tmp_path / "r"
-    reports.mkdir()
-    _reports(reports)                     # deeper arm: 2% of prices -> inside
-    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports))
+    # the default deeper arm: 2% of prices -> inside the gate
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports_dir))
     rail = [f for f in rep["findings"] if f["key"] == "learning.max_mean_step"][0]
     assert rail["class"] == "PASTE" and "inside the auto-apply gate" in rail["evidence"]
 
-    bt = json.loads((reports / "backtest.json").read_text())
+    bt = json.loads((reports_dir / "backtest.json").read_text())
     bt["policy_deltas"]["step_sensitivity"]["deeper_belief"][
         "share_prices_changed"] = 0.40     # a real price event
-    (reports / "backtest.json").write_text(json.dumps(bt))
-    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports))
+    (reports_dir / "backtest.json").write_text(json.dumps(bt))
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports_dir))
     rail = [f for f in rep["findings"] if f["key"] == "learning.max_mean_step"][0]
     assert rail["class"] == "OWNER" and "EXCEEDS the auto-apply gate" in rail["evidence"]
     assert rail["key"] not in {f["key"] for f in rep["to_paste"]}
 
 
-def test_a_tolerance_stays_with_the_owner(cfg, tmp_path):
+def test_a_tolerance_stays_with_the_owner(cfg, tmp_path, reports_dir):
     """The one value the data genuinely cannot decide: it says what effect is
     DETECTABLE, never what size of effect is worth detecting."""
-    reports = tmp_path / "r"
-    reports.mkdir()
-    _reports(reports, **{"thresholds.json": {
+    _reports(reports_dir, **{"thresholds.json": {
         "information_increment_recommendation": {"recommended": 0.341},
         "bounded_step_recommendation": {},
         "guardrail_threshold_recommendation": {},
         "ab_duration": {"target_mde_rel": 0.075, "by_duration": {
             "4w": {"detectable_mde_rel": 0.241, "meets_target": "False"}}}}})
-    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports))
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports_dir))
     mde = [f for f in rep["findings"]
            if f["key"] == "ab_test.min_detectable_effect_pct"][0]
     assert mde["class"] == "OWNER"
@@ -178,12 +90,9 @@ def test_a_tolerance_stays_with_the_owner(cfg, tmp_path):
     assert "NO duration reaches" in mde["evidence"]
 
 
-def test_owner_values_are_never_written(cfg, tmp_path):
-    reports = tmp_path / "r"
-    reports.mkdir()
-    _reports(reports)
+def test_owner_values_are_never_written(cfg, tmp_path, reports_dir):
     c = _cfg_with(cfg, tmp_path)
-    rep = tune.collect(c, str(reports))
+    rep = tune.collect(c, str(reports_dir))
     assert not rep["blocked"], [f for f in rep["findings"] if f["class"] == "BLOCK"]
 
     pasted = {f["key"] for f in rep["to_paste"]}
@@ -225,56 +134,47 @@ def test_an_ambiguous_anchor_refuses_rather_than_guessing():
         tune.set_scalar(text, ("dispersion", "rho"), 3)
 
 
-def test_the_calendar_vs_evidence_bottleneck_is_named(cfg, tmp_path):
+def test_the_calendar_vs_evidence_bottleneck_is_named(cfg, tmp_path, reports_dir):
     """The reading that inverted the tuning advice: at ~5,900 episodes/day a
     741-episode update is 0.13 days of evidence against a 1-day gate, so
     chasing information buys nothing."""
-    reports = tmp_path / "r"
-    reports.mkdir()
-    _reports(reports)
-    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports))
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports_dir))
     line = [f for f in rep["findings"] if f["key"] == "learning bottleneck"][0]
     assert line["current"] == "CALENDAR"
     assert "max_mean_step" in line["evidence"]
 
 
 def test_the_calibration_cadence_reading_prefers_whichever_is_nearer_one(
-        cfg, tmp_path):
-    reports = tmp_path / "r"
-    reports.mkdir()
-    _reports(reports)
-    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports))
+        cfg, tmp_path, reports_dir):
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports_dir))
     line = [f for f in rep["findings"] if f["key"] == "calibration cadence"][0]
     assert line["status"] == "OK"            # frozen 1.0002 beats weekly 0.9762
     assert "frozen anchor" in line["evidence"]
 
 
-def test_the_level_band_may_tighten_but_never_widen(cfg, tmp_path):
+def test_the_level_band_may_tighten_but_never_widen(cfg, tmp_path, reports_dir):
     """The band is sized from measured week-to-week anchor volatility, but a
     band WIDER than the current one is a decision about tolerated level error,
     not a reading (owner, 2026-08-30). The clamp is in RATIO space on purpose:
     exp(0.10) is 1.1052, so clamping the log half-width would widen the upper
     edge past the ceiling it is meant to enforce."""
-    reports = tmp_path / "r"
-    reports.mkdir()
-    _reports(reports)
     c = _cfg_with(cfg, tmp_path)
     cap = c["tuning"]["calibration_band_max_half_width"]
 
     # a quiet extract tightens
-    rep = tune.collect(c, str(reports))
+    rep = tune.collect(c, str(reports_dir))
     band = [f for f in rep["findings"]
             if f["key"] == "baseline_model.calibration_gate_band"][0]
     lo, hi = band["recommended"]
     assert lo > 1 - cap and hi < 1 + cap, "quiet weeks should tighten the band"
 
     # a volatile one is clamped, and never wider than the ceiling on EITHER side
-    bt = json.loads((reports / "backtest.json").read_text())
+    bt = json.loads((reports_dir / "backtest.json").read_text())
     chosen = f"trailing_{c['baseline_model']['calibration_fit_trailing_weeks']}w"
     bt["fidelity"]["calibration_window_sweep"][chosen][
         "mean_abs_log_error"] = 0.5
-    (reports / "backtest.json").write_text(json.dumps(bt))
-    rep = tune.collect(c, str(reports))
+    (reports_dir / "backtest.json").write_text(json.dumps(bt))
+    rep = tune.collect(c, str(reports_dir))
     band = [f for f in rep["findings"]
             if f["key"] == "baseline_model.calibration_gate_band"][0]
     lo, hi = band["recommended"]
@@ -284,18 +184,16 @@ def test_the_level_band_may_tighten_but_never_widen(cfg, tmp_path):
 
 
 def test_max_std_shrink_is_suggested_with_its_alternative_never_written(
-        cfg, tmp_path):
+        cfg, tmp_path, reports_dir):
     """Both rails resolve the same mismatch; WHICH one moves is a safety
     posture. The tool supplies both numbers and takes neither decision."""
-    reports = tmp_path / "r"
-    reports.mkdir()
-    _reports(reports, **{"thresholds.json": {
+    _reports(reports_dir, **{"thresholds.json": {
         "information_increment_recommendation": {"recommended": 0.341},
         "bounded_step_recommendation": {"median_launch_std": 1.1088,
                                         "consistent_max_mean_step": 0.485},
         "guardrail_threshold_recommendation": {},
         "ab_duration": {"target_mde_rel": 0.075, "by_duration": {}}}})
-    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports))
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports_dir))
     f = [x for x in rep["findings"] if x["key"] == "learning.max_std_shrink"][0]
     assert f["class"] == "OWNER"
     # 1 - sqrt(1 - 0.15/1.1088) = 0.0701: the shrink that makes the CURRENT
@@ -306,16 +204,13 @@ def test_max_std_shrink_is_suggested_with_its_alternative_never_written(
 
 
 def test_apply_names_the_minimum_rerun_and_never_asks_for_a_retrain(
-        cfg, tmp_path):
+        cfg, tmp_path, reports_dir):
     """The bug this prevents put an agent in a loop."""
-    reports = tmp_path / "r"
-    reports.mkdir()
-    _reports(reports)
     c = _cfg_with(cfg, tmp_path)
     work = tmp_path / "config.yaml"
     work.write_text(open(os.path.join(ROOT, "config.yaml")).read())
 
-    rep = tune.collect(c, str(reports))
+    rep = tune.collect(c, str(reports_dir))
     res = tune.apply(rep, str(work), out_dir=str(tmp_path / "out"))
 
     # runtime-only values require nothing; the message must not send anyone
@@ -490,37 +385,31 @@ def test_every_paste_key_has_a_line_anchor(cfg):
     assert ("baseline_model", "calibration_gate_band") in tune.ANCHORS
 
 
-def test_a_not_run_sweep_is_a_finding_not_a_traceback(cfg, tmp_path):
+def test_a_not_run_sweep_is_a_finding_not_a_traceback(cfg, tmp_path, reports_dir):
     """replay writes the sweep as a STRING on its NOT RUN path; `.get` on
     that took tune down instead of reporting the missing measurement."""
-    root = tmp_path / "r"
-    root.mkdir()
-    _reports(root)
-    bt = json.loads((root / "backtest.json").read_text())
+    bt = json.loads((reports_dir / "backtest.json").read_text())
     bt["fidelity"]["calibration_window_sweep"] = "NOT RUN: calib < 2W"
-    (root / "backtest.json").write_text(json.dumps(bt))
+    (reports_dir / "backtest.json").write_text(json.dumps(bt))
     assert tune._sweep_of(bt) == {}
-    rep = tune.collect(_cfg_with(cfg, tmp_path), str(root))      # no traceback
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports_dir))  # no traceback
     assert not any(f["key"] == "baseline_model.calibration_fit_trailing_weeks"
                    and f["class"] == tune.PASTE for f in rep["findings"])
 
 
-def test_a_not_run_measurement_is_an_act_never_silence(cfg, tmp_path):
+def test_a_not_run_measurement_is_an_act_never_silence(cfg, tmp_path, reports_dir):
     """derive_thresholds writes {verdict: "NOT RUN -- ..."} with no value
     when it cannot measure I*. tune emitted nothing, status read "every
     MEASURED value matches", and the fixture's paste stayed in force
     unverified. It must surface as ACT, and --apply must refuse to paste
     a value that does not exist."""
-    root = tmp_path / "r"
-    root.mkdir()
-    _reports(root)
-    th = json.loads((root / "thresholds.json").read_text())
+    th = json.loads((reports_dir / "thresholds.json").read_text())
     th["information_increment_recommendation"] = {
         "verdict": "NOT RUN -- no per-category prior stds"}
     th["bounded_step_recommendation"] = {
         "verdict": "NOT RUN -- degenerate prior widths"}
-    (root / "thresholds.json").write_text(json.dumps(th))
-    rep = tune.collect(_cfg_with(cfg, tmp_path), str(root))
+    (reports_dir / "thresholds.json").write_text(json.dumps(th))
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports_dir))
     by_key = {f["key"]: f for f in rep["findings"]}
     inc = by_key["learning.information_increment"]
     assert inc["class"] == tune.PASTE and inc["status"] == tune.ACT
@@ -539,16 +428,13 @@ def test_a_not_run_measurement_is_an_act_never_silence(cfg, tmp_path):
                for f in log["failed"])
 
 
-def test_an_unmeasured_floor_is_named_not_skipped(cfg, tmp_path):
-    root = tmp_path / "r"
-    root.mkdir()
-    _reports(root)
-    th = json.loads((root / "thresholds.json").read_text())
+def test_an_unmeasured_floor_is_named_not_skipped(cfg, tmp_path, reports_dir):
+    th = json.loads((reports_dir / "thresholds.json").read_text())
     th["guardrail_threshold_recommendation"]["scrap_rate"] = {
         "config_key": "monitoring.stop_conditions.scrap_deterioration_pct",
         "verdict": "insufficient history on either basis"}
-    (root / "thresholds.json").write_text(json.dumps(th))
-    rep = tune.collect(_cfg_with(cfg, tmp_path), str(root))
+    (reports_dir / "thresholds.json").write_text(json.dumps(th))
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports_dir))
     hits = [f for f in rep["findings"]
             if f["key"] == "monitoring.stop_conditions.scrap_deterioration_pct"]
     assert hits and hits[0]["class"] == tune.INFO
@@ -556,33 +442,28 @@ def test_an_unmeasured_floor_is_named_not_skipped(cfg, tmp_path):
     assert not any(f["key"] == hits[0]["key"] for f in rep["to_paste"])
 
 
-def test_a_refit_that_raised_in_shadow_is_an_open_question(cfg, tmp_path):
+def test_a_refit_that_raised_in_shadow_is_an_open_question(cfg, tmp_path, reports_dir):
     """shadow swallowed the weekly re-fit's exception into coverage, wrote
     weekly_refit null, and tune then read the cadence as settled."""
-    root = tmp_path / "r"
-    root.mkdir()
-    _reports(root)
-    sh = json.loads((root / "shadow.json").read_text())
+    sh = json.loads((reports_dir / "shadow.json").read_text())
     sh["calibration_regimes"] = {"frozen_anchor": 1.0002, "weekly_refit": None,
                                  "refit_error": "KeyError: 'd_ref'"}
-    (root / "shadow.json").write_text(json.dumps(sh))
-    rep = tune.collect(_cfg_with(cfg, tmp_path), str(root))
+    (reports_dir / "shadow.json").write_text(json.dumps(sh))
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports_dir))
     cad = [f for f in rep["findings"] if f["key"] == "calibration cadence"]
     assert cad and cad[0]["status"] == tune.ACT
     assert "KeyError" in cad[0]["evidence"]
 
 
-def test_the_bottleneck_reads_the_population_rate_not_the_sample(cfg, tmp_path):
+def test_the_bottleneck_reads_the_population_rate_not_the_sample(
+        cfg, tmp_path, reports_dir):
     """A --max-episodes shadow sample understates episodes/day and flips
     the reading to EVIDENCE when the calendar is the real limit."""
-    root = tmp_path / "r"
-    root.mkdir()
-    _reports(root)
-    sh = json.loads((root / "shadow.json").read_text())
+    sh = json.loads((reports_dir / "shadow.json").read_text())
     sh["window"] = {"date_min": "2026-08-10", "date_max": "2026-08-28",
                     "episodes": 2000, "population_episodes": 111400}
-    (root / "shadow.json").write_text(json.dumps(sh))
-    rep = tune.collect(_cfg_with(cfg, tmp_path), str(root))
+    (reports_dir / "shadow.json").write_text(json.dumps(sh))
+    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports_dir))
     bn = [f for f in rep["findings"] if f["key"] == "learning bottleneck"][0]
     assert bn["current"] == "CALENDAR", bn["evidence"]
     assert "5,863 episodes/day" in bn["evidence"]      # 111400 / 19

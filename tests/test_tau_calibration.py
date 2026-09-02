@@ -4,18 +4,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from common.config import load_config
+from conftest import P0, decision_event, outcome_event
 from events.store import EventStore
 from pipeline import monitor as mon
 from pipeline import update as upd
 from pricing.posterior import PosteriorStore
 
-P0, COST = 10000.0, 4000.0
 
-
-@pytest.fixture(scope="module")
-def cfg():
-    c = load_config()
+@pytest.fixture
+def cfg(cfg):
+    c = cfg
     if c["exploration"]["tau_initial"] is None:      # null until a gate passes
         c["exploration"]["tau_initial"] = 447.78     # the production paste
     # These tests are about TAU, not about level calibration. Point the factor
@@ -28,39 +26,23 @@ def cfg():
 
 
 def _decision(i, discount, exploration_cost, date="2026-08-19"):
-    return {
-        "event": "decision", "decision_id": f"D{i}", "episode_id": f"EP{i}",
-        "is_entry": True, "sku_id": f"S{i}", "fc": "FC-04",
-        "category": "vegetables", "subcategory": "leafy_greens",
-        "date": date, "hour_of_day": 17, "hours_remaining": 1, "q_remaining": 2,
-        "original_price": P0, "cost": COST, "d_max": 0.6,
-        "feasible_tier_count": 25, "action_set_size": 5,
-        "optimal_price": P0 * 0.85, "optimal_discount": 0.15,
-        "expected_il": 1000.0, "expected_denominator": 5000.0,
-        "applied_price": P0 * (1 - discount), "applied_discount": discount,
-        "is_exploration": exploration_cost > 0,
-        "exploration_cost": exploration_cost,
-        "affordable_set_size": 3 if exploration_cost > 0 else 0,
-        "tau_current": 447.78,
-        "epsilon_posterior_mean": -1.0, "epsilon_posterior_std": 0.6,
-        "reference_discount": 0.3, "reference_mu": 0.8, "mu_ref_path": [0.8],
-        "anchor_discount": None, "dispersion_r": 0.919,
-        "baseline_model_version": "b", "posterior_version": 0,
-        "config_version": "1.0.0", "timestamp": f"{date}T17:00:00+00:00",
-    }
+    """One entry decision per episode, exploring iff it cost something."""
+    return decision_event(
+        decision_id=f"D{i}", episode_id=f"EP{i}", sku_id=f"S{i}", date=date,
+        applied_price=P0 * (1 - discount), applied_discount=discount,
+        is_exploration=exploration_cost > 0, exploration_cost=exploration_cost,
+        affordable_set_size=3 if exploration_cost > 0 else 0,
+        timestamp=f"{date}T17:00:00+00:00")
 
 
 def _outcome(i, sold, date="2026-08-19"):
     """A closed episode: ending_inventory 0 with stock left is the write-off
     sentinel, which is what makes it count toward IL rather than reading as
     still running."""
-    return {
-        "event": "outcome", "outcome_id": f"O{i}", "decision_id": f"D{i}",
-        "units_sold": sold, "starting_inventory": 2, "ending_inventory": 0,
-        "applied_price": P0 * 0.7, "is_stockout": sold >= 2,
-        "execution_status": "ok", "adjustment_reason": "episode_close_write_off",
-        "finalized_at": f"{date}T18:00:00+00:00",
-    }
+    return outcome_event(
+        outcome_id=f"O{i}", decision_id=f"D{i}", units_sold=sold,
+        is_stockout=sold >= 2, adjustment_reason="episode_close_write_off",
+        finalized_at=f"{date}T18:00:00+00:00")
 
 
 def _store(cfg, tmp_path, n, cost_each, date="2026-08-19", history_days=3,
