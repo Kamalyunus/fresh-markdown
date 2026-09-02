@@ -22,7 +22,16 @@ def _reports(root, **over):
             "artifact_versions": {"baseline_model_version": "m1"},
             "fidelity": {"calibration_window_sweep": {
                 "recommended_fit_window": "trailing_1w",
-                "trailing_2w": {"mean_abs_log_error": 0.02}}},
+                # every candidate present, so the band finding resolves
+                # whatever W config happens to ship
+                "trailing_1w": {"mean_abs_log_error": 0.001,
+                                "share_weeks_in_band": 0.99},
+                "trailing_2w": {"mean_abs_log_error": 0.02,
+                                "share_weeks_in_band": 0.80},
+                "trailing_4w": {"mean_abs_log_error": 0.02,
+                                "share_weeks_in_band": 0.80},
+                "trailing_8w": {"mean_abs_log_error": 0.02,
+                                "share_weeks_in_band": 0.80}}},
             "policy_deltas": {"step_sensitivity": {
                 "deeper_belief": {"share_prices_changed": 0.02,
                                   "il_delta_pct": -0.0004}}},
@@ -112,7 +121,13 @@ def test_a_measurable_value_is_pasted_not_left_to_a_human(cfg, tmp_path):
     reports = tmp_path / "r"
     reports.mkdir()
     _reports(reports)
-    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports))
+    c = _cfg_with(cfg, tmp_path)
+    # nothing set yet: this test is about what the tool decides, not about
+    # what the shipped config happens to carry today
+    c["monitoring"]["stop_conditions"].update(
+        scrap_deterioration_pct=None, margin_deterioration_pct=None)
+    c["baseline_model"]["calibration_fit_trailing_weeks"] = 2
+    rep = tune.collect(c, str(reports))
     pasted = {f["key"] for f in rep["to_paste"]}
     assert "monitoring.stop_conditions.scrap_deterioration_pct" in pasted
     assert "baseline_model.calibration_fit_trailing_weeks" in pasted
@@ -255,7 +270,8 @@ def test_the_level_band_may_tighten_but_never_widen(cfg, tmp_path):
 
     # a volatile one is clamped, and never wider than the ceiling on EITHER side
     bt = json.loads((reports / "backtest.json").read_text())
-    bt["fidelity"]["calibration_window_sweep"]["trailing_2w"][
+    chosen = f"trailing_{c['baseline_model']['calibration_fit_trailing_weeks']}w"
+    bt["fidelity"]["calibration_window_sweep"][chosen][
         "mean_abs_log_error"] = 0.5
     (reports / "backtest.json").write_text(json.dumps(bt))
     rep = tune.collect(c, str(reports))
@@ -346,7 +362,10 @@ def test_the_fit_window_holds_on_a_near_tie_instead_of_oscillating(cfg, tmp_path
         return [f for f in finds
                 if f["key"] == "baseline_model.calibration_fit_trailing_weeks"][0]
 
-    cur = cfg["baseline_model"]["calibration_fit_trailing_weeks"]  # 2 shipped
+    # W is set HERE: with cur == the candidate window there is no tie to hold
+    cfg = {**cfg, "baseline_model": {**cfg["baseline_model"],
+                                     "calibration_fit_trailing_weeks": 2}}
+    cur = cfg["baseline_model"]["calibration_fit_trailing_weeks"]
     near_tie = {
         "recommended_fit_window": "trailing_1w",
         "trailing_1w": {"mean_abs_log_error": 0.0195,

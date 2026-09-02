@@ -147,17 +147,23 @@ def _episodes(cfg, n_ep, hours, episode_shift, seed=0):
     return decs, outs
 
 
-def test_correlation_matches_the_frozen_value_when_the_world_has_not_moved(cfg):
-    frozen = cfg["dispersion"]["rho"]
-    # BOTH terms of deff have to match, not just rho: hours tracks the frozen
-    # mean_forced_hours_per_episode, and shared variance is tuned so live rho
-    # lands near the frozen scalar (0.2436 on the calib window; count
-    # discreteness sets a ~0.26 floor on the generator's live rho)
+def _frozen_at_live_rho(cfg, decs, outs):
+    """cfg whose frozen rho IS what this world measures -- "the world has not
+    moved", stated directly instead of tuning a generator constant until it
+    happens to match whatever config ships today."""
+    live = assurance.correlation_drift(decs, outs, cfg)["rho_live"]
+    return {**cfg, "dispersion": {**cfg["dispersion"], "rho": live}}, live
+
+
+def test_correlation_passes_when_the_world_has_not_moved(cfg):
     hours = cfg["assurance"]["rho_min_hours_per_episode"] * 2
     decs, outs = _episodes(cfg, 300, hours=hours, episode_shift=0.25, seed=4)
-    out = assurance.correlation_drift(decs, outs, cfg)
+    matched, live = _frozen_at_live_rho(cfg, decs, outs)
+    out = assurance.correlation_drift(decs, outs, matched)
     assert out["verdict"] == "PASS", out
-    assert abs(out["rho_live"] - frozen) <= cfg["assurance"]["rho_drift_alert"]
+    assert out["rho_live"] == pytest.approx(live)
+    # rho_live is reported to 4dp, so feeding it back leaves only rounding
+    assert out["deff_drift_rel"] < cfg["assurance"]["deff_drift_alert_rel"] / 100
 
 
 def test_deff_is_measured_at_the_live_clustering_not_a_frozen_paste(cfg):
@@ -170,7 +176,8 @@ def test_deff_is_measured_at_the_live_clustering_not_a_frozen_paste(cfg):
     for hours in (base_hours, base_hours // 2):
         decs, outs = _episodes(cfg, 300, hours=hours, episode_shift=0.25,
                                seed=4)
-        out = assurance.correlation_drift(decs, outs, cfg)
+        matched, _ = _frozen_at_live_rho(cfg, decs, outs)
+        out = assurance.correlation_drift(decs, outs, matched)
         assert out["mean_forced_hours_live"] == pytest.approx(hours, abs=0.01)
         assert out["verdict"] == "PASS", out
 

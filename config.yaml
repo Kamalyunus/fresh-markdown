@@ -47,7 +47,7 @@ baseline_model:
   calibration_min_anchor_rows: 200     # SET  anchor basis needs this many rows
   mix_decomposition_min_unit_rows: 30  # SET  anchor rows before a SKU x FC unit gets its own ratio
   calibration_window_sweep_weeks: [1, 2, 4, 8]  # SET  windows the rolling-origin sweep scores to choose W
-  calibration_fit_trailing_weeks: 2    # MEASURED by the sweep; W, and calib must be >= 2W (design 6)
+  calibration_fit_trailing_weeks: 1  # MEASURED by the sweep; W, and calib must be >= 2W (design 6)
   calibration_factor_path: "artifacts/calibration.json"   # per-category level correction
 
 reference_discount:                    # SET  category anchors
@@ -62,7 +62,7 @@ dispersion:
   rho_clip_max: 0.95                   # SET  ceiling on the fitted intra-episode correlation
   r_lookup_path: "artifacts/r_lookup.json"
   rho_path: "artifacts/rho.json"
-  rho: 0.2436                          # MEASURED  fit_dispersion, on the calib window; mirrors artifacts/rho.json. m is NOT pasted: deff measures forced hours per episode per batch (common.config.deff_from_episodes)
+  rho: 0.1161  # MEASURED  fit_dispersion, on the calib window; mirrors artifacts/rho.json. m is NOT pasted: deff measures forced hours per episode per batch (common.config.deff_from_episodes)
 
 tuning:                                # SET  gates pipeline.tune checks before auto-applying
   max_price_share_changed_for_auto_rail: 0.10   # SET  auto-rail ceiling on price churn
@@ -104,7 +104,7 @@ exploration:
   min_feasible_tiers: 2                # SET  below this: non-explorable
 
 learning:
-  information_increment: 12.0          # MEASURED  deff-deflated NB info per bounded update
+  information_increment: 0.591  # MEASURED  deff-deflated NB info per bounded update
   max_mean_step: 0.15                  # SET BY OWNER, gated  cap on one update's mean move
   max_std_shrink: 0.25                 # SET BY OWNER  the PRIMARY rate limit on learning
 
@@ -145,8 +145,8 @@ monitoring:
       scrap: 7                         # per metric, chosen from measured noise
       margin: 1
     persistence_days: 2                # SET  consecutive days before a stop fires
-    scrap_deterioration_pct: null      # MEASURED  3-sigma of the trailing noise
-    margin_deterioration_pct: null     # MEASURED  3-sigma of the trailing noise
+    scrap_deterioration_pct: 0.3572  # MEASURED  3-sigma of the trailing noise
+    margin_deterioration_pct: 0.1435  # MEASURED  3-sigma of the trailing noise
   alert_posterior_std_flat_days: 21    # SET  learning-loop health
 
 ab_test:

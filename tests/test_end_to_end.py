@@ -2,6 +2,7 @@
 loop, learning update. Exercises the bootstrap pipeline order on a small
 randomized-policy dataset."""
 
+import copy
 import json
 import os
 import subprocess
@@ -387,9 +388,14 @@ def test_decision_loop_and_exactly_once_update(workspace):
     assert set(guard["scrap_deterioration"]) >= {"basis", "by_day", "latest"}
 
     args = (safety_metrics(events, decisions, outcomes),
-            learning_metrics(decisions, store, cfg),
+            learning_metrics(decisions, store, cfg, outcomes),
             business_metrics(decisions, outcomes, cfg), guard)
-    blocked = stop_conditions(*args, cfg)
+    # null thresholds report BLOCKED -- set HERE, not read from the shipped
+    # config, so the assertion states its own precondition
+    null_cfg = copy.deepcopy(cfg)
+    null_cfg["monitoring"]["stop_conditions"].update(
+        scrap_deterioration_pct=None, margin_deterioration_pct=None)
+    blocked = stop_conditions(*args, null_cfg)
     assert "BLOCKED" in blocked["fired"]["scrap_deterioration_pct"]
     assert "BLOCKED" in blocked["fired"]["margin_deterioration_pct"]
 
