@@ -20,6 +20,7 @@ from scipy.stats import nbinom
 from common.config import (intraclass_correlation,
                            load_config)
 from common import episodes
+from common.io import write_json
 from common.provenance import stamp
 from bootstrap.prepare_data import population, pre_launch, split_frames
 from bootstrap.train_baseline import BaselineModel
@@ -317,7 +318,6 @@ def main():
     r_lookup, rho_out = fit_dispersion(d, cfg)
 
     dc = cfg["dispersion"]
-    os.makedirs(os.path.dirname(dc["r_lookup_path"]) or ".", exist_ok=True)
     # is freezing these defensible on THIS extract? Measured, not assumed --
     # and it sets the retrain cadence rather than a weekly re-fit (see
     # drift_by_window on why weekly is the wrong answer)
@@ -325,10 +325,8 @@ def main():
     bundle = BaselineModel(cfg).version
     stamp(r_lookup, cfg, bundle, "bootstrap.fit_dispersion")
     stamp(rho_out, cfg, bundle, "bootstrap.fit_dispersion")
-    with open(dc["r_lookup_path"], "w") as f:
-        json.dump(r_lookup, f, indent=2)
-    with open(dc["rho_path"], "w") as f:
-        json.dump(rho_out, f, indent=2)
+    write_json(dc["r_lookup_path"], r_lookup)
+    write_json(dc["rho_path"], rho_out)
 
     print(f"r by subcategory : {len(r_lookup['subcategory'])} groups, "
           f"global r = {r_lookup['global']:.3f}, clamp at {r_lookup['clamp_at']:.3f}")

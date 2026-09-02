@@ -12,6 +12,8 @@ import json
 import os
 from datetime import datetime, timezone
 
+from common.io import read_json
+
 # Every frozen artifact, and the config key holding its path. Order is fitting
 # order, which is also the order a mismatch propagates in.
 ARTIFACTS = [
@@ -93,8 +95,7 @@ def _bundle_of(path):
     if not path.endswith(".json"):
         return None                       # the model itself is the bundle id
     try:
-        with open(path) as f:
-            payload = json.load(f)
+        payload = read_json(path, {})
     except (OSError, json.JSONDecodeError):
         return None
     prov = payload.get("provenance") or {}
@@ -164,8 +165,4 @@ def verify(cfg, sealed=None):
 
 
 def load_seal(cfg):
-    path = _path(cfg, ("artifacts", "bundle_path"))
-    if not os.path.exists(path):
-        return None
-    with open(path) as f:
-        return json.load(f)
+    return read_json(_path(cfg, ("artifacts", "bundle_path")))

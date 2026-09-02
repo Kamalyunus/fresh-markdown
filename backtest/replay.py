@@ -159,7 +159,7 @@ def calibration_window_sweep(d, cfg):
     a = d[episodes.is_anchor_row(d, tier_step)].copy()
     if not len(a):
         return "NOT RUN -- no anchor rows"
-    a["week"] = pd.to_datetime(a.date).dt.to_period("W")
+    a["week"] = episodes.week_key(a.date)
     cw = (a.groupby(["category", "week"], observed=True)
           .agg(sold=("units_sold", "sum"), pred=("predicted_units", "sum"))
           .reset_index())

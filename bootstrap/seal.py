@@ -8,10 +8,9 @@ python3 -m bootstrap.seal
 """
 
 import argparse
-import json
-import os
 
 from common.config import load_config
+from common.io import write_json
 from common import provenance
 
 
@@ -39,9 +38,7 @@ def main():
     cfg = load_config(args.config)
     payload = seal(cfg)
     path = cfg["artifacts"]["bundle_path"]
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(payload, f, indent=2)
+    write_json(path, payload)
     print(f"sealed bundle {payload['bundle']}")
     for name, digest in payload["sha256"].items():
         print(f"  {name:16s} {digest[:12]}")

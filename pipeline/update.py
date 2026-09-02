@@ -8,7 +8,6 @@ hard event-quality gate fails.
 """
 
 import argparse
-import json
 import math
 import os
 
@@ -19,6 +18,7 @@ from scipy.stats import nbinom
 
 from common.config import load_config, deff_from_episodes
 from common import episodes
+from common.io import read_json
 from events.store import EventStore
 from events.pairs import match_pairs, decision_day, is_learnable, price_matches
 from pricing import explore
@@ -265,8 +265,7 @@ def calibration_current(cfg, today=None):
     if not os.path.exists(path):
         return {"value": "none", "threshold": "schedule covers today",
                 "pass": True, "note": "no calibration artifact; factors are 1.0"}
-    with open(path) as f:
-        sched = (json.load(f).get("schedule") or {}).get("by_week") or {}
+    sched = (read_json(path).get("schedule") or {}).get("by_week") or {}
     if not sched:
         return {"value": "static", "threshold": "schedule covers today",
                 "pass": True,
@@ -274,7 +273,7 @@ def calibration_current(cfg, today=None):
                         "set, nothing to keep current"}
     now = pd.Timestamp(today) if today is not None else pd.Timestamp.now("UTC")
     week = pd.Timestamp(now).tz_localize(None) if now.tzinfo else now
-    week = week.to_period("W").start_time.strftime("%Y-%m-%d")
+    week = episodes.week_start(week).strftime("%Y-%m-%d")
     last = max(sched)
     ok = week <= last
     return {

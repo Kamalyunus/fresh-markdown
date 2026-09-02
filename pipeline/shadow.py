@@ -10,13 +10,13 @@ and ZERO cost-floor violations."""
 import argparse
 import hashlib
 import json
-import os
 
 import numpy as np
 import pandas as pd
 
 from common.config import load_config, deff_from_episodes, ConfigError
 from common import episodes
+from common.io import read_json, write_json
 from common.parallel import map_episodes
 from common.provenance import config_fingerprint
 from common.episodes import adjustment_reason
@@ -50,13 +50,8 @@ def _require_shadow_config(cfg, backtest_path="reports/backtest.json",
 
     # Non-null is not enough: tau_initial is hand-pasted and decides day-one
     # spend, before the controller has any spend to correct from.
-    def _read(path):
-        if os.path.exists(path):
-            with open(path) as f:
-                return json.load(f)
-        return None
-    stale = explore.tau_provenance_error(cfg, _read(backtest_path),
-                                         _read(shadow_path))
+    stale = explore.tau_provenance_error(cfg, read_json(backtest_path),
+                                         read_json(shadow_path))
     if stale:
         raise ConfigError("shadow phase blocked by a stale tau: "
                           + prefix + stale)
@@ -649,8 +644,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             refit, refit_cov = {}, [{"error": str(exc)}]
     if refit:
         anchor_f = model.calibration
-        weeks = pd.to_datetime(pd.Series(drift["date"])) \
-                  .dt.to_period("W").dt.start_time.dt.strftime("%Y-%m-%d")
+        weeks = episodes.week_key(pd.Series(drift["date"]))
         scale = np.ones(len(mu_arr))
         for i, (wkey, cell) in enumerate(zip(weeks.to_numpy(),
                                              drift["cell"])):
@@ -988,9 +982,7 @@ def main():
                         prior_il_by_day=history,
                         pre_window_frame=full, window_start=start)
 
-    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    with open(args.out, "w") as f:
-        json.dump(report, f, indent=2, default=str)
+    write_json(args.out, report)
 
     g = report["shadow_gate"]
     w = report["window"]

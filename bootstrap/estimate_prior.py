@@ -9,13 +9,13 @@ Run: python3 -m bootstrap.estimate_prior --input data/prepared.parquet
 """
 
 import argparse
-import json
-import os
 
 import numpy as np
 import pandas as pd
 
 from common.config import OWN_DATA_WEIGHT, load_config
+from common import episodes
+from common.io import write_json
 from common.provenance import stamp
 from bootstrap.prepare_data import population, split_frames
 from bootstrap.train_baseline import BaselineModel
@@ -27,8 +27,7 @@ def _episodes_per_week(d, cfg):
     `pricing.posterior.initialise`. A property of the population, not of how
     epsilon was estimated."""
     train = population(split_frames(d, cfg)["train"], cfg)
-    weeks = max(train.date.astype(str).map(
-        lambda x: pd.Timestamp(x).to_period("W")).nunique(), 1)
+    weeks = max(episodes.week_key(train.date).nunique(), 1)
     per = train.groupby("category")["episode_id"].nunique() / weeks
     return {str(k): round(float(v), 1) for k, v in per.items()}
 
@@ -141,9 +140,7 @@ def main():
 
     stamp(prior, cfg, BaselineModel(cfg).version, "bootstrap.estimate_prior")
     path = cfg["posterior"]["prior"]["path"]
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(prior, f, indent=2)
+    write_json(path, prior)
 
     _print(prior)
     print(f"wrote {path}")

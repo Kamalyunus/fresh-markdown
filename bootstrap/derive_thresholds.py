@@ -10,7 +10,6 @@ Run: python3 -m bootstrap.derive_thresholds --input data/prepared.parquet [--mde
 
 import argparse
 import json
-import os
 
 import numpy as np
 import pandas as pd
@@ -18,6 +17,7 @@ from scipy.stats import norm
 
 from common.ab import arm
 from common.config import load_config
+from common.io import write_json
 from common import episodes
 from common import guardrail
 from common import metrics
@@ -526,9 +526,7 @@ def main():
         "bounded_step_recommendation": bounded_step(cfg),
     }
 
-    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    with open(args.out, "w") as f:
-        json.dump(report, f, indent=2, default=str)
+    write_json(args.out, report)
 
     ab = report["ab_duration"]
     print(f"target MDE (relative)  : {mde if mde is not None else 'not set'}")

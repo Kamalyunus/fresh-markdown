@@ -7,7 +7,6 @@ price (0 on zero-sale rows), never used to reconstruct the offered price;
 episode_id is built here, the rule persisted in the split manifest."""
 
 import argparse
-import json
 import os
 
 import numpy as np
@@ -15,6 +14,7 @@ import pandas as pd
 
 from common.config import load_config, reference_discount
 from common import episodes
+from common.io import write_json
 from common.provenance import stamp
 
 SOURCE_TO_CANONICAL = {
@@ -698,23 +698,7 @@ def split_frames(d, cfg):
 
 
 
-def _json_safe(value):
-    """NaN/Inf are not JSON: json.dump emits bare `NaN`, which most parsers
-    reject. cogs_at_risk returns NaN for a whole stage when any episode has
-    a null cost, and `cost_missing` is a FLAG, so the NaN survives."""
-    if isinstance(value, dict):
-        return {k: _json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(v) for v in value]
-    if isinstance(value, float) and not np.isfinite(value):
-        return None
-    if isinstance(value, (np.integer, np.floating)):
-        return _json_safe(value.item())
-    return value
-
-
 def write_manifest(path, cfg, waterfall=None):
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     # The WATERFALL is the artifact, not the console. Every stage's rows,
     # episodes, COGS at risk and its detail dict were computed and then
     # printed as three columns -- so flow_identity.holds going False, the
@@ -725,15 +709,14 @@ def write_manifest(path, cfg, waterfall=None):
                "cogs_at_risk": s[3] if len(s) > 3 else None,
                "detail": s[4] if len(s) > 4 else None}
               for s in (waterfall or [])]
-    with open(path, "w") as f:
-        json.dump(stamp(_json_safe({
-            "episode_rule": EPISODE_RULE,
-            "split": cfg["data"]["split"],
-            "holdout": cfg["data"].get("holdout"),
-            "exclusion_window": cfg["data"]["exclusion_window"],
-            "config_version": cfg["meta"]["config_version"],
-            "waterfall": stages,
-        }), cfg, None, "bootstrap.prepare_data"), f, indent=2)
+    write_json(path, stamp({
+        "episode_rule": EPISODE_RULE,
+        "split": cfg["data"]["split"],
+        "holdout": cfg["data"].get("holdout"),
+        "exclusion_window": cfg["data"]["exclusion_window"],
+        "config_version": cfg["meta"]["config_version"],
+        "waterfall": stages,
+    }, cfg, None, "bootstrap.prepare_data"))
 
 
 def main():

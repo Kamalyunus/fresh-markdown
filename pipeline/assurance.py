@@ -8,8 +8,6 @@ Run: python3 -m pipeline.assurance --out reports/assurance.json
 """
 
 import argparse
-import json
-import os
 
 import numpy as np
 from scipy.stats import chi2 as chi2_dist
@@ -19,6 +17,7 @@ from common.config import (design_effect, intraclass_correlation,
                            load_config)
 from events.store import EventStore
 from events.pairs import match_pairs
+from common.io import write_json
 from common.provenance import config_fingerprint
 from pricing import dp as dp_mod
 from pricing.explore import affordable_set
@@ -341,9 +340,7 @@ def main():
     store = EventStore(cfg)
     report = run(store.load_decisions(), store.load_outcomes(), cfg)
 
-    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    with open(args.out, "w") as f:
-        json.dump(report, f, indent=2, default=str)
+    write_json(args.out, report)
     for name in ("reproduction", "dispersion", "correlation", "exploration"):
         print(f"{name:14s} {report[name]['verdict']}")
     print(f"wrote {args.out}")

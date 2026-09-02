@@ -20,7 +20,6 @@ graded a different model is worse than not tuning at all (hard rule 1).
 
 import argparse
 import datetime as dt
-import json
 import os
 import re
 import shutil
@@ -30,17 +29,56 @@ import pandas as pd
 
 from common.config import artifact_mirror_drift, load_config
 from common.guardrail import verdict_is_blocking, verdict_is_insufficient
+from common.io import read_json, write_json
 from pricing.explore import tau_provenance_error
 
 PASTE, OWNER, INFO, BLOCK = "PASTE", "OWNER", "INFO", "BLOCK"
 OK, ACT = "OK", "ACT"
 
-# What a paste invalidates: "none" = read at runtime or mirrors the
-# artifact; "calibration" = the loop turns (3b-5b, NO retrain);
-# "retrain" = only data.split, which is SET BY OWNER and never auto-applied.
-RERUN = {
-    ("baseline_model", "calibration_fit_trailing_weeks"): "calibration",
+# Every config key --apply may touch, one row each.
+#   anchor   -> the unique line anchor that carries its scalar. Targeted line
+#               edits rather than a YAML round-trip: every value in config.yaml
+#               carries the reasoning for it in a comment, and a round-trip
+#               would drop them all.
+#   measured -> the value is DERIVED from a report rather than chosen by the
+#               owner. A number here that disagrees with its report is stale
+#               or FOREIGN -- from another run, or from the repo's synthetic
+#               fixture -- never a preference. pipeline.status refuses the
+#               chain on any of them, whatever class the finding ended up in:
+#               a W the split rule downgrades to OWNER is still a value nobody
+#               chose.
+#   rerun    -> what a paste invalidates: "none" = read at runtime or mirrors
+#               the artifact; "calibration" = the loop turns (3b-5b, NO
+#               retrain); "retrain" = only data.split, which is SET BY OWNER
+#               and never auto-applied.
+KEYS = {
+    ("learning", "information_increment"):
+        {"anchor": "  information_increment:", "measured": True, "rerun": "none"},
+    ("learning", "max_mean_step"):
+        {"anchor": "  max_mean_step:", "measured": False, "rerun": "none"},
+    ("learning", "max_std_shrink"):
+        {"anchor": "  max_std_shrink:", "measured": False, "rerun": "none"},
+    ("exploration", "tau_initial"):
+        {"anchor": "  tau_initial:", "measured": True, "rerun": "none"},
+    ("dispersion", "rho"):
+        {"anchor": "  rho:", "measured": True, "rerun": "none"},
+    ("baseline_model", "calibration_fit_trailing_weeks"):
+        {"anchor": "  calibration_fit_trailing_weeks:", "measured": True,
+         "rerun": "calibration"},
+    ("monitoring", "stop_conditions", "scrap_deterioration_pct"):
+        {"anchor": "    scrap_deterioration_pct:", "measured": False,
+         "rerun": "none"},
+    ("monitoring", "stop_conditions", "margin_deterioration_pct"):
+        {"anchor": "    margin_deterioration_pct:", "measured": False,
+         "rerun": "none"},
+    ("ab_test", "min_detectable_effect_pct"):
+        {"anchor": "  min_detectable_effect_pct:", "measured": False,
+         "rerun": "none"},
+    ("baseline_model", "calibration_gate_band"):
+        {"anchor": "  calibration_gate_band:", "measured": True, "rerun": "none"},
 }
+MEASURED_KEYS = {k for k, v in KEYS.items() if v["measured"]}
+RERUN = {k: v["rerun"] for k, v in KEYS.items() if v["rerun"] != "none"}
 
 RERUN_STEPS = {
     "none": ("nothing to re-run: every value written is read at runtime or "
@@ -54,47 +92,6 @@ RERUN_STEPS = {
                 "`python3 -m bootstrap.run --input <raw>` is required; "
                 "nothing from before is comparable (rule 1)"),
 }
-
-# Keys whose value is DERIVED from a report rather than chosen by the owner.
-# A number here that disagrees with its report is stale or FOREIGN -- from
-# another run, or from the repo's synthetic fixture -- never a preference.
-# pipeline.status refuses the chain on any of them, whatever class the
-# finding ended up in: a W the split rule downgrades to OWNER is still a
-# value nobody chose.
-MEASURED_KEYS = {
-    ("baseline_model", "calibration_fit_trailing_weeks"),
-    ("baseline_model", "calibration_gate_band"),
-    ("learning", "information_increment"),
-    ("exploration", "tau_initial"),
-    ("dispersion", "rho"),
-}
-
-# config path -> the unique line anchor that carries its scalar. Targeted line
-# edits rather than a YAML round-trip: every value in config.yaml carries the
-# reasoning for it in a comment, and a round-trip would drop them all.
-ANCHORS = {
-    ("learning", "information_increment"): "  information_increment:",
-    ("learning", "max_mean_step"): "  max_mean_step:",
-    ("learning", "max_std_shrink"): "  max_std_shrink:",
-    ("exploration", "tau_initial"): "  tau_initial:",
-    ("dispersion", "rho"): "  rho:",
-    ("baseline_model", "calibration_fit_trailing_weeks"):
-        "  calibration_fit_trailing_weeks:",
-    ("monitoring", "stop_conditions", "scrap_deterioration_pct"):
-        "    scrap_deterioration_pct:",
-    ("monitoring", "stop_conditions", "margin_deterioration_pct"):
-        "    margin_deterioration_pct:",
-    ("ab_test", "min_detectable_effect_pct"): "  min_detectable_effect_pct:",
-    ("baseline_model", "calibration_gate_band"): "  calibration_gate_band:",
-}
-
-
-def _read(path):
-    if path and os.path.exists(path):
-        with open(path) as f:
-            return json.load(f)
-    return None
-
 
 def _sweep_of(backtest):
     """The sweep block, or {} -- it is a STRING on its NOT RUN path, and
@@ -555,11 +552,11 @@ def _readings(cfg, backtest, shadow):
 
 
 def collect(cfg, root="reports"):
-    backtest = _read(os.path.join(root, "backtest.json"))
-    shadow = _read(os.path.join(root, "shadow.json"))
-    thresholds = _read(os.path.join(root, "thresholds.json"))
-    calibration = _read(cfg["baseline_model"]["calibration_factor_path"])
-    rho_art = _read(cfg["dispersion"]["rho_path"])
+    backtest = read_json(os.path.join(root, "backtest.json"))
+    shadow = read_json(os.path.join(root, "shadow.json"))
+    thresholds = read_json(os.path.join(root, "thresholds.json"))
+    calibration = read_json(cfg["baseline_model"]["calibration_factor_path"])
+    rho_art = read_json(cfg["dispersion"]["rho_path"])
 
     missing = [n for n, r in (("backtest", backtest), ("shadow", shadow),
                               ("thresholds", thresholds))
@@ -590,7 +587,7 @@ def collect(cfg, root="reports"):
 def set_scalar(text, path, value):
     """Replace one scalar in config.yaml, keeping its comment and every
     other line byte-identical (a YAML round-trip drops comments)."""
-    anchor = ANCHORS.get(tuple(path))
+    anchor = (KEYS.get(tuple(path)) or {}).get("anchor")
     if anchor is None:
         raise KeyError(f"no line anchor for {'.'.join(path)}")
     hits = [i for i, ln in enumerate(text.splitlines()) if ln.startswith(anchor)]
@@ -635,7 +632,7 @@ def apply(report, config_path="config.yaml", out_dir="artifacts"):
             f.write(text)
 
     log_path = os.path.join(out_dir, "config_decisions.json")
-    history = _read(log_path) or {"runs": []}
+    history = read_json(log_path) or {"runs": []}
     history["runs"].append({
         "at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "config_backup": backup,
@@ -656,8 +653,7 @@ def apply(report, config_path="config.yaml", out_dir="artifacts"):
     needed = max((RERUN.get(tuple(f_["key"].split(".")), "none")
                   for f_ in applied), key=order.index, default="none")
     history["runs"][-1]["rerun_required"] = needed
-    with open(log_path, "w") as f:
-        json.dump(history, f, indent=2)
+    write_json(log_path, history)
     return {"backup": backup, "log": log_path, "applied": applied,
             "failed": failed, "rerun": needed}
 

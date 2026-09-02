@@ -376,15 +376,6 @@ def test_an_unusable_guardrail_floor_is_never_pasted(cfg):
     assert f["class"] == "PASTE" and f["recommended"] == 0.18
 
 
-def test_every_paste_key_has_a_line_anchor(cfg):
-    """A PASTE whose key is missing from ANCHORS raises inside --apply and is
-    reported SKIPPED every run -- calibration_gate_band could never tighten
-    through the tool."""
-    for key in tune.RERUN:
-        assert key in tune.ANCHORS, key
-    assert ("baseline_model", "calibration_gate_band") in tune.ANCHORS
-
-
 def test_a_not_run_sweep_is_a_finding_not_a_traceback(cfg, tmp_path, reports_dir):
     """replay writes the sweep as a STRING on its NOT RUN path; `.get` on
     that took tune down instead of reporting the missing measurement."""

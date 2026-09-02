@@ -1,10 +1,10 @@
 import argparse
 import json
-import os
 
 import pandas as pd
 
 from common.config import load_config
+from common.io import write_json
 from bootstrap.prepare_data import population, pre_launch
 from common.provenance import config_fingerprint
 from bootstrap.train_baseline import BaselineModel
@@ -83,9 +83,7 @@ def main():
         "policy_deltas": pol,
         "tau_initial_derivation": tau,
     }
-    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    with open(args.out, "w") as f:
-        json.dump(out, f, indent=2, default=str)
+    write_json(args.out, out)
 
     print(f"fidelity_episode_sold_ratio : {fid['fidelity_episode_sold_ratio']}")
     print(f"gate ({fid['calibration_gate_metric']}) : "

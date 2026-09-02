@@ -24,6 +24,17 @@ def is_anchor_row(d, tier_step):
     return (d.total_discount - d.d_ref).abs() <= tier_step / 2
 
 
+def week_start(ts):
+    """The ISO week (Mon-Sun) holding `ts`, as its Monday."""
+    return pd.Timestamp(ts).to_period("W").start_time
+
+
+def week_key(dates):
+    """`week_start` per row, as the "YYYY-MM-DD" key the factor schedules use."""
+    return (pd.to_datetime(dates).dt.to_period("W").dt.start_time
+            .dt.strftime("%Y-%m-%d"))
+
+
 def trailing_weeks_window(d, week_start, weeks_back):
     """The rows a factor fit for the week starting `week_start` may read:
     WHOLE episodes that opened in the `weeks_back` weeks strictly before it,
@@ -38,9 +49,8 @@ def trailing_weeks_window(d, week_start, weeks_back):
                           (w0 - pd.Timedelta(days=1)).strftime("%Y-%m-%d"))
     if not len(window):
         return window, 0
-    opened = pd.to_datetime(window.groupby("episode_id")["date"]
-                            .transform("min"))
-    return window, int(opened.dt.to_period("W").nunique())
+    opened = window.groupby("episode_id")["date"].transform("min")
+    return window, int(week_key(opened).nunique())
 
 
 def window_slice(d, start=None, end=None):

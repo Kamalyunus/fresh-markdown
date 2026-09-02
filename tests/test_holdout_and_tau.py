@@ -440,7 +440,7 @@ def test_calibration_factors_never_see_their_own_week_or_later(cfg):
     import inspect
     from bootstrap.train_baseline import BaselineModel
     src = inspect.getsource(BaselineModel._factor_vector)
-    assert 'to_period("W")' in src, "factors are not selected by row week"
+    assert "episodes.week_key(" in src, "factors are not selected by row week"
     assert "self.calibration.get(key, 1.0)" in src, \
         "an unfitted week must fall back to the frozen set, not to a later week"
 

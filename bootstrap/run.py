@@ -26,12 +26,11 @@ in normal operation should ever retrain to settle calibration.
 """
 
 import argparse
-import json
-import os
 import subprocess
 import sys
 
 from common.config import load_config
+from common.io import read_json
 
 PREPARED = "data/prepared.parquet"
 
@@ -51,10 +50,7 @@ def step(label, args, fatal=True, quiet=False):
 def convergence(cfg):
     """The verdict block the last `--check-convergence` wrote, or None."""
     path = cfg["baseline_model"]["calibration_factor_path"]
-    if not os.path.exists(path):
-        return None
-    with open(path) as f:
-        return (json.load(f) or {}).get("convergence")
+    return (read_json(path) or {}).get("convergence")
 
 
 def settle(cfg, max_turns):

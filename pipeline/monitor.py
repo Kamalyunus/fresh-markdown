@@ -8,13 +8,13 @@ Run: python3 -m pipeline.monitor --out reports/monitor.json
 
 import argparse
 import json
-import os
 
 import numpy as np
 import pandas as pd
 
 from common.ab import arm
 from common.config import load_config, deff_from_episodes
+from common.io import write_json
 from events.store import EventStore
 from events.pairs import match_pairs, decision_day, price_matches
 from pricing.posterior import PosteriorStore
@@ -363,9 +363,7 @@ def main():
     report["stop_conditions"] = stop_conditions(
         safety, learning, business, guardrail, cfg)
 
-    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    with open(args.out, "w") as f:
-        json.dump(report, f, indent=2, default=str)
+    write_json(args.out, report)
     print(json.dumps(report["stop_conditions"], indent=2))
     print("assurance: " + ("PASS" if assurance["verdict"] == "PASS"
                            else "FAIL -> " + ", ".join(assurance["failing"])))

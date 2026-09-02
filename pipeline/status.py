@@ -15,20 +15,24 @@ from common.config import (OWN_DATA_WEIGHT, RUNTIME_REQUIRED,
                            artifact_mirror_drift, config_get, load_config)
 from common import provenance
 from common.guardrail import verdict_is_blocking, verdict_is_insufficient
+from common.io import read_json
 from pricing import explore
 
 PASS, FAIL, WARN, NONE = "PASS", "FAIL", "WARN", "not run"
 
 
-def _read(path):
-    if not os.path.exists(path):
-        return None
-    with open(path) as f:
-        return json.load(f)
-
-
 def _row(name, verdict, detail, where=""):
     return {"check": name, "verdict": verdict, "detail": detail, "where": where}
+
+
+def _needs(report, name, missing, run_cmd="", key=None, predates=()):
+    """The NONE row a report-backed check opens with, or None to go on."""
+    if not report:
+        return _row(name, NONE, f"no {missing}", run_cmd)
+    if key and not report.get(key):
+        # file exists but predates the block: stale, not never-ran
+        return _row(name, NONE, *predates)
+    return None
 
 
 def _launch_blockers(cfg):
@@ -143,9 +147,9 @@ def _config_vs_reports(cfg, root):
 def _calibration(cfg, backtest):
     # DIAGNOSTIC, not a gate: calibration is always applied (owner,
     # 2026-08-25). Out of band -> WARN, never FAIL.
-    if not backtest:
-        return _row("calibration level", NONE, "no backtest report",
-                    "python3 -m backtest")
+    if row := _needs(backtest, "calibration level", "backtest report",
+                     "python3 -m backtest"):
+        return row
     fid = backtest.get("fidelity", {})
     metric = fid.get("calibration_gate_metric", "level_bias_at_anchor")
     value = fid.get("calibration_gate_value",
@@ -164,16 +168,15 @@ def _calibration_convergence(cfg):
     # the calibration <-> dispersion loop is resolved by iteration; this row
     # says whether anyone ASSERTED the fixed point settled. WARN, not FAIL:
     # like the level band it is a chain-health reading, not a launch gate.
-    cal = _read(cfg["baseline_model"]["calibration_factor_path"])
-    if not cal:
-        return _row("calibration convergence", NONE, "no calibration artifact")
-    block = cal.get("convergence")
-    if not block:
-        return _row("calibration convergence", NONE,
-                    "never checked -- the factor <-> r loop is assumed, "
-                    "not asserted",
-                    "python3 -m bootstrap.train_baseline --input "
-                    "data/prepared.parquet --check-convergence")
+    cal = read_json(cfg["baseline_model"]["calibration_factor_path"])
+    if row := _needs(cal, "calibration convergence", "calibration artifact",
+                     key="convergence", predates=(
+                         "never checked -- the factor <-> r loop is assumed, "
+                         "not asserted",
+                         "python3 -m bootstrap.train_baseline --input "
+                         "data/prepared.parquet --check-convergence")):
+        return row
+    block = cal["convergence"]
     # STALE BEATS CONVERGED: a verdict is only about the artifacts in force
     # when it ran; a moved prior/r/rho means the loop has turned again.
     from common.provenance import file_digest
@@ -201,10 +204,9 @@ def _calibration_convergence(cfg):
 
 
 def _prior(cfg):
-    path = (cfg["posterior"].get("prior") or {}).get("path")
-    prior = _read(path) if path else None
-    if not prior:
-        return _row("elasticity prior", NONE, "no prior artifact")
+    prior = read_json((cfg["posterior"].get("prior") or {}).get("path"))
+    if row := _needs(prior, "elasticity prior", "prior artifact"):
+        return row
     per = prior.get("per_category", {})
     own = sum(1 for v in per.values()
               if v.get("own_information_weight", 0) >= OWN_DATA_WEIGHT
@@ -217,9 +219,9 @@ def _prior(cfg):
 
 
 def _shadow(shadow):
-    if not shadow:
-        return _row("shadow gate", NONE, "no shadow report",
-                    "python3 -m pipeline.shadow")
+    if row := _needs(shadow, "shadow gate", "shadow report",
+                     "python3 -m pipeline.shadow"):
+        return row
     g = shadow.get("shadow_gate", {})
     # verdict carries a trailing note; sub-checks are {value, threshold, pass}
     ok = str(g.get("verdict", "")).upper().startswith(PASS)
@@ -314,15 +316,13 @@ def _tau(cfg, backtest, shadow=None):
 
 
 def _guardrails(thresholds):
-    if not thresholds:
-        return _row("guardrail floors", NONE, "no thresholds report",
-                    "python3 -m bootstrap.derive_thresholds")
-    rec = thresholds.get("guardrail_threshold_recommendation")
-    if not rec:
-        # file exists but predates the block: stale, not never-ran
-        return _row("guardrail floors", NONE,
-                    "report predates the recommendation block",
-                    "re-run python3 -m bootstrap.derive_thresholds")
+    if row := _needs(thresholds, "guardrail floors", "thresholds report",
+                     "python3 -m bootstrap.derive_thresholds",
+                     key="guardrail_threshold_recommendation", predates=(
+                         "report predates the recommendation block",
+                         "re-run python3 -m bootstrap.derive_thresholds")):
+        return row
+    rec = thresholds["guardrail_threshold_recommendation"]
     verdicts = {k: v.get("verdict") for k, v in rec.items()
                 if isinstance(v, dict) and "verdict" in v}
     # All three of design 12's blocking verdicts, not just the first. TOO
@@ -344,9 +344,9 @@ def _guardrails(thresholds):
 
 
 def _stops(monitor):
-    if not monitor:
-        return _row("stop conditions", NONE, "no monitor report",
-                    "python3 -m pipeline.monitor")
+    if row := _needs(monitor, "stop conditions", "monitor report",
+                     "python3 -m pipeline.monitor"):
+        return row
     # monitor.stop_conditions is {fired: {name: bool|status}, guardrails:
     # {...}, suspend_exploration: bool} -- read THAT shape. Iterating the
     # top level looking for v["fired"] found three container keys, counted
@@ -368,9 +368,9 @@ def _stops(monitor):
 
 
 def _assurance(rep):
-    if not rep:
-        return _row("assurance", NONE, "no assurance report",
-                    "python3 -m pipeline.assurance")
+    if row := _needs(rep, "assurance", "assurance report",
+                     "python3 -m pipeline.assurance"):
+        return row
     names = ("reproduction", "dispersion", "correlation", "exploration")
     v = {n: rep.get(n, {}).get("verdict", "?") for n in names}
     failing = [n for n, x in v.items() if x == FAIL]
@@ -386,12 +386,12 @@ def _assurance(rep):
 def collect(cfg, root="reports"):
     """`root` is injectable so the tests can point at a fixture directory --
     a status view that cannot itself be tested is not worth trusting."""
-    backtest = _read(os.path.join(root, "backtest.json"))
-    shadow = _read(os.path.join(root, "shadow.json"))
+    backtest = read_json(os.path.join(root, "backtest.json"))
+    shadow = read_json(os.path.join(root, "shadow.json"))
     reports = {"backtest": backtest, "shadow": shadow,
-               "thresholds": _read(os.path.join(root, "thresholds.json")),
-               "monitor": _read(os.path.join(root, "monitor.json")),
-               "assurance": _read(os.path.join(root, "assurance.json"))}
+               "thresholds": read_json(os.path.join(root, "thresholds.json")),
+               "monitor": read_json(os.path.join(root, "monitor.json")),
+               "assurance": read_json(os.path.join(root, "assurance.json"))}
     state = provenance.verify(cfg, provenance.load_seal(cfg))
     rows = [
         _launch_blockers(cfg),

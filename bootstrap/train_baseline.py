@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from common.config import load_config, reference_discount
+from common.io import read_json, write_json
 from common.provenance import stamp
 from common import episodes
 from bootstrap.prepare_data import population, pre_launch, split_frames
@@ -95,7 +96,7 @@ class BaselineModel:
             self._cal_rows_static += len(d)
             return keys.map(lambda k: self.calibration.get(k, 1.0)).to_numpy()
         dates = pd.to_datetime(d["date"])
-        weeks = dates.dt.to_period("W").dt.start_time.dt.strftime("%Y-%m-%d")
+        weeks = episodes.week_key(dates)
         frozen = (dates >= self._freeze_from).to_numpy() \
             if getattr(self, "_freeze_from", None) is not None \
             else np.zeros(len(d), bool)
@@ -349,7 +350,7 @@ def fit_level_calibration(d, cfg):
 
     r_path = cfg["dispersion"]["r_lookup_path"]
     censored_basis = os.path.exists(r_path)
-    r_lookup = json.load(open(r_path)) if censored_basis else None
+    r_lookup = read_json(r_path)
 
     min_anchor = cfg["baseline_model"]["calibration_min_anchor_rows"]
     k_shrink = cfg["baseline_model"]["calibration_shrinkage_units"]
@@ -368,20 +369,18 @@ def fit_level_calibration(d, cfg):
     # freeze_calibration_from instead of bounding the artifact here)
     scope = population(pre_launch(d, cfg), cfg).copy()
     by_week, coverage = {}, []
-    wk = pd.to_datetime(scope.date).dt.to_period("W")
-    for w in sorted(wk.unique()):
+    for w in sorted(episodes.week_key(scope.date).unique()):
         window, weeks_seen = episodes.trailing_weeks_window(
-            scope, w.start_time, weeks_back)
+            scope, w, weeks_back)
         if not len(window):
             continue
         f = _solve_level_factors(window.copy(), model, k_shrink,
                                  min_anchor, tier_step, max_k, r_lookup)
         if f is None:                       # too thin: hold 1.0, say so
-            coverage.append({"week": str(w.start_time.date()),
-                             "fitted": False})
+            coverage.append({"week": w, "fitted": False})
             continue
-        by_week[str(w.start_time.date())] = f[0]
-        coverage.append({"week": str(w.start_time.date()), "fitted": True,
+        by_week[w] = f[0]
+        coverage.append({"week": w, "fitted": True,
                          "fit_rows": int(len(window)),
                          "weeks_in_window": weeks_seen,
                          "partial": weeks_seen < weeks_back})
@@ -402,38 +401,36 @@ def fit_level_calibration(d, cfg):
         "by_week": by_week,
     }
 
-    path = cfg["baseline_model"]["calibration_factor_path"]
-    with open(path, "w") as f:
-        fv = np.array(list(factors.values()), dtype=float)
-        payload = {"grain": GRAIN,
-                   "factor_summary": {
-                       "p10": round(float(np.percentile(fv, 10)), 4),
-                       "p50": round(float(np.percentile(fv, 50)), 4),
-                       "p90": round(float(np.percentile(fv, 90)), 4),
-                       "share_within_5pct_of_1": round(
-                           float((np.abs(fv - 1.0) <= 0.05).mean()), 4),
-                       "note": "clustered on 1.0 -> model is level-correct; "
-                               "wide -> systematic per-cell bias worth fixing "
-                               "in training",
-                   },
-                   "factors": factors,
-                   "schedule": schedule,
-                   "detail": detail,
-                   "global_factor": round(float(f_global), 4),
-                   "shrinkage_units": k_shrink,
-                   "fit_window": "rolling_trailing",
-                   "fit_basis": "censored E[min(D,q)]" if censored_basis
-                       else "raw mu (r_lookup missing)",
-                   "fit_window_dates": [str(fit_dates.min().date()),
-                                        str(fit_dates.max().date())],
-                   "fit_rows": int(len(calib)),
-                   "fit_in_sample_share": round(in_sample_share, 4),
-                   "split": split,
-                   "basis": "anchor rows only; cells below "
-                            "calibration_min_anchor_rows left at 1.0"}
-        json.dump(stamp(payload, cfg, model.version,
-                        "bootstrap.train_baseline --fit-calibration"),
-                  f, indent=2)
+    fv = np.array(list(factors.values()), dtype=float)
+    payload = {"grain": GRAIN,
+               "factor_summary": {
+                   "p10": round(float(np.percentile(fv, 10)), 4),
+                   "p50": round(float(np.percentile(fv, 50)), 4),
+                   "p90": round(float(np.percentile(fv, 90)), 4),
+                   "share_within_5pct_of_1": round(
+                       float((np.abs(fv - 1.0) <= 0.05).mean()), 4),
+                   "note": "clustered on 1.0 -> model is level-correct; "
+                           "wide -> systematic per-cell bias worth fixing "
+                           "in training",
+               },
+               "factors": factors,
+               "schedule": schedule,
+               "detail": detail,
+               "global_factor": round(float(f_global), 4),
+               "shrinkage_units": k_shrink,
+               "fit_window": "rolling_trailing",
+               "fit_basis": "censored E[min(D,q)]" if censored_basis
+                   else "raw mu (r_lookup missing)",
+               "fit_window_dates": [str(fit_dates.min().date()),
+                                    str(fit_dates.max().date())],
+               "fit_rows": int(len(calib)),
+               "fit_in_sample_share": round(in_sample_share, 4),
+               "split": split,
+               "basis": "anchor rows only; cells below "
+                        "calibration_min_anchor_rows left at 1.0"}
+    write_json(cfg["baseline_model"]["calibration_factor_path"],
+               stamp(payload, cfg, model.version,
+                     "bootstrap.train_baseline --fit-calibration"))
     return factors
 
 
