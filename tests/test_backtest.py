@@ -73,3 +73,49 @@ def test_the_sweep_refuses_rather_than_score_a_stub_eval_set(cfg):
     cfg["baseline_model"]["calibration_window_sweep_weeks"] = [8]
     out = calibration_window_sweep(_anchor_rows(3), cfg)
     assert isinstance(out, str) and out.startswith("NOT RUN")
+
+
+def test_the_sweep_says_when_it_cannot_tell(cfg):
+    """The ranking compares aggregates over ~10 weeks and then turns on a
+    lexicographic tie-break, so ONE week of share_weeks_in_band can decide
+    which window 'wins'. The paired test asks the question that matters --
+    same week, did the factors move the ratio closer to 1 -- and says so when
+    the answer is undecidable."""
+    cfg = copy.deepcopy(cfg)
+    cfg["baseline_model"]["calibration_window_sweep_weeks"] = [1, 2]
+    out = calibration_window_sweep(_anchor_rows(10), cfg)
+
+    for key in ("trailing_1w", "trailing_2w"):
+        pv = out[key]["paired_vs_uncalibrated"]
+        assert pv["weeks_paired"] == out[key]["eval_weeks"]
+        assert 0 <= pv["weeks_calibration_helped"] <= pv["weeks_paired"]
+        assert 0.0 <= pv["sign_test_p"] <= 1.0
+
+    # flat anchor data: nothing to correct, so no window can separate
+    assert out["calibration_earns_its_keep"].startswith("UNDECIDED")
+    assert "tie-break, not a measurement" in out["calibration_earns_its_keep"]
+
+
+def test_a_window_that_genuinely_helps_is_called_out(cfg):
+    """A persistent per-category level offset is exactly what the factors
+    exist to remove; the paired test must find it."""
+    import numpy as np
+    import pandas as pd
+
+    cfg = copy.deepcopy(cfg)
+    cfg["baseline_model"]["calibration_window_sweep_weeks"] = [2]
+    rng = np.random.default_rng(3)
+    days = pd.date_range("2026-01-05", periods=7 * 14, freq="D")
+    rows = []
+    for d in days:
+        for c, bias in (("VEG", 1.6), ("FRUIT", 0.6)):   # stable, large offset
+            rows.append({"date": str(d.date()), "category": c,
+                         "total_discount": 0.30, "d_ref": 0.30,
+                         "units_sold": 50.0 * bias + rng.normal(0, 1.0),
+                         "predicted_units": 50.0})
+    out = calibration_window_sweep(pd.DataFrame(rows), cfg)
+
+    pv = out["trailing_2w"]["paired_vs_uncalibrated"]
+    assert pv["verdict"] == "calibration helps", pv
+    assert pv["median_abs_log_delta"] < 0            # error moved toward zero
+    assert out["calibration_earns_its_keep"].startswith("YES")

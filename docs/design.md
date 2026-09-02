@@ -849,7 +849,16 @@ Rules, in order:
    judged a long window on a later, smaller sample than a short one, so the
    ranking read *which weeks* rather than which window. `uncalibrated` is
    ranked with the windows: when no-factors wins, `verdict` says so and
-   `tune` raises it as an INFO reading. It is never a paste — W = 0 is not a
+   `tune` raises it as an INFO reading. **The ranking is not the evidence.**
+   It compares aggregates over ~10 weeks and then turns on a lexicographic
+   tie-break, so a one-week difference in `share_weeks_in_band` can decide
+   which window "wins" while it loses on error. `paired_vs_uncalibrated`
+   asks the question that matters — on the *same* week, did the factors move
+   the anchor ratio closer to 1 — with a sign test over the paired weeks, and
+   `calibration_earns_its_keep` reports UNDECIDED when nothing separates.
+   Pairing removes the between-week variance that swamps the aggregate
+   comparison; a level model already near 1 at the anchor has little bias to
+   remove and the factors mostly contribute estimation noise. It is never a paste — W = 0 is not a
    config value — so `recommended_fit_window` stays the best *calibrated*
    window, and whether level calibration earns its keep at all is an owner
    call on the design.

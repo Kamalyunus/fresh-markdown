@@ -9,6 +9,7 @@ and policy blocks are never summed; IL% uses the section 3.2 denominator.
 
 import numpy as np
 import pandas as pd
+from scipy.stats import binomtest
 
 from bootstrap.prepare_data import split_frames
 from bootstrap.fit_dispersion import lookup_r
@@ -179,7 +180,9 @@ def calibration_window_sweep(d, cfg):
         }
 
     def ratios_for(window):
-        out = []
+        """{week: anchor ratio} -- KEYED, so windows can be compared week by
+        week rather than only in aggregate."""
+        out = {}
         for i, t in enumerate(weeks):
             if i < start:                  # the SAME weeks for every row
                 continue
@@ -194,17 +197,49 @@ def calibration_window_sweep(d, cfg):
                  else cur.category.map(factor).fillna(1.0).to_numpy())
             adj = float((cur.pred.to_numpy() * f).sum())
             if adj > 0:
-                out.append(float(cur.sold.sum() / adj))
+                out[str(t)] = float(cur.sold.sum() / adj)
         return out
+
+    def paired_vs(window_ratios, base_ratios):
+        """Does calibration beat NO calibration on the SAME weeks?
+
+        The aggregate columns compare five numbers computed over 11-ish weeks
+        and the ranking then turns on a lexicographic tie-break -- a one-week
+        difference in `share_weeks_in_band` can decide it. Pairing removes the
+        between-week variance that dominates that comparison: on each week,
+        did the factors move the anchor ratio closer to 1?
+        """
+        common = sorted(set(window_ratios) & set(base_ratios))
+        if len(common) < 2:
+            return None
+        w = np.abs(np.log([window_ratios[k] for k in common]))
+        b = np.abs(np.log([base_ratios[k] for k in common]))
+        delta = w - b                          # negative = calibration helped
+        better = int((delta < 0).sum())
+        decided = int((delta != 0).sum())
+        p = (float(binomtest(better, decided, 0.5).pvalue)
+             if decided else 1.0)
+        return {
+            "weeks_paired": len(common),
+            "weeks_calibration_helped": better,
+            "median_abs_log_delta": round(float(np.median(delta)), 5),
+            "sign_test_p": round(p, 4),
+            "verdict": ("calibration helps" if p < 0.05 and better * 2 > decided
+                        else "calibration hurts" if p < 0.05
+                        else "NOT DISTINGUISHABLE at this many weeks"),
+        }
 
     result = {}
     base = ratios_for(0)
     if base:
-        result["uncalibrated"] = summarise(base)
+        result["uncalibrated"] = summarise(list(base.values()))
     for w in windows:
         r = ratios_for(w)
         if r:
-            result[f"trailing_{w}w"] = summarise(r)
+            row = summarise(list(r.values()))
+            if base:
+                row["paired_vs_uncalibrated"] = paired_vs(r, base)
+            result[f"trailing_{w}w"] = row
 
     def rank(k):
         return (-result[k]["share_weeks_in_band"],
@@ -217,6 +252,27 @@ def calibration_window_sweep(d, cfg):
         result["eval_weeks_common_from"] = str(weeks[start])
         beats = "uncalibrated" in result and rank("uncalibrated") < rank(best)
         result["uncalibrated_beats_all_windows"] = bool(beats)
+
+        # THE RANKING IS NOT THE EVIDENCE. It compares a handful of aggregate
+        # numbers over ~10 weeks and then turns on a lexicographic tie-break,
+        # so a ONE-WEEK difference in share_weeks_in_band can decide it. The
+        # paired test asks the question that actually matters -- on the same
+        # week, did the factors move the anchor ratio closer to 1 -- and says
+        # when the answer is "cannot tell at this many weeks".
+        paired = {k: (result[k].get("paired_vs_uncalibrated") or {})
+                  for k in candidates}
+        helped = [k for k, v in paired.items()
+                  if v.get("verdict") == "calibration helps"]
+        hurt = [k for k, v in paired.items()
+                if v.get("verdict") == "calibration hurts"]
+        result["calibration_earns_its_keep"] = (
+            f"YES for {', '.join(sorted(helped))}" if helped else
+            f"NO -- calibration measurably HURTS on {', '.join(sorted(hurt))}"
+            if hurt else
+            "UNDECIDED -- no window separates from `uncalibrated` week by week. "
+            "The ranking still names one, but on this many weeks that choice "
+            "is a tie-break, not a measurement. Read "
+            "paired_vs_uncalibrated.sign_test_p before acting on it.")
         result["note"] = (
             "Rolling-origin: factors fit on the trailing window, applied to "
             "the NEXT week. Shorter windows winning = the level is trending; "
