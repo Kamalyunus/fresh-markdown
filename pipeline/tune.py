@@ -55,6 +55,20 @@ RERUN_STEPS = {
                 "nothing from before is comparable (rule 1)"),
 }
 
+# Keys whose value is DERIVED from a report rather than chosen by the owner.
+# A number here that disagrees with its report is stale or FOREIGN -- from
+# another run, or from the repo's synthetic fixture -- never a preference.
+# pipeline.status refuses the chain on any of them, whatever class the
+# finding ended up in: a W the split rule downgrades to OWNER is still a
+# value nobody chose.
+MEASURED_KEYS = {
+    ("baseline_model", "calibration_fit_trailing_weeks"),
+    ("baseline_model", "calibration_gate_band"),
+    ("learning", "information_increment"),
+    ("exploration", "tau_initial"),
+    ("dispersion", "rho"),
+}
+
 # config path -> the unique line anchor that carries its scalar. Targeted line
 # edits rather than a YAML round-trip: every value in config.yaml carries the
 # reasoning for it in a comment, and a round-trip would drop them all.

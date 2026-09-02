@@ -218,6 +218,7 @@ Every paste has one source and one checker:
 | Config value | Paste from | Checked by |
 | --- | --- | --- |
 | `dispersion.rho` | `artifacts/rho.json`, after EVERY retrain (`m` is measured per batch, never pasted) | `artifact mirrors` (strict start-up refuses drift) |
+| `calibration_fit_trailing_weeks`, `information_increment`, `calibration_gate_band` | the REPORT that derives each (`tune` names it) | `config mirrors reports` — these ship fixture values and cannot be null, so the check is the only thing between a pulled repo and a foreign number |
 | `exploration.tau_initial` | `reports/shadow.json` → `tau_initial_derivation` (backtest = cross-check only) | `tau_provenance_error` — shadow refuses a stale paste |
 | `scrap/margin_deterioration_pct`, `min_detectable_effect_pct` | OWNER, from `reports/thresholds.json` — `TOO TIGHT`, `BLOCKED` and `LIKELY INERT` are all blocking | `guardrail floors` |
 | `ab_test.active` | OWNER — `false` until the A/B starts; the arm labels cannot say which regime is in force | `monitor.*_deterioration.basis` |

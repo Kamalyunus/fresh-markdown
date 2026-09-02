@@ -78,6 +78,41 @@ def _mirrors(cfg):
                 "config matches the frozen artifacts")
 
 
+def _config_vs_reports(cfg, root):
+    """MEASURED values pasted from a REPORT, checked against that report.
+
+    `artifact mirrors` covers the values pasted from a frozen artifact. These
+    come from backtest/shadow/thresholds instead, and nothing refused a stale
+    one: a number from someone else's run -- or from the repo's SYNTHETIC
+    fixture, which ships in config.yaml -- survived every check until somebody
+    happened to run `tune`. Values still null are launch blockers and are
+    reported there, not twice here.
+    """
+    from pipeline import tune
+
+    try:
+        rep = tune.collect(cfg, root)
+    except Exception as exc:                                   # noqa: BLE001
+        return _row("config mirrors reports", NONE,
+                    f"could not evaluate: {type(exc).__name__}: {exc}",
+                    "python3 -m pipeline.tune")
+    if rep["blocked"]:
+        return _row("config mirrors reports", NONE,
+                    "not evaluated -- a BLOCK upstream makes every reading "
+                    "meaningless", "python3 -m pipeline.tune")
+    measured = {".".join(k) for k in tune.MEASURED_KEYS}
+    stale = [f for f in rep["findings"]
+             if f["status"] == tune.ACT and f["key"] in measured
+             and f["current"] is not None]
+    if not stale:
+        return _row("config mirrors reports", PASS,
+                    "every MEASURED value matches the report that derived it")
+    return _row("config mirrors reports", FAIL,
+                "; ".join(f"{f['key']} is {f['current']} but the report says "
+                          f"{f['recommended']}" for f in stale),
+                "python3 -m pipeline.tune --apply")
+
+
 def _calibration(cfg, backtest):
     # DIAGNOSTIC, not a gate: calibration is always applied (owner,
     # 2026-08-25). Out of band -> WARN, never FAIL.
@@ -311,6 +346,7 @@ def collect(cfg, root="reports"):
         _launch_blockers(cfg),
         _bundle(cfg, state),
         _mirrors(cfg),
+        _config_vs_reports(cfg, root),
         _vintages(cfg, state, backtest, shadow),
         _calibration(cfg, backtest),
         _calibration_convergence(cfg),

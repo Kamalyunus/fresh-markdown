@@ -219,3 +219,46 @@ def test_every_blocking_floor_verdict_fails_not_just_TOO_TIGHT(cfg, tmp_path):
         "scrap": {"verdict": "clears the floor"}}})
     assert _verdicts(status.collect(cfg, str(tmp_path)))[
         "guardrail floors"] == status.PASS
+
+
+def test_a_measured_value_that_disagrees_with_its_report_fails(cfg, tmp_path):
+    """`artifact mirrors` catches values pasted from a frozen artifact.
+    Values pasted from a REPORT had no equivalent: a number from another run
+    -- or from the repo's synthetic fixture, which ships in config.yaml --
+    survived every check until somebody happened to run tune."""
+    import copy as _copy
+
+    from pipeline import tune
+
+    _write(tmp_path, "backtest", {
+        "artifact_versions": {"baseline_model_version": "m1"},
+        "fidelity": {"calibration_window_sweep": {
+            "recommended_fit_window": "trailing_1w",
+            "trailing_1w": {"mean_abs_log_error": 0.001,
+                            "share_weeks_in_band": 0.99},
+            "trailing_2w": {"mean_abs_log_error": 0.02,
+                            "share_weeks_in_band": 0.80}}}})
+
+    def verdict(c):
+        return [r for r in status.collect(c, str(tmp_path))["checks"]
+                if r["check"] == "config mirrors reports"][0]
+
+    # a BLOCK upstream suppresses it -- never a silent pass
+    assert verdict(cfg)["verdict"] in (status.NONE, status.PASS, status.FAIL)
+
+    drifted = _copy.deepcopy(cfg)
+    drifted["baseline_model"]["calibration_fit_trailing_weeks"] = 2
+    drifted["data"]["split"] = dict(drifted["data"]["split"],
+                                    calib_start="2026-06-01",
+                                    calib_end="2026-07-26")
+    row = verdict(drifted)
+    if row["verdict"] != status.NONE:            # not blocked upstream
+        assert row["verdict"] == status.FAIL
+        assert "calibration_fit_trailing_weeks" in row["detail"]
+
+    # every key the check guards is one nobody CHOOSES -- owner preferences
+    # (max_mean_step, max_std_shrink, the MDE) must never appear here or the
+    # row would be permanently red on a legitimate disagreement
+    owner = {("learning", "max_mean_step"), ("learning", "max_std_shrink"),
+             ("ab_test", "min_detectable_effect_pct")}
+    assert not (tune.MEASURED_KEYS & owner)

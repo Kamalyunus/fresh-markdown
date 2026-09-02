@@ -797,6 +797,7 @@ runs daily and tests the frozen artifacts against the live world:
 | `reproduction` | Do logged decisions re-solve to themselves? | The DP is deterministic; a mismatch means something moved underneath it |
 | `dispersion` | Is live demand as lumpy as frozen `r` claims? | Every bounded update assumes it, and no business metric moves |
 | `correlation` | Is **`deff`** still the frozen value? | It divides all accumulated evidence |
+| `config mirrors reports` (status) | Does every DERIVED config value still match the report that derived it? | `artifact mirrors` covers only artifact pastes; a report-derived value could be stale, foreign, or the repo's shipped fixture number and nothing refused it |
 | `exploration` | Is the applied price a uniform draw from the affordable set? | The causal claim rests on it entirely |
 
 Two thresholds here are set on the quantity with the *consequence*, not the
