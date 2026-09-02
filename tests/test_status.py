@@ -232,7 +232,9 @@ def test_a_measured_value_that_disagrees_with_its_report_fails(cfg, tmp_path):
     from tests.test_tune import _cfg_with, _reports as tune_reports
 
     tune_reports(tmp_path)                       # a complete, block-free set
-    cfg = _cfg_with(cfg, tmp_path)               # artifacts matching it
+    # artifacts that MATCH config, so only the drift under test shows up
+    cfg = _cfg_with(cfg, tmp_path,
+                    rho={"rho": cfg["dispersion"]["rho"]})
 
     def row(cfg_in):
         return [r for r in status.collect(cfg_in, str(tmp_path))["checks"]
@@ -244,6 +246,27 @@ def test_a_measured_value_that_disagrees_with_its_report_fails(cfg, tmp_path):
     assert r["verdict"] == status.FAIL
     assert "learning.information_increment" in r["detail"]
     assert "999.0" in r["detail"]
+
+    # a recommendation tune DOWNGRADED to OWNER is not a stale paste: the
+    # remedy is the split, not this key, so it warns rather than holding the
+    # row red on a decision the owner has already taken
+    infeasible = _copy.deepcopy(cfg)
+    # align every OTHER measured value with the fixture reports, so the only
+    # thing left disagreeing is the one downgraded to OWNER
+    infeasible["learning"]["information_increment"] = 0.341
+    infeasible["baseline_model"]["calibration_gate_band"] = [0.997, 1.003]
+    infeasible["baseline_model"]["calibration_fit_trailing_weeks"] = 1
+    infeasible["data"]["split"] = dict(infeasible["data"]["split"],
+                                       calib_start="2026-06-29",
+                                       calib_end="2026-07-26")
+    bt = json.loads((tmp_path / "backtest.json").read_text())
+    bt["fidelity"]["calibration_window_sweep"].update(
+        recommended_fit_window="trailing_8w",
+        trailing_8w={"mean_abs_log_error": 0.0001, "share_weeks_in_band": 1.0})
+    (tmp_path / "backtest.json").write_text(json.dumps(bt))
+    r = row(infeasible)
+    assert r["verdict"] == status.WARN
+    assert "not a paste" in r["detail"]
 
     # every key the check guards is one nobody CHOOSES -- owner preferences
     # (max_mean_step, max_std_shrink, the MDE) must never appear here or the

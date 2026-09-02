@@ -109,16 +109,32 @@ def _config_vs_reports(cfg, root):
                     NONE if missing_only else FAIL, detail,
                     "python3 -m pipeline.tune  (it prints the full reason)")
     measured = {".".join(k) for k in tune.MEASURED_KEYS}
-    stale = [f for f in rep["findings"]
+    drift = [f for f in rep["findings"]
              if f["status"] == tune.ACT and f["key"] in measured
              and f["current"] is not None]
-    if not stale:
+    if not drift:
         return _row("config mirrors reports", PASS,
                     "every MEASURED value matches the report that derived it")
-    return _row("config mirrors reports", FAIL,
-                "; ".join(f"{f['key']} is {f['current']} but the report says "
-                          f"{f['recommended']}" for f in stale),
-                "python3 -m pipeline.tune --apply")
+
+    # A MEASURED value tune classes PASTE is simply stale: --apply fixes it,
+    # so FAIL. One it downgraded to OWNER cannot be fixed at that key at all
+    # -- W is downgraded when the split cannot support the window the sweep
+    # wants, and the remedy is the SPLIT. Failing on that would hold the row
+    # red forever on a decision the owner has already taken, which is the
+    # "a guardrail that fires constantly kills the loop" failure mode.
+    stale = [f for f in drift if f["class"] == tune.PASTE]
+    decisions = [f for f in drift if f["class"] != tune.PASTE]
+    if stale:
+        return _row("config mirrors reports", FAIL,
+                    "; ".join(f"{f['key']} is {f['current']} but the report "
+                              f"says {f['recommended']}" for f in stale),
+                    "python3 -m pipeline.tune --apply")
+    return _row("config mirrors reports", WARN,
+                "; ".join(f"{f['key']} is {f['current']} and the sweep prefers "
+                          f"{f['recommended']}, but that is not a paste: "
+                          f"{f['evidence'].split(' -- ')[-1][:80]}"
+                          for f in decisions),
+                "python3 -m pipeline.tune  (OWNER decision, not a stale value)")
 
 
 def _calibration(cfg, backtest):
