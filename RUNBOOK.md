@@ -58,7 +58,9 @@ Then, in order:
    `mean/std/std_basis` → `holdout_comparison` (read
    `information_available_per_row` first). There is no pass flag; a pooled
    or uniform prior is a designed outcome, not a failure.
-3. **Paste MEASURED values into `config.yaml`** — the only hand step:
+3. **MEASURED values are pasted into `config.yaml`** by `advance` (it runs
+   `pipeline.tune --apply` and settles with `--check-only`); by hand only
+   if you are stepping through the lane yourself:
    - `dispersion.rho` — from `artifacts/rho.json`, after **every** retrain
      (`m` is measured per batch by `deff_from_episodes`, never pasted);
    - `learning.information_increment` — from `reports/thresholds.json` →
@@ -145,7 +147,9 @@ in the caller.
 
 ## Lane C — Learn & watch (daily: one cron, one human decision)
 
-Run after midnight, in this order:
+`python3 -m pipeline.advance --feed <yesterday's parquet>` runs everything
+below up to the operator gate. Stepping through by hand, after midnight,
+in this order:
 
 ```bash
 python3 -m pipeline.ingest_outcomes --feed <hourly parquet> \

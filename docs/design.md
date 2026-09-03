@@ -1423,6 +1423,13 @@ step                                          writes
 ```
 
 ```bash
+# THE driver: probes the state on disk, runs every step below that needs no
+# human, stops at the next decision (owner keys, launch_date, update --apply).
+python3 -m pipeline.advance --plan       # touches nothing
+python3 -m pipeline.advance              # to the next human decision
+python3 -m pipeline.advance --feed <yesterday's parquet>   # the daily lane
+
+# what it runs, for stepping through one at a time:
 # the bootstrap: 1, 3, then 3b-5b iterated to CONVERGED, then 6, 6b, 11, status.
 # RETRAINS THE MODEL (rule 1) — never re-run it to settle calibration.
 python3 -m bootstrap.run --input data/flc_raw.parquet

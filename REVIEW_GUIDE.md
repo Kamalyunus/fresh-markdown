@@ -32,8 +32,10 @@ than its bounds?* `test_tau_calibration.py` and the exactly-once tests in
 
 ## Tier 3 — skim; the gates and suite carry it (~5,500 lines, offline)
 
-`bootstrap/` (data preparation, model/prior/dispersion fits) and
-`backtest/` run before launch, produce frozen artifacts, and sit behind
+`bootstrap/` (data preparation, model/prior/dispersion fits),
+`backtest/` and `pipeline/advance.py` (the phase order as code; its
+`plan()` is pure and unit-tested per stop) run before launch, produce
+frozen artifacts, and sit behind
 human gate readings plus the test suite. A defect here cannot touch a
 shelf without first passing a gate whose inputs a human reads. Skim for
 structure; audit only if a gate behaves surprisingly. The one file worth a

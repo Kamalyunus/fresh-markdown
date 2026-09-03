@@ -18,11 +18,12 @@ statement and the incident that created the rule.
    `train_baseline` and `bootstrap.run` DO. (§5.4)
 1a. **Changing the elasticity prior invalidates `rho`, `deff` and the level
    factor** — re-run `fit_dispersion` onward and re-paste `rho`. (§5.6)
-1b. **Bootstrap the chain with `python3 -m bootstrap.run`, never by hand-running
-   steps 3b–5b** — they are one turn of a fixed-point loop that needs 8–9 turns
-   on production data, and re-running the step list to settle it retrains the
-   baseline (rule 1). `--check-only` settles a config paste without retraining.
-   (§9.2)
+1b. **Drive the chain with `python3 -m pipeline.advance`, never by hand-running
+   the step list** — it calls `bootstrap.run` (which iterates steps 3b–5b to
+   the fixed point, 8–9 turns on production data), settles every paste with
+   `--check-only`, and retrains only when the model is absent or `--retrain`
+   is given. Re-running the step list to settle calibration retrains the
+   baseline (rule 1). (§9.2, Appendix A)
 2. **`posterior.epsilon_max` (−0.05) is a sign constraint, never a bound to
    widen** — positive elasticity must remain unrepresentable. (§5.6)
 3. **A boundary solution is not an estimate** — a fit pinned at a search
@@ -278,6 +279,7 @@ Every paste has one source and one checker:
 | events, integration, quarantine | `docs/event_contract.html`; `events/store.py` |
 | provenance, seal, freshness | §5.14; rule 18 |
 | docs | `docs/maintaining_docs.md` |
+| operating the chain end to end, phase order | `pipeline/advance.py` (`--plan`); rule 1b |
 | operator runbook, review tiers | `RUNBOOK.md`, `REVIEW_GUIDE.md` |
 | why is it not done the other way? | `docs/learnings.md` |
 
