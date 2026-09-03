@@ -162,7 +162,7 @@ def test_export_events_writes_warehouse_safe_tables(tmp_path):
             "expected_denominator": 2.0, "applied_price": 8500.0,
             "applied_discount": 0.15, "is_exploration": False,
             "exploration_cost": 0.0, "affordable_set_size": 0,
-            "tau_current": 1.0, "epsilon_posterior_mean": -1.0,
+            "tau_current": 1.0, "delta_min": 0.0, "epsilon_posterior_mean": -1.0,
             "epsilon_posterior_std": 0.6, "reference_discount": 0.3,
             "reference_mu": 0.8, "mu_ref_path": [0.8, 0.7],
             "anchor_discount": None, "dispersion_r": 0.9,
