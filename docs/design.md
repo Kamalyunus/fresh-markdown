@@ -159,7 +159,7 @@ DECISION PATH (per hourly decision interval)
   state ── validate (reject, never an unsafe price)
         ──▶ feasible discount tiers, constructed from the cost floor
         ──▶ exact DP: expected IL for every tier
-        ──▶ exploit the argmax | explore the affordable set
+        ──▶ exploit the argmax | explore the affordable, admissible set (§5.8)
         ──▶ price ──▶ decision event (~30 fields)
                           │
                  finalized outcome event
@@ -838,7 +838,7 @@ runs daily and tests the frozen artifacts against the live world:
 | `dispersion` | Is live demand as lumpy as frozen `r` claims? | Every bounded update assumes it, and no business metric moves |
 | `correlation` | Is **`deff`** still the frozen value? | It divides all accumulated evidence |
 | `config mirrors reports` (status) | Does every DERIVED config value still match the report that derived it? | `artifact mirrors` covers only artifact pastes; a report-derived value could be stale, foreign, or the repo's shipped fixture number and nothing refused it |
-| `exploration` | Is the applied price a uniform draw from the affordable set? | The causal claim rests on it entirely |
+| `exploration` | Is the applied price a uniform draw from the affordable set, reconstructed with the decision's own `delta_min`? | The causal claim rests on it entirely |
 
 Two thresholds here are set on the quantity with the *consequence*, not the
 one that is easiest to measure. **`correlation` judges `deff = 1 + (m−1)ρ`,
@@ -1496,6 +1496,7 @@ committed.
 | `rho` | Frozen intra-episode demand correlation |
 | deff | Design effect deflating correlated within-episode evidence |
 | `tau` | Currency threshold defining the affordable exploration set |
+| `delta_min` | Smallest forced move, in log price, whose signal clears the model's level bias: `k·σ_b/|ε|` per cell (§5.8) |
 | Cell | A learning unit: one high-volume category, or the pooled global cell |
 | Anchor | The price currently in force; hourly actions may only deepen from it |
 | Censored hour | Sales hit inventory — demand known only as a lower bound |

@@ -111,6 +111,9 @@ And the standing prohibitions:
   - anchor rows — `common.episodes.is_anchor_row`
   - guardrail deviation and verdicts — `common.guardrail.deviation`,
     `verdict_is_blocking`, `verdict_is_insufficient`
+  - the tiers a forced move may land on — `pricing.explore.admissible`
+    (`affordable_set`, `spread_costs` and the assurance uniformity check
+    all read it; `delta_min` is derived there, never a second knob)
   - spread accounting — `pricing.explore.SpreadLedger`; the tau controller
     walk — `pricing.explore.walk_tau` (production and shadow's trace);
     the backtest's forward simulation — `backtest.replay._simulate_arm`
@@ -124,6 +127,11 @@ And the standing prohibitions:
     the status "not run" prologue — `pipeline.status._needs`
 - Never invent a SET BY OWNER value; never drive a quarantine count to zero
   with a catch-all reason.
+- **A code change ships with its doc change in the same commit** — this
+  file's one-home list and paste table, the RUNBOOK step it touches, the
+  design.md section, the event contract for any event field, and a
+  learnings.md entry when a design was superseded. Docs that lag the code
+  are how the next agent re-derives what already has a home.
 - Quote the sampling caveat with any sampled-run count — a zero over a
   sample is not a proof over the window.
 - `python3 -m pytest tests/` must pass before any push (~5.5 min; the

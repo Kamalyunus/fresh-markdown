@@ -27,6 +27,14 @@ from `config.yaml` and are NOT guarded: re-read them when
 episode in §05 is real solver output — regenerate it rather than
 hand-patching numbers.
 
+## Standing rule for code changes
+
+Every code change updates its docs in the same commit: AGENTS.md's
+one-home list and paste table, the RUNBOOK step it touches, the design.md
+section, `docs/event_contract.html` for any event field, and a
+learnings.md entry when a design was superseded. The two guarded docs
+fail the suite when they lag; the rest lag silently, which is worse.
+
 ## Standing rules for numbers in documents
 
 - **AGENTS.md is a router, not a reference** — a 400-line budget, enforced

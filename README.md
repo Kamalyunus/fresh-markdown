@@ -24,7 +24,7 @@ itself is learned in production from IL-budgeted randomized exploration.
 | `bootstrap/fit_dispersion.py` | 5.5 | Frozen NB `r` by subcategory and global `rho` vs fitted residuals, on the calib window. |
 | `bootstrap/derive_thresholds.py` | 12 | Evidence for the owner decisions: empirical A/B duration vs MDE, guardrail noise floors, the learning-rail consistency checks. |
 | `bootstrap/init_posterior.py` | 5.9 | One-time posterior init from the prior; refuses overwrite without `--force`. |
-| `pricing/` | 5.7–5.9 | `demand.py` (mu(d), censored expectation), `dp.py` (monotone DP, absolute-IL reward), `explore.py` (uniform draw from the tau-affordable set; budget and tau calibration), `posterior.py` (bounded step, atomic exactly-once commit). |
+| `pricing/` | 5.7–5.9 | `demand.py` (mu(d), censored expectation), `dp.py` (monotone DP, absolute-IL reward), `explore.py` (uniform draw from the admissible, tau-affordable set; `delta_min` floor on the move; budget and the `walk_tau` controller), `posterior.py` (bounded step, atomic exactly-once commit). |
 | `inference/decide.py` | 5.10 | State validation (reject, never an unsafe price), decision event emission. |
 | `events/store.py` | 5.10 | Append-only JSONL: dedup, quarantine with reasons, replay. |
 | `pipeline/` | 5.11–5.15 | `update.py` (censored NB grid update, `--apply` operator gate, `--calibrate-tau` daily tau walk), `monitor.py`, `shadow.py` (phase-1 harness), `assurance.py` (frozen artifacts vs the live world), `status.py` (exit 1 on FAIL), `tune.py` (the config loop as code), `ingest_outcomes.py` (outcome events built from the hourly feed — the minimal integration), `export_events.py` (decision/outcome tables for the warehouse — derived, never the record). |
@@ -103,7 +103,9 @@ Everything a repo-local run prints is a FIXTURE number (AGENTS rule 19).
 - Exploration is a **currency budget**, not a probability: `tau` is
   compared against `Q(p*) − Q(p)` in won, and the forced price is drawn
   uniformly from the affordable set — the uniformity is what makes outcomes
-  clean evidence.
+  clean evidence. Tiers closer to the optimum than `delta_min` (level-bias
+  scale over |ε|, derived) are neither drawn nor budgeted: their signal
+  sits inside the model's own error.
 - Only exploration outcomes update the posterior; information is deflated
   by `deff = 1 + (forced_hours − 1) × rho`; every step is bounded and
   exactly-once.

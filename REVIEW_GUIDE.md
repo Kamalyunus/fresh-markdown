@@ -10,7 +10,7 @@ sittings.
 | --- | --- |
 | `pricing/dp.py` | The two safety properties are **structural**: `feasible_tiers` cannot express a price below cost or above the anchor (no post-hoc check to forget), and the terminal value books scrap once. The state space is small enough that the solve is exact — check the truncation diagnostic, not the math |
 | `pricing/demand.py` | `mu(d) = mu_ref × ((1−d)/(1−d_ref))^ε` with a floor; censored expectation `E[min(D, q)]`. This is the only demand math in the system — everything else calls it |
-| `pricing/explore.py` | Exploration is a **uniform** draw from the tau-affordable set — any weighting would un-randomise the evidence the learner consumes. Also: `walk_tau` — tau moves by `clip(budget/spend, 0.5, 1.25)` one step per closed day on the trailing 7-day close-day IL base, and it is the ONE walk (production and shadow's trace) |
+| `pricing/explore.py` | Exploration is a **uniform** draw from the tau-affordable subset of `admissible` (moves of at least `delta_min` in log price) — any weighting would un-randomise the evidence the learner consumes, and the ledger, the chooser and the assurance check must read the one `admissible`. Also: `walk_tau` — tau moves by `clip(budget/spend, 0.5, 1.25)` one step per closed day on the trailing 7-day close-day IL base, and it is the ONE walk (production and shadow's trace) |
 | `inference/decide.py` | Validation **rejects** rather than returning a best-effort price; the decision event carries enough to re-solve itself (`mu_ref_path`, `anchor_discount`) |
 | `events/store.py` | Append-only, durable writes, dedup; malformed events **quarantine with the reason attached** rather than being dropped; exactly three `adjustment_reason` values reconcile inventory |
 
