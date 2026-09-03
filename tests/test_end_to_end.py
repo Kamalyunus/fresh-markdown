@@ -1086,3 +1086,36 @@ def test_the_manifest_persists_the_waterfall_it_computed(workspace):
     details = [s["detail"] for s in stages if s["detail"]]
     assert details
     assert any("flow_identity" in d for d in details), list(details[0])
+
+
+def test_a_set_launch_date_schedules_factors_past_the_gate(workspace, tmp_path):
+    """Before launch the factor schedule stops at split.test_end (rule 16).
+    After launch the same command IS the weekly cron: it must reach the
+    week being priced, or calibration_current refuses every --apply. Moving
+    split.test_end instead rescopes every sealed fit."""
+    from bootstrap.train_baseline import fit_level_calibration
+    from common import episodes
+    from common.config import load_config
+
+    ws = workspace
+    _chdir(ws)
+    cfg = load_config(str(ws / "config.yaml"))
+    cfg["baseline_model"] = dict(cfg["baseline_model"],
+                                 calibration_factor_path=str(tmp_path / "cal.json"))
+    d = pd.read_parquet(ws / "data" / "prepared.parquet")
+    test_end_week = episodes.week_key(pd.Series([cfg["data"]["split"]["test_end"]]))[0]
+    last_data_week = episodes.week_key(d.date).max()
+    assert last_data_week > test_end_week, "fixture has no post-gate weeks"
+
+    fit_level_calibration(d, cfg)
+    pre = json.loads((tmp_path / "cal.json").read_text())["schedule"]
+    assert max(pre["by_week"]) <= test_end_week
+    assert pre["scope"].startswith("pre-launch")
+
+    cfg["data"]["launch_date"] = str(d.date.max())
+    fit_level_calibration(d, cfg)
+    live = json.loads((tmp_path / "cal.json").read_text())["schedule"]
+    priced_week = (episodes.week_start(last_data_week)
+                   + pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+    assert max(live["by_week"]) == priced_week, live["weeks_unfitted_held_at_1"]
+    assert live["scope"].startswith("production")

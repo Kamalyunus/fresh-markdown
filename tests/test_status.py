@@ -442,3 +442,14 @@ def test_a_null_prior_block_reads_not_run_rather_than_crashing(cfg):
     live = dict(cfg, posterior=dict(cfg["posterior"], prior=None))
     row = status._prior(live)
     assert row["verdict"] == status.NONE
+
+
+def test_a_null_launch_date_is_a_launch_blocker(cfg):
+    """The weekly re-fit cannot reach the week being priced until
+    data.launch_date is set, so a null one blocks the pilot like a null
+    tau."""
+    live = dict(cfg, data=dict(cfg["data"], launch_date=None))
+    row = status._launch_blockers(live)
+    assert row["verdict"] == status.FAIL and "data.launch_date" in row["detail"]
+    live["data"]["launch_date"] = "2026-09-01"
+    assert "data.launch_date" not in status._launch_blockers(live)["detail"]

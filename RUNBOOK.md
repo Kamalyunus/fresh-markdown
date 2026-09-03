@@ -77,7 +77,13 @@ Then, in order:
    `exploration_budget.spend_over_budget` (over 2× → do not launch at this
    tau; re-derive) and `tau_controller_trace` — day one is an out-of-sample
    test of the derived tau.
-7. `python3 -m pipeline.status` — **done means every line green.** Exit code
+7. **On launch day, set `data.launch_date`** (SET BY OWNER, null until
+   then). It does one thing: the weekly `--fit-calibration` stops at
+   `split.test_end` before launch (rule 16) and runs through the latest
+   data plus the week being priced after it. Do NOT move `split.test_end`
+   for this — that rescopes every sealed fit. Run the re-fit once right
+   after setting it, then `bootstrap.seal`.
+8. `python3 -m pipeline.status` — **done means every line green.** Exit code
    1 on any FAIL, so it can gate a deploy.
 
 **Never** retrain between two runs you intend to compare; comparisons are

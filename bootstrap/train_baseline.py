@@ -364,12 +364,22 @@ def fit_level_calibration(d, cfg):
             " -- widen calibration_fit_trailing_weeks")
     factors, detail, f_global = fitted
 
-    # POINT-IN-TIME schedule over every pre-launch week (production re-fits
-    # weekly; a forward replay must see exactly that -- the gate freezes via
-    # freeze_calibration_from instead of bounding the artifact here)
-    scope = population(pre_launch(d, cfg), cfg).copy()
+    # POINT-IN-TIME schedule. Pre-launch: over every pre-launch week (a
+    # forward replay must see exactly what production re-fits weekly; the
+    # gate freezes via freeze_calibration_from, not by bounding the artifact).
+    # After `data.launch_date` is set: THIS is the weekly cron, so the
+    # schedule runs through the latest data and one week past it -- the
+    # week being priced, whose own rows are not complete yet -- while every
+    # sealed fit keeps its pre-launch scope. Moving split.test_end instead
+    # would rescope every other fit.
+    launched = bool(cfg["data"].get("launch_date"))
+    scope = population(d if launched else pre_launch(d, cfg), cfg).copy()
+    weeks = sorted(episodes.week_key(scope.date).unique())
+    if launched and weeks:
+        weeks.append((episodes.week_start(weeks[-1]) + pd.Timedelta(days=7))
+                     .strftime("%Y-%m-%d"))
     by_week, coverage = {}, []
-    for w in sorted(episodes.week_key(scope.date).unique()):
+    for w in weeks:
         window, weeks_seen = episodes.trailing_weeks_window(
             scope, w, weeks_back)
         if not len(window):
@@ -386,6 +396,10 @@ def fit_level_calibration(d, cfg):
                          "partial": weeks_seen < weeks_back})
     schedule = {
         "mode": "rolling_trailing",
+        "scope": (f"production -- launch_date {cfg['data']['launch_date']}; "
+                  "through the latest data plus the week being priced"
+                  if launched else
+                  f"pre-launch -- through split.test_end {split['test_end']}"),
         "trailing_weeks": weeks_back,
         "gate_freezes_at": str(gate_start.date()),
         "anchor_fit_window": [str(lo.date()), str(gate_start.date())],

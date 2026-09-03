@@ -20,6 +20,7 @@ class ConfigError(RuntimeError):
 
 # Keys that must be non-null before any price is applied in production.
 RUNTIME_REQUIRED = [
+    ("data", "launch_date"),
     ("dispersion", "rho"),
     ("exploration", "tau_initial"),
     ("monitoring", "stop_conditions", "scrap_deterioration_pct"),

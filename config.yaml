@@ -32,6 +32,7 @@ data:
   holdout:                             # SET  a TRUE hold-out -- no artifact is fit on it and no gate was decided on it. ONE SHOT: tune a value on it and it stops being one
     start: "2026-08-10"
     end:   "2026-08-28"
+  launch_date: null                    # SET BY OWNER  the day production pricing starts; null until then. Once set, --fit-calibration (the weekly cron) schedules factors through the LATEST data plus the week being priced, while every sealed fit keeps its pre-launch scope (split.test_end). Never move split.test_end for this -- it rescopes every other fit
   max_window_hours: 120                # SET  upper bound on a plausible FLC window; a longer one is FLAGGED window_too_long, not dropped
   manufacturing_window_hours: 24       # SET  synthetic countdown for SKUs whose flc_window enters already negative
 

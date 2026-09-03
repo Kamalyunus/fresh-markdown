@@ -1353,7 +1353,13 @@ calls the same classifier.
 **The backtest sees nothing past the gate window**: `pre_launch` slices to
 episodes opened on or before `split.test_end` before anything reads the
 frame (previously `policy_replay` and `derive_tau_initial` ran on the whole
-frame, so `tau_initial` was partly fitted on the hold-out).
+frame, so `tau_initial` was partly fitted on the hold-out). The one
+artifact that must outlive the gate is the level-factor schedule:
+`data.launch_date` (owner, null until launch) switches `--fit-calibration`
+from the pre-launch scope to the latest data plus the week being priced,
+so the weekly cron reaches the week `calibration_current` checks. Every
+other fit keeps `pre_launch`; moving `split.test_end` would rescope them
+all and turn `--check-only` into a re-settle on hold-out rows.
 `derive_tau_initial` solves production's own equation: the budget is
 `explore.budget_today` at the widest launch prior std, Q-spreads are
 collected under `inference.decide`'s explorability gate, and `n_days` is
