@@ -469,16 +469,21 @@ def _readings(cfg, backtest, shadow):
     if per_update and days and episodes:
         per_day = episodes / days
         evidence_days = per_update / per_day if per_day else None
-        floor = ly.get("calendar_floor_days_per_0.15_of_mean", 1)
+        floor = ly.get("calendar_floor_days_per_0.15_of_mean",
+                       cfg["learning"]["update_cadence_days"])
         binds = "CALENDAR" if (evidence_days or 0) < floor else "EVIDENCE"
         out.append(_finding(
             "learning bottleneck", INFO, OK, binds, None,
             f"{per_update:,.0f} episodes per bounded update at "
             f"{per_day:,.0f} episodes/day = {evidence_days:.2f} days of "
-            f"evidence per update, against a {floor}-day operator gate -> "
+            f"evidence per update, against a {floor}-day update cadence -> "
             f"{binds} BINDS. "
-            + ("Widening the forced discount gap buys nothing while the gate "
-               "is the limit; raise max_mean_step instead."
+            + (f"Each {floor}-day period brings "
+               f"{ly.get('bounded_updates_worth_per_period')} bounded "
+               "updates' worth of evidence and one update can absorb one: "
+               "the rest is discarded. Widening the forced discount gap buys "
+               "nothing; raise max_std_shrink (then max_mean_step), or "
+               "shorten learning.update_cadence_days."
                if binds == "CALENDAR" else
                "Evidence is the limit: wider forced arms (information is "
                "QUADRATIC in the log price ratio) before anything else."),

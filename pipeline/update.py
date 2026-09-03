@@ -204,19 +204,23 @@ def tau_calibration(decisions, outcomes, posterior, cfg):
     if through is None:
         block["skipped"] = "no finalized outcomes"
         return block
-    if posterior.tau_calibrated_through() == through:
+    done = posterior.tau_calibrated_through()
+    if done == through:
         block["skipped"] = f"already calibrated through {through}"
         block["through_date"] = through
         return block
 
-    # THE DAY JUST CLOSED, on both sides -- the controller design 5.8
-    # specifies and the one shadow's trace walks. Summing every forced
-    # decision ever against all-time IL diluted each day's correction by 1/N
-    # (a 10x overspend on day 27 moved tau by 0.76x instead of the 0.5x clip)
-    # and took the exploration_cost_vs_budget stop condition blind with it,
-    # because both compared the same two cumulative totals.
+    # EVERY closed day since the last calibration, in order, one step each
+    # -- design 5.8 is a daily walk, and a weekly batch is seven steps, not
+    # one graded day and six skipped. Each day's spend is graded against
+    # the budget priced from the days before it. Zero realised spend on a
+    # priced day is NOT skipped: nothing was affordable, which is exactly
+    # the under-spend the rule raises tau on, and the only way a tau cut
+    # below the smallest spread ever recovers.
     spend_by_day = daily_exploration_spend(decisions, outcomes)
-    realised = float(spend_by_day.get(through, 0.0))
+    days = sorted({decision_day(d) for d, o in match_pairs(decisions, outcomes)
+                   if o.get("finalized_at")})
+    days = [d for d in days if done is None or d > str(done)]
     business = business_metrics(decisions, outcomes, cfg)
     il_by_day = business.get("il_by_close_day") or {}
     cells = posterior.state["cells"]
@@ -224,35 +228,34 @@ def tau_calibration(decisions, outcomes, posterior, cfg):
         block["skipped"] = ("no closed-episode IL to project a budget from"
                             if not il_by_day else "no posterior cells")
         return block
-    # Zero realised spend on a priced day is NOT skipped: `through` is by
-    # construction a day with finalized decisions, so zero spend means
-    # nothing was affordable -- exactly the under-spend design 5.8 raises
-    # tau on, and the only way a tau cut below the smallest spread ever
-    # recovers. shadow's trace walks that rule; production used to hold
-    # still and the two disagreed.
 
     # the widest ROUTED cell's std, matching the monitor: the budget is sized
-    # for the cell that still has the most to learn. GLOBAL, when nothing
-    # routes to it, never narrows and would pin this at the launch std.
+    # for the cell that still has the most to learn
     widest_std = posterior.widest_std()
-    # a share of TRAILING realised IL, never the same day's own
-    trailing_il = explore.trailing_daily_il(il_by_day, through, cfg)
-    budget = explore.budget_today(trailing_il, widest_std, cfg)
+    tau_end, rows = explore.walk_tau(
+        tau_now, days, lambda day, _tau: spend_by_day.get(day, 0.0),
+        il_by_day, widest_std, cfg)
+    last = rows[-1]
     block.update({
         "through_date": through,
-        "realised_exploration_cost": round(realised, 1),
-        "markdown_il": round(float(trailing_il), 1),
+        "days_walked": len(rows),
+        "by_day": rows,
+        # the last day walked, for the printed line
+        "realised_exploration_cost": last["spend"],
+        "markdown_il": round(float(explore.trailing_daily_il(
+            il_by_day, through, cfg)), 1),
         "markdown_il_basis": (
             f"mean realised IL/day over the trailing "
             f"{cfg['exploration']['budget_il_window_days']} days to {through}"),
         "widest_posterior_std": widest_std,
-        "budget": round(budget, 1),
-        "tau_after": round(explore.tau_next(tau_now, budget, realised, cfg), 2),
+        "budget": last["budget"],
+        "tau_after": round(float(tau_end), 2),
         "commit": True,
     })
-    block["clipped"] = block["tau_after"] in (
-        round(tau_now * cfg["exploration"]["tau_adjust_clip"][0], 2),
-        round(tau_now * cfg["exploration"]["tau_adjust_clip"][1], 2))
+    lo, hi = cfg["exploration"]["tau_adjust_clip"]
+    block["clipped"] = any(r["tau_after"] in (round(r["tau"] * lo, 2),
+                                              round(r["tau"] * hi, 2))
+                           for r in rows if r["tau_after"] != r["tau"])
     return block
 
 
@@ -289,7 +292,8 @@ def calibration_current(cfg, today=None):
     }
 
 
-def run(cfg, apply=False, events_root=None, posterior_path=None, today=None):
+def run(cfg, apply=False, events_root=None, posterior_path=None, today=None,
+        calibrate_tau=False):
     store = EventStore(cfg, root=events_root)
     posterior = PosteriorStore(cfg, path=posterior_path)
     per_cell, gates, decision_list, outcome_list = collect_batch(
@@ -355,27 +359,34 @@ def run(cfg, apply=False, events_root=None, posterior_path=None, today=None):
     report["tau_calibration"] = tau_calibration(
         decision_list, outcome_list, posterior, cfg)
 
-    if apply:
-        if hard_fail:
-            report["refused"] = (f"hard gate(s) failed: {hard_fail}; "
-                                 "no update applied")
-        else:
-            report["applied"] = True
-            tc = report["tau_calibration"]
-            if tc["commit"]:
-                posterior.commit_tau(tc["tau_after"], tc["through_date"])
+    # tau is committed by --apply AND by --calibrate-tau: it moves on spend,
+    # not evidence, so it needs no operator and must not wait for the
+    # learning cadence (weekly --apply with a daily tau)
+    if (apply or calibrate_tau) and hard_fail:
+        report["refused"] = (f"hard gate(s) failed: {hard_fail}; "
+                             "no update applied")
+    elif apply or calibrate_tau:
+        tc = report["tau_calibration"]
+        if tc["commit"]:
+            posterior.commit_tau(tc["tau_after"], tc["through_date"])
+        report["tau_committed"] = bool(tc["commit"])
+        report["applied"] = bool(apply)
     return report
 
 
 def main():
     ap = argparse.ArgumentParser(prog="pipeline.update")
     ap.add_argument("--apply", action="store_true",
-                    help="apply bounded posterior updates (operator gate)")
+                    help="apply bounded posterior updates (operator gate, "
+                         "every learning.update_cadence_days)")
+    ap.add_argument("--calibrate-tau", action="store_true",
+                    help="commit the tau walk only (daily, no operator): "
+                         "spend, not evidence")
     ap.add_argument("--config", default="config.yaml")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    report = run(cfg, apply=args.apply)
+    report = run(cfg, apply=args.apply, calibrate_tau=args.calibrate_tau)
 
     for name, g in report["event_quality_gates"].items():
         print(f"gate {name}: {g['value']} vs {g['threshold']} "
@@ -394,14 +405,18 @@ def main():
         print(f"tau: {tc['tau_before']} unchanged -- {tc['skipped']}")
     else:
         print(f"tau: {tc['tau_before']} -> {tc['tau_after']}  "
-              f"(spent {tc['realised_exploration_cost']} of {tc['budget']} "
-              f"through {tc['through_date']})"
+              f"({tc['days_walked']} day(s) walked through {tc['through_date']}; "
+              f"last day spent {tc['realised_exploration_cost']} of "
+              f"{tc['budget']})"
               + ("  [CLIP BOUND]" if tc.get("clipped") else ""))
 
     if "refused" in report:
         print("REFUSED:", report["refused"])
     elif report["applied"]:
         print("applied bounded posterior updates")
+    elif report.get("tau_committed"):
+        print("tau committed; posterior cells untouched -- --apply is the "
+              "operator gate")
     else:
         print("monitor only -- rerun with --apply to commit")
 

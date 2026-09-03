@@ -234,29 +234,25 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
     week? Spend per day is EXPECTED spend at the tau in force."""
     stop_at = cfg["monitoring"]["stop_conditions"]["exploration_cost_vs_budget"]
     days = ledger.days
-    order = sorted(range(len(days)), key=lambda i: days[i])
-    tau, rows, first_within, suspend_days = float(tau0), [], None, 0
-    for rank, i in enumerate(order[:max_days]):
-        day = days[i]
-        spend = float(ledger.spend_by_day(tau)[i])
-        # production's budget for the day: a share of TRAILING realised IL,
-        # never the same day's own (unknown until its episodes close)
-        budget = explore.budget_today(
-            explore.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
-        over = (spend / budget) if budget > 0 else None
+    order = sorted(range(len(days)), key=lambda i: days[i])[:max_days]
+    index = {days[i]: i for i in order}
+    # the SAME walk production runs (explore.walk_tau); spend here is
+    # EXPECTED spend at the tau in force
+    tau, walked = explore.walk_tau(
+        float(tau0), [days[i] for i in order],
+        lambda day, t: ledger.spend_by_day(t)[index[day]],
+        il_by_day, widest_std, cfg)
+    rows, first_within, suspend_days = [], None, 0
+    for rank, r in enumerate(walked):
+        over = (r["spend"] / r["budget"]) if r["budget"] > 0 else None
         fired = bool(over is not None and over > stop_at)
         suspend_days += int(fired)
         if over is not None and over <= 1.0 and first_within is None:
             first_within = rank + 1
-        rows.append({"day": day, "tau": round(tau, 2),
-                     "spend": round(spend, 1), "budget": round(budget, 1),
+        rows.append({"day": r["day"], "tau": r["tau"], "spend": r["spend"],
+                     "budget": r["budget"],
                      "over_budget": round(over, 2) if over is not None else None,
                      "stop_condition_fires": fired})
-        # the controller runs at the operator gate, on the day just closed.
-        # A ZERO budget (no trailing IL history yet) is an absence of signal,
-        # not an overspend -- calibrating on it would halve tau for nothing
-        if budget > 0:
-            tau = explore.tau_next(tau, budget, spend, cfg)
     return {
         "tau_start": round(float(tau0), 2),
         "tau_end": round(tau, 2),
@@ -719,6 +715,8 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
 
     per_episode = eff_information / n_ep if n_ep else 0.0
     step = cfg["learning"]["max_mean_step"]
+    cadence = int(cfg["learning"]["update_cadence_days"])
+    per_day_pop = len(population) / max(n_days, 1)
     learning_yield = {
         "effective_information_total": round(eff_information, 2),
         "effective_information_per_episode": round(per_episode, 5),
@@ -727,7 +725,13 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         "episodes_per_bounded_update": round(inc / per_episode, 1)
             if per_episode > 0 else None,
         "max_mean_step": step,
-        "calendar_floor_days_per_0.15_of_mean": 1,
+        # one bounded update per learning.update_cadence_days: the calendar
+        # floor on learning, and how much evidence each period brings
+        "update_cadence_days": cadence,
+        "calendar_floor_days_per_0.15_of_mean": cadence,
+        "bounded_updates_worth_per_period": round(
+            per_episode * per_day_pop * cadence / inc, 2)
+            if per_episode > 0 and per_day_pop else None,
         # low yield has two causes with opposite remedies: few forced
         # decisions (raise tau) vs small price moves (info is QUADRATIC in
         # the log ratio) -- the terms below tell them apart

@@ -65,10 +65,16 @@ def _store(cfg, tmp_path, n, cost_each, date="2026-08-19", history_days=3,
     return store
 
 
-def _posterior(cfg, tmp_path):
-    return PosteriorStore.initialise(
+def _posterior(cfg, tmp_path, calibrated_through="2026-08-18"):
+    """The controller walks EVERY closed day since its last calibration, so
+    a single-day fixture says tau was calibrated through the day before:
+    the trailing history days are budget base, not days to grade."""
+    p = PosteriorStore.initialise(
         cfg, {"vegetables": {"mean": -1.0, "std": 0.6}}, {"vegetables": 500},
         path=str(tmp_path / "posterior.json"))
+    if calibrated_through:
+        p.commit_tau(p.tau(cfg), calibrated_through)
+    return p
 
 
 # ------------------------------------------------------------------ the loop
@@ -224,7 +230,7 @@ def test_a_null_tau_initial_is_reported_not_crashed(cfg, tmp_path):
     """Before a gate-passing backtest there is nothing in force to calibrate."""
     blank = dict(cfg, exploration=dict(cfg["exploration"], tau_initial=None))
     store = _store(cfg, tmp_path, 4, cost_each=1.0)
-    posterior = _posterior(cfg, tmp_path)
+    posterior = _posterior(cfg, tmp_path, calibrated_through=None)   # nothing stored
     block = upd.tau_calibration(store.load_decisions(), store.load_outcomes(),
                                 posterior, blank)
     assert not block["commit"]
@@ -322,3 +328,46 @@ def test_a_cell_that_took_outcomes_still_counts_for_the_budget(cfg, tmp_path):
     assert PosteriorStore.widest_active_std(cells, cell_of) == pytest.approx(0.6)
     cells["fruit"]["n_obs"] = 12                   # ...but it has evidence
     assert PosteriorStore.widest_active_std(cells, cell_of) == pytest.approx(0.9)
+
+
+def test_a_weekly_batch_is_walked_day_by_day_never_graded_as_one_day(cfg, tmp_path):
+    """With a weekly --apply (learning.update_cadence_days) seven closed days
+    arrive at once. Grading only the latest one skipped six corrections;
+    the walk takes one clipped step per day, the same walk shadow's trace
+    runs (explore.walk_tau)."""
+    from pricing import explore
+    store = _store(cfg, tmp_path, 20, cost_each=5000.0, history_days=3,
+                   history_cost=5000.0)                # four overspending days
+    posterior = _posterior(cfg, tmp_path, calibrated_through=None)
+    block = upd.tau_calibration(store.load_decisions(), store.load_outcomes(),
+                                posterior, cfg)
+    assert block["commit"] and block["through_date"] == "2026-08-19"
+    # day one has no trailing IL (zero budget: held), then three halvings
+    lo = cfg["exploration"]["tau_adjust_clip"][0]
+    walked = [r for r in block["by_day"] if r["budget"] > 0]
+    assert block["days_walked"] == 4 and len(walked) == 3, block["by_day"]
+    assert block["tau_after"] == pytest.approx(block["tau_before"] * lo ** 3, rel=1e-3)
+    # and the walk is the shared one, step for step
+    tau_end, rows = explore.walk_tau(
+        block["tau_before"], [r["day"] for r in block["by_day"]],
+        lambda day, t: {r["day"]: r["spend"] for r in block["by_day"]}[day],
+        {}, posterior.widest_std(), cfg)
+    assert rows[0]["tau_after"] == rows[0]["tau"]        # zero budget holds
+
+
+def test_calibrate_tau_commits_tau_without_touching_the_cells(cfg, tmp_path):
+    """tau moves on spend, not evidence: the daily --calibrate-tau commits
+    the walk while the posterior cells wait for the operator's --apply."""
+    store = _store(cfg, tmp_path, 20, cost_each=5000.0)
+    posterior = _posterior(cfg, tmp_path)
+    cells_before = {k: dict(v) for k, v in posterior.state["cells"].items()}
+    rep = upd.run(cfg, apply=False, calibrate_tau=True,
+                  events_root=str(tmp_path / "events"),
+                  posterior_path=str(tmp_path / "posterior.json"))
+    assert rep["tau_committed"] and not rep["applied"]
+    again = PosteriorStore(cfg, path=str(tmp_path / "posterior.json"))
+    assert again.tau_calibrated_through() == "2026-08-19"
+    assert again.tau(cfg) < posterior.tau(cfg) or again.tau(cfg) == rep["tau_calibration"]["tau_after"]
+    for k, v in again.state["cells"].items():
+        assert (v["mean"], v["std"], v["n_obs"]) == \
+            (cells_before[k]["mean"], cells_before[k]["std"], cells_before[k]["n_obs"])

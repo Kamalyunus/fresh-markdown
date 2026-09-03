@@ -167,6 +167,14 @@ now. Dates are owner sign-off, 2026-08.
   the under-spend design 5.8 raises tau on, and the only way a tau cut
   below the smallest spread ever recovers. Shadow's trace already walked
   that rule; production held still and the two disagreed on one log.
+- **Daily learning gate → weekly, with tau split off.** One human-gated
+  update per day was the calendar floor on learning and a daily chore.
+  The gate now runs every `learning.update_cadence_days` (7); tau, which
+  moves on spend and needs no operator, is committed daily by
+  `--calibrate-tau` and walks every closed day since its last calibration
+  (`explore.walk_tau`, shared with shadow's trace) -- before the walk, a
+  weekly batch graded one day and skipped six. The rails are per update,
+  so the cadence reading names how much evidence a period brings.
 - **Backtest tau on its own budget rule → production's.** The backtest
   solved against the bare `budget_share_of_il` share, collected Q-spreads
   without `inference.decide`'s explorability gate, and counted `n_days` as

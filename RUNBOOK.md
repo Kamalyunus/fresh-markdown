@@ -145,7 +145,7 @@ in the caller.
 
 ---
 
-## Lane C — Learn & watch (daily: one cron, one human decision)
+## Lane C — Learn & watch (daily cron; one human decision per `learning.update_cadence_days`)
 
 `python3 -m pipeline.advance --feed <yesterday's parquet>` runs everything
 below up to the operator gate. Stepping through by hand, after midnight,
@@ -155,8 +155,10 @@ in this order:
 python3 -m pipeline.ingest_outcomes --feed <hourly parquet> \
     [--failures failures.parquet]      # yesterday's table rows -> outcomes;
                                        # idempotent, failures table optional
-python3 -m pipeline.update             # monitor only -- always safe
-python3 -m pipeline.update --apply     # OPERATOR GATE -- see below
+python3 -m pipeline.update --calibrate-tau   # DAILY: walks tau over every closed
+                                             # day; spend, not evidence, no operator
+python3 -m pipeline.update --apply     # OPERATOR GATE, every update_cadence_days
+                                       # (weekly) -- see below
 python3 -m pipeline.monitor            # business / learning / safety series
 python3 -m pipeline.assurance          # the frozen artifacts vs the live world
 python3 -m pipeline.status             # the only screen that must be read daily
@@ -201,8 +203,9 @@ cell per day. Before approving, read each cell's block:
 | event-quality gates | green (the command refuses on red) | never work around a refusal |
 | `calibration_schedule_current` | green | red means the weekly re-fit above was missed — `--apply` refuses, because learning from prices set on stale factors banks evidence about a model that is not the one running |
 
-`tau` recalibrates on the same `--apply`, on spend rather than evidence,
-exactly once per day — a second run in the same day is a no-op, not a bug.
+`tau` is walked one clipped step per closed day since its last calibration
+(`--calibrate-tau` daily, and `--apply` too) — a second run on the same
+day is a no-op, not a bug, and a weekly batch is seven steps, not one.
 
 **Red-line table** — what a red `status` line means and the response:
 

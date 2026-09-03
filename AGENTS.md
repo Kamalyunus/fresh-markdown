@@ -224,8 +224,9 @@ step                                          writes
 Daily production loop (Lane C — full operator guidance in `RUNBOOK.md`):
 
 ```bash
-python3 -m pipeline.update             # monitor only, always safe
-python3 -m pipeline.update --apply     # OPERATOR GATE (rule 10)
+python3 -m pipeline.update --calibrate-tau   # daily tau walk, no operator
+python3 -m pipeline.update --apply     # OPERATOR GATE (rule 10), every
+                                       # learning.update_cadence_days (weekly)
 python3 -m pipeline.monitor
 python3 -m pipeline.assurance
 python3 -m pipeline.status             # done = every line green

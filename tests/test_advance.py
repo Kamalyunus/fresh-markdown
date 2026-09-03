@@ -22,7 +22,7 @@ def _state(**over):
         "schedule_scope": "production -- launch_date 2026-09-01",
         "schedule_end": "2026-09-07", "expected_schedule_end": "2026-09-07",
         "this_week": "2026-08-31",
-        "events": True, "feed": None,
+        "events": True, "feed": None, "cadence": 7,
         "status": {"failing": [], "checks": []},
     }
     st.update(over)
@@ -123,6 +123,8 @@ def test_the_daily_lane_ends_at_the_operator_gate_never_past_it():
                     "pipeline.monitor", "pipeline.assurance",
                     "pipeline.export_events", "pipeline.status"]
     assert all("--apply" not in s["args"] for s in steps if s["kind"] == "run")
+    assert "--calibrate-tau" in steps[1]["args"]          # tau is daily, no operator
+    assert "every 7 days" in steps[-1]["detail"][0]
     assert steps[-1]["kind"] == "stop" and "--apply" in steps[-1]["detail"][0]
 
 

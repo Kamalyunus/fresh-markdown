@@ -109,6 +109,7 @@ exploration:
   min_feasible_tiers: 2                # SET  below this: non-explorable
 
 learning:
+  update_cadence_days: 7               # SET BY OWNER  one operator-gated posterior update (pipeline.update --apply) per this many days. tau is DAILY regardless (--calibrate-tau): it moves on spend, not evidence. The rails below are per UPDATE, so a longer cadence needs a larger max_std_shrink or it discards evidence (shadow.learning_yield_would_be.bounded_updates_worth_per_period)
   information_increment: 0.591  # MEASURED  deff-deflated NB info per bounded update
   max_mean_step: 0.15                  # SET BY OWNER, gated  cap on one update's mean move
   max_std_shrink: 0.25                 # SET BY OWNER  the PRIMARY rate limit on learning

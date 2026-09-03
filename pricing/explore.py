@@ -249,6 +249,27 @@ def budget_today(trailing_il, posterior_std, cfg):
     return ec["budget_share_of_il"] * scale * trailing_il
 
 
+def walk_tau(tau, days, spend_for, il_by_day, widest_std, cfg):
+    """The controller walk, day by day, in one place: production (every
+    closed day since the last calibration -- a weekly batch is seven
+    steps, never one) and shadow's trace (expected spend at the tau in
+    force) both call it. `spend_for(day, tau)` returns the day's realised
+    or expected exploration spend. A ZERO budget (no trailing IL yet) is an
+    absence of signal, not an overspend: tau holds that day. Returns
+    (tau_end, rows)."""
+    rows = []
+    for day in days:
+        budget = budget_today(trailing_daily_il(il_by_day, day, cfg),
+                              widest_std, cfg)
+        spend = float(spend_for(day, tau))
+        after = tau_next(tau, budget, spend, cfg) if budget > 0 else tau
+        rows.append({"day": str(day), "tau": round(float(tau), 2),
+                     "spend": round(spend, 1), "budget": round(budget, 1),
+                     "tau_after": round(float(after), 2)})
+        tau = after
+    return tau, rows
+
+
 def tau_next(tau, budget, realised_cost, cfg):
     """tau * clip(budget/spend, *tau_adjust_clip) -- asymmetric on purpose:
     cutting is the safety direction, raising is never urgent (config)."""

@@ -95,6 +95,7 @@ def probe(cfg, root="reports", feed=None, retrain=False):
         "this_week": this_week,
         "events": os.path.isdir(events_dir) and bool(os.listdir(events_dir)),
         "feed": feed,
+        "cadence": cfg["learning"]["update_cadence_days"],
         "status": status.collect(cfg, root),
     }
 
@@ -204,15 +205,17 @@ def plan(st):
                           ["pipeline.ingest_outcomes", "--feed", st["feed"]],
                           phase="daily"))
     if st["events"] or st["feed"]:
-        steps += [_run("update (monitor only)", ["pipeline.update"], phase="daily"),
+        steps += [_run("update: tau walk (no operator)",
+                       ["pipeline.update", "--calibrate-tau"], phase="daily"),
                   _run("monitor", ["pipeline.monitor"], phase="daily"),
                   _run("assurance", ["pipeline.assurance"], phase="daily"),
                   _run("export events", ["pipeline.export_events"], phase="daily"),
                   _run("status", ["pipeline.status"], phase="daily", fatal=False)]
     steps.append(_stop("daily", "LAUNCHED -- the operator gate is yours",
-                       ["python3 -m pipeline.update --apply   (read the batch "
-                        "summary above first; a second --apply consuming nothing "
-                        "is correct)"]))
+                       [f"python3 -m pipeline.update --apply   every "
+                        f"{st['cadence']} days (learning.update_cadence_days); "
+                        "read the batch summary above first -- a second --apply "
+                        "consuming nothing is correct"]))
     return steps
 
 

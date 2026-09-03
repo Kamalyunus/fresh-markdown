@@ -565,9 +565,12 @@ the IL side. Zero realised spend on a priced day is under-spend, not
 absence of signal: nothing was affordable, τ rises by the clip, and that is
 the only way a τ cut below the smallest spread recovers. `pipeline.shadow`'s
 controller trace walks the same arithmetic, so "would the pilot survive its
-first week" grades the controller production actually runs. The
-calibration commits inside `pipeline.update --apply` — τ moves on
-**spend**, not evidence, exactly once per day (`tau_calibrated_through`).
+first week" grades the controller production actually runs — literally:
+both call `explore.walk_tau`, one clipped step per closed day since the
+last calibration (`tau_calibrated_through`), so a weekly outcome batch is
+seven steps, never one graded day and six skipped. τ moves on **spend**,
+not evidence, so it needs no operator: `pipeline.update --calibrate-tau`
+commits the walk daily, and `--apply` commits it too.
 τ persists in the posterior artifact; `exploration.tau_initial` is only the
 launch value, and a production caller reads `PosteriorStore.tau(cfg)` or τ
 stays pinned at launch forever. Why budget-only rationing is sound:
@@ -658,6 +661,11 @@ takes moments.
   should trip at the same surprise; `bounded_step_recommendation` reports
   which binds first, and `backtest.step_sensitivity` prices the step on
   real episodes (re-solving the DP at ε ± step). A human approves each
+  update, one every `learning.update_cadence_days` (weekly by default;
+  the rails are per update, so a longer cadence needs a larger
+  `max_std_shrink` or the period's surplus evidence is discarded —
+  `learning_yield_would_be.bounded_updates_worth_per_period` says how
+  much). A human approves each
   day's update; the apply refuses while event-quality gates fail
   (duplicates/unmatched > 1%, price mismatch > 1% — compared on exact
   counts, never the rounded rate the report prints) or when
@@ -1384,7 +1392,7 @@ legacy ramp-to-cap behaviour), so both arms run the same horizon.
 
 | # | Risk | Mitigation |
 | --- | --- | --- |
-| 1 | **Learning throughput** — per-outcome information is small, the prior is wide where unidentified, monotonicity concentrates identification at entry | Shadow emits `learning_yield_would_be` so weeks-to-convergence is read before the pilot. Two floors bind separately: evidence (episodes per update) and calendar (one human-gated `max_mean_step` per day). Levers: budget share, coarser cells. 21-day flat-posterior alert |
+| 1 | **Learning throughput** — per-outcome information is small, the prior is wide where unidentified, monotonicity concentrates identification at entry | Shadow emits `learning_yield_would_be` so weeks-to-convergence is read before the pilot. Two floors bind separately: evidence (episodes per update) and calendar (one human-gated update per `learning.update_cadence_days`). Levers: budget share, coarser cells. 21-day flat-posterior alert |
 | 2 | **Frozen-model drift** over the window | Final retrain at the launch freeze; daily drift ratio; weekly level re-fit (§9.2) |
 | 3 | **A/B power** — the duration curve is flat (between-unit variance, recurring units) | Empirical duration table; if more power is needed the lever is more SKU × FC units, not more weeks |
 | 4 | **Metric divergence at readout** — planner optimises IL, business reads IL% | Both metrics + denominators everywhere; decision table pre-committed (§11.2) |
