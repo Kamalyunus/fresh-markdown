@@ -567,8 +567,8 @@ the only way a τ cut below the smallest spread recovers. `pipeline.shadow`'s
 controller trace walks the same arithmetic, so "would the pilot survive its
 first week" grades the controller production actually runs — literally:
 both call `explore.walk_tau`, one clipped step per closed day since the
-last calibration (`tau_calibrated_through`), so a weekly outcome batch is
-seven steps, never one graded day and six skipped. τ moves on **spend**,
+last calibration (`tau_calibrated_through`), so a missed day is graded,
+never skipped. τ moves on **spend**,
 not evidence, so it needs no operator: `pipeline.update --calibrate-tau`
 commits the walk daily, and `--apply` commits it too.
 τ persists in the posterior artifact; `exploration.tau_initial` is only the

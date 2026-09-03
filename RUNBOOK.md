@@ -204,7 +204,7 @@ cell per day. Before approving, read each cell's block:
 
 `tau` is walked one clipped step per closed day since its last calibration
 (`--calibrate-tau` daily, and `--apply` too) — a second run on the same
-day is a no-op, not a bug, and a weekly batch is seven steps, not one.
+day is a no-op, not a bug, and a missed day is graded, not skipped.
 
 **Red-line table** — what a red `status` line means and the response:
 

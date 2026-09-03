@@ -111,8 +111,10 @@ And the standing prohibitions:
   - anchor rows — `common.episodes.is_anchor_row`
   - guardrail deviation and verdicts — `common.guardrail.deviation`,
     `verdict_is_blocking`, `verdict_is_insufficient`
-  - spread accounting — `pricing.explore.SpreadLedger`; the backtest's
-    forward simulation — `backtest.replay._simulate_arm` (+ `_dp_price`)
+  - spread accounting — `pricing.explore.SpreadLedger`; the tau controller
+    walk — `pricing.explore.walk_tau` (production and shadow's trace);
+    the backtest's forward simulation — `backtest.replay._simulate_arm`
+    (+ `_dp_price`)
   - rho — `common.config.intraclass_correlation`; `m` per batch —
     `deff_from_episodes`
   - JSON in/out — `common.io.read_json` / `write_json` (NaN-safe)
@@ -149,9 +151,12 @@ It owns the order (bootstrap → tune/settle → posterior → shadow → owner
 keys → launch_date → weekly re-fit → daily lane) and recomputes state from
 disk every run. It never retrains unless the model is absent or `--retrain`
 is given, re-grades any report whose bundle or config moved, and stops on
-every SET BY OWNER null with the evidence. `pipeline.update --apply` is
-never run by it. Read its stop before doing anything by hand; the sections
-below explain the steps it runs.
+every SET BY OWNER null with the evidence. Its daily lane walks tau
+(`pipeline.update --calibrate-tau`, no operator) and stops at
+`pipeline.update --apply`, which it never runs: learning is gated daily
+and per cell — a fast category updates the day its batch has the evidence.
+Read its stop before doing anything by hand; the sections below explain
+the steps it runs.
 
 ## Running the bootstrap — use `bootstrap.run`, not the step list
 
