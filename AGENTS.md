@@ -137,6 +137,21 @@ All commands run from the repo root — paths in `config.yaml` are relative to
 it, and running a module from elsewhere silently reads/writes the wrong
 artifacts.
 
+## Driving the chain — `pipeline.advance`, not the step list
+
+```bash
+python3 -m pipeline.advance --plan    # phase table + next steps, touches nothing
+python3 -m pipeline.advance           # runs to the next HUMAN decision and stops
+```
+
+It owns the order (bootstrap → tune/settle → posterior → shadow → owner
+keys → launch_date → weekly re-fit → daily lane) and recomputes state from
+disk every run. It never retrains unless the model is absent or `--retrain`
+is given, re-grades any report whose bundle or config moved, and stops on
+every SET BY OWNER null with the evidence. `pipeline.update --apply` is
+never run by it. Read its stop before doing anything by hand; the sections
+below explain the steps it runs.
+
 ## Running the bootstrap — use `bootstrap.run`, not the step list
 
 **Do not hand-run the steps in order. Run this:**

@@ -1119,3 +1119,19 @@ def test_a_set_launch_date_schedules_factors_past_the_gate(workspace, tmp_path):
                    + pd.Timedelta(days=7)).strftime("%Y-%m-%d")
     assert max(live["by_week"]) == priced_week, live["weeks_unfitted_held_at_1"]
     assert live["scope"].startswith("production")
+
+
+def test_advance_reads_the_workspace_and_names_the_phase(workspace):
+    """The driver's probe runs against a real bootstrapped workspace and
+    --plan touches nothing: same files before and after."""
+    ws = workspace
+    before = {p: os.path.getmtime(ws / p) for p in
+              ("config.yaml", "artifacts/bundle.json", "reports/backtest.json")
+              if (ws / p).exists()}
+    r = subprocess.run([sys.executable, "-m", "pipeline.advance", "--plan"],
+                       cwd=ws, env={**os.environ, "PYTHONPATH": ROOT},
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.startswith("phase   ")
+    assert "[" in r.stdout.splitlines()[0]            # a phase is marked
+    assert {p: os.path.getmtime(ws / p) for p in before} == before

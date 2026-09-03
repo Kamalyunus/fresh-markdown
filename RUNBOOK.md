@@ -10,6 +10,24 @@ All commands run from the repo root. `data/`, `reports/`, `artifacts/`,
 `events_store*/` are run outputs and never committed. Credentials
 (`REDSHIFT_*`) live in `~/.env`, never in config or code.
 
+## The short version — `pipeline.advance` owns the order
+
+```bash
+python3 -m pipeline.advance --plan       # where the chain is, what runs next; touches nothing
+python3 -m pipeline.advance              # run to the next human decision, then stop
+python3 -m pipeline.advance --feed <yesterday's hourly parquet>   # the daily lane
+```
+
+It recomputes the state from disk every run, so it is safe to run again
+after every action. It never retrains unless the model is absent or you
+pass `--retrain` (rule 1), it re-runs any report that grades a bundle or
+config no longer in force, and it never invents a value: a null SET BY
+OWNER key stops it with the evidence printed. Its stops, in order: the
+Redshift pull · a tune BLOCK · a failed shadow gate · the owner keys ·
+`data.launch_date` on launch day · a red `status` · and, every day,
+**`pipeline.update --apply`, which stays yours**. The lanes below are what
+it runs, for reading one step at a time.
+
 ---
 
 ## Lane A — Train & freeze (at launch; on each retrain)

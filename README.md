@@ -17,6 +17,7 @@ itself is learned in production from IL-budgeted randomized exploration.
 | `bootstrap/download_flc.py` | 5.2 | Redshift extract of the raw hourly FLC feed (`REDSHIFT_*` from `~/.env`). |
 | `bootstrap/prepare_data.py` | 5.2 | Schema mapping, integrity/scope filter chain + eligibility flags, window-keyed episode construction, waterfall with COGS at risk, split manifest. |
 | `common/episodes.py` | 5.2, 12a | One definition of episode endings, leftover, censoring, the flow identity, and window extension. |
+| `pipeline/advance.py` | — | The order of operations as code: probes the state on disk, runs every step that needs no human, stops at the next decision (owner keys, launch date, `update --apply`). `--plan` touches nothing. |
 | `bootstrap/run.py` | 5.14 | The pipeline with its loop driven to convergence: prepare, train ONCE, iterate calibration → prior → dispersion → convergence until settled, then backtest, thresholds, seal, status. `--check-only` settles with no retrain. |
 | `bootstrap/train_baseline.py` | 5.4, 9.2 | Frozen LightGBM/Tweedie `mu_ref` (price overwritten to `d_ref` at inference); level-calibration factors; convergence check. |
 | `bootstrap/estimate_prior.py` + `prior_density.py` | 5.6 | The elasticity prior as a profile-likelihood density (censored Poisson, entry rows, pooled shrinkage, no fallback constant) with its held-out comparison. |
