@@ -67,6 +67,11 @@ Then, in order:
      `information_increment_recommendation.recommended`, re-derived after
      **every** prior change (it is the ceiling above which a bounded update
      discards the evidence it waited for; the report stamps `TOO LARGE`);
+   - `exploration.delta_min_log_bias` — `tune` derives it from
+     `reports/backtest.json` (the largest of three level-error readings);
+     it sets the smallest forced move worth making per cell, so the
+     exploration budget stops buying one-tier moves the model cannot
+     distinguish from its own error;
    - `exploration.tau_initial` — from `reports/shadow.json` →
      `tau_initial_derivation.tau_initial` (shadow derives it itself on the
      trailing pre-window week, so this paste happens AFTER step 6 and feeds

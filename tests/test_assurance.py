@@ -41,7 +41,7 @@ def _decision(cfg, q, path, eps=-1.0, anchor=0.0, tau=None, rng=None,
         "applied_discount": float(res.tiers[chosen]),
         "expected_il": float(-res.q_by_tier[chosen]),
         "is_exploration": is_expl, "affordable_set_size": len(affordable),
-        "tau_current": tau,
+        "tau_current": tau, "delta_min": 0.0,
     }
 
 
@@ -354,3 +354,24 @@ def test_assurance_grades_only_prices_that_were_actually_charged(cfg):
     assert len(match_pairs(decs, outs)) == 30
     assert len(match_pairs(decs, outs, learnable=True)) == 20
     assert len(assurance._pairs(decs, outs)) == 20
+
+
+def test_uniformity_reconstructs_the_set_with_the_decision_own_delta_min(cfg):
+    """The affordable set the chooser drew from excluded tiers below the
+    decision's delta_min; a reconstruction without it would call every
+    honest draw non-uniform (the near tiers never appear)."""
+    from pricing import explore
+    rng = np.random.default_rng(5)
+    decs = []
+    for _ in range(150):
+        d = _decision(cfg, q=4, path=[0.8] * 4, tau=1e9, rng=rng)
+        res = assurance._resolve(d, cfg)
+        dmin = 0.10
+        kept, costs = explore.affordable_set(res, 1e9, dmin)
+        j = kept[int(rng.integers(0, len(kept)))]
+        d.update(applied_discount=res.tiers[j], is_exploration=True,
+                 exploration_cost=costs[j], affordable_set_size=len(kept),
+                 delta_min=dmin)
+        decs.append(d)
+    rep = assurance.exploration_uniformity(decs, cfg)
+    assert rep["verdict"] == "PASS", rep

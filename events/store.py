@@ -20,7 +20,7 @@ DECISION_REQUIRED = [
     "action_set_size",
     "optimal_price", "optimal_discount", "expected_il", "expected_denominator",
     "applied_price", "applied_discount", "is_exploration", "exploration_cost",
-    "affordable_set_size", "tau_current",
+    "affordable_set_size", "tau_current", "delta_min",
     "epsilon_posterior_mean", "epsilon_posterior_std",
     "reference_discount", "reference_mu", "mu_ref_path", "anchor_discount",
     "dispersion_r",

@@ -536,6 +536,7 @@ def _dp_price(e, cfg, eps_belief, spread_sink=None):
     built over the same decision population."""
     p0, cost = e["original_price"], e["cost"]
     min_tiers = cfg["exploration"]["min_feasible_tiers"]
+    dmin = explore.delta_min(cfg, eps_belief)
 
     def price_at(t, q_int, anchor):
         try:
@@ -545,9 +546,7 @@ def _dp_price(e, cfg, eps_belief, spread_sink=None):
         except ValueError:
             return None
         if spread_sink is not None and len(res.q_by_tier) >= min_tiers:
-            _, costs = explore.affordable_set(res, 0.0)
-            spread_sink((e["date"], [c for j, c in costs.items()
-                                     if j != res.optimal_index]))
+            spread_sink((e["date"], explore.spread_costs(res, dmin)))
         return res.tiers[res.optimal_index]
     return price_at
 

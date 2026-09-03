@@ -536,6 +536,23 @@ cost(p)     = Q(p*) − Q(p)          ← expected IL sacrificed, in currency
 affordable  = { p ≠ p* : cost(p) ≤ tau }
 ```
 
+**δ_min — the smallest informative move.** A forced move of size L in log
+price carries signal ε·L in log demand against a level bias of scale
+σ_b — the largest of three fidelity readings (the rolling-origin MAE at
+the W in force, the `by_category` rms log ratio, the gate half-width
+`log(1.1)`), each of which understates alone. Below
+`δ_min = k·σ_b/|ε|` the move's signal sits inside the model's own level
+error and the outcome teaches nothing about ε; shadow spent ~22% of
+decisions there, all at one tier step. So the set is
+`admissible = { p ≠ p* : |log((1−p)/(1−p*))| ≥ δ_min }` and
+`affordable = { p ∈ admissible : cost(p) ≤ tau }`; the ledger prices tau
+against admissible tiers only, so tau still funds exactly the draws that
+will be made. τ stays the one controller; `δ_min` is derived — σ_b is
+MEASURED by `tune` (`exploration.delta_min_log_bias`), ε is the cell's
+posterior mean at the decision, `k = delta_min_bias_multiple` (1). Fisher
+information ∝ n·L² is conserved at a fixed budget; the case for large
+moves is bias, not variance.
+
 If the affordable set is non-empty, the applied price is drawn **uniformly
 at random** from it. Uniformity is the randomisation that makes outcomes
 causal evidence; any state-dependent choice reintroduces the endogeneity

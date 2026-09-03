@@ -770,12 +770,13 @@
         <tr><td class="f">expected_il</td><td class="ex">10048.795016024469</td><td>Expected inventory loss under the <em>applied</em> action, in won — the objective.</td></tr>
         <tr><td class="f">expected_denominator</td><td class="ex">7242.0524034908485</td><td>Predicted revenue base, for predicted-vs-realised tracking.</td></tr>
 
-        <tr class="grouphead"><td colspan="3">What it applied — 6</td></tr>
+        <tr class="grouphead"><td colspan="3">What it applied — 7</td></tr>
         <tr><td class="f">applied_price · applied_discount</td><td class="ex">7000.0 · 0.3</td><td>What actually went out. Differs from optimal only on an exploration — as here.</td></tr>
         <tr><td class="f">is_exploration</td><td class="ex">true</td><td>Whether this hour was a deliberate experiment.</td></tr>
         <tr><td class="f">exploration_cost</td><td class="ex">2385.0286259173663</td><td>Expected IL given up to run it. Zero when not exploring.</td></tr>
         <tr><td class="f">affordable_set_size</td><td class="ex">3</td><td>How many alternatives were within budget.</td></tr>
         <tr><td class="f">tau_current</td><td class="ex">3202.33</td><td>The exploration budget in force, in won.</td></tr>
+        <tr><td class="f">delta_min</td><td class="ex">0.2124</td><td>The smallest log price move this cell may be forced by (level-bias scale over |ε|); tiers closer to the optimum were neither drawn nor budgeted. 0 before the scale is measured.</td></tr>
 
         <tr class="grouphead"><td colspan="3">Inputs that make it reproducible — 7</td></tr>
         <tr><td class="f">epsilon_posterior_mean</td><td class="ex">-1.0</td><td>The learned price response. Always negative.</td></tr>

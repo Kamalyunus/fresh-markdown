@@ -60,6 +60,8 @@ KEYS = {
         {"anchor": "  max_std_shrink:", "measured": False, "rerun": "none"},
     ("exploration", "tau_initial"):
         {"anchor": "  tau_initial:", "measured": True, "rerun": "none"},
+    ("exploration", "delta_min_log_bias"):
+        {"anchor": "  delta_min_log_bias:", "measured": True, "rerun": "none"},
     ("dispersion", "rho"):
         {"anchor": "  rho:", "measured": True, "rerun": "none"},
     ("baseline_model", "calibration_fit_trailing_weeks"):
@@ -252,6 +254,32 @@ def _measured(cfg, shadow, rho_art, thresholds, backtest=None):
             stale or ("matches shadow's own derivation on the trailing "
                       "pre-window week -- the gate pipeline.status enforces"),
             "shadow.tau_initial_derivation.tau_initial"))
+    # delta_min's bias scale: the LARGEST of three level-error readings,
+    # each of which understates alone (design 5.8)
+    fid = (backtest or {}).get("fidelity") or {}
+    sweep = _sweep_of(backtest)
+    chosen = f"trailing_{cfg['baseline_model']['calibration_fit_trailing_weeks']}w"
+    mae = ((sweep.get(chosen) or {}).get("mean_abs_log_error")
+           if isinstance(sweep.get(chosen), dict) else None)
+    bc = fid.get("by_category") or {}
+    logs = np.log([v for v in bc.values() if v and v > 0]) if bc else np.array([])
+    rms = float(np.sqrt((logs ** 2).mean())) if len(logs) else None
+    band = cfg["baseline_model"]["calibration_gate_band"]
+    half = float(np.log(band[1])) if band else None
+    readings = {"mean_abs_log_error@W": mae, "by_category_rms_log": rms,
+                "gate_half_width_log": half}
+    have = {k: float(v) for k, v in readings.items() if v}
+    cur = _get(cfg, ("exploration", "delta_min_log_bias"))
+    if have:
+        rec = round(max(have.values()), 4)
+        out.append(_finding(
+            ("exploration", "delta_min_log_bias"), PASTE,
+            OK if _close(cur, rec) else ACT, cur, rec,
+            "largest of " + ", ".join(f"{k}={v:.4f}" for k, v in have.items())
+            + " -- a forced move must beat this level error to say anything "
+            "about eps (delta_min = multiple x bias / |eps| per cell)",
+            f"backtest.fidelity.calibration_window_sweep.{chosen}, "
+            "backtest.fidelity.by_category, config calibration_gate_band"))
     return out
 
 

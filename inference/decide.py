@@ -93,13 +93,13 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
     # one action while the grid still has twenty, and at entry the coarse arm
     # set is the action set. Judging on len(tiers) overstated both.
     explorable = len(result.q_by_tier) >= cfg["exploration"]["min_feasible_tiers"]
+    # the smallest informative move for THIS cell: tiers closer to p* than
+    # this are neither drawn nor priced into tau (explore.admissible)
+    dmin = explore.delta_min(cfg, eps)
     if spread_sink is not None and explorable:
-        # reuse affordable_set's cost definition rather than restating it --
-        # tau is calibrated against exactly the quantity it is compared to
-        _, spread_costs = explore.affordable_set(result, 0.0)
-        spread_sink([c for j, c in spread_costs.items()
-                     if j != result.optimal_index])
-    choice = explore.select(result, tau_current, rng, explorable=explorable)
+        spread_sink(explore.spread_costs(result, dmin))
+    choice = explore.select(result, tau_current, rng, explorable=explorable,
+                            delta_min=dmin)
 
     d_opt = result.tiers[result.optimal_index]
     d_applied = result.tiers[choice["chosen_index"]]
@@ -141,6 +141,7 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
         "exploration_cost": choice["exploration_cost"],
         "affordable_set_size": choice["affordable_set_size"],
         "tau_current": tau_current,
+        "delta_min": float(dmin),
         "epsilon_posterior_mean": float(cell["mean"]),
         "epsilon_posterior_std": float(cell["std"]),
         "reference_discount": float(d_ref),

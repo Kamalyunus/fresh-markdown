@@ -17,22 +17,67 @@ no exploration probability schedule, base rate, floor, ceiling, or cold-start
 std.
 """
 
+import math
+
 import numpy as np
+
+from pricing.dp import TIER_EPS
 import pandas as pd
 
 
-def affordable_set(dp_result, tau):
-    """Tier indices a perturbation may legally land on, and their costs.
-    Public: `pipeline.assurance` reconstructs this exact set to test that the
-    draw was uniform -- one definition, never two.
+def delta_min(cfg, eps):
+    """The smallest INFORMATIVE log price move, per cell (design 5.8).
+
+    A forced move of size L in log price carries signal eps*L in log demand
+    against a level bias of scale `delta_min_log_bias` (the largest of the
+    three fidelity readings tune derives it from). Below k*bias/|eps| the
+    move's signal sits inside the model's own level error and the outcome
+    teaches nothing about eps; shadow spent ~22% of decisions there, all at
+    one tier step. 0 while the bias scale is null (nothing pasted yet).
     """
+    ec = cfg["exploration"]
+    bias = ec.get("delta_min_log_bias")
+    if not bias:
+        return 0.0
+    floor = abs(float(cfg["posterior"]["epsilon_max"]))       # the sign constraint
+    return (float(ec.get("delta_min_bias_multiple", 1.0)) * float(bias)
+            / max(abs(float(eps)), floor))
+
+
+def log_move(d_from, d_to):
+    """|log((1-d_to)/(1-d_from))|: the price move in log space."""
+    return abs(math.log((1.0 - d_to) / (1.0 - d_from)))
+
+
+def admissible(dp_result, delta_min=0.0):
+    """Non-optimal tiers whose move from p* is at least `delta_min` -- the
+    tiers a perturbation may land on before the budget is asked. ONE
+    definition: the chooser, the spread ledger and the assurance check all
+    read it, so tau is calibrated against exactly the set it is spent on."""
+    star = dp_result.optimal_index
+    d_star = dp_result.tiers[star]
+    return [j for j in dp_result.q_by_tier if j != star
+            and log_move(d_star, dp_result.tiers[j]) >= delta_min - TIER_EPS]
+
+
+def affordable_set(dp_result, tau, delta_min=0.0):
+    """Tier indices a perturbation may legally land on, and every tier's
+    cost. Public: `pipeline.assurance` reconstructs this exact set to test
+    that the draw was uniform."""
     q = dp_result.q_by_tier
     star = dp_result.optimal_index
     costs = {j: q[star] - q[j] for j in q}
-    return [j for j in q if j != star and costs[j] <= tau], costs
+    return [j for j in admissible(dp_result, delta_min) if costs[j] <= tau], costs
 
 
-def select(dp_result, tau, rng, explorable=True):
+def spread_costs(dp_result, delta_min=0.0):
+    """The Q-spread costs the ledger prices tau against: admissible tiers
+    only, so a tau solved here funds the draws production will make."""
+    _, costs = affordable_set(dp_result, 0.0, delta_min)
+    return [costs[j] for j in admissible(dp_result, delta_min)]
+
+
+def select(dp_result, tau, rng, explorable=True, delta_min=0.0):
     """Returns a dict describing the chosen action.
 
     explorable=False marks a structurally non-explorable episode (fewer than
@@ -50,7 +95,7 @@ def select(dp_result, tau, rng, explorable=True):
     if not explorable or tau is None:
         return choice
 
-    affordable, costs = affordable_set(dp_result, tau)
+    affordable, costs = affordable_set(dp_result, tau, delta_min)
     choice["affordable_set_size"] = len(affordable)
     if affordable:
         j = affordable[int(rng.integers(0, len(affordable)))]

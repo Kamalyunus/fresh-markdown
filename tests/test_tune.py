@@ -458,3 +458,27 @@ def test_the_bottleneck_reads_the_population_rate_not_the_sample(
     bn = [f for f in rep["findings"] if f["key"] == "learning bottleneck"][0]
     assert bn["current"] == "CALENDAR", bn["evidence"]
     assert "5,863 episodes/day" in bn["evidence"]      # 111400 / 19
+
+
+def test_the_delta_min_bias_scale_is_the_largest_of_three_readings(cfg, tmp_path):
+    """Each reading understates alone: the week-aggregate MAE averages
+    noise away, the by_category ratios are one window, the gate band is a
+    tolerance. tune takes the largest and pastes it; the fixture ships null."""
+    root = tmp_path / "r"
+    root.mkdir()
+    _reports(root)
+    bt = json.loads((root / "backtest.json").read_text())
+    bt["fidelity"]["by_category"] = {"MEAT": 0.97, "FRUIT": 1.29, "VEG": 1.09}
+    (root / "backtest.json").write_text(json.dumps(bt))
+    c = _cfg_with(cfg, tmp_path)
+    rep = tune.collect(c, str(root))
+    f = next(x for x in rep["findings"] if x["key"] == "exploration.delta_min_log_bias")
+    import numpy as np
+    logs = np.log([0.97, 1.29, 1.09])
+    rms = float(np.sqrt((logs ** 2).mean()))
+    half = float(np.log(c["baseline_model"]["calibration_gate_band"][1]))
+    chosen = f"trailing_{c['baseline_model']['calibration_fit_trailing_weeks']}w"
+    mae = bt["fidelity"]["calibration_window_sweep"][chosen]["mean_abs_log_error"]
+    assert f["recommended"] == pytest.approx(round(max(mae, rms, half), 4))
+    assert f["class"] == tune.PASTE and f["status"] == tune.ACT     # null in config
+    assert "by_category_rms_log" in f["evidence"]

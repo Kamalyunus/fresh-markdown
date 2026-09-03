@@ -1047,3 +1047,46 @@ def test_the_tier_epsilon_has_one_home():
         assert "1e-9" not in inspect.getsource(fn), fn.__name__
     assert "TIER_EPS" in inspect.getsource(decide)
     assert "TIER_EPS" in inspect.getsource(shadow)
+
+
+def _solved(eps=-1.0):
+    return dp_mod.solve(10000.0, 4000.0, 6, [0.8] * 6, 0.30, eps, 0.9, CFG,
+                        anchor_discount=None, entry=True)
+
+
+def test_delta_min_removes_the_tiers_the_model_cannot_tell_apart():
+    """A forced move smaller than bias/|eps| in log price has its signal
+    inside the model's own level error; it is neither drawn nor budgeted.
+    Shadow spent ~22% of decisions there, all one tier step out."""
+    res = _solved()
+    star = res.optimal_index
+    everything, costs = explore.affordable_set(res, 1e12)
+    assert everything == explore.admissible(res, 0.0)
+    dmin = 0.10
+    kept, _ = explore.affordable_set(res, 1e12, dmin)
+    assert kept and len(kept) < len(everything)
+    for j in everything:
+        move = explore.log_move(res.tiers[star], res.tiers[j])
+        assert (j in kept) == (move >= dmin - 1e-9), (j, move)
+    # the ledger prices tau against the SAME set the chooser draws from
+    assert explore.spread_costs(res, dmin) == [costs[j] for j in kept]
+    # and the draw never lands below the floor
+    rng = np.random.default_rng(0)
+    for _ in range(50):
+        c = explore.select(res, 1e12, rng, delta_min=dmin)
+        assert c["is_exploration"] and c["chosen_index"] in kept
+
+
+def test_delta_min_is_derived_never_a_second_knob():
+    """tau stays the one controller: the floor is k x bias / |eps| from a
+    MEASURED bias scale and the cell's own eps, and 0 until tune pastes
+    the scale -- the fixture ships no number."""
+    assert CFG["exploration"]["delta_min_log_bias"] is None
+    assert explore.delta_min(CFG, -1.0) == 0.0
+    live = dict(CFG, exploration=dict(CFG["exploration"], delta_min_log_bias=0.30,
+                                      delta_min_bias_multiple=1.0))
+    assert explore.delta_min(live, -1.5) == pytest.approx(0.20)
+    assert explore.delta_min(live, -0.5) == pytest.approx(0.60)
+    # |eps| is floored at the sign constraint, never at zero
+    assert explore.delta_min(live, -0.001) == pytest.approx(
+        0.30 / abs(CFG["posterior"]["epsilon_max"]))

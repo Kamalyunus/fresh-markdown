@@ -107,6 +107,8 @@ exploration:
   budget_scale_ref_std: 0.40           # SET  budget scales with std / this
   budget_scale_floor: 0.25             # SET  never below 25% of budget
   min_feasible_tiers: 2                # SET  below this: non-explorable
+  delta_min_log_bias: null             # MEASURED by pipeline.tune from the backtest: the level-bias scale in log space (largest of the W-in-force MAE, the by_category rms log ratio, the gate half-width). Per cell, forced moves smaller than delta_min_bias_multiple x this / |eps| are neither drawn nor priced into tau -- their signal sits inside the model's own error. null = no floor
+  delta_min_bias_multiple: 1.0         # SET  signal-to-bias ratio a forced move must clear; 1 = the move's signal equals the level bias
 
 learning:
   update_cadence_days: 1               # SET BY OWNER  days between operator-gated posterior updates (pipeline.update --apply). DAILY: each cell triggers on its own batch, so a fast category updates the day it has the evidence and a slow one waits -- a longer cadence only delays the fast ones and discards their surplus (learning_yield_would_be.bounded_updates_worth_per_period). tau is walked daily regardless (--calibrate-tau)

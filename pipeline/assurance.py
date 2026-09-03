@@ -266,7 +266,8 @@ def exploration_uniformity(decisions, cfg):
             unreconstructed += 1
             continue
         # the SAME function the chooser used, so this cannot drift from it
-        affordable, _ = affordable_set(res, evt["tau_current"])
+        affordable, _ = affordable_set(res, evt["tau_current"],
+                                       evt.get("delta_min", 0.0))
         j_applied = _tier_index(res.tiers, evt["applied_discount"], step)
         if j_applied is None or j_applied not in affordable or len(affordable) < 2:
             # size-1 sets say nothing about uniformity -- not evidence

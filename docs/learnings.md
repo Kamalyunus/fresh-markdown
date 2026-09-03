@@ -139,6 +139,15 @@ now. Dates are owner sign-off, 2026-08.
   trailing base the budget barely moves; cutting is the safety direction
   (a measured 8.7× overspend needs three halvings to get inside the 2×
   stop), raising is never urgent.
+- **Every tier is worth exploring → δ_min.** Shadow spent ~22% of
+  decisions exploring, almost all one tier step (2.5pp) from the optimum:
+  cheap, so the budget bought many of them, and worthless, because a move
+  whose signal ε·L sits inside the model's own level error teaches nothing
+  about ε. A second knob (an exploration probability) was rejected — τ
+  stays the one controller — and the floor is DERIVED: the bias scale is
+  measured by `tune` from the backtest, ε is the cell's posterior mean,
+  and the ledger prices τ against admissible tiers so the budget still
+  funds exactly the draws made.
 - **Entry-only spread collection.** The replay collected Q-spreads at entry
   only, funding ~1 exploration per episode against a system that explores
   every hour — its own bisection reported 1.00× regardless (a number a

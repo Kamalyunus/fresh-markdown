@@ -37,7 +37,7 @@ def decision_event(**over):
         "expected_il": 1000.0, "expected_denominator": 5000.0,
         "applied_price": P0 * 0.7, "applied_discount": 0.3,
         "is_exploration": False, "exploration_cost": 0.0,
-        "affordable_set_size": 0, "tau_current": 447.78,
+        "affordable_set_size": 0, "tau_current": 447.78, "delta_min": 0.0,
         "epsilon_posterior_mean": -1.0, "epsilon_posterior_std": 0.6,
         "reference_discount": 0.3, "reference_mu": 0.8, "mu_ref_path": [0.8],
         "anchor_discount": None, "dispersion_r": 0.919,
