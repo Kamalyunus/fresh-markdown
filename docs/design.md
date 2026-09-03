@@ -661,11 +661,12 @@ takes moments.
   should trip at the same surprise; `bounded_step_recommendation` reports
   which binds first, and `backtest.step_sensitivity` prices the step on
   real episodes (re-solving the DP at ε ± step). A human approves each
-  update, one every `learning.update_cadence_days` (weekly by default;
-  the rails are per update, so a longer cadence needs a larger
-  `max_std_shrink` or the period's surplus evidence is discarded —
-  `learning_yield_would_be.bounded_updates_worth_per_period` says how
-  much). A human approves each
+  update, one per `learning.update_cadence_days` (1: daily). Daily is
+  deliberate — each cell triggers on its own batch, so a fast category
+  updates the day it has the evidence while a slow one waits; a longer
+  cadence only delays the fast ones and discards their surplus
+  (`learning_yield_would_be.bounded_updates_worth_per_period`). A human
+  approves each
   day's update; the apply refuses while event-quality gates fail
   (duplicates/unmatched > 1%, price mismatch > 1% — compared on exact
   counts, never the rounded rate the report prints) or when
