@@ -479,6 +479,25 @@ def test_the_delta_min_bias_scale_is_the_largest_of_three_readings(cfg, tmp_path
     half = float(np.log(c["baseline_model"]["calibration_gate_band"][1]))
     chosen = f"trailing_{c['baseline_model']['calibration_fit_trailing_weeks']}w"
     mae = bt["fidelity"]["calibration_window_sweep"][chosen]["mean_abs_log_error"]
-    assert f["recommended"] == pytest.approx(round(max(mae, rms, half), 4))
+    floor = max(mae, half)
+    # PER CATEGORY, each floored by the catalogue-wide noise and tolerance;
+    # _default (the old scalar) for a category the backtest never saw
+    assert f["recommended"] == {
+        "MEAT": round(max(abs(np.log(0.97)), floor), 4),
+        "FRUIT": round(max(abs(np.log(1.29)), floor), 4),
+        "VEG": round(max(abs(np.log(1.09)), floor), 4),
+        "_default": round(max(floor, rms), 4)}
+    assert f["recommended"]["FRUIT"] > f["recommended"]["MEAT"]
     assert f["class"] == tune.PASTE and f["status"] == tune.ACT     # null in config
-    assert "by_category_rms_log" in f["evidence"]
+
+    # the mapping pastes as ONE line the anchor owns, and reads back equal
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(open(os.path.join(ROOT, "config.yaml")).read())
+    tune.apply(rep, config_path=str(cfg_path), out_dir=str(tmp_path / "art"))
+    from common.config import load_config as _lc
+    pasted = _lc(str(cfg_path))["exploration"]["delta_min_log_bias"]
+    assert pasted == f["recommended"]
+    again = next(x for x in tune.collect(
+        dict(c, exploration=dict(c["exploration"], delta_min_log_bias=pasted)),
+        str(root))["findings"] if x["key"] == "exploration.delta_min_log_bias")
+    assert again["status"] == tune.OK

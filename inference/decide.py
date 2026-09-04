@@ -95,7 +95,7 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
     explorable = len(result.q_by_tier) >= cfg["exploration"]["min_feasible_tiers"]
     # the smallest informative move for THIS cell: tiers closer to p* than
     # this are neither drawn nor priced into tau (explore.admissible)
-    dmin = explore.delta_min(cfg, eps)
+    dmin = explore.delta_min(cfg, eps, s["category"])
     if spread_sink is not None and explorable:
         spread_sink(explore.spread_costs(result, dmin))
     choice = explore.select(result, tau_current, rng, explorable=explorable,

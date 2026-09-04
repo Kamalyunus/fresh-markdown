@@ -25,7 +25,7 @@ from pricing.dp import TIER_EPS
 import pandas as pd
 
 
-def delta_min(cfg, eps):
+def delta_min(cfg, eps, category=None):
     """The smallest INFORMATIVE log price move FROM THE REFERENCE, per cell
     (design 5.8).
 
@@ -41,6 +41,11 @@ def delta_min(cfg, eps):
     """
     ec = cfg["exploration"]
     bias = ec.get("delta_min_log_bias")
+    if isinstance(bias, dict):
+        # per category, `_default` for one the backtest never saw -- the
+        # same key convention as reference_discount ('SIDE DISH' -> SIDE_DISH)
+        key = str(category).replace(" ", "_") if category is not None else "_default"
+        bias = bias.get(key, bias.get("_default"))
     if not bias:
         return 0.0
     floor = abs(float(cfg["posterior"]["epsilon_max"]))       # the sign constraint

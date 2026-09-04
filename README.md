@@ -103,8 +103,8 @@ Everything a repo-local run prints is a FIXTURE number (AGENTS rule 19).
 - Exploration is a **currency budget**, not a probability: `tau` is
   compared against `Q(p*) − Q(p)` in won, and the forced price is drawn
   uniformly from the affordable set — the uniformity is what makes outcomes
-  clean evidence. Tiers closer to the REFERENCE discount than `delta_min` (level-bias
-  scale over |ε|, derived) are neither drawn nor budgeted: the learner
+  clean evidence. Tiers closer to the REFERENCE discount than `delta_min` (the category's
+  level-bias scale over its |ε|, both derived) are neither drawn nor budgeted: the learner
   reads outcomes against `mu_ref` at the reference, and inside that
   distance the signal sits within the model's own error.
 - Only exploration outcomes update the posterior; information is deflated

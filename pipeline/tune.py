@@ -120,6 +120,9 @@ def _finding(key, cls, status, current, recommended, evidence, source):
 def _close(a, b, rel=1e-3):
     if a is None or b is None:
         return False
+    if isinstance(a, dict) or isinstance(b, dict):
+        return (isinstance(a, dict) and isinstance(b, dict) and set(a) == set(b)
+                and all(_close(a[k], b[k], rel) for k in b))
     try:
         return abs(float(a) - float(b)) <= rel * max(abs(float(b)), 1e-9)
     except (TypeError, ValueError):
@@ -261,22 +264,31 @@ def _measured(cfg, shadow, rho_art, thresholds, backtest=None):
     chosen = f"trailing_{cfg['baseline_model']['calibration_fit_trailing_weeks']}w"
     mae = ((sweep.get(chosen) or {}).get("mean_abs_log_error")
            if isinstance(sweep.get(chosen), dict) else None)
-    bc = fid.get("by_category") or {}
-    logs = np.log([v for v in bc.values() if v and v > 0]) if bc else np.array([])
+    bc = {str(k).replace(" ", "_"): float(v) for k, v in
+          (fid.get("by_category") or {}).items() if v and v > 0}
+    logs = np.log(list(bc.values())) if bc else np.array([])
     rms = float(np.sqrt((logs ** 2).mean())) if len(logs) else None
     band = cfg["baseline_model"]["calibration_gate_band"]
     half = float(np.log(band[1])) if band else None
-    readings = {"mean_abs_log_error@W": mae, "by_category_rms_log": rms,
-                "gate_half_width_log": half}
-    have = {k: float(v) for k, v in readings.items() if v}
+    # catalogue-wide floor: the aggregate noise (MAE at W) and the accepted
+    # tolerance; no category's floor may sit below either
+    floor = max(v for v in (mae, half) if v) if (mae or half) else None
     cur = _get(cfg, ("exploration", "delta_min_log_bias"))
-    if have:
-        rec = round(max(have.values()), 4)
+    if floor is not None:
+        # PER CATEGORY: its own surviving level error, floored; `_default`
+        # (the old scalar: largest of floor and the rms) for a category the
+        # backtest never saw
+        rec = {c: round(max(abs(float(np.log(v))), floor), 4) for c, v in bc.items()}
+        rec["_default"] = round(max(floor, rms or 0.0), 4)
         out.append(_finding(
             ("exploration", "delta_min_log_bias"), PASTE,
             OK if _close(cur, rec) else ACT, cur, rec,
-            "largest of " + ", ".join(f"{k}={v:.4f}" for k, v in have.items())
-            + " -- a forced move must beat this level error to say anything "
+            f"per category: max(|log by_category ratio|, floor) with floor="
+            f"max(mean_abs_log_error@W={mae}, gate_half_width={half:.4f}); "
+            f"_default=max(floor, by_category rms {rms:.4f})"
+            if rms is not None else
+            f"floor only (no by_category in the backtest): {floor:.4f}"
+            " -- a forced move must beat this level error to say anything "
             "about eps (delta_min = multiple x bias / |eps| per cell)",
             f"backtest.fidelity.calibration_window_sweep.{chosen}, "
             "backtest.fidelity.by_category, config calibration_gate_band"))
@@ -634,6 +646,10 @@ def set_scalar(text, path, value):
     comment = ""
     if "#" in tail:
         comment = "  " + tail[tail.index("#"):].rstrip("\n")
+    if isinstance(value, dict):
+        # a per-category mapping pastes as a one-line YAML flow mapping, so
+        # the anchor still owns exactly one line
+        value = "{" + ", ".join(f"{k}: {v}" for k, v in value.items()) + "}"
     lines[i] = f"{head}: {value}{comment}\n"
     return "".join(lines)
 

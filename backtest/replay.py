@@ -536,7 +536,7 @@ def _dp_price(e, cfg, eps_belief, spread_sink=None):
     built over the same decision population."""
     p0, cost = e["original_price"], e["cost"]
     min_tiers = cfg["exploration"]["min_feasible_tiers"]
-    dmin = explore.delta_min(cfg, eps_belief)
+    dmin = explore.delta_min(cfg, eps_belief, e["category"])
 
     def price_at(t, q_int, anchor):
         try:

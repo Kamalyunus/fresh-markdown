@@ -1096,6 +1096,14 @@ def test_delta_min_is_derived_never_a_second_knob():
     # |eps| is floored at the sign constraint, never at zero
     assert explore.delta_min(live, -0.001) == pytest.approx(
         0.30 / abs(CFG["posterior"]["epsilon_max"]))
+    # PER CATEGORY: its own bias, `_default` for one the backtest never saw,
+    # and the reference_discount key convention ('SIDE DISH' -> SIDE_DISH)
+    per = dict(CFG, exploration=dict(CFG["exploration"], delta_min_bias_multiple=1.0,
+                                     delta_min_log_bias={"MEAT": 0.12, "SIDE_DISH": 0.40,
+                                                         "_default": 0.15}))
+    assert explore.delta_min(per, -1.0, "MEAT") == pytest.approx(0.12)
+    assert explore.delta_min(per, -1.0, "SIDE DISH") == pytest.approx(0.40)
+    assert explore.delta_min(per, -1.0, "FRUIT") == pytest.approx(0.15)
 
 
 def test_a_forced_move_never_raises_the_price_within_an_episode():

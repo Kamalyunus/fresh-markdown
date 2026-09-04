@@ -540,9 +540,13 @@ affordable  = { p ≠ p* : cost(p) ≤ tau }
 outcome against `mu_ref` at the reference discount, so the distance that
 carries information is from the reference, not from p*: with
 L = log((1−d)/(1−d_ref)) the signal is ε·L in log demand, against a level
-bias in `mu_ref` of scale σ_b — the largest of three fidelity readings (the rolling-origin MAE at
-the W in force, the `by_category` rms log ratio, the gate half-width
-`log(1.1)`), each of which understates alone. Below
+bias in `mu_ref` of scale σ_b, **per category**: the category's own
+surviving level error `|log by_category ratio|`, floored by two
+catalogue-wide readings no category may sit below (the rolling-origin MAE
+at the W in force, the gate half-width `log(1.1)`); `_default`, the larger
+of that floor and the `by_category` rms, serves a category the backtest
+never saw. One catalogue scalar under-floored the worst categories and
+over-floored the best. Below
 `δ_min = k·σ_b/|ε|` the move's signal sits inside the model's own level
 error and the outcome teaches nothing about ε; shadow spent ~22% of
 decisions there, all at one tier step. So the set is

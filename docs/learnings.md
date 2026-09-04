@@ -151,7 +151,11 @@ now. Dates are owner sign-off, 2026-08.
   and changed nothing on the owner's shadow (forced rate and the mean gap
   from the reference identical): cost is measured from p*, but the learner
   reads every outcome against `mu_ref` at the REFERENCE discount, so the
-  informative distance is from the reference. The floor is on that.
+  informative distance is from the reference. The floor is on that. The
+  bias scale was then made per category: one catalogue scalar
+  under-floored the categories with the worst surviving level error and
+  over-floored the best, and `tune` already had every category's own
+  reading in `by_category`.
 - **Entry-only spread collection.** The replay collected Q-spreads at entry
   only, funding ~1 exploration per episode against a system that explores
   every hour — its own bisection reported 1.00× regardless (a number a
