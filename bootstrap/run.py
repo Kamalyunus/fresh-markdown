@@ -98,7 +98,8 @@ def settle(cfg, max_turns):
             # so. Re-check (DRY -- nothing should move) to re-stamp the
             # digests. It confirms rather than re-settles: the full prior
             # changes only the std, and factors follow the MEAN.
-            step("5b: re-check against the full prior",
+            step("5b: CONFIRM (dry re-check against the full prior -- "
+                 "0.0000 expected, this is not another loop)",
                  ["bootstrap.train_baseline", "--input", PREPARED,
                   "--check-convergence"], fatal=False)
             return True, turn, (convergence(cfg) or block)

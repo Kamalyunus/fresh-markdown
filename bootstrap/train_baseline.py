@@ -576,9 +576,12 @@ def main():
         block = check_calibration_convergence(
             d, cfg, commit=args.commit_convergence)
         print(f"max |dlog f| = {block['max_abs_dlog']:.4f} "
-              f"(tol {block['tol_log']}) at {block['worst_cell']}"
-              + (f" ({block['worst_cell_anchor_rows']:,} anchor rows)"
-                 if block.get("worst_cell_anchor_rows") else ""))
+              f"(tol {block['tol_log']}) "
+              + (f"at {block['worst_cell']}"
+                 + (f" ({block['worst_cell_anchor_rows']:,} anchor rows)"
+                    if block.get("worst_cell_anchor_rows") else "")
+                 if block.get("worst_cell") is not None else
+                 "-- the re-solve reproduces the artifact on disk exactly"))
         if len(block.get("history") or []) > 1:
             print("trajectory   : "
                   + " -> ".join(f"{h:.4f}" for h in block["history"]))
