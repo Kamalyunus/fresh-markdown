@@ -136,3 +136,37 @@ def test_a_red_status_stops_before_the_daily_lane():
 def test_render_marks_the_current_phase():
     out = advance.render_plan(advance.plan(_state(posterior=False)))
     assert "[posterior]" in out.splitlines()[0]
+
+
+def test_the_readiness_report_is_assembled_from_the_journal_and_the_decision_log(
+        cfg, tmp_path, monkeypatch):
+    """What ran per phase, every value the process changed and why, the
+    config in force, status, and what is waited on -- from files, never
+    from memory."""
+    import json
+    journal = tmp_path / "journal.json"
+    journal.write_text(json.dumps({"runs": [
+        {"at": "2026-09-01T02:00:00+00:00", "phase": "bootstrap", "stop": None,
+         "ran": [{"label": "bootstrap",
+                  "command": "python3 -m bootstrap.run --input data/flc_raw.parquet"}]},
+        {"at": "2026-09-01T03:00:00+00:00", "phase": "tune", "stop": None,
+         "ran": [{"label": "tune --apply", "pasted": ["dispersion.rho"], "skipped": []}]},
+        {"at": "2026-09-01T04:00:00+00:00", "phase": "launch", "ran": [],
+         "stop": {"phase": "launch", "why": "data.launch_date is null",
+                  "detail": ["set it on launch day"]}},
+    ]}))
+    decisions = tmp_path / "decisions.json"
+    decisions.write_text(json.dumps({"runs": [
+        {"at": "2026-09-01T03:00:00+00:00", "applied": [
+            {"key": "dispersion.rho", "current": 0.1161, "recommended": 0.2436,
+             "evidence": "config mirrors the frozen artifact",
+             "source": "artifacts/rho.json rho"}]}]}))
+    text = advance.report(cfg, str(tmp_path / "no_reports"),
+                          journal=str(journal), decisions=str(decisions))
+    assert "### bootstrap" in text and "bootstrap.run --input" in text
+    assert "### tune" in text and "pasted `dispersion.rho`" in text
+    assert "| `dispersion.rho` | 0.1161 → 0.2436 |" in text
+    assert "## Config in force" in text and "SET BY OWNER" in text
+    assert "## Status" in text
+    assert "**[launch] data.launch_date is null**" in text
+    assert "set it on launch day" in text

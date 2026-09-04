@@ -27,10 +27,13 @@ import pandas as pd
 from bootstrap.run import PREPARED, step
 from common import episodes, provenance
 from common.config import RUNTIME_REQUIRED, config_get, load_config
-from common.io import read_json
+from common.io import read_json, write_json
 from pipeline import status, tune, update
 
 RAW = "data/flc_raw.parquet"
+JOURNAL = "artifacts/advance_journal.json"
+DECISIONS = "artifacts/config_decisions.json"
+READINESS = "launch_readiness.md"
 PHASES = ("data", "bootstrap", "tune", "posterior", "shadow", "owner",
           "launch", "daily")
 MAX_TUNE_ROUNDS = 4
@@ -239,12 +242,18 @@ def render_plan(steps):
     return "\n".join(lines)
 
 
-def execute(steps, config_path, root="reports"):
-    """Run the plan's steps; True when the caller should re-probe."""
+def execute(steps, config_path, root="reports", journal=JOURNAL):
+    """Run the plan's steps, journal what ran; True when the caller should
+    re-probe."""
+    entry = {"at": pd.Timestamp.now("UTC").isoformat(),
+             "phase": current_phase(steps), "ran": [], "stop": None}
+    again = False
     for s in steps:
         if s["kind"] == "run":
             step(s["label"], s["args"] + ["--config", config_path],
                  fatal=s.get("fatal", True))
+            entry["ran"].append({"label": s["label"],
+                                 "command": "python3 -m " + " ".join(s["args"])})
         elif s["kind"] == "paste":
             res = tune.apply(tune.collect(load_config(config_path), root),
                              config_path)
@@ -252,14 +261,102 @@ def execute(steps, config_path, root="reports"):
                 print(f"  pasted    {f_['key']} = {f_['recommended']}")
             for f_ in res["failed"]:
                 print(f"  SKIPPED   {f_['key']}: {f_['error']}")
+            entry["ran"].append({"label": "tune --apply",
+                                 "pasted": [f_["key"] for f_ in res["applied"]],
+                                 "skipped": [f_["key"] for f_ in res["failed"]]})
         else:
             print(f"\nSTOP [{s['phase']}] {s['why']}")
             for d in s["detail"]:
                 print(f"  {d}")
-            return False
+            entry["stop"] = {"phase": s["phase"], "why": s["why"],
+                             "detail": s["detail"]}
+            break
         if s.get("reevaluate"):
-            return True
-    return False
+            again = True
+            break
+    log = read_json(journal) or {"runs": []}
+    log["runs"].append(entry)
+    write_json(journal, log)
+    return again
+
+
+# ---------------------------------------------------------------- report
+
+def report(cfg, root="reports", journal=JOURNAL, decisions=DECISIONS):
+    """The launch-readiness report: what ran in each phase, every config
+    value the process changed and why, the owner's decisions, the config in
+    force, status, and what is still waited on. Assembled from the journal
+    advance keeps, tune's decision log, the config and the reports -- never
+    from memory."""
+    runs = (read_json(journal) or {}).get("runs", [])
+    pastes = (read_json(decisions) or {}).get("runs", [])
+    st = status.collect(cfg, root)
+    findings = tune.collect(cfg, root)["findings"]
+    seal = provenance.verify(cfg, provenance.load_seal(cfg))
+    fp = provenance.config_fingerprint(cfg, phase=None)
+    now = pd.Timestamp.now("UTC").strftime("%Y-%m-%d %H:%M UTC")
+    last_stop = next((r["stop"] for r in reversed(runs) if r.get("stop")), None)
+
+    lines = [f"# Launch readiness — {now}", "",
+             f"bundle `{seal.get('bundle')}` · config `{cfg['meta']['config_version']}` "
+             f"(digest `{fp['digest']}`) · status **{st['verdict']}**", ""]
+
+    lines += ["## What ran, by phase", ""]
+    by_phase = {}
+    for r in runs:
+        by_phase.setdefault(r["phase"], []).append(r)
+    for phase in PHASES:
+        rs = by_phase.get(phase)
+        if not rs:
+            continue
+        lines.append(f"### {phase}")
+        for r in rs:
+            for item in r["ran"]:
+                if "command" in item:
+                    lines.append(f"- {r['at'][:16]}  `{item['command']}`")
+                else:
+                    lines.append(f"- {r['at'][:16]}  tune --apply pasted "
+                                 + (", ".join(f"`{k}`" for k in item["pasted"]) or "nothing")
+                                 + (f"; skipped {', '.join(item['skipped'])}"
+                                    if item["skipped"] else ""))
+            if r.get("stop"):
+                lines.append(f"- {r['at'][:16]}  STOP: {r['stop']['why']}")
+        lines.append("")
+
+    lines += ["## Config values the process changed, and why", "",
+              "| when | key | before → after | why | source |", "|---|---|---|---|---|"]
+    for run in pastes:
+        for f in run.get("applied", []):
+            lines.append(f"| {run['at'][:16]} | `{f['key']}` | {f.get('current')} → "
+                         f"{f.get('recommended')} | {str(f.get('evidence', '')).replace('|', '/')} "
+                         f"| {f.get('source', '')} |")
+    if len(lines) and lines[-1].startswith("|---"):
+        lines.append("| — | — | no paste recorded yet | — | — |")
+    lines.append("")
+
+    lines += ["## Config in force (every MEASURED and SET BY OWNER value)", "",
+              "| key | value | class | current? | source |", "|---|---|---|---|---|"]
+    for f in findings:
+        if f["class"] in (tune.PASTE, tune.OWNER):
+            lines.append(f"| `{f['key']}` | {f.get('current')} | "
+                         f"{'MEASURED' if f['class'] == tune.PASTE else 'SET BY OWNER'} | "
+                         f"{f['status']} | {f.get('source', '')} |")
+    nulls = [".".join(p) for p in RUNTIME_REQUIRED if config_get(cfg, p) is None]
+    lines += ["", "Still null: " + (", ".join(f"`{n}`" for n in nulls) or "none"), ""]
+
+    lines += ["## Status", "", "| check | verdict | detail |", "|---|---|---|"]
+    lines += [f"| {r['check']} | {r['verdict']} | {r['detail'].replace('|', '/')} |"
+              for r in st["checks"]]
+    lines.append("")
+
+    lines += ["## Waiting on", ""]
+    if last_stop:
+        lines.append(f"**[{last_stop['phase']}] {last_stop['why']}**")
+        lines += [f"- {d}" for d in last_stop["detail"]]
+    else:
+        lines.append("nothing recorded -- run `python3 -m pipeline.advance`")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def main():
@@ -274,7 +371,18 @@ def main():
                          "(rule 1: this is a NEW bundle; reports re-run after)")
     ap.add_argument("--plan", action="store_true",
                     help="print the phase table and the next steps; touch nothing")
+    ap.add_argument("--report", action="store_true",
+                    help="write and print reports/launch_readiness.md; touch "
+                         "nothing else")
     args = ap.parse_args()
+
+    if args.report:
+        text = report(load_config(args.config), args.reports)
+        path = os.path.join(args.reports, READINESS)
+        os.makedirs(args.reports, exist_ok=True)
+        open(path, "w").write(text)
+        print(text)
+        return 0
 
     rounds = 0
     while True:
@@ -290,6 +398,11 @@ def main():
             raise SystemExit("advance did not settle -- a step keeps "
                              "invalidating another; read the plan above")
         if not execute(steps, args.config, args.reports):
+            # every stop leaves the readiness report behind it
+            path = os.path.join(args.reports, READINESS)
+            os.makedirs(args.reports, exist_ok=True)
+            open(path, "w").write(report(load_config(args.config), args.reports))
+            print(f"\nreport      {path}")
             return 0
 
 

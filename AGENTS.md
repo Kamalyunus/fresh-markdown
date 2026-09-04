@@ -155,9 +155,24 @@ python3 -m pipeline.advance --plan    # phase table + next steps, touches nothin
 python3 -m pipeline.advance           # runs to the next HUMAN decision and stops
 ```
 
-It owns the order (bootstrap → tune/settle → posterior → shadow → owner
-keys → launch_date → weekly re-fit → daily lane) and recomputes state from
-disk every run. It never retrains unless the model is absent or `--retrain`
+It owns the order and recomputes state from disk every run. Phase by
+phase — what runs, which config keys move, and who moves them:
+
+| phase | runs | config keys | moved by |
+| --- | --- | --- | --- |
+| bootstrap | `bootstrap.run` (train ONCE, loop to the fixed point, backtest, thresholds, seal) | none | — |
+| tune | `tune --apply`, then `bootstrap.run --check-only`, until nothing is left to paste | `rho`, `calibration_fit_trailing_weeks`, `calibration_gate_band`, `information_increment`, `delta_min_log_bias` | the process, from the report that derives each |
+| posterior | `init_posterior`, once | none | — |
+| shadow | `pipeline.shadow` on the hold-out, every episode; then `tune --apply` | `tau_initial` | the process, from `shadow.tau_initial_derivation` |
+| owner | STOP | `scrap_deterioration_pct`, `margin_deterioration_pct`, `min_detectable_effect_pct`, the two learning rails, `ab_test.active` | you, from `thresholds.json` (advance prints floor, verdict, source) |
+| launch | STOP, then `--fit-calibration` + `seal` | `data.launch_date` | you, on launch day |
+| daily | ingest, `update --calibrate-tau`, monitor, assurance, export, status; STOP at `update --apply` | none | you approve each update |
+
+Every stop writes `reports/launch_readiness.md` (`--report` regenerates
+it): what ran per phase, every value the process changed with before,
+after, why and source, the config in force, status, and what is still
+waited on — the handover document, assembled from the journal and tune's
+decision log, never from memory. It never retrains unless the model is absent or `--retrain`
 is given, re-grades any report whose bundle or config moved, and stops on
 every SET BY OWNER null with the evidence. Its daily lane walks tau
 (`pipeline.update --calibrate-tau`, no operator) and stops at

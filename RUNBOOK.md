@@ -19,7 +19,10 @@ python3 -m pipeline.advance --feed <yesterday's hourly parquet>   # the daily la
 ```
 
 It recomputes the state from disk every run, so it is safe to run again
-after every action. It never retrains unless the model is absent or you
+after every action, and every stop writes `reports/launch_readiness.md`:
+what ran in each phase, every config value the process changed (before,
+after, why, source), the owner decisions, the config in force, status, and
+what is still waited on — read that before touching anything by hand. It never retrains unless the model is absent or you
 pass `--retrain` (rule 1), it re-runs any report that grades a bundle or
 config no longer in force, and it never invents a value: a null SET BY
 OWNER key stops it with the evidence printed. Its stops, in order: the
