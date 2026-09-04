@@ -147,7 +147,11 @@ now. Dates are owner sign-off, 2026-08.
   stays the one controller — and the floor is DERIVED: the bias scale is
   measured by `tune` from the backtest, ε is the cell's posterior mean,
   and the ledger prices τ against admissible tiers so the budget still
-  funds exactly the draws made.
+  funds exactly the draws made. The first cut measured the floor from p*
+  and changed nothing on the owner's shadow (forced rate and the mean gap
+  from the reference identical): cost is measured from p*, but the learner
+  reads every outcome against `mu_ref` at the REFERENCE discount, so the
+  informative distance is from the reference. The floor is on that.
 - **Entry-only spread collection.** The replay collected Q-spreads at entry
   only, funding ~1 exploration per episode against a system that explores
   every hour — its own bisection reported 1.00× regardless (a number a

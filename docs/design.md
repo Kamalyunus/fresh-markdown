@@ -536,15 +536,19 @@ cost(p)     = Q(p*) − Q(p)          ← expected IL sacrificed, in currency
 affordable  = { p ≠ p* : cost(p) ≤ tau }
 ```
 
-**δ_min — the smallest informative move.** A forced move of size L in log
-price carries signal ε·L in log demand against a level bias of scale
-σ_b — the largest of three fidelity readings (the rolling-origin MAE at
+**δ_min — the smallest informative move.** The learner reads every forced
+outcome against `mu_ref` at the reference discount, so the distance that
+carries information is from the reference, not from p*: with
+L = log((1−d)/(1−d_ref)) the signal is ε·L in log demand, against a level
+bias in `mu_ref` of scale σ_b — the largest of three fidelity readings (the rolling-origin MAE at
 the W in force, the `by_category` rms log ratio, the gate half-width
 `log(1.1)`), each of which understates alone. Below
 `δ_min = k·σ_b/|ε|` the move's signal sits inside the model's own level
 error and the outcome teaches nothing about ε; shadow spent ~22% of
 decisions there, all at one tier step. So the set is
-`admissible = { p ≠ p* : |log((1−p)/(1−p*))| ≥ δ_min }` and
+`admissible = { p ≠ p* : |log((1−p)/(1−p_ref))| ≥ δ_min }` (cost is
+measured from p*, information from p_ref — a tier far from p* but at the
+reference costs budget and teaches nothing) and
 `affordable = { p ∈ admissible : cost(p) ≤ tau }`; the ledger prices tau
 against admissible tiers only, so tau still funds exactly the draws that
 will be made. τ stays the one controller; `δ_min` is derived — σ_b is
@@ -1496,7 +1500,7 @@ committed.
 | `rho` | Frozen intra-episode demand correlation |
 | deff | Design effect deflating correlated within-episode evidence |
 | `tau` | Currency threshold defining the affordable exploration set |
-| `delta_min` | Smallest forced move, in log price, whose signal clears the model's level bias: `k·σ_b/|ε|` per cell (§5.8) |
+| `delta_min` | Smallest forced move from the REFERENCE discount, in log price, whose signal clears the model's level bias: `k·σ_b/|ε|` per cell (§5.8) |
 | Cell | A learning unit: one high-volume category, or the pooled global cell |
 | Anchor | The price currently in force; hourly actions may only deepen from it |
 | Censored hour | Sales hit inventory — demand known only as a lower bound |

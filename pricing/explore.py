@@ -26,14 +26,18 @@ import pandas as pd
 
 
 def delta_min(cfg, eps):
-    """The smallest INFORMATIVE log price move, per cell (design 5.8).
+    """The smallest INFORMATIVE log price move FROM THE REFERENCE, per cell
+    (design 5.8).
 
-    A forced move of size L in log price carries signal eps*L in log demand
-    against a level bias of scale `delta_min_log_bias` (the largest of the
+    The learner reads every forced outcome against mu_ref at the reference
+    discount: L = log((1-d)/(1-d_ref)) and the signal is eps*L, against a
+    level bias in mu_ref of scale `delta_min_log_bias` (the largest of the
     three fidelity readings tune derives it from). Below k*bias/|eps| the
-    move's signal sits inside the model's own level error and the outcome
-    teaches nothing about eps; shadow spent ~22% of decisions there, all at
-    one tier step. 0 while the bias scale is null (nothing pasted yet).
+    signal sits inside the model's own level error and the outcome teaches
+    nothing about eps. Cost is measured from p*; information from d_ref --
+    a tier far from p* but at d_ref costs money and teaches nothing, which
+    is why the floor is on the reference distance. 0 while the bias scale
+    is null (nothing pasted yet).
     """
     ec = cfg["exploration"]
     bias = ec.get("delta_min_log_bias")
@@ -50,14 +54,18 @@ def log_move(d_from, d_to):
 
 
 def admissible(dp_result, delta_min=0.0):
-    """Non-optimal tiers whose move from p* is at least `delta_min` -- the
-    tiers a perturbation may land on before the budget is asked. ONE
-    definition: the chooser, the spread ledger and the assurance check all
-    read it, so tau is calibrated against exactly the set it is spent on."""
+    """Non-optimal tiers at least `delta_min` from the REFERENCE discount in
+    log price -- the tiers a perturbation may land on before the budget is
+    asked. ONE definition: the chooser, the spread ledger and the assurance
+    check all read it, so tau is calibrated against exactly the set it is
+    spent on."""
     star = dp_result.optimal_index
-    d_star = dp_result.tiers[star]
+    d_ref = dp_result.d_ref
+    if delta_min > 0 and d_ref is None:
+        raise ValueError("delta_min needs the DP result's d_ref")
     return [j for j in dp_result.q_by_tier if j != star
-            and log_move(d_star, dp_result.tiers[j]) >= delta_min - TIER_EPS]
+            and (delta_min <= 0
+                 or log_move(d_ref, dp_result.tiers[j]) >= delta_min - TIER_EPS)]
 
 
 def affordable_set(dp_result, tau, delta_min=0.0):

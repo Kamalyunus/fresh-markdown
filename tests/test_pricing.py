@@ -1055,19 +1055,25 @@ def _solved(eps=-1.0):
 
 
 def test_delta_min_removes_the_tiers_the_model_cannot_tell_apart():
-    """A forced move smaller than bias/|eps| in log price has its signal
-    inside the model's own level error; it is neither drawn nor budgeted.
-    Shadow spent ~22% of decisions there, all one tier step out."""
+    """The learner reads a forced outcome against mu_ref at the REFERENCE
+    discount, so the informative distance is from d_ref, not from p*: a
+    tier far from p* but at d_ref costs budget and teaches nothing. Below
+    bias/|eps| the signal sits inside the model's own level error; such
+    tiers are neither drawn nor budgeted."""
     res = _solved()
-    star = res.optimal_index
+    assert res.d_ref == 0.30
     everything, costs = explore.affordable_set(res, 1e12)
     assert everything == explore.admissible(res, 0.0)
     dmin = 0.10
     kept, _ = explore.affordable_set(res, 1e12, dmin)
     assert kept and len(kept) < len(everything)
     for j in everything:
-        move = explore.log_move(res.tiers[star], res.tiers[j])
+        move = explore.log_move(res.d_ref, res.tiers[j])
         assert (j in kept) == (move >= dmin - 1e-9), (j, move)
+    # a tier AT the reference is never admissible under a floor, however far
+    # p* sits from it
+    at_ref = [j for j in everything if abs(res.tiers[j] - res.d_ref) < 1e-9]
+    assert at_ref and not any(j in kept for j in at_ref)
     # the ledger prices tau against the SAME set the chooser draws from
     assert explore.spread_costs(res, dmin) == [costs[j] for j in kept]
     # and the draw never lands below the floor

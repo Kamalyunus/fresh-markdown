@@ -78,9 +78,11 @@ def entry_action_set(tiers, d_ref, d_max, pcfg):
 
 
 class DPResult:
-    def __init__(self, tiers, q_by_tier, v_star, solver_latency_s, tail_mass_max):
+    def __init__(self, tiers, q_by_tier, v_star, solver_latency_s, tail_mass_max,
+                 d_ref=None):
         self.tiers = tiers                    # discounts, ascending
         self.q_by_tier = q_by_tier            # {tier_index: Q value} for allowed actions
+        self.d_ref = d_ref                    # the reference the forecast is quoted at
         self.v_star = v_star
         self.solver_latency_s = solver_latency_s
         self.tail_mass_max = tail_mass_max
@@ -156,4 +158,5 @@ def solve(original_price, cost, q0, mu_ref_path, d_ref, epsilon, r, cfg,
 
     q_by_tier = {j: float(Q_now[j, q0]) for j in allowed}
     v_star = max(q_by_tier.values())
-    return DPResult(tiers, q_by_tier, v_star, time.monotonic() - t0, tail_max)
+    return DPResult(tiers, q_by_tier, v_star, time.monotonic() - t0, tail_max,
+                    d_ref=d_ref)

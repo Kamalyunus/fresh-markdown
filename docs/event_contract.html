@@ -776,7 +776,7 @@
         <tr><td class="f">exploration_cost</td><td class="ex">2385.0286259173663</td><td>Expected IL given up to run it. Zero when not exploring.</td></tr>
         <tr><td class="f">affordable_set_size</td><td class="ex">3</td><td>How many alternatives were within budget.</td></tr>
         <tr><td class="f">tau_current</td><td class="ex">3202.33</td><td>The exploration budget in force, in won.</td></tr>
-        <tr><td class="f">delta_min</td><td class="ex">0.2124</td><td>The smallest log price move this cell may be forced by (level-bias scale over |ε|); tiers closer to the optimum were neither drawn nor budgeted. 0 before the scale is measured.</td></tr>
+        <tr><td class="f">delta_min</td><td class="ex">0.2124</td><td>The smallest distance from the reference discount, in log price, a forced tier may sit at (level-bias scale over |ε|); tiers closer to the reference were neither drawn nor budgeted — the learner reads outcomes against <code>reference_mu</code>. 0 before the scale is measured.</td></tr>
 
         <tr class="grouphead"><td colspan="3">Inputs that make it reproducible — 7</td></tr>
         <tr><td class="f">epsilon_posterior_mean</td><td class="ex">-1.0</td><td>The learned price response. Always negative.</td></tr>
