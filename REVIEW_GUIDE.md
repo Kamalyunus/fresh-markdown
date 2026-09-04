@@ -1,10 +1,10 @@
 # Review guide — what to review, how deeply, and why
 
-The part of the repo that can touch a live price is ~1,800 lines. This
+The part of the repo that can touch a live price is ~1,550 lines. This
 guide scopes a code review to risk, so the whole exercise is about two
 sittings.
 
-## Tier 1 — review line by line (~1,100 lines; prices real money, hourly)
+## Tier 1 — review line by line (~900 lines; prices real money, hourly)
 
 | File | What to verify |
 | --- | --- |
@@ -19,18 +19,19 @@ unauditable price?* The test files that pin these properties —
 `test_pricing.py`, `test_end_to_end.py` (decision path), `test_restock.py` —
 are worth reading as the specification.
 
-## Tier 2 — review the state mutations (~700 lines; the only writes in production)
+## Tier 2 — review the state mutations (~650 lines; the only writes in production)
 
 | File | What to verify |
 | --- | --- |
 | `pipeline/update.py` | Only exploration outcomes are eligible; the censored NB likelihood on the grid; information in NB units (`μL²·r/(r+μ)`) deflated by deff; the trigger evaluates the **unconsumed batch**, never a running counter; `predictive_check` scores the batch against the pre-update posterior; tau calibrates on spend, not evidence — `--calibrate-tau` commits it daily with no operator, one step per closed day since the last calibration (a missed day is graded, not skipped), keyed by the decision's TRADING day (`events.pairs.decision_day`, never the outcome's UTC finalize time), and zero spend on a priced day raises it — under-spend, not absence of signal |
+| `events/pairs.py` | The one decision↔outcome pairing; `learnable=` is what keeps a failed push out of the evidence |
 | `pricing/posterior.py` | The bounded step (mean ≤ 0.15, std shrink ≤ 25%, floored); revision + consumed outcome IDs commit in **one atomic write** — a crash between them cannot double-count; re-applying with nothing new is a verified no-op |
 
 The review question: *can evidence be spent twice, or a belief move more
 than its bounds?* `test_tau_calibration.py` and the exactly-once tests in
 `test_end_to_end.py` are the pinned answers.
 
-## Tier 3 — skim; the gates and suite carry it (~5,500 lines, offline)
+## Tier 3 — skim; the gates and suite carry it (~8,800 lines, offline)
 
 `bootstrap/` (data preparation, model/prior/dispersion fits),
 `backtest/` and `pipeline/advance.py` (the phase order as code; its
@@ -57,5 +58,5 @@ the one decision↔outcome pairing.
 reviewers' asset, not their burden: every non-obvious rule named above has a
 test whose docstring states it in prose.
 
-CI runs `python3 -m pytest tests/` (~5.5 min) and `python3 -m pipeline.status`
+CI runs `python3 -m pytest tests/` (~5 min) and `python3 -m pipeline.status`
 on deploy (exit code 1 on any FAIL).
