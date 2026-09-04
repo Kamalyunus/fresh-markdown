@@ -23,6 +23,7 @@ def _state(**over):
         "schedule_end": "2026-09-07", "expected_schedule_end": "2026-09-07",
         "this_week": "2026-08-31",
         "events": True, "feed": None, "cadence": 7,
+        "extract_range": ("2026-03-01", "2026-08-28"),
         "status": {"failing": [], "checks": []},
     }
     st.update(over)
@@ -33,9 +34,14 @@ def _kinds(steps):
     return [(s["kind"], s.get("phase"), s.get("label") or s.get("why")) for s in steps]
 
 
-def test_no_extract_stops_at_the_credentials_step():
+def test_no_extract_pulls_it_per_the_config_dates():
+    """The extract is not a human step: the config's split and hold-out
+    dates size the pull, and download_flc fails loudly without REDSHIFT_*."""
     steps = advance.plan(_state(raw=False, prepared=False))
-    assert steps[0]["kind"] == "stop" and steps[0]["phase"] == "data"
+    assert steps[0]["kind"] == "run" and steps[0]["phase"] == "data"
+    assert steps[0]["args"] == ["bootstrap.download_flc", "--start-date",
+                                "2026-03-01", "--end-date", "2026-08-28"]
+    assert steps[0]["reevaluate"]
 
 
 def test_the_bootstrap_runs_only_when_the_model_is_absent_or_asked_for():

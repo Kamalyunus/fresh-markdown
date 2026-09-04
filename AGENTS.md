@@ -155,6 +155,15 @@ python3 -m pipeline.advance --plan    # phase table + next steps, touches nothin
 python3 -m pipeline.advance           # runs to the next HUMAN decision and stops
 ```
 
+**Two readers, one command.** The OWNER tells their agent: read this file,
+then run `pipeline.advance` until `reports/launch_readiness.md` says it is
+waiting on `data.launch_date`; the agent pulls the extract per the config's
+split and hold-out dates (`REDSHIFT_*` in `~/.env`), derives every MEASURED
+value, and stops at each owner decision with the evidence. ENGINEERING
+builds Lane B against `docs/event_contract.html` (the caller, applying the
+price, reporting failed pushes) and runs the daily lane
+(`advance --feed`) on a cron; `RUNBOOK.md` is their document.
+
 It owns the order and recomputes state from disk every run. Phase by
 phase — what runs, which config keys move, and who moves them:
 

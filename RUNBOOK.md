@@ -1,122 +1,93 @@
 # Runbook — operating the Perishable Markdown MVP
 
-For the engineering team running this system. Three lanes, each with its own
-cadence and its own definition of done. The authoritative spec is
+For the engineering team and the product owner. The order of operations is
+code — `python3 -m pipeline.advance` — so this document is about the parts
+the process cannot do: what engineering builds, what the owner decides, and
+what a stop or a red line means. The authoritative spec is
 `docs/design.md`; the integration contract is `docs/event_contract.html`;
-`REVIEW_GUIDE.md` maps the code by risk tier. Nothing in this document
-requires reading the spec first.
+`REVIEW_GUIDE.md` maps the code by risk tier; `AGENTS.md` is what an agent
+reads before touching the repo.
 
 All commands run from the repo root. `data/`, `reports/`, `artifacts/`,
 `events_store*/` are run outputs and never committed. Credentials
 (`REDSHIFT_*`) live in `~/.env`, never in config or code.
 
-## The short version — `pipeline.advance` owns the order
+## Who does what
+
+- **Owner** — tell your agent: *read `AGENTS.md`, then run `pipeline.advance`
+  until `reports/launch_readiness.md` says it is waiting on
+  `data.launch_date`.* It pulls the extract for the config's split and
+  hold-out dates, trains once, derives and pastes every MEASURED value,
+  runs shadow on the hold-out, and stops at each decision only you can
+  make, printing the evidence. Read the section *What the owner decides*.
+- **Engineering** — build Lane B (below) against the event contract, then
+  run the daily lane on a cron and read its stop:
 
 ```bash
 python3 -m pipeline.advance --plan       # where the chain is, what runs next; touches nothing
 python3 -m pipeline.advance              # run to the next human decision, then stop
 python3 -m pipeline.advance --feed <yesterday's hourly parquet>   # the daily lane
+python3 -m pipeline.advance --report     # regenerate reports/launch_readiness.md
 ```
 
-It recomputes the state from disk every run, so it is safe to run again
-after every action, and every stop writes `reports/launch_readiness.md`:
-what ran in each phase, every config value the process changed (before,
-after, why, source), the owner decisions, the config in force, status, and
-what is still waited on — read that before touching anything by hand. It never retrains unless the model is absent or you
-pass `--retrain` (rule 1), it re-runs any report that grades a bundle or
-config no longer in force, and it never invents a value: a null SET BY
-OWNER key stops it with the evidence printed. Its stops, in order: the
-Redshift pull · a tune BLOCK · a failed shadow gate · the owner keys ·
-`data.launch_date` on launch day · a red `status` · and, every day,
-**`pipeline.update --apply`, which stays yours**. The lanes below are what
-it runs, for reading one step at a time.
+`advance` recomputes the state from disk every run, so running it again
+after any action is always safe. It never retrains unless the model is
+absent or `--retrain` is given; it re-runs any report that grades a bundle
+or config no longer in force; it never invents a value. Every stop writes
+`reports/launch_readiness.md` — what ran per phase, every config value the
+process changed (before, after, why, source), the config in force, status,
+and what is waited on. Its stops, in order: a tune BLOCK · a failed shadow
+gate · the owner keys · `data.launch_date` · a stale extract · a red
+`status` · and, daily, **`pipeline.update --apply`**, which stays a human's.
 
 ---
 
-## Lane A — Train & freeze (at launch; on each retrain)
+## What the owner decides, and how to read it
 
-Produces the sealed artifact bundle every price stands on. Runs offline; no
-price is touched until Lane B. One step is a HUMAN GATE (the prior) and one
-is an owner review (the level diagnostic) — an engineer runs the commands,
-the owner reads the verdicts.
+The process stops with the evidence printed; these are the readings behind
+each decision.
 
-```bash
-pip install -r requirements.txt
-python3 -m bootstrap.download_flc --days 120          # -> data/flc_raw.parquet
-python3 -m bootstrap.run --input data/flc_raw.parquet
-# trains ONCE, iterates calibration -> prior -> dispersion to CONVERGED,
-# then backtest, thresholds, seal, status. Production settles in ~8-9 turns.
-```
+1. **Level diagnostic (a review, not a gate).** `reports/backtest.json` →
+   `calibration_gate_value` against `calibration_gate_band`. Out of band is
+   a drift/staleness reading — the decision tree in `docs/design.md` §9.2
+   separates wobble from trend. WARN in `status`, never a launch blocker.
+2. **Prior gate.** `artifacts/prior.json`, in this order:
+   `wrong_sign_categories` → per-category `mean/std/std_basis` →
+   `holdout_comparison` (read `information_available_per_row` first). There
+   is no pass flag; a pooled or uniform prior is a designed outcome.
+3. **Shadow gate.** `reports/shadow.json`: completeness ≥ 99% and zero
+   cost-floor violations, then `exploration_budget.spend_over_budget`
+   (over 2× → do not launch at this tau) and `tau_controller_trace` — day
+   one is an out-of-sample test of the derived tau. `learning_yield_would_be`
+   says how fast the pilot can learn and whether evidence or the calendar
+   binds; `delta_min` on the decision events says which categories the
+   forced-move floor binds.
+4. **The owner keys** (`advance` stops here): `scrap_deterioration_pct` and
+   `margin_deterioration_pct` at or above the floor `thresholds.json`
+   stamps (never on `TOO TIGHT`, `BLOCKED`, `LIKELY INERT` or
+   `insufficient history`); `min_detectable_effect_pct` from `ab_duration`;
+   the two learning rails — `max_std_shrink` first (`information_increment`
+   derives from it), then `max_mean_step`, reading
+   `bounded_step_recommendation` and `backtest.step_sensitivity`;
+   `ab_test.active` stays `false` until the A/B genuinely starts.
+5. **`data.launch_date`**, on launch day. It lets the weekly level re-fit
+   schedule past `split.test_end`; never move `split.test_end` for this.
+   `advance` then re-fits, re-seals, and `status` must be green.
 
-Then, in order:
+**The daily `--apply` gate.** One human approves at most one posterior step
+per cell per day; each cell triggers on its own batch. Before approving:
 
-1. **Level diagnostic (review, not a gate).** Calibration is always
-   fitted and applied (the script's step 3b). Read `reports/backtest.json`
-   → `calibration_gate_value` against the band `[0.90, 1.10]`: out of band
-   is a drift/staleness reading — follow the decision tree in `docs/design.md` §9.2
-   to separate wobble from trend — surfaced as WARN in `status`, never a
-   launch blocker.
-2. **GATE — prior (owner).** Read `artifacts/prior.json` in this order:
-   `wrong_sign_categories` → per-category
-   `mean/std/std_basis` → `holdout_comparison` (read
-   `information_available_per_row` first). There is no pass flag; a pooled
-   or uniform prior is a designed outcome, not a failure.
-3. **MEASURED values are pasted into `config.yaml`** by `advance` (it runs
-   `pipeline.tune --apply` and settles with `--check-only`); by hand only
-   if you are stepping through the lane yourself:
-   - `dispersion.rho` — from `artifacts/rho.json`, after **every** retrain
-     (`m` is measured per batch by `deff_from_episodes`, never pasted);
-   - `learning.information_increment` — from `reports/thresholds.json` →
-     `information_increment_recommendation.recommended`, re-derived after
-     **every** prior change (it is the ceiling above which a bounded update
-     discards the evidence it waited for; the report stamps `TOO LARGE`);
-   - `exploration.delta_min_log_bias` — `tune` derives it from
-     `reports/backtest.json` (the largest of three level-error readings);
-     it sets the smallest forced move worth making per cell, so the
-     exploration budget stops buying one-tier moves the model cannot
-     distinguish from its own error;
-   - `exploration.tau_initial` — from `reports/shadow.json` →
-     `tau_initial_derivation.tau_initial` (shadow derives it itself on the
-     trailing pre-window week, so this paste happens AFTER step 6 and feeds
-     the pilot, not the shadow run; a stale or mismatched paste is refused,
-     by design). `python3 -m pipeline.tune` names every paste and its
-     source; a report that could not measure a key reads ACT with no value,
-     and `--apply` refuses to paste it — re-run the report instead.
-4. **Owner sets the `SET BY OWNER` keys** (`scrap_deterioration_pct`,
-   `margin_deterioration_pct`, `min_detectable_effect_pct`, and
-   `ab_test.active` — leave it `false` until the A/B genuinely starts, or the
-   guardrail compares system-priced units against system-priced units and
-   cannot fire) from
-   `reports/thresholds.json` — never invented, and never below a floor the
-   report stamps `TOO TIGHT`. The two learning rails
-   (`learning.max_std_shrink`, then `learning.max_mean_step`) are owner calls
-   too: read `bounded_step_recommendation` for which one binds first, and
-   `backtest.step_sensitivity` for what a mean step does to prices. Set
-   `max_std_shrink` first — `information_increment` is derived from it.
-5. `python3 -m bootstrap.init_posterior` (once, at launch — refuses to
-   overwrite production learning state without `--force`).
-6. **Shadow, on the hold-out** (default window):
-   `python3 -m pipeline.shadow --input data/prepared.parquet --max-episodes 0`
-   for the launch record. It derives its own launch tau on the trailing
-   pre-window week (`tau_initial_derivation` in the report — this is the
-   value to paste in step 3 for the pilot). Exit gate: completeness ≥ 99%
-   (outcomes accepted per decision emitted) and **zero** cost-floor
-   violations. Also read
-   `exploration_budget.spend_over_budget` (over 2× → do not launch at this
-   tau; re-derive) and `tau_controller_trace` — day one is an out-of-sample
-   test of the derived tau.
-7. **On launch day, set `data.launch_date`** (SET BY OWNER, null until
-   then). It does one thing: the weekly `--fit-calibration` stops at
-   `split.test_end` before launch (rule 16) and runs through the latest
-   data plus the week being priced after it. Do NOT move `split.test_end`
-   for this — that rescopes every sealed fit. Run the re-fit once right
-   after setting it, then `bootstrap.seal`.
-8. `python3 -m pipeline.status` — **done means every line green.** Exit code
-   1 on any FAIL, so it can gate a deploy.
+| Field | Approve when | Hold when |
+| --- | --- | --- |
+| `predictive_check` | `worse_than_a_flat_prior: false`, or a one-off | it persists across batches — the belief tightened faster than the evidence; escalate before more updates |
+| `bound_clipped` | occasional | most updates clip — step cap or increment mis-sized; escalate |
+| `batch_oldest_outcome_age_days` | near the expected cadence | growing without a trigger — the loop is stalling; check volumes and tau |
+| event-quality gates | green (the command refuses on red) | never work around a refusal |
+| `calibration_schedule_current` | green | red means the weekly re-fit was missed — `--apply` refuses, because learning from prices set on stale factors banks evidence about a model that is not the one running |
 
-**Never** retrain between two runs you intend to compare; comparisons are
-valid only when `baseline_model_version` matches. **Never** tune anything on
-the hold-out window — it is a one-shot resource.
+`tau` needs no approval: `advance --feed` walks it one clipped step per
+closed day (`update --calibrate-tau`); a second run on the same day is a
+no-op, and a missed day is graded, not skipped.
 
 ---
 
@@ -135,15 +106,18 @@ contract:
   (parquet/CSV) or JSONL (`sku_id`, `fc`, `date`, `hour_of_day`, `reason`);
   no row means the push succeeded;
 - a defined fallback for `StateRejected` (hold the current price; alert on
-  rate).
+  rate);
+- the daily cron: `advance --feed <yesterday's hourly parquet>`, which
+  ingests outcomes, walks tau, writes monitor/assurance/status/exports and
+  stops at `--apply`.
 
 Outcomes are NOT engineering's to produce: `pipeline.ingest_outcomes`
-(Lane C) builds them from the hourly FLC feed, matched to decisions by
-(SKU, FC, date, hour), deriving `adjustment_reason`, `is_stockout` and the
-offered price itself. §08 of the contract page is the pre-build
-feasibility checklist, and §01 — deliberately first — is the definitions
-and claims register: every derivation stands on source-data meanings only
-engineering can confirm, so align on §01 before anything else.
+builds them from the hourly FLC feed, matched to decisions by (SKU, FC,
+date, hour), deriving `adjustment_reason`, `is_stockout` and the offered
+price itself. §08 of the contract page is the pre-build feasibility
+checklist, and §01 — deliberately first — is the definitions and claims
+register: every derivation stands on source-data meanings only engineering
+can confirm, so align on §01 before anything else.
 
 The caller reads `tau` from `PosteriorStore.tau(cfg)` — **not** from
 `config.exploration.tau_initial`, which is only the launch value and never
@@ -153,86 +127,26 @@ in the caller.
 
 ---
 
-## Lane C — Learn & watch (daily: one cron, one human decision)
-
-`python3 -m pipeline.advance --feed <yesterday's parquet>` runs everything
-below up to the operator gate. Stepping through by hand, after midnight,
-in this order:
-
-```bash
-python3 -m pipeline.ingest_outcomes --feed <hourly parquet> \
-    [--failures failures.parquet]      # yesterday's table rows -> outcomes;
-                                       # idempotent, failures table optional
-python3 -m pipeline.update --calibrate-tau   # DAILY: walks tau over every closed
-                                             # day; spend, not evidence, no operator
-python3 -m pipeline.update --apply     # OPERATOR GATE -- see below
-python3 -m pipeline.monitor            # business / learning / safety series
-python3 -m pipeline.assurance          # the frozen artifacts vs the live world
-python3 -m pipeline.status             # the only screen that must be read daily
-python3 -m pipeline.export_events      # decision/outcome tables for the
-                                       # warehouse -- derived, never the record
-```
-
-**Weekly, in the same lane — re-fit the level factors.** The calibration
-schedule only covers weeks it was fitted on, and a row past its end falls
-back to the frozen factors **silently**. That is the staleness the point-in-
-time change exists to remove, so the re-fit is an operational step, not a
-launch-time one:
-
-```bash
-python3 -m bootstrap.train_baseline --input data/prepared.parquet --fit-calibration
-python3 -m bootstrap.seal        # calibration.json changed -- re-seal the bundle
-```
-
-- **This is NOT a retrain.** The model, `r`, `rho` and the prior do not move,
-  so before/after comparisons stay valid under hard rule 1 — but say which
-  factor vintage a report ran under, because the factors did move.
-- Read `artifact_versions.calibration_coverage` in the next backtest or
-  shadow report: `rows_on_fallback` should be 0 and the verdict `OK`.
-  `STALE FACTORS IN USE` means the schedule ran out and the run was priced on
-  frozen factors.
-- If `calibration_window_sweep` starts preferring a different trailing
-  window, that is an owner decision — re-read it, do not drift the config.
-- `uncalibrated_beats_all_windows: true` (with its `verdict`) means no-factors
-  scored better than every window on the same eval weeks: the level factors
-  are adding estimation noise, not removing bias. Read `fidelity.by_category`
-  next — factors near 1 everywhere are inert; factors that scatter are being
-  fit on too little data per cell.
-
-**The `--apply` gate.** One human approves at most one posterior step per
-cell per day. Before approving, read each cell's block:
-
-| Field | Approve when | Hold when |
-| --- | --- | --- |
-| `predictive_check` | `worse_than_a_flat_prior: false`, or a one-off | it persists across batches — the belief tightened faster than the evidence; escalate before more updates |
-| `bound_clipped` | occasional | most updates clip — step cap or increment mis-sized; escalate |
-| `batch_oldest_outcome_age_days` | near the expected cadence | growing without a trigger — the loop is stalling; check volumes and tau |
-| event-quality gates | green (the command refuses on red) | never work around a refusal |
-| `calibration_schedule_current` | green | red means the weekly re-fit above was missed — `--apply` refuses, because learning from prices set on stale factors banks evidence about a model that is not the one running |
-
-`tau` is walked one clipped step per closed day since its last calibration
-(`--calibrate-tau` daily, and `--apply` too) — a second run on the same
-day is a no-op, not a bug, and a missed day is graded, not skipped.
-
-**Red-line table** — what a red `status` line means and the response:
+## Red-line table — what a red `status` line means and the response
 
 | Line | Response |
 | --- | --- |
 | stop condition fired (overspend >2×, mismatch, duplicates) | exploration suspends for the cohort automatically; **exploitation pricing continues**. Investigate, don't restart blindly |
-| `config mirrors reports` FAIL | a MEASURED paste disagrees with the report that derives it, or the report could not measure it (NOT RUN). `python3 -m pipeline.tune` prints the reason; `--apply` pastes what it can |
+| `config mirrors reports` FAIL | a MEASURED paste disagrees with the report that derives it, or the report could not measure it (NOT RUN). `python3 -m pipeline.tune` prints the reason; `advance` re-pastes what it can |
 | `guardrail floors` WARN | "insufficient history" — nobody measured the floor, so the stop was not checked. Not a pass: more closed-episode history, then re-run `derive_thresholds` |
 | `assurance · reproduction` FAIL | something moved under the solver (config edit, artifact swap, deploy, library). Diff the bundle first: `artifact bundle` line, then `artifact mirrors` |
 | `artifact mirrors` FAIL | config paste and its source disagree (rho). Read the **bundle** line before re-pasting — the stale side is not always config |
-| `report vintages` FAIL | backtest/shadow report was produced against a model no longer on disk — its gate rows grade a ghost. Re-run that report; do not launch on it |
-| `calibration_coverage` says `STALE FACTORS IN USE` | the weekly re-fit was missed: the schedule ran out and rows were priced on frozen factors. Re-run `--fit-calibration`, re-seal, re-run the report |
+| `report vintages` FAIL | a report was produced against a model no longer on disk — its gate rows grade a ghost. `advance` re-runs it; do not launch on it |
+| `calibration_coverage` says `STALE FACTORS IN USE` | the weekly re-fit was missed: rows were priced on frozen factors. `advance` re-fits and re-seals; re-run the report |
 | posterior std flat ≥ alert days | the loop is dead: no committed update. Check batch age, tau, volumes — in that order |
 | guardrail breach (scrap/margin, 2 consecutive days) | business decision, not a code fix — escalate to the owner with the monitor's arm comparison |
 | `INSUFFICIENT` verdicts | not a pass. A thin window said so; widen or wait. Assurance's top line stays `INSUFFICIENT` until every check ran |
 
-**Never** hand-edit `artifacts/posterior.json`, re-derive filter logic
-outside `prepare_data.population`, or drive a quarantine count to zero by
-adding a catch-all reason — the quarantine file is where uninterpretable
-outcomes stay visible.
+**Never** retrain between two runs you intend to compare (comparisons are
+valid only when `baseline_model_version` matches); never tune anything on
+the hold-out window; never hand-edit `artifacts/posterior.json`; never
+re-derive filter logic outside `prepare_data.population`; never drive a
+quarantine count to zero with a catch-all reason.
 
 ---
 
@@ -240,13 +154,11 @@ outcomes stay visible.
 
 | Decision / step | Engineering | Product owner |
 | --- | --- | --- |
-| Run Lane A commands, CI, deploys | **R/A** | — |
+| Run `advance`, CI, deploys | **R/A** (owner may run it via their agent) | — |
 | Prior gate verdict; level-diagnostic review | run & present | **A** |
-| MEASURED pastes into config | **R** (from named report fields only) | informed |
-| `SET BY OWNER` thresholds, MDE, gate band | — | **A** |
-| Lane B service, push-failure feed, SLA | **R/A** | — |
+| MEASURED pastes into config | — (the process, from named report fields only) | informed |
+| `SET BY OWNER` thresholds, MDE, rails, `launch_date` | — | **A** |
+| Lane B service, push-failure feed, daily cron | **R/A** | — |
 | Daily `--apply` approval | **R** (pilot: owner may retain) | consulted on escalations |
 | Guardrail breach response, A/B readout | informed | **A** (decision table in design §11.2) |
 | A/B duration & no-early-reads | enforce | **A** |
-
-

@@ -99,6 +99,11 @@ def probe(cfg, root="reports", feed=None, retrain=False):
         "events": os.path.isdir(events_dir) and bool(os.listdir(events_dir)),
         "feed": feed,
         "cadence": cfg["learning"]["update_cadence_days"],
+        # the extract the config's windows need: train_start through the
+        # hold-out's end (download_flc clips at yesterday)
+        "extract_range": (cfg["data"]["split"]["train_start"],
+                          (cfg["data"].get("holdout") or {}).get("end")
+                          or cfg["data"]["split"]["test_end"]),
         "status": status.collect(cfg, root),
     }
 
@@ -118,8 +123,12 @@ def plan(st):
     state so every branch is testable without a workspace."""
     steps = []
     if not st["raw"] and not st["prepared"]:
-        return [_stop("data", "no extract on disk",
-                      ["python3 -m bootstrap.download_flc  (REDSHIFT_* from ~/.env)"])]
+        # per config: the split and hold-out dates size the pull. Credentials
+        # come from ~/.env (REDSHIFT_*); download_flc fails loudly without them
+        start, end = st["extract_range"]
+        return [_run("download the extract (config split/holdout dates)",
+                     ["bootstrap.download_flc", "--start-date", str(start),
+                      "--end-date", str(end)], phase="data", reevaluate=True)]
 
     # 1. bootstrap: the ONLY place a retrain happens
     if not st["model"] or not st["bundle"] or st["retrain"]:
