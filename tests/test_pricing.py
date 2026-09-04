@@ -1096,3 +1096,21 @@ def test_delta_min_is_derived_never_a_second_knob():
     # |eps| is floored at the sign constraint, never at zero
     assert explore.delta_min(live, -0.001) == pytest.approx(
         0.30 / abs(CFG["posterior"]["epsilon_max"]))
+
+
+def test_a_forced_move_never_raises_the_price_within_an_episode():
+    """Monotonicity is STRUCTURAL: under an anchor the DP's action set holds
+    only tiers at or deeper than it, admissible is a subset of that set,
+    and the draw comes from admissible -- so no floor, budget or draw can
+    move a price back up. A forced move is always a deeper discount."""
+    anchor = 0.30
+    res = dp_mod.solve(10000.0, 4000.0, 6, [0.8] * 6, 0.30, -1.0, 0.9, CFG,
+                       anchor_discount=anchor, entry=False)
+    assert all(res.tiers[j] >= anchor - 1e-9 for j in res.q_by_tier)
+    rng = np.random.default_rng(1)
+    for dmin in (0.0, 0.05, 0.15):
+        for j in explore.admissible(res, dmin):
+            assert res.tiers[j] >= anchor - 1e-9
+        for _ in range(30):
+            c = explore.select(res, 1e12, rng, delta_min=dmin)
+            assert res.tiers[c["chosen_index"]] >= anchor - 1e-9

@@ -557,6 +557,11 @@ posterior mean at the decision, `k = delta_min_bias_multiple` (1). Fisher
 information ∝ n·L² is conserved at a fixed budget; the case for large
 moves is bias, not variance.
 
+`admissible` is a subset of the DP's action set, which under an anchor
+holds only tiers at or deeper than the price in force — so a forced move
+is always a deeper discount, whatever δ_min or τ say; monotonicity is
+structural, not a check.
+
 If the affordable set is non-empty, the applied price is drawn **uniformly
 at random** from it. Uniformity is the randomisation that makes outcomes
 causal evidence; any state-dependent choice reintroduces the endogeneity
