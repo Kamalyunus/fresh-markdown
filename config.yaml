@@ -71,6 +71,7 @@ dispersion:
   r_lookup_path: "artifacts/r_lookup.json"
   rho_path: "artifacts/rho.json"
   rho: 0.1161  # MEASURED  fit_dispersion, on the calib window; mirrors artifacts/rho.json. m is NOT pasted: deff measures forced hours per episode per batch (common.config.deff_from_episodes)
+  rho_paste_tolerance_abs: 0.005       # SET  the paste vs artifacts/rho.json. A PROVENANCE check: each --check-only turn moves rho ~1e-3 while the loop contracts, and 0.005 in rho is ~0.4% of deff at m=6 (assurance alerts at 0.10). Tighter than the step made every settle a new paste
 
 tuning:                                # SET  gates pipeline.tune checks before auto-applying
   max_price_share_changed_for_auto_rail: 0.10   # SET  auto-rail ceiling on price churn

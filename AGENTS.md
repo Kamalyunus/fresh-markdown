@@ -298,7 +298,7 @@ Every paste has one source and one checker:
 
 | Config value | Paste from | Checked by |
 | --- | --- | --- |
-| `dispersion.rho` | `artifacts/rho.json`, after EVERY retrain (`m` is measured per batch, never pasted) | `artifact mirrors` (strict start-up refuses drift) |
+| `dispersion.rho` | `artifacts/rho.json`, after EVERY retrain (`m` is measured per batch, never pasted) | `artifact mirrors` (strict start-up refuses drift beyond `rho_paste_tolerance_abs`, 0.005 — above the ~1e-3 step a `--check-only` turn takes, so a settle is not a new paste) |
 | `calibration_fit_trailing_weeks`, `information_increment`, `calibration_gate_band` | the REPORT that derives each (`tune` names it) | `config mirrors reports` — these ship fixture values and cannot be null, so the check is the only thing between a pulled repo and a foreign number |
 | `exploration.tau_initial` | `reports/shadow.json` → `tau_initial_derivation` (backtest = cross-check only) | `tau_provenance_error` — shadow refuses a stale paste |
 | `exploration.delta_min_log_bias` | `tune` from `backtest.fidelity`, PER CATEGORY as a one-line mapping (own log ratio floored by MAE@W and the gate half-width; `_default` for unseen categories) — null = no floor, the fixture never ships a number | `config mirrors reports` |

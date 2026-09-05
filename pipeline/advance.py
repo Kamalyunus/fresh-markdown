@@ -194,7 +194,8 @@ def plan(st):
                           + (f"; {st['stale']['shadow']}" if "shadow" in st["stale"] else "")
                           + ")",
                           ["pipeline.shadow", "--input", PREPARED,
-                           "--out", "reports/shadow.json", "--max-episodes", "0"],
+                           "--out", "reports/shadow.json", "--max-episodes", "0",
+                           "--workers", "0"],          # every core but one; byte-identical
                           phase="shadow", reevaluate=True))
         return steps
     if st["shadow_gate"] and not str(st["shadow_gate"]).startswith("PASS"):

@@ -193,7 +193,12 @@ now. Dates are owner sign-off, 2026-08.
   loop, `delta_min` re-runs shadow, a stop threshold re-derives
   thresholds, unclassified edits re-grade everything, MEASURED write-backs
   nothing), and `advance` refuses to run the same step a third time in one
-  invocation.
+  invocation. The second half of the same loop: the rho paste tolerance was
+  5e-4 while each `--check-only` turn still contracts rho by ~1e-3, so every
+  settle was a new paste; the tolerance is now the config's
+  `rho_paste_tolerance_abs` (0.005, ~0.4% of deff at m = 6). And shadow ran
+  single-threaded for an hour per pass; `advance` and `bootstrap.run` now
+  pass `--workers 0` (reports are byte-identical serial or parallel).
 - **Weekly learning gate, tried and reverted.** A weekly `--apply` was
   considered to lighten the daily chore. It buys nothing: the trigger is
   per cell, so under a daily gate a fast category updates the day its

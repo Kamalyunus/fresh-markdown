@@ -155,7 +155,7 @@ def main():
 
     ok, turns, block = settle(cfg, args.max_turns)
 
-    step("step 6: backtest", ["backtest", "--input", PREPARED,
+    step("step 6: backtest", ["backtest", "--input", PREPARED, "--workers", "0",
                               "--out", "reports/backtest.json"])
     step("step 6b: derive_thresholds",
          ["bootstrap.derive_thresholds", "--input", PREPARED]

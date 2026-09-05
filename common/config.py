@@ -44,12 +44,17 @@ def config_get(cfg, path):
     return node
 
 
-def artifact_mirror_drift(cfg, tol=5e-4):
+def artifact_mirror_drift(cfg, tol=None):
     """Config values that disagree with the artifact they were pasted from.
 
     Returns a list of human-readable divergences (empty when consistent).
-    A missing artifact is not drift -- bootstrap has not run yet.
+    A missing artifact is not drift -- bootstrap has not run yet. The
+    tolerance is `dispersion.rho_paste_tolerance_abs`: each --check-only
+    turn contracts rho by ~1e-3 while the loop is still converging, and a
+    tolerance below that step made every settle a new paste.
     """
+    if tol is None:
+        tol = float(cfg["dispersion"].get("rho_paste_tolerance_abs", 5e-3))
     drift = []
     for path_key, field, cfg_path in ARTIFACT_MIRRORS:
         path = config_get(cfg, path_key)

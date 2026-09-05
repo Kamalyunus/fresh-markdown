@@ -89,7 +89,8 @@ def test_a_tune_block_stops_the_driver_but_missing_reports_do_not():
 def test_shadow_runs_on_the_holdout_with_every_episode_and_then_gates():
     steps = advance.plan(_state(have={"backtest", "thresholds"}))
     assert steps[0]["args"][:2] == ["pipeline.shadow", "--input"]
-    assert steps[0]["args"][-2:] == ["--max-episodes", "0"]
+    assert "--max-episodes" in steps[0]["args"] and "0" in steps[0]["args"]
+    assert steps[0]["args"][-2:] == ["--workers", "0"]   # parallel, byte-identical
     assert "--all" not in steps[0]["args"]                # hold-out by default
     steps = advance.plan(_state(shadow_gate="FAIL -- completeness 0.97"))
     assert steps[0]["kind"] == "stop" and steps[0]["phase"] == "shadow"
