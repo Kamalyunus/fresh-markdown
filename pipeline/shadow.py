@@ -194,8 +194,8 @@ def derive_tau0(d_full, cfg, start, model, posterior, r_lookup, il_history,
            "cells": {str(c): posterior.get(c) for c in pre.category.unique()}}
     ledger = explore.SpreadLedger()
     for out in map_episodes(_shadow_one, items, ctx, workers):
-        for day, costs in out["spreads"]:
-            ledger.add(day, costs)
+        for day, costs, moves, dmin in out["spreads"]:
+            ledger.add(day, costs, moves, dmin)
 
     block.update(decisions=ledger.decisions, episodes=len(groups),
                  episodes_population=int(n_pop),
@@ -406,8 +406,8 @@ def _shadow_one(ep, ctx):
             anchor = float(ep["total_discount"][t])
             continue
 
-        for costs in spreads_here:
-            out["spreads"].append((row_day, costs))
+        for costs, moves, dmin in spreads_here:
+            out["spreads"].append((row_day, costs, moves, dmin))
         out["latencies"].append(evt["solver_latency_s"])
         if evt["applied_price"] < evt["cost"] - 1e-6:
             out["cost_floor_violations"] += 1
@@ -555,8 +555,8 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         latencies.extend(out["latencies"])
         for key in drift:
             drift[key].extend(out["drift"][key])
-        for day, costs in out["spreads"]:
-            ledger.add(day, costs)
+        for day, costs, moves, dmin in out["spreads"]:
+            ledger.add(day, costs, moves, dmin)
         hours.extend(out["hours"])
         # the parent commits through the real store, in episode order, so
         # dedup and quarantine (which the gate measures) run where they ran
@@ -712,6 +712,13 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     budget_check["tau_controller_trace"] = _controller_trace(
         ledger, il_by_day, tau, widest_std, cfg, window_days=n_days,
         sampled_episodes=n_ep, population_episodes=len(population))
+    # what a smaller budget or a deeper floor would buy, from this ledger
+    ec = cfg["exploration"]
+    share, mult = float(ec["budget_share_of_il"]), float(ec["delta_min_bias_multiple"])
+    budget_sweep = ledger.sweep(
+        daily_budget, n_days, n_dec, share, mult,
+        shares=sorted({round(share * f, 6) for f in (0.25, 0.5, 0.75, 1.0, 1.5)}),
+        multiples=sorted({mult, round(mult * 1.5, 4), round(mult * 2, 4)}))
 
     per_episode = eff_information / n_ep if n_ep else 0.0
     step = cfg["learning"]["max_mean_step"]
@@ -824,6 +831,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
                     "recommendations would have spent",
         },
         "exploration_budget_would_be": budget_check,
+        "exploration_budget_sweep": budget_sweep,
         # the launch tau's own derivation (or why it fell back to the paste);
         # tau_provenance_error accepts this block as a paste source
         "tau_initial_derivation": tau_deriv,
@@ -991,6 +999,16 @@ def main():
               f"{bc['spread_decisions']:,} decisions "
               f"({bc['spread_decisions_per_episode']}/episode)")
     print(f"tau controller     : {bc['tau_controller_trace']['verdict']}")
+    sw = report.get("exploration_budget_sweep") or {}
+    if sw.get("rows"):
+        print("budget sweep       : share  x_dmin   forced   spend/day   move   info")
+        for r in sw["rows"]:
+            if "forced_rate" not in r:
+                continue
+            print(f"                     {r['budget_share_of_il']:<6g} {r['delta_min_bias_multiple']:<7g} "
+                  f"{r['forced_rate']:>6.1%}  {r['implied_daily_spend']:>10,.0f}   "
+                  f"{r['mean_log_move_forced'] or 0:.3f}  {r.get('information_rel', 1):.2f}"
+                  + ("  <- in force" if r["in_force"] else ""))
     print(g["verdict"])
     print(f"wrote {args.out}")
 

@@ -931,3 +931,47 @@ def test_anchor_rows_are_one_mask():
     d = pd.DataFrame({"total_discount": [0.30, 0.32, 0.33, 0.28],
                       "d_ref": [0.30] * 4})
     assert episodes.is_anchor_row(d, 0.05).tolist() == [True, True, False, True]
+
+
+def test_budget_sweep_trades_count_for_depth_from_one_ledger():
+    """The forced RATE is the budget's (tau); the delta_min multiple sets
+    which tiers are drawn. From one ledger, a smaller share forces less at
+    the same depth and a deeper multiple forces less but deeper -- so the
+    owner reads the table instead of re-running shadow per candidate. A
+    multiple below the one in force cannot be recovered and says so."""
+    rng = np.random.default_rng(5)
+    led = SpreadLedger()
+    n_dec = 600
+    for i in range(n_dec):
+        moves = np.sort(rng.uniform(0.05, 0.6, 6))        # distance from ref
+        costs = 40.0 * moves ** 2 * rng.lognormal(6, 0.3)  # deeper = dearer
+        keep = moves >= 0.10                                # the floor in force
+        led.add(f"d{i % 5}", costs[keep], moves[keep], delta_min=0.10)
+    sw = led.sweep(daily_budget=20000.0, n_days=5, n_decisions=n_dec,
+                   share_in_force=0.01, multiple_in_force=1.0,
+                   shares=[0.0025, 0.005, 0.01], multiples=[0.5, 1.0, 2.0])
+    rows = {(r["budget_share_of_il"], r["delta_min_bias_multiple"]): r
+            for r in sw["rows"]}
+    ref = rows[(0.01, 1.0)]
+    assert ref["in_force"] and ref["information_rel"] == 1.0
+    assert ref["implied_daily_spend"] <= ref["daily_budget"] == 20000.0
+    # less budget: lower rate, same depth (within the draw's noise)
+    half, quarter = rows[(0.005, 1.0)], rows[(0.0025, 1.0)]
+    assert quarter["forced_rate"] < half["forced_rate"] < ref["forced_rate"]
+    assert half["daily_budget"] == 10000.0
+    assert abs(half["mean_log_move_forced"] - ref["mean_log_move_forced"]) < 0.05
+    assert quarter["information_rel"] < half["information_rel"] < 1.0
+    # deeper floor at the same budget: fewer, deeper forced moves
+    deep = rows[(0.01, 2.0)]
+    assert deep["forced_rate"] < ref["forced_rate"]
+    assert deep["mean_log_move_forced"] > ref["mean_log_move_forced"] + 0.05
+    # a shallower floor than recorded is not a number
+    assert "forced_rate" not in rows[(0.01, 0.5)] and "never recorded" in rows[(0.01, 0.5)]["note"]
+    # with no floor in force the multiples are inert, and the table says so
+    flat = SpreadLedger()
+    for i in range(100):
+        flat.add("d", rng.lognormal(5, 1, 4))
+    sw0 = flat.sweep(1000.0, 1, 100, 0.01, 1.0, [0.01], [1.0, 2.0])
+    assert sw0["delta_min_in_force"] is False and "reads the same" in sw0["note"]
+    a, b = (r for r in sw0["rows"])
+    assert a["forced_rate"] == b["forced_rate"]

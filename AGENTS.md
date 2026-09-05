@@ -172,7 +172,7 @@ phase — what runs, which config keys move, and who moves them:
 | bootstrap | `bootstrap.run` (train ONCE, loop to the fixed point, backtest, thresholds, seal) | none | — |
 | tune | `tune --apply`, then `bootstrap.run --check-only`, until nothing is left to paste | `rho`, `calibration_fit_trailing_weeks`, `calibration_gate_band`, `information_increment`, `delta_min_log_bias` | the process, from the report that derives each |
 | posterior | `init_posterior`, once | none | — |
-| shadow | `pipeline.shadow` on the hold-out, every episode; then `tune --apply` | `tau_initial` | the process, from `shadow.tau_initial_derivation` |
+| shadow | `pipeline.shadow` on the hold-out, every episode; then `tune --apply` | `tau_initial` | the process, from `shadow.tau_initial_derivation`. The forced rate is the budget's: to change it the owner reads `shadow.exploration_budget_sweep` (forced rate, spend, move, `information_rel` per `budget_share_of_il` × `delta_min_bias_multiple`), sets the pair, and shadow re-runs once |
 | owner | STOP | `scrap_deterioration_pct`, `margin_deterioration_pct`, `min_detectable_effect_pct`, the two learning rails, `ab_test.active` | you, from `thresholds.json` (advance prints floor, verdict, source) |
 | launch | STOP, then `--fit-calibration` + `seal` | `data.launch_date` | you, on launch day |
 | daily | ingest, `update --calibrate-tau`, monitor, assurance, export, status; STOP at `update --apply` | none | you approve each update |

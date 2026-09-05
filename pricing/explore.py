@@ -83,11 +83,20 @@ def affordable_set(dp_result, tau, delta_min=0.0):
     return [j for j in admissible(dp_result, delta_min) if costs[j] <= tau], costs
 
 
-def spread_costs(dp_result, delta_min=0.0):
-    """The Q-spread costs the ledger prices tau against: admissible tiers
-    only, so a tau solved here funds the draws production will make."""
+def spread_table(dp_result, delta_min=0.0):
+    """(costs, log moves from the reference) over the admissible tiers -- the
+    Q-spreads the ledger prices tau against, so a tau solved here funds the
+    draws production will make; the moves let the ledger re-judge
+    admissibility at a deeper floor (SpreadLedger.sweep)."""
     _, costs = affordable_set(dp_result, 0.0, delta_min)
-    return [costs[j] for j in admissible(dp_result, delta_min)]
+    kept = admissible(dp_result, delta_min)
+    return ([costs[j] for j in kept],
+            [log_move(dp_result.d_ref, dp_result.tiers[j]) for j in kept]
+            if dp_result.d_ref is not None else [0.0] * len(kept))
+
+
+def spread_costs(dp_result, delta_min=0.0):
+    return spread_table(dp_result, delta_min)[0]
 
 
 def select(dp_result, tau, rng, explorable=True, delta_min=0.0):
@@ -130,38 +139,51 @@ class SpreadLedger:
 
     def __init__(self):
         self._chunks, self._buf = [], []
+        self._mchunks, self._mbuf = [], []      # log moves, aligned to costs
         self._lens, self._day_of, self._day_index = [], [], {}
+        self._dmin = []                          # the floor in force, per decision
 
-    def add(self, day, costs):
-        """Record one decision's spreads. `costs` excludes the optimum."""
+    def add(self, day, costs, moves=None, delta_min=0.0):
+        """Record one decision's spreads. `costs` excludes the optimum;
+        `moves` are the same tiers' log distances from the reference (zeros
+        when the caller has none -- the sweep then reports multiples as
+        inert) and `delta_min` the floor these tiers already cleared."""
         if not len(costs):
             return
         self._buf.extend(costs)
+        self._mbuf.extend(moves if moves is not None else [0.0] * len(costs))
         self._lens.append(len(costs))
+        self._dmin.append(float(delta_min))
         day = str(day)
         if day not in self._day_index:
             self._day_index[day] = len(self._day_index)
         self._day_of.append(self._day_index[day])
         if len(self._buf) >= self._FLUSH:
             self._chunks.append(np.asarray(self._buf, dtype=np.float64))
-            self._buf = []
+            self._mchunks.append(np.asarray(self._mbuf, dtype=np.float64))
+            self._buf, self._mbuf = [], []
 
     def _build(self):
         if self._buf:
             self._chunks.append(np.asarray(self._buf, dtype=np.float64))
-            self._buf = []
+            self._mchunks.append(np.asarray(self._mbuf, dtype=np.float64))
+            self._buf, self._mbuf = [], []
         if getattr(self, "_costs", None) is None or self._chunks:
             # _lens/_day_of span the FULL history, so _costs must too --
             # dropping prior chunks after add()-query-add() mis-aligns every
             # index against _dec_of
-            prior = ([self._costs] if getattr(self, "_costs", None) is not None
-                     and len(self._costs) else [])
+            have = getattr(self, "_costs", None) is not None and len(self._costs)
+            prior = [self._costs] if have else []
+            mprior = [self._moves] if have else []
             self._costs = (np.concatenate(prior + self._chunks)
                            if (prior or self._chunks) else np.zeros(0))
-            self._chunks = []
+            self._moves = (np.concatenate(mprior + self._mchunks)
+                           if (mprior or self._mchunks) else np.zeros(0))
+            self._chunks, self._mchunks = [], []
             lens = np.asarray(self._lens, dtype=np.int64)
             self._dec_of = np.repeat(np.arange(len(lens)), lens)
             self._dec_day = np.asarray(self._day_of, dtype=np.int64)
+            self._dec_dmin = np.asarray(self._dmin, dtype=np.float64)
 
     @property
     def decisions(self):
@@ -172,7 +194,20 @@ class SpreadLedger:
         """Day labels in first-seen order; index i is row i of spend_by_day."""
         return [d for d, _ in sorted(self._day_index.items(), key=lambda kv: kv[1])]
 
-    def spend_by_day(self, tau):
+    def _per_decision(self, tau, weights=None, keep=None):
+        """Mean of `weights` (default: cost) over each decision's affordable
+        tiers at `tau`, zero for an empty set; `keep` masks tiers out."""
+        self._build()
+        n_dec = len(self._lens)
+        m = self._costs <= tau
+        if keep is not None:
+            m &= keep
+        w = self._costs if weights is None else weights
+        sums = np.bincount(self._dec_of[m], weights=w[m], minlength=n_dec)
+        cnts = np.bincount(self._dec_of[m], minlength=n_dec)
+        return np.divide(sums, cnts, out=np.zeros(n_dec), where=cnts > 0), cnts
+
+    def spend_by_day(self, tau, keep=None):
         """EXPECTED spend per day at `tau`: mean affordable cost per
         decision (uniform draw), empty sets contribute nothing. Expected,
         not realised -- the trace walks counterfactual taus."""
@@ -180,33 +215,108 @@ class SpreadLedger:
         n_dec, n_day = len(self._lens), len(self._day_index)
         if not n_dec:
             return np.zeros(n_day)
-        m = self._costs <= tau
-        sums = np.bincount(self._dec_of[m], weights=self._costs[m], minlength=n_dec)
-        cnts = np.bincount(self._dec_of[m], minlength=n_dec)
-        per_dec = np.divide(sums, cnts, out=np.zeros(n_dec), where=cnts > 0)
+        per_dec, _ = self._per_decision(tau, keep=keep)
         return np.bincount(self._dec_day, weights=per_dec, minlength=n_day)
 
-    def implied_daily_spend(self, tau, n_days=None):
-        by_day = self.spend_by_day(tau)
+    def implied_daily_spend(self, tau, n_days=None, keep=None):
+        by_day = self.spend_by_day(tau, keep)
         return float(by_day.sum()) / max(n_days or len(by_day), 1)
 
-    def solve_tau(self, budget_per_day, n_days=None, steps=60):
+    def solve_tau(self, budget_per_day, n_days=None, steps=60, keep=None):
         """Bisect for the tau whose implied daily spend equals the budget.
         Returns the LOW end of the bracket: spend steps as costs cross tau,
         and under-budget is the right side to miss on."""
         self._build()
-        if not len(self._costs) or budget_per_day <= 0:
+        costs = self._costs if keep is None else self._costs[keep]
+        if not len(costs) or budget_per_day <= 0:
             return None
-        lo, hi = 0.0, float(self._costs.max())
-        if self.implied_daily_spend(hi, n_days) < budget_per_day:
+        lo, hi = 0.0, float(costs.max())
+        if self.implied_daily_spend(hi, n_days, keep) < budget_per_day:
             return hi                       # budget exceeds even unbounded tau
         for _ in range(steps):
             mid = (lo + hi) / 2
-            if self.implied_daily_spend(mid, n_days) < budget_per_day:
+            if self.implied_daily_spend(mid, n_days, keep) < budget_per_day:
                 lo = mid
             else:
                 hi = mid
         return lo
+
+    def sweep(self, daily_budget, n_days, n_decisions, share_in_force,
+              multiple_in_force, shares, multiples):
+        """What the budget share and the delta_min multiple each buy, from
+        THIS ledger and no re-run: for every (share, multiple) the tau the
+        budget solves to, the forced rate, spend, mean move and an
+        information proxy (sum over forced decisions of E[move^2], relative
+        to the in-force pair -- the NB Fisher information is quadratic in the
+        move, so this is the count-and-depth trade in one number). A
+        multiple below the in-force one cannot be recovered (those tiers
+        were never recorded) and is reported as such; with no floor in force
+        (delta_min null) every multiple is inert."""
+        self._build()
+        n_dec = len(self._lens)
+        if not n_dec or daily_budget <= 0:
+            return {"note": "no spreads or no budget -- nothing to sweep"}
+        floor_active = bool(len(self._dec_dmin)) and float(self._dec_dmin.max()) > 0
+        move_sq = self._moves ** 2
+
+        def cell(share, mult):
+            if mult < multiple_in_force - 1e-9:
+                return {"note": "below the multiple in force -- those tiers were "
+                                "never recorded; re-run shadow at that multiple"}
+            if floor_active and mult > multiple_in_force + 1e-9:
+                rel = mult / multiple_in_force
+                keep = self._moves >= rel * self._dec_dmin[self._dec_of] - TIER_EPS
+            else:
+                keep = None
+            budget = daily_budget * share / share_in_force
+            tau = self.solve_tau(budget, n_days, keep=keep)
+            if tau is None:
+                return {"note": "no positive tau at this budget"}
+            _, cnts = self._per_decision(tau, keep=keep)
+            forced = int((cnts > 0).sum())
+            mean_move, _ = self._per_decision(tau, weights=self._moves, keep=keep)
+            e_sq, _ = self._per_decision(tau, weights=move_sq, keep=keep)
+            return {
+                "tau": round(float(tau), 2),
+                "forced_rate": round(forced / n_decisions, 4),
+                "forced_per_day": round(forced / max(n_days, 1), 1),
+                "implied_daily_spend": round(self.implied_daily_spend(tau, n_days, keep), 1),
+                "daily_budget": round(budget, 1),
+                "mean_log_move_forced": round(float(mean_move[cnts > 0].mean()), 4)
+                    if forced else None,
+                "_info": float(e_sq.sum()),
+            }
+
+        grid = {}
+        for mult in multiples:
+            for share in shares:
+                grid[(share, mult)] = cell(share, mult)
+        ref = grid.get((share_in_force, multiple_in_force), {}).get("_info")
+        rows = []
+        for (share, mult), c in grid.items():
+            info = c.pop("_info", None)
+            rows.append({"budget_share_of_il": share, "delta_min_bias_multiple": mult,
+                         "in_force": (abs(share - share_in_force) < 1e-12
+                                      and abs(mult - multiple_in_force) < 1e-9),
+                         **c,
+                         **({"information_rel": round(info / ref, 3)}
+                            if info is not None and ref else {})})
+        return {
+            "basis": ("this run's spread ledger re-solved per cell: tau is the "
+                      "bisection at share x (in-force budget / in-force share); "
+                      "forced when any admissible tier is affordable; a deeper "
+                      "multiple drops recorded tiers whose move is below it"),
+            "delta_min_in_force": floor_active,
+            "rows": rows,
+            "note": ("the forced RATE is set by the budget (tau); the multiple "
+                     "sets which tiers are drawn. Lower the share to force less "
+                     "at the same depth; raise the multiple to force less but "
+                     "deeper. information_rel is the count x depth trade against "
+                     "the in-force pair (quadratic in the move, proxy only)."
+                     + ("" if floor_active else
+                        " No delta_min floor is in force, so every multiple "
+                        "reads the same.")),
+        }
 
     def quantile_of(self, tau):
         self._build()

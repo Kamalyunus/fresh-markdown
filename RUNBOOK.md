@@ -67,7 +67,13 @@ each decision.
    one is an out-of-sample test of the derived tau. `learning_yield_would_be`
    says how fast the pilot can learn and whether evidence or the calendar
    binds; `delta_min` on the decision events says which categories the
-   forced-move floor binds.
+   forced-move floor binds. `exploration_would_be.forced_rate` is what the
+   budget buys (it equals 1 − `affordable_set_empty_rate`); to change it
+   read `exploration_budget_sweep` — one row per (`budget_share_of_il`,
+   `delta_min_bias_multiple`) with forced rate, spend, mean move and
+   `information_rel` — and set the pair, then re-run shadow once. A
+   smaller share forces less at the same depth; a larger multiple forces
+   less but deeper.
 4. **The owner keys** (`advance` stops here): `scrap_deterioration_pct` and
    `margin_deterioration_pct` at or above the floor `thresholds.json`
    stamps (never on `TOO TIGHT`, `BLOCKED`, `LIKELY INERT` or

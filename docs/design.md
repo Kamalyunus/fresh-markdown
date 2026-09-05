@@ -774,6 +774,24 @@ seed and in-window — is `common.metrics.episode_economics` over every
 observed hour: the same scrap and IL the guardrail floors, `il_pct` and
 the monitor read, never a local copy.
 
+**The forced rate is the budget's, and the sweep says what a change
+buys.** The chooser explores whenever τ affords an admissible tier, so
+`forced_rate = 1 − affordable_set_empty_rate` exactly and the rate is set by
+τ, i.e. by `budget_share_of_il`; `delta_min_bias_multiple` sets *which*
+tiers are drawn, not how many. Shadow's `exploration_budget_sweep` re-solves
+its own spread ledger per (share, multiple) — shares at ¼, ½, ¾, 1 and 1.5×
+the one in force, multiples at 1, 1.5 and 2× — and reports for each the τ
+the budget bisects to, the forced rate, spend, mean log move and
+`information_rel`, the sum over forced decisions of E[move²] relative to
+the in-force pair (the NB Fisher information is quadratic in the move, so
+this is the count-and-depth trade in one number; a proxy). Lower the share
+to force less at the same depth; raise the multiple to force less but
+deeper — the latter can *raise* total information at the same budget. The
+ledger records only tiers admissible at the floor in force, so multiples
+below it are reported as unrecoverable, and with `delta_min_log_bias` null
+every multiple reads the same. The owner picks from the table; only the
+chosen pair needs a shadow re-run.
+
 `realised_vs_predicted_sold_ratio_at_legacy_price` is the production
 continuation of the calibration diagnostic — the first place frozen-
 baseline drift shows. `calibration_regimes` reports it under both the

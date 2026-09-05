@@ -59,9 +59,9 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
            baseline_version, spread_sink=None):
     """Price one decision interval and emit the 16.1 decision event.
     `state` carries the episode context (mu_ref_path index 0 = now;
-    current_discount None at entry). `spread_sink` receives the
-    Q(p_star)-Q(p) costs out of band, before the draw, so the record is
-    tau-independent."""
+    current_discount None at entry). `spread_sink` receives
+    (costs, log moves, delta_min) over the admissible tiers out of band,
+    before the draw, so the record is tau-independent."""
     s = state
     d_ref = reference_discount(cfg, s["category"])
     entry = s["current_discount"] is None
@@ -97,7 +97,8 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
     # this are neither drawn nor priced into tau (explore.admissible)
     dmin = explore.delta_min(cfg, eps, s["category"])
     if spread_sink is not None and explorable:
-        spread_sink(explore.spread_costs(result, dmin))
+        costs, moves = explore.spread_table(result, dmin)
+        spread_sink((costs, moves, dmin))
     choice = explore.select(result, tau_current, rng, explorable=explorable,
                             delta_min=dmin)
 
