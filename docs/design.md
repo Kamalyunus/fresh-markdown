@@ -821,8 +821,17 @@ Stale *reports* are the other half: after a retrain, yesterday's
 gate-feeding report stamps `artifact_versions` **and a `config`
 fingerprint** — the phase it belongs to (`backtest` / `shadow` /
 `production`), a digest of the whole config it read, and the full snapshot.
-`status` compares them against disk: model mismatch is FAIL; a config that
-has moved since the report is WARN and **names the values that moved**. The
+`status` compares them against disk: model mismatch is FAIL; a config key
+**the report reads** that has moved since is WARN and names it
+(`tune.rerun_for` classifies moved keys: W turns the loop, `delta_min`
+re-runs shadow, a stop threshold re-derives thresholds, an unclassified edit
+re-grades everything, and a MEASURED paste that writes back what a report
+measured is inert). Treating every digest change as staleness made
+`advance` re-run shadow after each tau paste and chase the fixed point for a
+day; and the rho paste tolerance must sit above the ~1e-3 step a
+`--check-only` turn takes while the loop contracts
+(`dispersion.rho_paste_tolerance_abs`, 0.005 ≈ 0.4% of deff at m = 6), or
+every settle is a new paste. The
 snapshot is also the answer to "what config was in force for each phase" —
 read `reports/<name>.json → config.snapshot`. `meta.config_version` stays as
 a human label only; nothing depends on anyone remembering to bump it.
