@@ -242,6 +242,15 @@ def test_apply_names_the_minimum_rerun_and_never_asks_for_a_retrain(
                        "scrap_deterioration_pct")] == "thresholds"
     # and the forced-move floor re-runs shadow, whose spreads it changes
     assert tune.RERUN[("exploration", "delta_min_log_bias")] == "shadow"
+    # the classes do not nest: pasted together, BOTH re-runs are named, and
+    # each report is invalidated only by the keys it reads
+    both = ["exploration.delta_min_log_bias",
+            "monitoring.stop_conditions.scrap_deterioration_pct"]
+    assert tune.rerun_classes(both) == ["shadow", "thresholds"]
+    assert tune.stale_keys("shadow", both) == both[:1]
+    assert tune.stale_keys("thresholds", both) == both[1:]
+    assert tune.stale_keys("backtest", both) == []
+    assert tune.rerun_classes(["exploration.tau_initial"]) == ["none"]
 
     # and the decision log records which re-run the run required
     log = json.load(open(res["log"]))["runs"][-1]

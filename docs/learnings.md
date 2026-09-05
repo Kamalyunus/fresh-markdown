@@ -193,7 +193,13 @@ now. Dates are owner sign-off, 2026-08.
   loop, `delta_min` re-runs shadow, a stop threshold re-derives
   thresholds, unclassified edits re-grade everything, MEASURED write-backs
   nothing), and `advance` refuses to run the same step a third time in one
-  invocation. The second half of the same loop: the rho paste tolerance was
+  invocation. Its first fix judged staleness by the STRONGEST class among
+  the moved keys, and the classes do not nest: the delta_min paste (shadow)
+  swallowed the stop-threshold paste (thresholds) made in the same `--apply`,
+  so thresholds was never re-derived while `status` — which had its own,
+  looser rule — still flagged it, and the backtest with it, twice over.
+  One routing (`tune.stale_keys`, per key, union) now serves both readers.
+  The second half of the same loop: the rho paste tolerance was
   5e-4 while each `--check-only` turn still contracts rho by ~1e-3, so every
   settle was a new paste; the tolerance is now the config's
   `rho_paste_tolerance_rel` (1% of the frozen rho; tau's is 5% because tau

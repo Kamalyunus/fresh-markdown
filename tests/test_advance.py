@@ -204,6 +204,17 @@ def test_a_measured_paste_does_not_stale_the_report_that_derived_it(cfg):
     c = copy.deepcopy(cfg)
     c["monitoring"]["stop_conditions"]["scrap_deterioration_pct"] = 0.3
     assert set(advance.stale_reports(c, "b", reps)) == {"thresholds"}
+    # pasted TOGETHER (one tune --apply) each still re-runs its own report:
+    # the strongest class used to swallow the weaker one and thresholds was
+    # never re-derived after the stop-threshold paste
+    c = copy.deepcopy(cfg)
+    c["exploration"]["delta_min_log_bias"] = 0.2
+    c["monitoring"]["stop_conditions"]["scrap_deterioration_pct"] = 0.3
+    c["monitoring"]["stop_conditions"]["margin_deterioration_pct"] = 0.1
+    st = advance.stale_reports(c, "b", reps)
+    assert set(st) == {"shadow", "thresholds"}
+    assert st["thresholds"].startswith("thresholds:") and "delta_min" not in st["thresholds"]
+    assert st["shadow"].startswith("shadow:") and "scrap" not in st["shadow"]
     c = copy.deepcopy(cfg)
     c["baseline_model"]["calibration_fit_trailing_weeks"] = 4
     assert set(advance.stale_reports(c, "b", reps)) == {"backtest", "thresholds", "shadow"}

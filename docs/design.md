@@ -823,10 +823,15 @@ fingerprint** — the phase it belongs to (`backtest` / `shadow` /
 `production`), a digest of the whole config it read, and the full snapshot.
 `status` compares them against disk: model mismatch is FAIL; a config key
 **the report reads** that has moved since is WARN and names it
-(`tune.rerun_for` classifies moved keys: W turns the loop, `delta_min`
-re-runs shadow, a stop threshold re-derives thresholds, an unclassified edit
+(`tune.stale_keys` routes moved keys to the reports they invalidate, and
+`advance` re-runs by the same table: W turns the loop, `delta_min` re-runs
+shadow, a stop threshold re-derives thresholds, an unclassified edit
 re-grades everything, and a MEASURED paste that writes back what a report
-measured is inert). Treating every digest change as staleness made
+measured is inert; the classes do not nest, so a paste of several keys
+re-runs the union — the strongest class alone once swallowed the
+stop-threshold paste behind `delta_min`'s and left thresholds un-derived.
+The backtest's exploration ledger reads `delta_min` too, but no pasted
+value comes from it, so it is not re-graded). Treating every digest change as staleness made
 `advance` re-run shadow after each tau paste and chase the fixed point for a
 day; and the rho paste tolerance must sit above the ~1e-3 step a
 `--check-only` turn takes while the loop contracts

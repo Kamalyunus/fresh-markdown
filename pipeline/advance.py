@@ -41,19 +41,13 @@ MAX_TUNE_ROUNDS = 4
 
 # ------------------------------------------------------------------ probe
 
-# which reports a re-run class invalidates
-INVALIDATES = {"thresholds": {"thresholds"},
-               "shadow": {"shadow"},
-               "calibration": {"backtest", "thresholds", "shadow"},
-               "retrain": {"backtest", "thresholds", "shadow"}}
-
-
 def stale_reports(cfg, bundle, reports):
     """Reports produced against a bundle no longer on disk, or under a
-    config whose MOVED KEYS they actually read (tune.rerun_for). A MEASURED
-    paste that only writes back what a report measured invalidates nothing:
-    treating every digest change as staleness re-ran shadow after every
-    tau paste and chased the fixed point for a day. Returns {name: why}."""
+    config whose MOVED KEYS they actually read (tune.stale_keys, the same
+    routing status uses). A MEASURED paste that only writes back what a
+    report measured invalidates nothing: treating every digest change as
+    staleness re-ran shadow after every tau paste and chased the fixed
+    point for a day. Returns {name: why}."""
     out = {}
     for name, rep in reports.items():
         if not rep:
@@ -67,10 +61,9 @@ def stale_reports(cfg, bundle, reports):
             continue
         moved = [m.split(":")[0] for m in
                  provenance.config_diff(fp["snapshot"], cfg)]
-        need = tune.rerun_for(moved)
-        if name in INVALIDATES.get(need, set()):
-            out[name] = f"{need}: " + ", ".join(
-                k for k in moved if tune.rerun_for([k]) != "none")
+        mine = tune.stale_keys(name, moved)
+        if mine:
+            out[name] = f"{tune.rerun_for(mine)}: " + ", ".join(mine)
     return out
 
 

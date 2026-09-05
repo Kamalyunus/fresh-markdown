@@ -89,6 +89,32 @@ RERUN = {k: v["rerun"] for k, v in KEYS.items() if v["rerun"] != "none"}
 # Re-grading every report on every paste chased the fixed point for a day.
 RERUN_ORDER = ["none", "thresholds", "shadow", "calibration", "retrain"]
 
+# which reports each re-run class invalidates. The classes do NOT nest
+# ("shadow" does not cover "thresholds"), so staleness is the UNION over the
+# moved keys, never the strongest class alone -- that swallowed the stop
+# thresholds paste behind the delta_min paste and left thresholds un-derived.
+INVALIDATES = {"none": set(),
+               "thresholds": {"thresholds"},
+               "shadow": {"shadow"},
+               "calibration": {"backtest", "thresholds", "shadow"},
+               "retrain": {"backtest", "thresholds", "shadow"}}
+
+
+def rerun_classes(keys):
+    """Every distinct re-run class the moved keys demand, strongest first
+    ("none" only when nothing else is)."""
+    found = {rerun_for([k]) for k in keys} - {"none"}
+    return sorted(found, key=RERUN_ORDER.index, reverse=True) or ["none"]
+
+
+def stale_keys(report, moved):
+    """The moved dotted keys that invalidate `report` -- the ONE routing both
+    readers (pipeline.advance and pipeline.status) use, so they agree on
+    what is stale. The backtest's exploration ledger reads delta_min too,
+    but nothing pasted comes from it (tau_initial is shadow's), so a
+    delta_min paste re-runs shadow only."""
+    return [k for k in moved if report in INVALIDATES[rerun_for([k])]]
+
 # config keys no report reads: runtime-only, paths, the driver's own knobs
 INERT_PREFIXES = ("meta.", "events.", "artifacts.", "tuning.", "assurance.",
                   "data.launch_date", "data.split_manifest_path",
@@ -797,8 +823,11 @@ def main():
         for f_ in res["failed"]:
             print(f"  SKIPPED   {f_['key']}: {f_['error']}")
         if res["applied"]:
-            # the MINIMUM sufficient re-run for what was written
-            print(f"\n{RERUN_STEPS[res['rerun']]}")
+            # every re-run class the written keys demand -- the classes do
+            # not nest, so a delta_min paste (shadow) does not cover a stop
+            # threshold paste (thresholds)
+            for cls in rerun_classes([f_["key"] for f_ in res["applied"]]):
+                print(f"\n{RERUN_STEPS[cls]}")
     return 0
 
 

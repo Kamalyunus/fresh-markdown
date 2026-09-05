@@ -321,13 +321,31 @@ def test_report_vintages_names_the_config_values_that_moved(cfg, tmp_path):
     pasted = _copy.deepcopy(cfg)
     pasted["exploration"]["tau_initial"] = 999.0
     row = status._vintages(pasted, state, {"shadow": same})
-    assert row["verdict"] == status.PASS and "inert pastes since" in row["detail"]
+    assert row["verdict"] == status.PASS and "none it reads" in row["detail"]
     # a key a report READS is
     edited = _copy.deepcopy(cfg)
     edited["pricing"]["tier_step"] = 0.05
     row = status._vintages(edited, state, {"shadow": same})
     assert row["verdict"] == status.WARN
     assert "pricing.tier_step" in row["detail"] and "0.05" in row["detail"]
+
+    # status and advance route by the SAME table (tune.stale_keys): the
+    # delta_min + stop-threshold pastes re-grade shadow and thresholds, not
+    # the backtest -- and reports that share a vintage share ONE sentence
+    # instead of repeating the whole list per report
+    bt = {"artifact_versions": {"baseline_model_version": bundle},
+          "config": config_fingerprint(cfg, "backtest")}
+    pasted = _copy.deepcopy(cfg)
+    pasted["exploration"]["delta_min_log_bias"] = {"_default": 0.15}
+    pasted["monitoring"]["stop_conditions"]["scrap_deterioration_pct"] = 0.43
+    row = status._vintages(pasted, state, {"backtest": bt, "thresholds": bt, "shadow": same})
+    assert row["verdict"] == status.WARN
+    assert row["detail"].count("delta_min_log_bias") == 1
+    assert row["detail"].count("scrap_deterioration_pct") == 1
+    assert "backtest" not in row["detail"].split("since then")[0].replace("backtest=", "")
+    assert "thresholds ran under" in row["detail"] and "shadow ran under" in row["detail"]
+    row = status._vintages(pasted, state, {"backtest": bt})
+    assert row["verdict"] == status.PASS and "none it reads" in row["detail"]
 
     # a model mismatch still outranks a config move, and is FAIL
     other = {"artifact_versions": {"baseline_model_version": "m0"},

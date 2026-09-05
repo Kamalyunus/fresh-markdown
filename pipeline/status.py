@@ -252,7 +252,8 @@ def _vintages(cfg, state, reports):
                     "no single artifact bundle to compare against",
                     "see the artifact bundle line")
     live = provenance.config_fingerprint(cfg, phase=None)["digest"]
-    stale, moved, checked = [], [], []
+    stale, checked = [], []
+    moved = {}                  # (digest, what moved) -> [report names]
     for name, rep in reports.items():
         if not rep:
             continue                # its own row already reads "not run"
@@ -266,22 +267,22 @@ def _vintages(cfg, state, reports):
             if fp.get("digest") != live:
                 from pipeline import tune                    # sibling; no cycle
                 diff = provenance.config_diff(fp.get("snapshot") or {}, cfg)
-                # a paste that only writes back what a report measured, or a
-                # key no report reads, is not a reason to re-grade it
-                live_moves = [d for d in diff
-                              if tune.rerun_for([d.split(":")[0]]) != "none"]
+                # only a key THIS report reads re-grades it (tune.stale_keys,
+                # the routing advance re-runs by): a paste that writes back
+                # what it measured, or a key another report reads, does not
+                mine = set(tune.stale_keys(name, [d.split(":")[0] for d in diff]))
+                live_moves = [d for d in diff if d.split(":")[0] in mine]
                 if live_moves:
-                    moved.append(f"{name} ({fp.get('phase')}) ran under config "
-                                 f"{fp.get('digest')}; since then: "
-                                 + "; ".join(live_moves))
+                    moved.setdefault((fp.get("digest"), "; ".join(live_moves)),
+                                     []).append(name)
                 else:
-                    checked.append(f"{name}={fp.get('phase')} (inert pastes since)")
+                    checked.append(f"{name}={fp.get('phase')} (pastes since, none it reads)")
             else:
                 checked.append(f"{name}={fp.get('phase')}")
         elif av:                    # a report from before fingerprints
             if av.get("config_version") != cfg["meta"]["config_version"]:
-                moved.append(f"{name} ran under config_version "
-                             f"{av.get('config_version')} (pre-fingerprint)")
+                moved.setdefault((f"config_version {av.get('config_version')}",
+                                  "pre-fingerprint"), []).append(name)
             else:
                 checked.append(f"{name}=unfingerprinted")
     if stale:
@@ -290,8 +291,14 @@ def _vintages(cfg, state, reports):
                     "re-run it: every row it feeds grades a model that is "
                     "no longer deployed")
     if moved:
-        return _row("report vintages", WARN, "; ".join(moved),
-                    "re-run to re-grade under the config now in force")
+        # one line per (config, what moved): reports that share a vintage
+        # share the sentence instead of repeating it
+        return _row("report vintages", WARN,
+                    "; ".join(f"{', '.join(names)} ran under config {digest}; "
+                              f"since then: {what}"
+                              for (digest, what), names in moved.items()),
+                    "re-run to re-grade under the config now in force "
+                    "(pipeline.advance does)")
     if not checked:
         return _row("report vintages", NONE, "no stamped reports yet")
     return _row("report vintages", PASS,
