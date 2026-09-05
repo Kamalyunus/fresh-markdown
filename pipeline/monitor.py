@@ -122,6 +122,28 @@ def guardrail_series(decisions, outcomes, cfg):
     return out
 
 
+def overspend_series(learning, business, cfg):
+    """spend / budget_today per priced day, through the day the controller
+    prices (update.latest_priced_day -- the last day with a closed episode is
+    a different day whenever the latest day's episodes are still open). A
+    zero-budget day has no reading and breaks a streak."""
+    il_by_day = business.get("il_by_close_day") or {}
+    cells = learning.get("posterior_by_cell") or {}
+    last = learning.get("latest_priced_day")
+    spend_by_day = learning.get("exploration_cost_by_day") or {}
+    if not (il_by_day and cells and last):
+        return {"basis": "spend / budget_today", "by_day": {}, "latest": None}
+    widest_std = PosteriorStore.widest_active_std(cells, learning.get("cell_of") or {})
+    by_day = {}
+    for day in sorted(d for d in spend_by_day if d <= last):
+        budget = explore.budget_today(
+            explore.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
+        if budget > 0:
+            by_day[day] = round(float(spend_by_day[day]) / budget, 4)
+    return {"basis": "spend / budget_today", "by_day": by_day,
+            "latest": by_day.get(last)}
+
+
 def evaluate_guardrail(block, threshold, persistence_days):
     """Fires only after `persistence_days` CONSECUTIVE CALENDAR days over
     threshold, ending on the latest day in the series. Persistence is
@@ -264,29 +286,18 @@ def stop_conditions(safety, learning, business, guardrail, cfg):
         safety["price_mismatch_count"] / max(safety["compared_pair_count"], 1)
         > sc["price_mismatch_rate"])
 
-    # realised exploration cost vs budget on the day the controller prices,
-    # from the same two per-day numbers pipeline.update's tau controller
-    # moves on (design 5.8): trailing realised IL and the widest cell std
-    il_by_day = business.get("il_by_close_day") or {}
-    cells = learning["posterior_by_cell"]
-    # the SAME day the controller prices (update.latest_priced_day) -- the
-    # last day with a closed episode is a different day whenever the latest
-    # day's episodes are still open
-    day = learning.get("latest_priced_day")
-    if il_by_day and cells and day:
-        widest_std = PosteriorStore.widest_active_std(
-            cells, learning.get("cell_of") or {})
-        budget = explore.budget_today(
-            explore.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
-        spend = float((learning.get("exploration_cost_by_day") or {}).get(day, 0.0))
-        fired["exploration_cost_vs_budget"] = (
-            spend > sc["exploration_cost_vs_budget"] * budget) if budget > 0 else False
-    else:
-        fired["exploration_cost_vs_budget"] = False
+    # realised exploration cost vs budget, per priced day, from the same two
+    # per-day numbers pipeline.update's tau controller moves on (design 5.8):
+    # trailing realised IL and the widest cell std. One day over is a thin
+    # IL day or two expensive draws (and the controller halves tau on it the
+    # next morning); the stop needs the same persistence as the guardrails
+    guardrails = {"exploration_cost_vs_budget": evaluate_guardrail(
+        overspend_series(learning, business, cfg),
+        sc["exploration_cost_vs_budget"], sc["persistence_days"])}
+    fired["exploration_cost_vs_budget"] = guardrails["exploration_cost_vs_budget"]["fired"]
 
     # the two owner thresholds, evaluated against the daily deterioration
     # series with the persistence rule the design commits to
-    guardrails = {}
     for key, block_key in (("scrap_deterioration_pct", "scrap_deterioration"),
                            ("margin_deterioration_pct", "margin_deterioration")):
         block = (guardrail or {}).get(block_key) or {}

@@ -71,12 +71,11 @@ def test_no_fixed_schedule_prices_below_cost(deck):
 
 
 def test_the_refusals_state_the_stop_rules_the_monitor_applies(deck, cfg, tmp_path):
-    """pipeline.monitor: the overspend stop compares ONE day's realised spend
-    against that day's budget (a single day fires it); persistence_days is
-    the scrap/margin guardrails' consecutive-day rule (evaluate_guardrail)."""
+    """pipeline.monitor: every stop -- overspend, scrap, margin -- needs
+    persistence_days consecutive priced days over its threshold
+    (evaluate_guardrail); the deck must say what the monitor does."""
     out = tmp_path / "deck.html"
     sd.write_page(deck, cfg, out)
     html = out.read_text()
-    assert "a single day is enough" in html
-    assert "consecutive days over their threshold" in html
-    assert "for ${D.config.persistence_days} consecutive days, or a scrap" not in html
+    assert "Every stop needs ${D.config.persistence_days} consecutive days" in html
+    assert "a single day is enough" not in html

@@ -253,7 +253,8 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
                       max_days=60):
     """Day-by-day tau-controller walk: does the pilot survive its first
     week? Spend per day is EXPECTED spend at the tau in force."""
-    stop_at = cfg["monitoring"]["stop_conditions"]["exploration_cost_vs_budget"]
+    sc = cfg["monitoring"]["stop_conditions"]
+    stop_at, persist = sc["exploration_cost_vs_budget"], int(sc["persistence_days"])
     days = ledger.days
     order = sorted(range(len(days)), key=lambda i: days[i])[:max_days]
     index = {days[i]: i for i in order}
@@ -263,16 +264,20 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
         float(tau0), [days[i] for i in order],
         lambda day, t: ledger.spend_by_day(t)[index[day]],
         il_by_day, widest_std, cfg)
-    rows, first_within, suspend_days = [], None, 0
+    rows, first_within, suspend_days, streak = [], None, 0, 0
     for rank, r in enumerate(walked):
         over = (r["spend"] / r["budget"]) if r["budget"] > 0 else None
-        fired = bool(over is not None and over > stop_at)
+        # the monitor's rule: over the multiple on persistence_days
+        # CONSECUTIVE priced days (a zero-budget day breaks the streak)
+        streak = streak + 1 if (over is not None and over > stop_at) else 0
+        fired = streak >= persist
         suspend_days += int(fired)
         if over is not None and over <= 1.0 and first_within is None:
             first_within = rank + 1
         rows.append({"day": r["day"], "tau": r["tau"], "spend": r["spend"],
                      "budget": r["budget"],
                      "over_budget": round(over, 2) if over is not None else None,
+                     "days_over": streak,
                      "stop_condition_fires": fired})
     # three distinct day counts -- calendar span, days with decisions, days
     # walked -- none interchangeable, especially on a sample; the per-day
@@ -297,10 +302,10 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
             if population_episodes else None,
         "verdict": (
             "no days simulated" if not rows else
-            f"exploration suspends on day 1 and stays suspended for "
-            f"{suspend_days} of {len(rows)} days -- the controller cannot "
-            "correct a tau it has not yet seen spend from"
-            if rows[0]["stop_condition_fires"] else
+            f"exploration suspends on day {persist} and the stop condition "
+            f"holds on {suspend_days} of {len(rows)} days -- the controller "
+            "cannot correct a tau it has not yet seen spend from"
+            if len(rows) >= persist and rows[persist - 1]["stop_condition_fires"] else
             f"survives launch; {suspend_days} of {len(rows)} days would fire "
             "the stop condition" if suspend_days else
             "survives launch; the stop condition never fires"),

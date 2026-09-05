@@ -729,8 +729,10 @@ mismatch rates, quarantine, latency). A posterior std flat for 21 days
 alerts directly; `affordable_set_empty_rate` is the leading indicator of a
 non-explorable catalogue; `realised_vs_predicted_sold_ratio` is the daily
 continuation of the calibration diagnostic. Stop conditions (cost-floor
-violation, event-quality breach, mismatch, overspend > 2× budget on a
-single day, scrap/margin deterioration over `persistence_days`) **suspend
+violation, event-quality breach, mismatch, realised spend > 2× the day's
+budget, scrap/margin deterioration — the last three over `persistence_days`
+consecutive priced days, because one day over is a thin-IL day or two
+expensive draws and the τ controller halves τ on it the next morning) **suspend
 exploration — exploitation pricing continues**: the monitor writes
 `exploration_suspended` into the posterior state, `decide` selects with no
 budget (no draw) while it is set, `status` reads WARN with the reason, and
