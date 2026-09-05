@@ -1,11 +1,11 @@
-"""Tests for common.provenance and bootstrap.seal."""
+"""Tests for common.provenance and ops.seal."""
 import json
 import pathlib
 
 import pytest
 
 from common import provenance
-from bootstrap import seal as seal_mod
+from ops import seal as seal_mod
 from conftest import _write
 
 

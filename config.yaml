@@ -6,8 +6,8 @@
 # repo's SYNTHETIC fixture and is evidence about the fixture only (AGENTS
 # rule 19). On a real extract they are all wrong, sometimes badly: pulling
 # this file overwrites whatever your own run derived. On your data, run
-# `python3 -m pipeline.advance`: it bootstraps, re-derives every MEASURED
-# value through `pipeline.tune --apply`, and stops at each value only you can
+# `python3 -m ops.advance`: it bootstraps, re-derives every MEASURED
+# value through `ops.tune --apply`, and stops at each value only you can
 # set. The values that must never ship a number at all (tau_initial,
 # delta_min_log_bias, the guardrail stops, launch_date) ship null; status lists them as launch blockers until you
 # paste your own, and delta_min_log_bias null simply means no floor.
@@ -48,7 +48,7 @@ baseline_model:
   min_data_in_leaf: 50                 # SET
   model_path: "artifacts/baseline_model.txt"
   feature_schema_path: "artifacts/feature_schema.json"
-  calibration_gate_band: [0.90, 1.10]  # MEASURED by pipeline.tune from weekly volatility; DIAGNOSTIC, and may only TIGHTEN from here
+  calibration_gate_band: [0.90, 1.10]  # MEASURED by ops.tune from weekly volatility; DIAGNOSTIC, and may only TIGHTEN from here
   calibration_convergence_tol_log: 0.02  # SET  the f<->r chain is circular; above this max |log(f_new/f_old)| the fixed point has not settled
   calibration_shrinkage_units: 100     # SET  pseudo-count, in anchor units
   calibration_min_anchor_rows: 200     # SET  anchor basis needs this many rows
@@ -76,7 +76,7 @@ dispersion:
   rho: 0.1161  # MEASURED  fit_dispersion, on the calib window; mirrors artifacts/rho.json. m is NOT pasted: deff measures forced hours per episode per batch (common.config.deff_from_episodes)
   rho_paste_tolerance_rel: 0.01        # SET  the paste vs artifacts/rho.json, relative to the frozen value. A PROVENANCE check sized to the consequence: rho is frozen for the pilot and divides every unit of evidence via deff, so 1% of rho is well under 1% of deff; tau's 5% is looser because the controller corrects tau daily. Above the ~1e-3 step a --check-only turn takes while the loop contracts (below it, every settle was a new paste)
 
-tuning:                                # SET  gates pipeline.tune checks before auto-applying
+tuning:                                # SET  gates ops.tune checks before auto-applying
   max_price_share_changed_for_auto_rail: 0.10   # SET  auto-rail ceiling on price churn
   max_il_delta_pct_for_auto_rail: 0.005         # SET  auto-rail ceiling on the IL move
   calibration_band_sigma_multiple: 3            # SET  band = this many sigma of log f
@@ -118,11 +118,11 @@ exploration:
   budget_scale_ref_std: 0.40           # SET  budget scales with std / this
   budget_scale_floor: 0.25             # SET  never below 25% of budget
   min_feasible_tiers: 2                # SET  below this: non-explorable
-  delta_min_log_bias: null             # MEASURED by pipeline.tune from the backtest, PER CATEGORY as a one-line mapping {CAT: bias, ..., _default: bias}: each category's own surviving level error |log by_category ratio|, floored by the catalogue-wide MAE at W and the gate half-width; _default for a category the backtest never saw. Forced moves closer to the reference than delta_min_bias_multiple x this / |eps| are neither drawn nor priced into tau. null = no floor
+  delta_min_log_bias: null             # MEASURED by ops.tune from the backtest, PER CATEGORY as a one-line mapping {CAT: bias, ..., _default: bias}: each category's own surviving level error |log by_category ratio|, floored by the catalogue-wide MAE at W and the gate half-width; _default for a category the backtest never saw. Forced moves closer to the reference than delta_min_bias_multiple x this / |eps| are neither drawn nor priced into tau. null = no floor
   delta_min_bias_multiple: 1.0         # SET  signal-to-bias ratio a forced move must clear; 1 = the move's signal equals the level bias
 
 learning:
-  update_cadence_days: 1               # SET BY OWNER  days between operator-gated posterior updates (pipeline.update --apply). DAILY: each cell triggers on its own batch, so a fast category updates the day it has the evidence and a slow one waits -- a longer cadence only delays the fast ones and discards their surplus (learning_yield_would_be.bounded_updates_worth_per_period). tau is walked daily regardless (--calibrate-tau)
+  update_cadence_days: 1               # SET BY OWNER  days between operator-gated posterior updates (daily.update --apply). DAILY: each cell triggers on its own batch, so a fast category updates the day it has the evidence and a slow one waits -- a longer cadence only delays the fast ones and discards their surplus (learning_yield_would_be.bounded_updates_worth_per_period). tau is walked daily regardless (--calibrate-tau)
   information_increment: 0.591  # MEASURED  deff-deflated NB info per bounded update
   max_mean_step: 0.15                  # SET BY OWNER, gated  cap on one update's mean move
   max_std_shrink: 0.25                 # SET BY OWNER  the PRIMARY rate limit on learning
@@ -131,7 +131,7 @@ events:
   store_dir: "events_store"            # SET  decision/outcome event log location
   shadow_store_dir: "events_store_shadow"  # SET  shadow-phase events kept separate
 
-assurance:                             # pipeline.assurance -- live-data checks
+assurance:                             # daily.assurance -- live-data checks
   reproduction_sample: 500             # SET  most RECENT decisions re-solved
   reproduction_discount_tol: 1.0e-9    # SET  tier grid is exact; this is float noise
   reproduction_il_tol_abs: 0.01        # SET  currency, absolute
@@ -142,7 +142,7 @@ assurance:                             # pipeline.assurance -- live-data checks
   dispersion_min_bin: 100              # SET  bins thinner than this are skipped
   dispersion_alert_z: 3.0              # SET  |z| on the binomial null
   rho_min_episodes: 200                # SET  below this, do not re-measure
-  rho_min_hours_per_episode: 3         # SET  matches bootstrap.fit_dispersion
+  rho_min_hours_per_episode: 3         # SET  matches fit.fit_dispersion
   rho_drift_alert: 0.10                # SET  absolute rho drift; DIAGNOSTIC only -- fit_dispersion reports it, the assurance verdict is on deff
   deff_drift_alert_rel: 0.15           # SET  relative drift in deff = 1 + (m-1)*rho, the quantity that divides information. Both terms drift; rho alone was blind to the forced-hours channel
   uniformity_bins: 5                   # SET  chi-square bins on the mapped rank

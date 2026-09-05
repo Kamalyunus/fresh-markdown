@@ -1,10 +1,10 @@
-"""Tests for pipeline.status."""
+"""Tests for ops.status."""
 import json
 
 import pytest
 
 from conftest import _cfg_with, _reports, _write
-from pipeline import status
+from ops import status
 
 
 def _verdicts(report):
@@ -218,7 +218,7 @@ def test_a_measured_value_that_disagrees_with_its_report_fails(cfg, tmp_path):
     survived every check until somebody happened to run tune."""
     import copy as _copy
 
-    from pipeline import tune
+    from ops import tune
 
     _reports(tmp_path)                           # a complete, block-free set
     # artifacts that MATCH config, so only the drift under test shows up
@@ -393,39 +393,39 @@ def _derivation(tau, scoped=True):
 
 
 def test_a_matching_paste_from_a_current_backtest_is_clean(cfg):
-    from pricing.explore import tau_provenance_error
+    from engine.explore import tau_provenance_error
     assert tau_provenance_error(_cfg_with_tau(cfg, 410.74),
                                 _derivation(410.74)) is None
 
 
 def test_a_null_tau_is_not_this_check_s_business(cfg):
-    from pricing.explore import tau_provenance_error
+    from engine.explore import tau_provenance_error
     # the null case is _require_shadow_config's, and it is louder
     assert tau_provenance_error(_cfg_with_tau(cfg, None), None) is None
 
 
 def test_a_paste_with_no_derivation_on_disk_is_refused(cfg):
-    from pricing.explore import tau_provenance_error
+    from engine.explore import tau_provenance_error
     assert "no backtest derivation" in tau_provenance_error(
         _cfg_with_tau(cfg, 410.74), None)
 
 
 def test_a_derivation_predating_the_scoping_fix_is_refused(cfg):
-    from pricing.explore import tau_provenance_error
+    from engine.explore import tau_provenance_error
     err = tau_provenance_error(_cfg_with_tau(cfg, 410.74),
                                _derivation(410.74, scoped=False))
     assert "ENTRY decisions only" in err
 
 
 def test_a_paste_that_no_longer_matches_its_source_is_refused(cfg):
-    from pricing.explore import tau_provenance_error
+    from engine.explore import tau_provenance_error
     err = tau_provenance_error(_cfg_with_tau(cfg, 500.0), _derivation(410.74))
     assert "500.0" in err and "410.74" in err
 
 
 def test_shadow_refuses_to_start_on_a_stale_tau(cfg, tmp_path):
     from common.config import ConfigError
-    from pipeline import shadow
+    from evaluate import shadow
     cfg = _cfg_with_tau(cfg, 410.74)
     path = tmp_path / "backtest.json"
     none = str(tmp_path / "missing.json")
@@ -442,7 +442,7 @@ def test_a_shadow_derivation_is_the_trusted_paste_source(cfg):
     """The anchored-path derivation outranks the backtest's exploit-only one:
     a paste matching shadow is clean even when the backtest disagrees, and a
     paste matching only the backtest is refused once shadow has derived."""
-    from pricing.explore import tau_provenance_error
+    from engine.explore import tau_provenance_error
     shadow = {"tau_initial_derivation": {"tau_initial": 257.48,
                                          "fallback": False}}
     assert tau_provenance_error(_cfg_with_tau(cfg, 257.48),
@@ -454,7 +454,7 @@ def test_a_shadow_derivation_is_the_trusted_paste_source(cfg):
 
 def test_a_fallback_shadow_block_defers_to_the_backtest_checks(cfg):
     # a shadow run that itself fell back to the paste is not a paste source
-    from pricing.explore import tau_provenance_error
+    from engine.explore import tau_provenance_error
     shadow = {"tau_initial_derivation": {"tau_initial": None, "fallback": True}}
     assert tau_provenance_error(_cfg_with_tau(cfg, 410.74),
                                 _derivation(410.74), shadow) is None

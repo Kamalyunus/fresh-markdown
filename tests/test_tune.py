@@ -1,4 +1,4 @@
-"""Tests for pipeline.tune."""
+"""Tests for ops.tune."""
 import json
 import os
 
@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 from conftest import ROOT, _cfg_with, _reports
-from pipeline import tune
+from ops import tune
 
 
 def test_a_missing_report_blocks_tuning_rather_than_tuning_on_nothing(cfg, tmp_path):
@@ -210,7 +210,7 @@ def test_apply_names_the_minimum_rerun_and_never_asks_for_a_retrain(
     R = lambda *k: tune.KEYS[k]["rerun"]                       # noqa: E731
     assert R("baseline_model", "calibration_fit_trailing_weeks") == "calibration"
     steps = tune.RERUN_STEPS["calibration"]
-    assert "bootstrap.run --check-only" in steps, \
+    assert "ops.bootstrap_loop --check-only" in steps, \
         "the loop is driven by the module, not hand-iterated"
     assert "WITHOUT retraining" in steps
 
@@ -258,7 +258,7 @@ def test_the_fit_window_holds_on_a_near_tie_instead_of_oscillating(cfg, tmp_path
     the loop re-scores the sweep -- a strict argmin flips between near-tied
     windows and loops an agent on apply -> check-only forever. Near-tie:
     HOLD. Material win: switch."""
-    import pipeline.tune as tune
+    from ops import tune as tune
 
     def w_finding(sweep):
         backtest = {"fidelity": {"calibration_window_sweep": sweep}}
@@ -296,7 +296,7 @@ def test_no_factors_winning_is_reported_and_is_never_a_paste(cfg):
     """`uncalibrated` beating every window says the level factors are adding
     noise. That is an owner reading, not a W: W=0 is not a config value, so
     the paste stays on the best CALIBRATED window."""
-    import pipeline.tune as tune
+    from ops import tune as tune
 
     cur = cfg["baseline_model"]["calibration_fit_trailing_weeks"]
     sweep = {
@@ -331,7 +331,7 @@ def test_tau_uses_the_same_staleness_rule_the_status_gate_enforces(cfg):
     hand edit of config.yaml."""
     import copy as _copy
 
-    from pricing.explore import tau_provenance_error
+    from engine.explore import tau_provenance_error
 
     cfg = _copy.deepcopy(cfg)
     cfg["exploration"]["tau_initial"] = 269.99

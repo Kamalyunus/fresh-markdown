@@ -55,7 +55,7 @@ def test_resolve_workers():
 # ------------------------------------------------------- per-episode seeding
 
 def test_the_episode_generator_is_reproducible_and_order_free():
-    from pipeline.shadow import _episode_seed
+    from evaluate.shadow import _episode_seed
     a = _episode_seed(0, "sku|fc|2026-08-04T09").integers(0, 10_000, 5)
     b = _episode_seed(0, "sku|fc|2026-08-04T09").integers(0, 10_000, 5)
     assert np.array_equal(a, b), "same episode, same seed -> same draws"
@@ -70,7 +70,7 @@ def test_the_episode_generator_is_reproducible_and_order_free():
 # ------------------------------------------------ workers never write events
 
 def test_workers_buffer_events_and_the_parent_commits_them():
-    from pipeline import shadow
+    from evaluate import shadow
 
     buf = shadow._BufferStore()
     assert buf.emit_decision({"a": 1}) is True
@@ -86,14 +86,14 @@ def test_workers_buffer_events_and_the_parent_commits_them():
 
 
 def test_the_episode_function_touches_no_shared_state():
-    from pipeline import shadow
+    from evaluate import shadow
     src = inspect.getsource(shadow._shadow_one)
     for forbidden in ("ledger.", "last_rows.", "n_dec", "il_discount"):
         assert forbidden not in src, f"_shadow_one still reaches {forbidden}"
 
 
 def test_the_replay_episode_function_touches_no_shared_state():
-    from backtest import replay
+    from evaluate import backtest as replay
     src = inspect.getsource(replay._replay_one)
     assert "ledger" not in src
     assert "rows.append" not in src
@@ -101,7 +101,7 @@ def test_the_replay_episode_function_touches_no_shared_state():
 
 
 def test_the_frozen_posterior_is_read_only():
-    from pipeline.shadow import _FrozenCells
+    from evaluate.shadow import _FrozenCells
     cells = _FrozenCells({"MEAT": {"mean": -1.0, "std": 0.4}})
     assert cells.get("MEAT")["mean"] == -1.0
     assert not hasattr(cells, "commit_update")

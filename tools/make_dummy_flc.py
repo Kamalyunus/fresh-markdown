@@ -28,7 +28,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from pricing.dp import TIER_EPS
+from engine.dp import TIER_EPS
 
 # --------------------------------------------------------------------------
 # Catalog definition. Reference discounts mirror config.yaml's reference_discount.
@@ -89,7 +89,7 @@ HOUR_FACTOR = {
 
 # The fixture must cover the configured splits: --start defaults to
 # split.train_start and --days to what reaches split.test_end, so
-# `bootstrap.run --input <fixture>` runs end to end.
+# `ops.bootstrap_loop --input <fixture>` runs end to end.
 DEFAULT_START = dt.date(2026, 3, 1)
 
 

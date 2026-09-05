@@ -1,14 +1,14 @@
 """A mid-episode restock in PRODUCTION, which is a different path from the one
-`bootstrap.prepare_data` guards."""
+`fit.prepare_data` guards."""
 
 import numpy as np
 import pytest
 
 from conftest import P0, decision_event, outcome_event
 from events.store import EventStore
-from pipeline import monitor as mon
+from daily import monitor as mon
 from common.episodes import adjustment_reason
-from pipeline.update import grid_update
+from daily.update import grid_update
 
 PRICE = 7000.0
 

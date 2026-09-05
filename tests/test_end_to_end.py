@@ -43,12 +43,12 @@ def workspace(tmp_path_factory):
     run(os.path.join(ROOT, "tools", "make_dummy_flc.py"),
         "--skus", "120", "--policy", "randomized",
         "--seed", "3", "--out", "data/flc.parquet")
-    run("-m", "bootstrap.prepare_data", "--input", "data/flc.parquet",
+    run("-m", "fit.prepare_data", "--input", "data/flc.parquet",
         "--out", "data/prepared.parquet")
-    run("-m", "bootstrap.train_baseline", "--input", "data/prepared.parquet")
-    run("-m", "bootstrap.fit_dispersion", "--input", "data/prepared.parquet")
-    run("-m", "bootstrap.estimate_prior", "--input", "data/prepared.parquet")
-    run("-m", "backtest", "--input", "data/prepared.parquet",
+    run("-m", "fit.train_baseline", "--input", "data/prepared.parquet")
+    run("-m", "fit.fit_dispersion", "--input", "data/prepared.parquet")
+    run("-m", "fit.estimate_prior", "--input", "data/prepared.parquet")
+    run("-m", "evaluate.backtest", "--input", "data/prepared.parquet",
         "--out", "reports/backtest.json", "--policy-episodes", "150")
     # every test here chdirs into the workspace; RESTORE on teardown, or the
     # whole rest of the session runs against this fixture's artifacts and
@@ -260,12 +260,12 @@ def test_backtest_blocks_reported_separately(workspace):
 def test_decision_loop_and_exactly_once_update(workspace):
     _chdir(workspace)
     from common.config import load_config
-    from bootstrap.train_baseline import BaselineModel
-    from backtest.replay import _attach_predictions
-    from pricing.posterior import PosteriorStore
+    from fit.train_baseline import BaselineModel
+    from evaluate.backtest import _attach_predictions
+    from engine.posterior import PosteriorStore
     from events.store import EventStore, DECISION_REQUIRED
-    from inference.decide import decide
-    from pipeline.update import run as update_run
+    from engine.decide import decide
+    from daily.update import run as update_run
 
     cfg = load_config("config.yaml")
     with open(cfg["posterior"]["prior"]["path"]) as f:
@@ -309,7 +309,7 @@ def test_decision_loop_and_exactly_once_update(workspace):
 
             assert all(f in evt for f in DECISION_REQUIRED)
             # the contract must be sufficient, not merely complete: a decision
-            # has to be recomputable from its own event, or pipeline.assurance
+            # has to be recomputable from its own event, or daily.assurance
             # cannot tell a drifted artifact from a correct one
             replayed.append(evt)
             # safety invariants: cost floor and monotonicity on every path
@@ -336,7 +336,7 @@ def test_decision_loop_and_exactly_once_update(workspace):
     # is the production check running against production events, and it is the
     # test that would fail if the event contract ever stopped carrying enough
     # to recompute a price.
-    from pipeline import assurance
+    from daily import assurance
     repro = assurance.reproduction(replayed, cfg)
     assert repro["verdict"] == "PASS", repro
     # `reproduction` re-solves the most recent `reproduction_sample` only, so
@@ -387,7 +387,7 @@ def test_decision_loop_and_exactly_once_update(workspace):
     # the section 15.4 guardrails must be computed from these events, not
     # merely declared in config: with both thresholds null they report BLOCKED,
     # and once set they evaluate a real deterioration series
-    from pipeline.monitor import (guardrail_series, stop_conditions,
+    from daily.monitor import (guardrail_series, stop_conditions,
                                   business_metrics, learning_metrics,
                                   safety_metrics)
     decisions, outcomes = events.load_decisions(), events.load_outcomes()
@@ -429,7 +429,7 @@ def test_fit_calibration_cli(workspace):
     _chdir(workspace)
     env = {**os.environ, "PYTHONPATH": ROOT}
     r = subprocess.run(
-        [sys.executable, "-m", "bootstrap.train_baseline",
+        [sys.executable, "-m", "fit.train_baseline",
          "--input", "data/prepared.parquet", "--fit-calibration"],
         cwd=workspace, env=env, capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -448,7 +448,7 @@ def test_fit_calibration_cli(workspace):
     assert all(0.0 <= w <= 1.0 for w in weights)
     # the trained model must still be loadable with factors applied
     from common.config import load_config
-    from bootstrap.train_baseline import BaselineModel
+    from fit.train_baseline import BaselineModel
     cfg = load_config("config.yaml")
     d = pd.read_parquet("data/prepared.parquet").head(50)
     mu = BaselineModel(cfg).predict_mu_ref(d)
@@ -480,7 +480,7 @@ def test_duplicate_and_malformed_events_quarantined(workspace):
 
 @pytest.fixture(scope="module")
 def shadow_reports(workspace):
-    """pipeline.shadow, twice, for every shadow test in this module: the
+    """evaluate.shadow, twice, for every shadow test in this module: the
     --all SAMPLED run (the sampling and in-sample caveats need more episodes
     than the hold-out holds, and its tau is the config paste) and the
     hold-out run over EVERY episode with the tau0 floor within reach (its tau
@@ -496,7 +496,7 @@ def shadow_reports(workspace):
 
     # Paste tau the way an operator has to: from the backtest's own
     # derivation. A hand-typed number is refused -- see
-    # pricing.explore.tau_provenance_error.
+    # engine.explore.tau_provenance_error.
     with open("config.yaml") as f:
         cfg_raw = yaml.safe_load(f)
     with open("reports/backtest.json") as f:
@@ -510,10 +510,10 @@ def shadow_reports(workspace):
     with open("config_tau0.yaml", "w") as f:
         f.write(yaml.safe_dump(cfg_raw))
 
-    run("-m", "bootstrap.init_posterior", "--force")
-    run("-m", "pipeline.shadow", "--input", "data/prepared.parquet",
+    run("-m", "ops.init_posterior", "--force")
+    run("-m", "evaluate.shadow", "--input", "data/prepared.parquet",
         "--out", "reports/shadow.json", "--all", "--max-episodes", "60")
-    run("-m", "pipeline.shadow", "--input", "data/prepared.parquet",
+    run("-m", "evaluate.shadow", "--input", "data/prepared.parquet",
         "--config", "config_tau0.yaml", "--out", "reports/shadow_holdout.json",
         "--max-episodes", "0")
     with open("reports/shadow.json") as f:
@@ -622,7 +622,7 @@ def test_shadow_phase_harness(workspace, shadow_reports):
 
     # shadow outcomes are NOT learning evidence: update must consume nothing
     from common.config import load_config
-    from pipeline.update import run as update_run
+    from daily.update import run as update_run
     cfg = load_config("config.yaml")
     report2 = update_run(cfg, apply=False,
                          events_root=cfg["events"]["shadow_store_dir"])
@@ -675,15 +675,15 @@ def test_parallel_and_serial_produce_the_same_reports(workspace):
             x.pop(k, None), y.pop(k, None)
         assert json.dumps(x, sort_keys=True) == json.dumps(y, sort_keys=True)
 
-    run("-m", "backtest", "--input", "data/prepared.parquet", "--out",
+    run("-m", "evaluate.backtest", "--input", "data/prepared.parquet", "--out",
         "reports/bt_s.json", "--policy-episodes", "80")
-    run("-m", "backtest", "--input", "data/prepared.parquet", "--out",
+    run("-m", "evaluate.backtest", "--input", "data/prepared.parquet", "--out",
         "reports/bt_p.json", "--policy-episodes", "80", "--workers", "3")
     compare("reports/bt_s.json", "reports/bt_p.json", ())
 
     for out, extra in (("reports/sh_s.json", []),
                        ("reports/sh_p.json", ["--workers", "3"])):
-        run("-m", "pipeline.shadow", "--input", "data/prepared.parquet",
+        run("-m", "evaluate.shadow", "--input", "data/prepared.parquet",
             "--out", out, "--all", "--max-episodes", "80", *extra)
     # solver latency is wall-clock, not a result
     compare("reports/sh_s.json", "reports/sh_p.json", ("solver_latency_p95_s",))
@@ -693,7 +693,7 @@ def test_derive_thresholds_cli(workspace):
     _chdir(workspace)
     env = {**os.environ, "PYTHONPATH": ROOT}
     r = subprocess.run(
-        [sys.executable, "-m", "bootstrap.derive_thresholds",
+        [sys.executable, "-m", "evaluate.derive_thresholds",
          "--input", "data/prepared.parquet",
          "--out", "reports/thresholds.json"],
         cwd=workspace, env=env, capture_output=True, text=True)
@@ -713,7 +713,7 @@ def test_derive_thresholds_cli(workspace):
 def test_zero_cost_episodes_are_flagged_whole_not_dropped(workspace, tmp_path):
     """A zero cost is a MISSING cost -- nobody gives perishable stock away."""
     _chdir(workspace)
-    from bootstrap.prepare_data import load_and_filter
+    from fit.prepare_data import load_and_filter
 
     cfg = yaml.safe_load(open("config.yaml"))
     raw = pd.read_parquet("data/flc.parquet")
@@ -756,7 +756,7 @@ def test_a_restock_survives_the_real_chain_and_stays_dp_eligible(
         workspace, tmp_path):
     """The flag through the whole pipeline, not just the detector."""
     _chdir(workspace)
-    from bootstrap.prepare_data import load_and_filter
+    from fit.prepare_data import load_and_filter
 
     cfg = yaml.safe_load(open("config.yaml"))
     raw = pd.read_parquet("data/flc.parquet")
@@ -813,7 +813,7 @@ def test_negative_entry_window_is_recovered_not_dropped(workspace, tmp_path):
     """A window counter that enters ALREADY negative is a known source
     pattern, not a defect, and dropping it is not neutral."""
     _chdir(workspace)
-    from bootstrap.prepare_data import load_and_filter
+    from fit.prepare_data import load_and_filter
 
     cfg = yaml.safe_load(open("config.yaml"))
     cap = cfg["data"]["manufacturing_window_hours"]
@@ -856,7 +856,7 @@ def test_negative_entry_window_is_recovered_not_dropped(workspace, tmp_path):
 def test_an_unreconciled_hour_becomes_shrink_not_a_drop(workspace, tmp_path):
     """Stock that vanishes is COUNTED, not deleted with its episode."""
     _chdir(workspace)
-    from bootstrap.prepare_data import load_and_filter
+    from fit.prepare_data import load_and_filter
     from common import episodes as E
 
     cfg = yaml.safe_load(open("config.yaml"))
@@ -951,7 +951,7 @@ def test_the_manifest_reports_the_identity(workspace):
 def test_re_segmentation_is_a_no_op_and_says_so_if_it_stops_being_one(workspace):
     """`contiguous_episodes_built` guards an invisible invariant."""
     _chdir(workspace)
-    from bootstrap.prepare_data import load_and_filter, assign_episode_ids
+    from fit.prepare_data import load_and_filter, assign_episode_ids
     from common.config import load_config as _lc
 
     _, wf = load_and_filter("data/flc.parquet", _lc())
@@ -973,7 +973,7 @@ def test_a_row_scoped_drop_is_caught_rather_than_silently_re_segmenting(
     """The guard fires. Simulated by punching a hole the way a row-scoped
     filter would -- which is exactly the failure mode it exists for."""
     _chdir(workspace)
-    import bootstrap.prepare_data as pdm
+    from fit import prepare_data as pdm
 
     real = pdm.assign_episode_ids
     calls = {"n": 0}
@@ -998,7 +998,7 @@ def test_a_missing_hour_drops_the_whole_window_not_just_a_fragment(
         workspace, tmp_path):
     """A fragment is not an episode, and neither fragment is usable."""
     _chdir(workspace)
-    from bootstrap.prepare_data import load_and_filter
+    from fit.prepare_data import load_and_filter
 
     cfg = yaml.safe_load(open("config.yaml"))
     raw = pd.read_parquet("data/flc.parquet")
@@ -1033,14 +1033,14 @@ def test_a_missing_hour_drops_the_whole_window_not_just_a_fragment(
 
 
 def test_no_pre_launch_artifact_reads_past_test_end(workspace):
-    """Rule 16: the hold-out is read once, by pipeline.shadow. derive_thresholds
+    """Rule 16: the hold-out is read once, by evaluate.shadow. derive_thresholds
     PASTES guardrail floors into config via tune, and
     fit_dispersion's drift_by_window sets the retrain cadence -- both were
     measuring on the full extract, i.e. tuning config on the window that
     exists to grade it."""
     import pandas as pd
 
-    from bootstrap.prepare_data import pre_launch
+    from fit.prepare_data import pre_launch
 
     import yaml
 
@@ -1087,7 +1087,7 @@ def test_a_set_launch_date_schedules_factors_past_the_gate(workspace, tmp_path):
     After launch the same command IS the weekly cron: it must reach the
     week being priced, or calibration_current refuses every --apply. Moving
     split.test_end instead rescopes every sealed fit."""
-    from bootstrap.train_baseline import fit_level_calibration
+    from fit.train_baseline import fit_level_calibration
     from common import episodes
     from common.config import load_config
 
@@ -1122,7 +1122,7 @@ def test_advance_reads_the_workspace_and_names_the_phase(workspace):
     before = {p: os.path.getmtime(ws / p) for p in
               ("config.yaml", "artifacts/bundle.json", "reports/backtest.json")
               if (ws / p).exists()}
-    r = subprocess.run([sys.executable, "-m", "pipeline.advance", "--plan"],
+    r = subprocess.run([sys.executable, "-m", "ops.advance", "--plan"],
                        cwd=ws, env={**os.environ, "PYTHONPATH": ROOT},
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr

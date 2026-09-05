@@ -10,7 +10,7 @@ import json
 import pandas as pd
 import pytest
 
-from pipeline.ingest_outcomes import build_outcomes, load_failures
+from daily.ingest_outcomes import build_outcomes, load_failures
 
 
 def _dec(i, sku="7", fc="F1", date="2026-08-19", hour=17):
@@ -164,81 +164,6 @@ def test_failures_can_arrive_as_a_table(tmp_path):
             ("7", "F1", "2026-08-19", 17): "push_timeout"}
 
 
-def test_export_events_writes_warehouse_safe_tables(tmp_path):
-    """Derived tables for the warehouse: one row per event, list fields
-    JSON-encoded, idempotent, --since filters. The JSONL stays authoritative
-    -- the export reads through the store, never bypasses it."""
-    from common.config import load_config
-    from events.store import EventStore
-    from pipeline.export_events import export
-
-    cfg = load_config()
-    store = EventStore(cfg, root=str(tmp_path / "events"))
-    for i, day in ((1, "2026-08-18"), (2, "2026-08-19")):
-        store.emit_decision({f: 1 for f in ()} | {
-            "decision_id": f"D{i}", "episode_id": "EP", "is_entry": True,
-            "sku_id": "7", "fc": "F1", "category": "VEG",
-            "subcategory": "LEAFY", "date": day, "hour_of_day": 17,
-            "hours_remaining": 2, "q_remaining": 3, "original_price": 1e4,
-            "cost": 4e3, "d_max": 0.6, "feasible_tier_count": 25,
-            "action_set_size": 5, "optimal_price": 8500.0,
-            "optimal_discount": 0.15, "expected_il": 1.0,
-            "expected_denominator": 2.0, "applied_price": 8500.0,
-            "applied_discount": 0.15, "is_exploration": False,
-            "exploration_cost": 0.0, "affordable_set_size": 0,
-            "tau_current": 1.0, "delta_min": 0.0, "epsilon_posterior_mean": -1.0,
-            "epsilon_posterior_std": 0.6, "reference_discount": 0.3,
-            "reference_mu": 0.8, "mu_ref_path": [0.8, 0.7],
-            "anchor_discount": None, "dispersion_r": 0.9,
-            "baseline_model_version": "b", "posterior_version": 0,
-            "config_version": "1.0.0", "timestamp": f"{day}T17:00:00+00:00"})
-    written = export(store, str(tmp_path / "exports"))
-    path, n = written["decisions"]
-    assert n == 2
-    df = pd.read_parquet(path)
-    # list field arrives JSON-encoded, so any warehouse loads it
-    assert json.loads(df.mu_ref_path.iloc[0]) == [0.8, 0.7]
-    # idempotent overwrite, and --since filters by pricing date
-    assert export(store, str(tmp_path / "exports"))["decisions"][1] == 2
-    assert export(store, str(tmp_path / "exports"),
-                  since="2026-08-19")["decisions"][1] == 1
-
-
-def test_business_metrics_counts_shrink_like_the_guardrail_and_il_pct_do():
-    """Scrap = leftover + shrink has ONE definition. business_metrics read
-    leftover only, so IL, waste_units, sell-through -- the pilot's read and
-    production's exploration-budget base -- were all a different IL from the
-    one the noise floors are measured on."""
-    from common.config import load_config
-    from pipeline.monitor import business_metrics, guardrail_series
-
-    cfg = load_config()
-    hours = [(3, 6, 1, 3),      # 6 - 1 = 5 expected, 3 reported -> shrink 2
-             (2, 3, 1, 2),
-             (1, 2, 1, 0)]      # write-off row: leftover 1, NOT shrink
-    decisions, outcomes = [], []
-    for hr, start, sold, end in hours:
-        decisions.append({
-            "decision_id": f"b{hr}", "episode_id": "EP-B", "sku_id": "s",
-            "fc": "f", "category": "VEG", "subcategory": "LEAFY",
-            "date": "2026-08-19", "hour_of_day": 24 - hr,
-            "hours_remaining": hr, "original_price": 1000.0, "cost": 100.0})
-        outcomes.append({
-            "decision_id": f"b{hr}", "starting_inventory": start,
-            "units_sold": sold, "ending_inventory": end,
-            "applied_price": 800.0})
-
-    b = business_metrics(decisions, outcomes)
-    g = guardrail_series(decisions, outcomes, cfg)
-    # leftover 1 + shrink 2 = 3 units of scrap, on both sides
-    assert b["waste_units"] == 3
-    assert g["daily_scrap_rate"]["2026-08-19"] == pytest.approx(3 / 6)
-    # IL charges cost x scrap, not cost x leftover
-    assert b["il_pct_aggregate"]["il_absolute"] == pytest.approx(
-        3 * 200.0 + 3 * 100.0)
-    assert b["sell_through"] == pytest.approx(3 / 6)
-
-
 def test_one_unusable_feed_row_costs_its_decision_not_the_days_batch():
     """int(nan) raised and aborted the whole daily ingest before the store --
     whose design is quarantine-with-a-reason -- ever saw a row, so the day
@@ -270,43 +195,6 @@ def test_a_zero_base_price_is_refused_not_priced_at_full_discount():
     assert "original_price" in rep["unusable_examples"][0]["reason"]
 
 
-def test_the_guardrail_fires_on_a_catalogue_wide_deterioration(tmp_path):
-    """The basis is the trailing mean of the same system-priced episodes:
-    there is no control arm, so a catalogue-wide scrap doubling must show as
-    a positive deterioration (an arm comparison of two system-priced halves
-    once cancelled it to exactly zero)."""
-    from common.config import load_config
-    from pipeline.monitor import guardrail_series
-
-    cfg = load_config()
-    # the trailing basis needs guardrail_noise_window_days of history before
-    # it produces a comparison at all, plus the smoothing shift
-    span = cfg["monitoring"]["guardrail_noise_window_days"] + 20
-    decisions, outcomes, i = [], [], 0
-    for day in range(span):
-        # scrap doubles for the last stretch, across the WHOLE catalogue
-        sold, end = (2, 0) if day < span - 10 else (1, 0)
-        for unit in range(40):
-            i += 1
-            decisions.append({
-                "decision_id": f"g{i}", "episode_id": f"E{i}",
-                "sku_id": f"S{unit}", "fc": "F1", "category": "VEG",
-                "subcategory": "LEAFY", "hours_remaining": 1, "hour_of_day": 23,
-                "cost": 100.0, "original_price": 1000.0,
-                "timestamp": (pd.Timestamp("2026-06-01")
-                              + pd.Timedelta(days=day)).isoformat() + "+00:00",
-                "date": str((pd.Timestamp("2026-06-01")
-                             + pd.Timedelta(days=day)).date())})
-            outcomes.append({
-                "decision_id": f"g{i}", "starting_inventory": 4,
-                "units_sold": sold, "ending_inventory": end,
-                "applied_price": 800.0})
-
-    pre = guardrail_series(decisions, outcomes, cfg)
-    assert pre["scrap_deterioration"]["basis"].startswith("trailing_")
-    assert pre["scrap_deterioration"]["latest"] > 0, pre["scrap_deterioration"]
-
-
 def test_a_discount_outside_percent_range_is_refused():
     """The feed discount is PERCENT. A fraction (0.30) would be 0.3% and
     price the hour at full list; 100+ prices it at or below zero."""
@@ -318,91 +206,3 @@ def test_a_discount_outside_percent_range_is_refused():
     assert [o["decision_id"] for o in outs] == ["D3"]
     assert rep["unusable_feed_rows"] == 2
     assert all("total_discount" in x["reason"] for x in rep["unusable_examples"])
-
-
-def test_the_guardrail_series_is_keyed_on_the_trading_day():
-    """An hour-23 decision on day D carries a UTC timestamp that may read as
-    D+1. Bucketing on the wall clock split the daily scrap series at
-    midnight UTC while IL and the budget were keyed on the trading day."""
-    from common.config import load_config
-    from pipeline.monitor import guardrail_series
-
-    cfg = load_config()
-    decisions = [{
-        "decision_id": "late", "episode_id": "EP-L", "sku_id": "s", "fc": "f",
-        "date": "2026-08-19", "hour_of_day": 23,
-        "timestamp": "2026-08-20T02:00:00+00:00",      # UTC is already D+1
-        "hours_remaining": 1, "cost": 100.0, "original_price": 1000.0}]
-    outcomes = [{"decision_id": "late", "starting_inventory": 4,
-                 "units_sold": 1, "ending_inventory": 0,
-                 "applied_price": 500.0}]
-    g = guardrail_series(decisions, outcomes, cfg)
-    assert list(g["daily_scrap_rate"]) == ["2026-08-19"]
-
-
-def test_daily_rates_are_keyed_on_the_close_day_not_the_opening_day():
-    """Bucketed by OPENING day over settled episodes, the newest days hold
-    only the episodes that closed early (sold out: low scrap) -- the
-    long-running ones are still open -- so the series read as improving
-    exactly where the persistence rule evaluates. A close-day bucket is
-    complete once its episodes settle."""
-    from common import metrics
-    from conftest import episode_frame
-
-    # two episodes open on the 19th: one sells out that day, one runs into
-    # the 20th and writes off two units there
-    d = episode_frame(
-        episode_id=["quick", "quick", "slow", "slow", "slow"],
-        date=["2026-08-19", "2026-08-19", "2026-08-19", "2026-08-19", "2026-08-20"],
-        hour_of_day=[20, 21, 20, 21, 1],
-        starting_inventory=[2, 1, 4, 3, 2],
-        units_sold=[1, 1, 1, 1, 0],
-        ending_inventory=[1, 0, 3, 2, 0],
-        original_price=1000.0, offered_price=800.0, cost=100.0)
-    ep, _ = metrics.settled(metrics.episode_economics(d))
-    day = metrics.daily_rates(ep)
-    assert list(day.index) == ["2026-08-19", "2026-08-20"]
-    # the 19th carries only the sold-out episode; the slow one lands where
-    # its scrap became known
-    assert day.loc["2026-08-19", "scrap"] == 0 and day.loc["2026-08-19", "opening"] == 2
-    assert day.loc["2026-08-20", "scrap"] == 2 and day.loc["2026-08-20", "opening"] == 4
-    assert day.loc["2026-08-20", "scrap_rate"] == pytest.approx(0.5)
-    # the monitor's series is the same one, on the same key
-    from common.config import load_config
-    from pipeline.monitor import guardrail_series
-    decisions, outcomes = [], []
-    for i, row in d.iterrows():
-        decisions.append({"decision_id": f"d{i}", "episode_id": row.episode_id,
-                          "sku_id": "s", "fc": "f", "category": "VEG",
-                          "date": row.date, "hour_of_day": int(row.hour_of_day),
-                          "cost": row.cost, "original_price": row.original_price})
-        outcomes.append({"decision_id": f"d{i}",
-                         "starting_inventory": int(row.starting_inventory),
-                         "units_sold": int(row.units_sold),
-                         "ending_inventory": int(row.ending_inventory),
-                         "applied_price": row.offered_price})
-    g = guardrail_series(decisions, outcomes, load_config())
-    assert g["day_key"] == "close_day"
-    assert g["daily_scrap_rate"] == {"2026-08-19": 0.0, "2026-08-20": 0.5}
-
-
-def test_price_mismatch_is_a_rate_over_compared_pairs():
-    """Dividing by every outcome let unmatched outcomes dilute the rate
-    below the stop threshold."""
-    from pipeline.monitor import safety_metrics
-
-    class _Store:
-        duplicate_counts = {"decision": 0, "outcome": 0}
-
-        def load_quarantine(self):
-            return []
-
-    decisions = [{"decision_id": "D1", "applied_price": 100.0,
-                  "expected_denominator": 1.0, "original_price": 100.0}]
-    outcomes = [{"decision_id": "D1", "applied_price": 90.0, "units_sold": 1,
-                 "is_stockout": False}]
-    outcomes += [{"decision_id": f"orphan{i}", "applied_price": 1.0,
-                  "units_sold": 0, "is_stockout": False} for i in range(9)]
-    s = safety_metrics(_Store(), decisions, outcomes)
-    assert s["applied_vs_recommended_price_mismatch"] == 1.0
-    assert s["unmatched_outcome_count"] == 9

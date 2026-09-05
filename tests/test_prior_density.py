@@ -1,11 +1,13 @@
-"""The prior's boundary handling: a peak pinned at epsilon_min is a boundary
-solution (rule 3), not a right-signed estimate."""
+"""fit.prior_density: boundary handling (a peak pinned at epsilon_min is a
+boundary solution, rule 3, not a right-signed estimate), the entry row, the
+hour control, the deflation, and the std floor."""
 
 import copy
 
 import numpy as np
+import pytest
 
-from bootstrap import prior_density as pdn
+from fit import prior_density as pdn
 
 
 def _sharp_curves(peaks):
@@ -112,7 +114,7 @@ def test_the_lower_margin_is_a_config_key_and_the_upper_bound_never_moves(cfg):
 
 
 def test_estimate_prior_surfaces_the_boundary_categories(cfg, monkeypatch):
-    from bootstrap import estimate_prior as ep
+    from fit import estimate_prior as ep
 
     lo = cfg["posterior"]["epsilon_min"]
     monkeypatch.setattr(pdn, "build_curves",
@@ -161,3 +163,126 @@ def test_a_flat_likelihood_is_not_a_boundary_solution(cfg, monkeypatch):
     assert "no_price_variation" in flat and not flat["wrong_sign"]
     assert pooled["pooled_categories"] == ["REAL"]
     assert set(flat["unconstrained_argmax"]) == {"naive", "controlled"}
+
+
+def test_a_prior_std_can_never_be_zero():
+    """A zero-width prior is not confidence, it is a frozen posterior."""
+    import numpy as np
+
+    from fit import prior_density as pdn
+
+    grid = np.linspace(-4.0, -0.05, 159)
+    step = grid[1] - grid[0]
+    # a likelihood dropping 59 nats per grid step: exactly the production case
+    ll = -59.5 * np.arange(len(grid))[::-1]
+    w = pdn.density(ll, 1.0)
+    _, raw_std = pdn.moments(grid, w)
+    assert raw_std == pytest.approx(0.0, abs=1e-9), \
+        "the collapse this guards against must actually happen"
+
+    # nothing finer than one grid cell was ever resolved, so the reported std
+    # can never be below the grid's own step
+    assert max(raw_std, step) >= step
+
+
+def test_the_hour_control_is_keyed_on_the_day_not_just_the_clock():
+    """Design 5.6 says "same-hour CROSS-EPISODE", and a control pooled across
+    dates is only an approximation to it: it removes the average evening lift
+    and leaves a Tuesday storm or a rival's promotion in the residual, still
+    correlated with how far the legacy ramp has run."""
+    import inspect
+
+    import numpy as np
+    import pandas as pd
+
+    from fit import prior_density as pdn
+
+    assert list(inspect.signature(pdn.time_cell).parameters) == ["g"], \
+        "the control is not selectable any more -- date_hour won"
+
+    g = pd.DataFrame({
+        "date": ["2026-03-01"] * 3 + ["2026-03-02"] * 3,
+        "hour_of_day": [10, 11, 10, 10, 11, 10],
+    })
+    cells = list(pdn.time_cell(g))
+    assert len(set(cells)) == 4, cells
+    # the same clock hour on two different days must NOT share a cell -- that
+    # is the entire difference between the two controls
+    assert cells[0] != cells[3]
+
+    # A CELL FITTED FROM TOO FEW ROWS absorbs the price response it is meant to
+    # control for, and biases |eps| toward zero. Thin cells fall back to 1.0
+    # rather than fitting a multiplier from three observations.
+    mu = np.full(6, 2.0)
+    k = np.array([3, 3, 3, 1, 1, 1])
+    cen = np.zeros(6, bool)
+    mult, thin = pdn.hour_multipliers(mu, np.array(cells), k, cen, min_rows=5)
+    assert np.allclose(mult, 1.0), "every cell here has 1-2 rows; none qualify"
+    assert thin == pytest.approx(1.0)
+    # with no minimum they are all fitted, which is the behaviour the guard
+    # exists to prevent at small cell sizes
+    fitted, _ = pdn.hour_multipliers(mu, np.array(cells), k, cen, min_rows=1)
+    assert not np.allclose(fitted, 1.0)
+
+
+def test_the_prior_entry_row_is_the_first_HOUR_not_the_lowest_clock_time(cfg):
+    """Rule 7: the prior identifies elasticity on ENTRY rows only. Sorting by
+    hour_of_day alone picks the 00:00 row of an episode that opened at 22:00
+    the night before -- a within-episode, post-price-path row, which is the
+    confound the rule exists to exclude. Production windows cross midnight
+    routinely (design 12a); the fixture has none, so nothing caught it."""
+    import pandas as pd
+
+    from fit.prior_density import scored_rows
+
+    ep = pd.DataFrame([
+        # opens 22:00 at the anchor, deepens after midnight
+        {"date": "2026-07-01", "hour_of_day": 22, "total_discount": 0.10},
+        {"date": "2026-07-01", "hour_of_day": 23, "total_discount": 0.10},
+        {"date": "2026-07-02", "hour_of_day": 0, "total_discount": 0.25},
+        {"date": "2026-07-02", "hour_of_day": 3, "total_discount": 0.25},
+    ]).assign(episode_id="EP-MIDNIGHT", starting_inventory=5, units_sold=1,
+              ending_inventory=4, category="VEG", subcategory="LEAFY",
+              original_price=1e4, cost=4e3, fc="F1", d_ref=0.30)
+
+    row = scored_rows(ep)
+    assert len(row) == 1
+    assert (row.date.iloc[0], int(row.hour_of_day.iloc[0])) == ("2026-07-01", 22)
+    assert row.total_discount.iloc[0] == 0.10      # the entry price, not 0.25
+
+
+def test_the_priors_deflation_can_actually_engage(cfg):
+    """scored_rows returns ONE row per episode, so an episode-grouped ICC was
+    empty by construction: rho 0, deff exactly 1.0 for every category, and
+    design 5.6's deflation could never do anything. Clustered on the unit that
+    recurs -- SKU x FC -- it engages when correlation is present."""
+    import numpy as np
+    import pandas as pd
+
+    from fit.prior_density import deflation_deff
+
+    class _Model:                     # mu_ref is the deflation's baseline only
+        @staticmethod
+        def predict_mu_ref(rows):
+            return np.full(len(rows), 5.0)
+
+    rng = np.random.default_rng(0)
+    n_units, per_unit = 200, cfg["assurance"]["rho_min_hours_per_episode"] + 1
+    rows = []
+    for u in range(n_units):
+        shared = rng.normal(0, 2.0)            # a persistent per-unit level
+        for _ in range(per_unit):
+            rows.append({"sku_id": f"S{u}", "fc": "F1",
+                         "units_sold": 5.0 + shared + rng.normal(0, 0.5)})
+    frame = pd.DataFrame(rows).assign(episode_id=lambda f: range(len(f)))
+
+    deff, rho, m = deflation_deff(frame, _Model(), cfg)
+    assert m == pytest.approx(per_unit)
+    assert rho > 0.5                    # the shared level dominates
+    assert deff > 1.0                   # and the deflation is real
+
+    # one row per unit: no clustering to measure, deff falls back to 1.0
+    solo = frame.drop_duplicates("sku_id").copy()
+    assert deflation_deff(solo, _Model(), cfg)[0] == pytest.approx(1.0)
+
+

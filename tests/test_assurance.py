@@ -1,4 +1,4 @@
-"""Tests for pipeline.assurance."""
+"""Tests for daily.assurance."""
 import copy
 import uuid
 
@@ -7,10 +7,10 @@ import pytest
 from scipy.stats import nbinom
 
 from conftest import P0, COST, decision_event
-from pipeline import assurance
-from pricing import dp as dp_mod
-from pricing import explore
-from pricing.demand import mu_at
+from daily import assurance
+from engine import dp as dp_mod
+from engine import explore
+from engine.demand import mu_at
 
 
 D_REF, R = 0.30, 0.919
@@ -18,7 +18,7 @@ D_REF, R = 0.30, 0.919
 
 def _decision(cfg, q, path, eps=-1.0, anchor=0.0, tau=None, rng=None,
               episode="ep", entry=False):
-    """A decision event built the way inference.decide builds one: the
+    """A decision event built the way engine.decide builds one: the
     shared contract builder, with the solver's own answer for this state
     and a uniform draw from the affordable set when a tau is in force."""
     anchor = None if entry else anchor
@@ -329,7 +329,7 @@ def test_uniformity_needs_size_as_well_as_significance(cfg):
     import numpy as np
     from scipy.stats import chi2 as chi2_dist
 
-    from pipeline.assurance import exploration_uniformity
+    from daily.assurance import exploration_uniformity
 
     bins = cfg["assurance"]["uniformity_bins"]
     size_gate = cfg["assurance"]["uniformity_max_bin_deviation"]

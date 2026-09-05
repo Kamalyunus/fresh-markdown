@@ -3,7 +3,7 @@
 The artifacts are fitted in sequence and only meaningful TOGETHER: mix
 vintages and nothing errors, the numbers just silently stop describing one
 world. The bundle id IS the baseline model version -- every downstream
-artifact is fitted AGAINST a model. bootstrap.seal adds per-file hashes so a
+artifact is fitted AGAINST a model. ops.seal adds per-file hashes so a
 hand-edited artifact is detectable too, which stamps alone cannot catch.
 """
 

@@ -48,7 +48,7 @@ def test_page_embeds_valid_json_and_no_placeholders(deck, cfg, tmp_path):
     data = json.loads(m.group(1).replace("<\\/", "</"))
     assert len(data["scenarios"]) == 12
     assert data["config"]["config_version"] == cfg["meta"]["config_version"]
-    assert "pricing.dp.solve" in html
+    assert "engine.dp.solve" in html
 
 
 def test_no_fixed_schedule_prices_below_cost(deck):
@@ -71,7 +71,7 @@ def test_no_fixed_schedule_prices_below_cost(deck):
 
 
 def test_the_refusals_state_the_stop_rules_the_monitor_applies(deck, cfg, tmp_path):
-    """pipeline.monitor: every stop -- overspend, scrap, margin -- needs
+    """daily.monitor: every stop -- overspend, scrap, margin -- needs
     persistence_days consecutive priced days over its threshold
     (evaluate_guardrail); the deck must say what the monitor does."""
     out = tmp_path / "deck.html"

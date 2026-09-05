@@ -1,5 +1,5 @@
 """How a guardrail metric is compared against its baseline. ONE definition:
-derive_thresholds measures the noise floor and pipeline.monitor evaluates the
+derive_thresholds measures the noise floor and daily.monitor evaluates the
 trigger, and both MUST compute the same quantity. Two bases: `relative`
 (t/c - 1) for strictly positive rates (scrap); `absolute_pp` (t - c) when a
 metric can cross zero -- margin_rate does, so its relative floor exceeded the
@@ -50,8 +50,8 @@ def verdict_is_blocking(verdict):
     and the paster cannot disagree: TOO TIGHT (fires on ordinary days and
     silently suspends exploration), BLOCKED (no threshold on this basis is
     both safe and useful), LIKELY INERT (a guardrail that cannot fire is
-    absent, not conservative). `pipeline.status` refuses the chain and
-    `pipeline.tune` refuses the paste on this same test.
+    absent, not conservative). `ops.status` refuses the chain and
+    `ops.tune` refuses the paste on this same test.
     """
     v = str(verdict or "").upper()
     return v.startswith("TOO") or "BLOCKED" in v or "INERT" in v

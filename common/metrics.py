@@ -3,7 +3,7 @@
   episode_economics / settled / daily_rates -> every IL, scrap and margin
       figure (guardrail floors, live guardrail, business metrics, shadow's
       budget base)
-  fidelity_decomposition  -> backtest.replay (the level gate value)
+  fidelity_decomposition  -> evaluate.backtest (the level gate value)
 
 They live here rather than in any caller because several need them and a
 second copy would drift.

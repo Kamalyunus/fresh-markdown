@@ -5,7 +5,7 @@ import pathlib
 
 import pytest
 
-from bootstrap.prepare_data import DP_INELIGIBLE, load_and_filter
+from fit.prepare_data import DP_INELIGIBLE, load_and_filter
 from common.config import load_config
 from conftest import ROOT
 
@@ -122,7 +122,7 @@ def test_agents_md_stays_a_router_not_a_reference():
     buried mid-file. It is a router now: one-line non-negotiables up front,
     pointers to design.md for everything else. This budget is what keeps it
     that way -- new material goes to design.md (spec), learnings.md
-    (history), or docs/maintaining_docs.md (doc tooling), with at most a
+    (history), with at most a
     one-liner and a pointer here."""
     text = pathlib.Path(ROOT, "AGENTS.md").read_text()
     lines = text.count("\n") + 1

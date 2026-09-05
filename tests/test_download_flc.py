@@ -5,8 +5,8 @@ import re
 import pyarrow as pa
 import pytest
 
-from bootstrap import download_flc
-from bootstrap.prepare_data import SOURCE_TO_CANONICAL
+from fit import download_flc
+from fit.prepare_data import SOURCE_TO_CANONICAL
 from tools.make_dummy_flc import SCHEMA
 
 
@@ -84,7 +84,7 @@ def test_the_negative_window_dirt_lands_on_WHOLE_windows(): # noqa: N802
         assert steps <= {-1}, f"{key} does not decrement by one: {steps}"
 
     # the payoff: unclosed episodes are no longer an artifact of the injection
-    from bootstrap.prepare_data import load_and_filter
+    from fit.prepare_data import load_and_filter
     from common import episodes as E
     from common.config import load_config
     import pyarrow as pa, pyarrow.parquet as pq, tempfile, os
@@ -151,7 +151,7 @@ def test_a_pull_that_stops_short_of_the_configured_windows_is_refused():
     """`--days 120` from yesterday is the manual default, and it silently
     left the calib window (or the hold-out) empty: fit_dispersion then died
     about 'no rows' three steps later. The requested range is checked against
-    train_start .. holdout.end (or test_end), the range pipeline.advance
+    train_start .. holdout.end (or test_end), the range ops.advance
     passes, and the exit is non-zero with the dates named."""
     from datetime import date
     from common.config import load_config

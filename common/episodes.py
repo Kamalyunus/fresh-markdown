@@ -118,7 +118,7 @@ def shrink_by_hour(starting_inventory, units_sold, ending_inventory, is_last_row
     at zero, with the write-off exemption on the LAST ROW ONLY.
 
     The one home for shrink. `episode_flow` aggregates it as `vanished` and
-    `pipeline.monitor` measures the live guardrail with it -- a second
+    `daily.monitor` measures the live guardrail with it -- a second
     hand-rolled copy is how the trigger came to run looser than the floor it
     is compared against. Mid-episode a zeroed ending with stock still owed is
     shrink, not a close (learnings.md); restock hours clip to zero.

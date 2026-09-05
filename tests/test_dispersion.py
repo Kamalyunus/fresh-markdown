@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from bootstrap import fit_dispersion as fd
+from fit import fit_dispersion as fd
 
 
 def test_an_r_at_a_search_bound_is_recognised_by_the_configured_tolerance(cfg):
@@ -116,3 +116,62 @@ def test_the_residual_frame_has_one_home(cfg):
     assert f.mu_hat.iloc[1] == pytest.approx(2.0 * ratio ** -1.0)
     assert (f.resid == f.units_sold - f.mu_hat).all()
     assert list(f.censored) == [False, True]
+
+
+def test_an_under_dispersed_group_is_exempt_from_the_clamp():
+    """The clamp must not make the steadiest cells claim variance they lack."""
+    from fit.fit_dispersion import pearson_dispersion
+
+    rng = np.random.default_rng(4)
+    mu = 6.0
+    # binomial with the same mean is UNDER-dispersed: var = mu(1-p) < mu
+    tight = rng.binomial(12, mu / 12, 4000)
+    assert pearson_dispersion(tight, np.full(len(tight), mu)) < 1.0
+    # negative binomial at the same mean is over-dispersed
+    loose = rng.negative_binomial(1.5, 1.5 / (1.5 + mu), 4000)
+    assert pearson_dispersion(loose, np.full(len(loose), mu)) > 1.0
+    # Poisson sits at 1 either side of noise
+    poi = rng.poisson(mu, 20000)
+    assert 0.9 < pearson_dispersion(poi, np.full(len(poi), mu)) < 1.1
+
+
+def test_dispersion_drift_separates_a_failed_fit_from_a_moved_parameter():
+    """The measurement that says whether freezing r and rho is defensible --
+    and the trap it has to avoid."""
+    import json
+    import os
+
+    from fit import fit_dispersion as fd
+
+    # the discriminator itself: below 1 is inexpressible, above is ordinary
+    steady = np.full(400, 2.0)
+    assert fd.pearson_dispersion(steady, np.full(400, 2.0)) < 1.0
+    rng = np.random.default_rng(0)
+    bursty = rng.negative_binomial(0.7, 0.7 / (0.7 + 2.0), 400)
+    assert fd.pearson_dispersion(bursty, np.full(400, 2.0)) > 1.0
+
+    path = "artifacts/rho.json"
+    if not os.path.exists(path):
+        pytest.skip("no rho artifact on disk")
+    drift = json.load(open(path)).get("drift_by_window")
+    if not drift or not drift.get("windows_fitted"):
+        pytest.skip("no drift block in the artifact")
+
+    for w, v in drift["by_window"].items():
+        # every window declares whether its r means anything, and why
+        assert set(("pearson", "nb_expressible", "r_at_search_bound",
+                    "r_usable")) <= set(v), w
+        if v["pearson"] < 1.0:
+            assert not v["r_usable"], \
+                f"{w}: Pearson < 1 but its r is being treated as a measurement"
+
+    # the headline r spread must be over USABLE windows only
+    usable = [v["r"] for v in drift["by_window"].values() if v["r_usable"]]
+    if usable:
+        assert drift["r_spread"] == pytest.approx(
+            max(usable) - min(usable), abs=1e-3)
+        assert drift["r_windows_usable"] == len(usable)
+
+    # and when most windows are unfittable the verdict says THAT, not "drift"
+    if drift["r_unusable_share"] > 0.34:
+        assert "NOT FITTABLE AT THIS CADENCE" in drift["verdict"]

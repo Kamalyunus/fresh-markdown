@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import bootstrap.train_baseline as tb
+from fit import train_baseline as tb
 
 
 class _Model:
@@ -193,7 +193,7 @@ def test_a_failing_convergence_check_stops_the_loop_with_its_own_message(
         monkeypatch, cfg):
     """When 5b itself crashed, the loop read no verdict, the stall test had
     nothing to fire on and the run went to --max-turns doing nothing."""
-    import bootstrap.run as br
+    from ops import bootstrap_loop as br
 
     calls = []
 

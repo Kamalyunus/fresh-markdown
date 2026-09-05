@@ -1,8 +1,8 @@
-"""pipeline.advance -- the order of operations as code. plan() is pure over
+"""ops.advance -- the order of operations as code. plan() is pure over
 probe()'s state, so every branch is exercised without a workspace."""
 
-from pipeline import advance
-from pipeline import tune
+from ops import advance
+from ops import tune
 
 
 def _state(**over):
@@ -35,7 +35,7 @@ def test_no_extract_pulls_it_per_the_config_dates():
     dates size the pull, and download_flc fails loudly without REDSHIFT_*."""
     steps = advance.plan(_state(raw=False, prepared=False))
     assert steps[0]["kind"] == "run" and steps[0]["phase"] == "data"
-    assert steps[0]["args"] == ["bootstrap.download_flc", "--start-date",
+    assert steps[0]["args"] == ["fit.download_flc", "--start-date",
                                 "2026-03-01", "--end-date", "2026-08-28"]
     assert steps[0]["reevaluate"]
 
@@ -47,7 +47,7 @@ def test_the_bootstrap_runs_only_when_the_model_is_absent_or_asked_for():
         ("run", "bootstrap", "bootstrap")
     assert _kinds(advance.plan(_state(retrain=True)))[0] == \
         ("run", "bootstrap", "bootstrap")
-    assert all(s["args"][0] != "bootstrap.run" or "--check-only" in s["args"]
+    assert all(s["args"][0] != "ops.bootstrap_loop" or "--check-only" in s["args"]
                for s in advance.plan(_state()) if s["kind"] == "run")
 
 
@@ -56,7 +56,7 @@ def test_a_stale_report_is_regraded_before_anything_is_pasted():
                                 tune={"findings": [], "blocked": False,
                                       "to_paste": [{"key": "dispersion.rho"}],
                                       "owner_decisions": []}))
-    assert steps[0]["args"] == ["bootstrap.run", "--check-only"]
+    assert steps[0]["args"] == ["ops.bootstrap_loop", "--check-only"]
     assert steps[0]["reevaluate"]
 
 
@@ -79,12 +79,12 @@ def test_a_tune_block_stops_the_driver_but_missing_reports_do_not():
     steps = advance.plan(_state(posterior=False,
                                 tune={"findings": [missing], "blocked": True,
                                       "to_paste": [], "owner_decisions": []}))
-    assert steps[0]["args"] == ["bootstrap.init_posterior"]
+    assert steps[0]["args"] == ["ops.init_posterior"]
 
 
 def test_shadow_runs_on_the_holdout_with_every_episode_and_then_gates():
     steps = advance.plan(_state(have={"backtest", "thresholds"}))
-    assert steps[0]["args"][:2] == ["pipeline.shadow", "--input"]
+    assert steps[0]["args"][:2] == ["evaluate.shadow", "--input"]
     assert "--max-episodes" in steps[0]["args"] and "0" in steps[0]["args"]
     assert steps[0]["args"][-2:] == ["--workers", "0"]   # parallel, byte-identical
     assert "--all" not in steps[0]["args"]                # hold-out by default
@@ -112,8 +112,8 @@ def test_launch_day_refits_the_schedule_once_and_stops_on_a_stale_extract():
     steps = advance.plan(_state(launched=False))
     assert steps[0]["phase"] == "launch" and "launch_date" in steps[0]["why"]
     steps = advance.plan(_state(schedule_scope="pre-launch -- through 2026-08-09"))
-    assert [s["args"][0] for s in steps] == ["bootstrap.train_baseline",
-                                             "bootstrap.seal"]
+    assert [s["args"][0] for s in steps] == ["fit.train_baseline",
+                                             "ops.seal"]
     steps = advance.plan(_state(schedule_end="2026-08-17",
                                 expected_schedule_end="2026-08-17"))
     assert steps[0]["kind"] == "stop" and "stale" in steps[0]["why"]
@@ -122,9 +122,9 @@ def test_launch_day_refits_the_schedule_once_and_stops_on_a_stale_extract():
 def test_the_daily_lane_ends_at_the_operator_gate_never_past_it():
     steps = advance.plan(_state(feed="feed.parquet"))
     mods = [s["args"][0] for s in steps if s["kind"] == "run"]
-    assert mods == ["pipeline.ingest_outcomes", "pipeline.update",
-                    "pipeline.monitor", "pipeline.assurance",
-                    "pipeline.export_events", "pipeline.status"]
+    assert mods == ["daily.ingest_outcomes", "daily.update",
+                    "daily.monitor", "daily.assurance",
+                    "daily.export_events", "ops.status"]
     assert all("--apply" not in s["args"] for s in steps if s["kind"] == "run")
     assert "--calibrate-tau" in steps[1]["args"]          # tau is daily, no operator
     assert "every 7 days" in steps[-1]["detail"][0]
@@ -151,7 +151,7 @@ def test_the_readiness_report_is_assembled_from_the_journal_and_the_decision_log
     journal.write_text(json.dumps({"runs": [
         {"at": "2026-09-01T02:00:00+00:00", "phase": "bootstrap", "stop": None,
          "ran": [{"label": "bootstrap",
-                  "command": "python3 -m bootstrap.run --input data/flc_raw.parquet"}]},
+                  "command": "python3 -m ops.bootstrap_loop --input data/flc_raw.parquet"}]},
         {"at": "2026-09-01T03:00:00+00:00", "phase": "tune", "stop": None,
          "ran": [{"label": "tune --apply", "pasted": ["dispersion.rho"], "skipped": []}]},
         {"at": "2026-09-01T04:00:00+00:00", "phase": "launch", "ran": [],
@@ -166,7 +166,7 @@ def test_the_readiness_report_is_assembled_from_the_journal_and_the_decision_log
              "source": "artifacts/rho.json rho"}]}]}))
     text = advance.report(cfg, str(tmp_path / "no_reports"),
                           journal=str(journal), decisions=str(decisions))
-    assert "### bootstrap" in text and "bootstrap.run --input" in text
+    assert "### bootstrap" in text and "ops.bootstrap_loop --input" in text
     assert "### tune" in text and "pasted `dispersion.rho`" in text
     assert "| `dispersion.rho` | 0.1161 → 0.2436 |" in text
     assert "## Config in force" in text and "SET BY OWNER" in text
@@ -236,9 +236,9 @@ def test_a_measured_paste_does_not_stale_the_report_that_derived_it(cfg):
 
 def test_only_the_invalidated_report_is_re_run():
     steps = advance.plan(_state(stale={"thresholds": "thresholds: monitoring.stop_conditions.scrap_deterioration_pct"}))
-    assert steps[0]["args"][0] == "bootstrap.derive_thresholds"
+    assert steps[0]["args"][0] == "evaluate.derive_thresholds"
     steps = advance.plan(_state(stale={"shadow": "shadow: exploration.delta_min_log_bias"}))
-    assert steps[0]["args"][0] == "pipeline.shadow"
+    assert steps[0]["args"][0] == "evaluate.shadow"
 
 
 def test_the_round_budget_counts_work_not_stops(monkeypatch, tmp_path):
@@ -273,7 +273,7 @@ def test_an_unlearned_posterior_is_reinitialised_when_the_launch_belief_moves():
     not a report, so no vintage check catches it. While it holds no outcome
     a --force re-init is safe and due; once it has learned, never."""
     steps = advance.plan(_state(posterior_stale=True))
-    assert steps[0]["args"] == ["bootstrap.init_posterior", "--force"]
+    assert steps[0]["args"] == ["ops.init_posterior", "--force"]
     assert steps[0]["phase"] == "posterior"
     assert advance.plan(_state(posterior_stale=False))[0]["kind"] != "run" or \
-        advance.plan(_state(posterior_stale=False))[0]["args"][0] != "bootstrap.init_posterior"
+        advance.plan(_state(posterior_stale=False))[0]["args"][0] != "ops.init_posterior"

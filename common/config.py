@@ -80,7 +80,7 @@ def load_config(path="config.yaml", strict=False):
         missing = [".".join(p) for p in RUNTIME_REQUIRED
                    if config_get(cfg, p) is None]
         if not os.path.exists(cfg["posterior"]["prior"]["path"]):
-            missing.append("artifacts/prior.json (run bootstrap.estimate_prior)")
+            missing.append("artifacts/prior.json (run fit.estimate_prior)")
         if missing:
             raise ConfigError(
                 "refusing to start: null MEASURED / SET BY OWNER values: "

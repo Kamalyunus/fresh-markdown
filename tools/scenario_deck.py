@@ -1,7 +1,7 @@
 """Build the leadership scenario deck: reports/scenarios.html.
 
 Twelve named situations, each answered by the REAL decision engine
-(pricing.dp.solve -- the code that prices the shelf), precomputed over a
+(engine.dp.solve -- the code that prices the shelf), precomputed over a
 grid of shelf states and embedded in one self-contained HTML page. Sliders
 snap to grid points; nothing is re-implemented in the browser. The demand
 forecast is a slider, not the trained model, so the page shows the DECISION
@@ -21,9 +21,9 @@ import numpy as np
 from common.config import load_config, reference_discount
 from common.io import read_json
 from common.parallel import map_episodes
-from pricing import dp as dp_mod
-from pricing.demand import expected_min_demand_inventory, mu_at
-from pricing.posterior import launch_belief
+from engine import dp as dp_mod
+from engine.demand import expected_min_demand_inventory, mu_at
+from engine.posterior import launch_belief
 
 P0 = 10_000.0          # list price; every currency figure scales with it
 GRID = {
@@ -346,7 +346,7 @@ function render(){nav();const sc=D.scenarios.find(s=>s.id===cur.sc);const st=sta
  ${cur.sc==='explore'||cur.tau>0?`<div class="card" style="margin-top:16px"><h3>Exploration — the alternatives and what each costs</h3>${explore(st)}</div>`:''}
  ${cur.sc==='refuses'?`<div class="card" style="margin-top:16px"><h3>What it refuses — by construction</h3>${refuses()}</div>`:''}
  <div class="read"><b>How to read it.</b> ${sc.read}</div>
- <p class="foot">Every point is a solve of <code>pricing.dp.solve</code> — the code that prices the shelf — on this machine's config; sliders snap to the precomputed grid. Legacy ramp is an illustrative schedule (reference −15pp, reference, reference +15pp by thirds, never past the cost floor). The demand forecast is a slider; nothing here is a prediction about a real SKU. Like-for-like comparisons share one demand model; the pilot's own outcomes are the evidence.</p>`}
+ <p class="foot">Every point is a solve of <code>engine.dp.solve</code> — the code that prices the shelf — on this machine's config; sliders snap to the precomputed grid. Legacy ramp is an illustrative schedule (reference −15pp, reference, reference +15pp by thirds, never past the cost floor). The demand forecast is a slider; nothing here is a prediction about a real SKU. Like-for-like comparisons share one demand model; the pilot's own outcomes are the evidence.</p>`}
 render();
 </script></body></html>
 """

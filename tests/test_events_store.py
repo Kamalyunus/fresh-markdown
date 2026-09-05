@@ -7,7 +7,7 @@ import pytest
 
 from conftest import decision_event, outcome_event
 from events.store import EventStore
-from pipeline import update as upd
+from daily import update as upd
 
 
 def _store(cfg, tmp_path):
@@ -43,7 +43,7 @@ def test_duplicate_ids_written_by_a_foreign_producer_are_counted_on_load(cfg, tm
     assert store.duplicate_counts["outcome"] == 2
 
     # the gate reads it: 4 duplicates over 2 outcome rows is far past 1%
-    from pricing.posterior import PosteriorStore
+    from engine.posterior import PosteriorStore
     posterior = PosteriorStore.initialise(
         cfg, {"vegetables": {"mean": -1.0, "std": 0.6}}, {"vegetables": 10**6},
         path=str(tmp_path / "posterior.json"))
