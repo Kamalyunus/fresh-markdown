@@ -841,6 +841,12 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             "mean_recommended_discount": round(tot["rec_disc"] / n_dec, 4),
             "mean_legacy_discount": round(tot["leg_disc"] / n_dec, 4),
             "share_hours_differing": round(tot["differs"] / n_dec, 4),
+            # every hour re-anchors on LEGACY's price, so a differing hour is
+            # one where the agent would cut below the price in force; the
+            # agent's own within-episode steps are the backtest's
+            # intra_episode_moves (shadow never walks its own path)
+            "share_hours_recommending_deeper_than_legacy_price": round(
+                tot["differs"] / n_dec, 4),
         },
         "realised_vs_predicted_sold_ratio_at_legacy_price": round(drift_ratio, 4)
             if drift_ratio else None,

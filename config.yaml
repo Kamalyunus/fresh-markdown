@@ -83,6 +83,7 @@ tuning:                                # SET  gates pipeline.tune checks before 
   calibration_band_max_half_width: 0.10         # SET BY OWNER  ceiling; tune may only tighten
   guardrail_inert_floor_multiple: 3             # SET  a stop threshold above this multiple of its noise floor is LIKELY INERT
   bounded_step_consistent_band: [0.7, 1.4]      # SET  std-surprise band inside which the two learning rails are called CONSISTENT
+  cost_ratio_bands: [0.4, 0.6]                  # SET  cost/price cut points for the backtest's within-episode move table (the deepening bar falls with cost)
 
 posterior:
   min_episodes_per_week_for_cell: 150  # SET  below this, fall back to the global cell

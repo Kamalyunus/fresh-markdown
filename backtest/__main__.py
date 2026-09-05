@@ -97,7 +97,16 @@ def main():
           f"{gap['dp_il_reduction_pct_of_legacy']:.1%} (like-for-like)"
           if gap["dp_il_reduction_pct_of_legacy"] is not None else
           "model world     : like-for-like gap unavailable")
-    print(f"pct_dp_deepened             : {pol['pct_dp_deepened']:.1%}")
+    print(f"pct_dp_deepened             : {pol['pct_dp_deepened']:.1%}  "
+          "(episode MEAN deeper than legacy's)")
+    mv = pol["intra_episode_moves"]
+    print(f"moves after entry (DP arm)  : {mv['overall']['share_episodes_with_a_step']:.1%} "
+          f"of episodes step at least once, {mv['overall']['mean_steps_per_episode']:.2f} "
+          f"steps/episode (legacy {mv['overall']['legacy_share_episodes_with_a_step']:.1%})")
+    for band, b in mv["by_cost_ratio_band"].items():
+        print(f"    {band:<22s} {b['share_episodes_with_a_step']:>6.1%} step, "
+              f"{b['share_episodes_eps_above_threshold']:>6.1%} of episodes above the bar "
+              f"({b['episodes']:,} episodes)")
     if tau:
         print(f"tau_initial (currency)      : {tau['tau_initial']}  "
               f"(q{tau['cost_distribution_quantile']:.2f} of Q-spread; "

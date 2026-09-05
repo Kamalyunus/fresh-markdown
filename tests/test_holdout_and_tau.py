@@ -1185,6 +1185,9 @@ def test_the_backtest_slices_to_pre_launch_before_anything_reads_the_frame(
     monkeypatch.setattr(bt, "policy_replay", lambda *a, **k: (
         {"actual_il": 1.0, "actual_il_pct": 0.1, "legacy_model_il": 1.0,
          "dp_il": 1.0, "pct_dp_deepened": 0.0,
+         "intra_episode_moves": {"overall": {
+             "share_episodes_with_a_step": 0.0, "mean_steps_per_episode": 0.0,
+             "legacy_share_episodes_with_a_step": 0.0}, "by_cost_ratio_band": {}},
          "policy_gap_like_for_like": {"dp_il_reduction_pct_of_legacy": None}},
         pd.DataFrame(), SpreadLedger()))
     monkeypatch.setattr(bt, "derive_tau_initial", lambda *a, **k: None)

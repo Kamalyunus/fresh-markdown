@@ -63,6 +63,11 @@ each decision.
    `calibration_gate_value` against `calibration_gate_band`. Out of band is
    a drift/staleness reading — the decision tree in `docs/design.md` §9.2
    separates wobble from trend. WARN in `status`, never a launch blocker.
+   While there, read `policy_deltas.intra_episode_moves`: how often the
+   agent steps after entry on its own path, by cost band, against the share
+   of episodes above the deepening bar. Near zero with the bar unreached is
+   enter-and-hold at the launch prior (design §5.7), not a pinned price;
+   `pct_dp_deepened` answers a different question (episode mean vs legacy).
 2. **Prior gate.** `artifacts/prior.json`, in this order:
    `wrong_sign_categories` → per-category `mean/std/std_basis` →
    `holdout_comparison` (read `information_available_per_row` first). There

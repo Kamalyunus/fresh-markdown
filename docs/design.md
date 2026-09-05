@@ -512,7 +512,20 @@ entry choice and from not ramping; the clearance loss and scrap pressure
 follow from this and are expected; **widening the action set cannot change
 it** — only a posterior moving past the bar will, which is what exploration
 is funded to find out (`intra_episode_deepening` in the backtest tracks the
-gap).
+gap). Enter-and-hold is a *result*, never a rule: every hour is a fresh
+solve from the actual shelf with the price in force as the anchor, and
+holding wins only while no deeper tier has a lower expected loss. The
+backtest measures it directly as `intra_episode_moves` — the share of
+episodes with at least one step on the DP arm's **own** path and the mean
+steps per episode, overall and by cost-ratio band (`tuning.cost_ratio_bands`;
+the bar falls as cost rises, so high-COGS shelves step on day one where
+mid-cost ones hold), beside the legacy ramp's share and the share of
+episodes above the bar. `pct_dp_deepened` is a different question — is the
+DP's episode *mean* deeper than legacy's — and reads zero whenever the agent
+is shallower on average, whatever it does within the episode. Shadow cannot
+measure the agent's own steps: it re-anchors every hour on the legacy price
+in force, so its `share_hours_recommending_deeper_than_legacy_price` is the
+share of hours it would cut below the shelf's actual price.
 
 Enter-and-hold does not starve the learner — the opposite. Information is
 `mu · L² · r/(r+mu)` with `L` the log price ratio **against the

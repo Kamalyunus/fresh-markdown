@@ -611,6 +611,7 @@ def _replay_one(e, cfg):
     }
     for name, arm in arms.items():
         row.update({
+            f"{name}_steps": intra_episode_steps(arm["path"]),
             f"{name}_sold_units": float(arm["sold"]),
             f"{name}_leftover_units": float(arm["left"]),
             f"{name}_scrap_units": float(arm["left"] + arm["shrink"]),
@@ -637,6 +638,44 @@ def _replay_one(e, cfg):
         "original_price": p0, "cost": cost, "d_ref": e["d_ref"],
     })
     return row, spreads
+
+
+def intra_episode_steps(path):
+    """How many times an arm's price moved AFTER entry: hours where the
+    discount in force deepened against the previous hour (monotone, so a
+    move is always a deepening; None hours -- empty shelf -- are skipped)."""
+    seen = [d for d in path if d is not None]
+    return int(sum(1 for a, b in zip(seen, seen[1:]) if b > a + dp_mod.TIER_EPS))
+
+
+def intra_episode_moves(ep, cfg):
+    """Does the agent move after entry, and where? Overall and by cost-ratio
+    band (the deepening bar (1-d)/(gamma-d) falls as cost rises, so the
+    bands are where a difference should show). `pct_dp_deepened` compares
+    episode MEANS against legacy and says nothing about this."""
+    edges = list(cfg["tuning"]["cost_ratio_bands"])
+    gamma = ep.cost / ep.original_price
+    labels = ([f"cost_ratio<{edges[0]}"]
+              + [f"{a}<=cost_ratio<{b}" for a, b in zip(edges, edges[1:])]
+              + [f"cost_ratio>={edges[-1]}"])
+    band = pd.cut(gamma, [-np.inf] + edges + [np.inf], right=False, labels=labels)
+
+    def summary(g):
+        return {"episodes": int(len(g)),
+                "share_episodes_with_a_step": round(float((g.dp_steps > 0).mean()), 4),
+                "mean_steps_per_episode": round(float(g.dp_steps.mean()), 3),
+                "legacy_share_episodes_with_a_step": round(
+                    float((g.legacy_model_steps > 0).mean()), 4),
+                "share_episodes_eps_above_threshold": round(
+                    float((g.eps.abs() > g.deepening_threshold).mean()), 4)}
+
+    return {"overall": summary(ep),
+            "by_cost_ratio_band": {str(k): summary(g)
+                                   for k, g in ep.groupby(band, observed=True)},
+            "note": ("a step is an hour whose discount deepened against the "
+                     "previous hour on the arm's OWN path; every hour is a "
+                     "fresh solve, so zero steps means holding won every "
+                     "hour, not that the price was pinned (design 5.7)")}
 
 
 def _dp_arm(e, cfg, eps_belief, eps_world=None):
@@ -792,6 +831,9 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
                      "elasticity; only the posterior moving past the bar "
                      "changes that, widening the action set cannot."),
         },
+        # the direct measurement of enter-and-hold: steps on the DP arm's own
+        # path, overall and where cost makes the bar reachable
+        "intra_episode_moves": intra_episode_moves(ep, cfg),
         # like-for-like: both policies under the SAME demand model, so bias
         # cancels; actual_* vs model figures are fidelity, not policy
         "policy_gap_like_for_like": {

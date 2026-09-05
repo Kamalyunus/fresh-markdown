@@ -917,3 +917,51 @@ def test_ref_rate_features_do_not_depend_on_the_frames_index_labels(cfg):
     assert second.notna().all()
     anchor_first = out[(out.episode_id == "1|F|0") & (out.hour_of_day < 12)]
     assert second.iloc[0] == pytest.approx(anchor_first.units_sold.mean())
+
+
+def test_within_episode_moves_are_counted_on_the_arms_own_path(cfg):
+    """`pct_dp_deepened` compares episode MEANS against legacy and says
+    nothing about whether the agent moves after entry. `intra_episode_moves`
+    counts steps on the DP arm's own path -- a fresh solve every hour, so a
+    high-cost shelf (low deepening bar) steps where a mid-cost one holds."""
+    import numpy as np
+    from backtest.replay import intra_episode_steps, intra_episode_moves, _episode_frame, _replay_one
+
+    # a step is a deepening between consecutive priced hours; empty-shelf
+    # hours (None) are skipped, and a flat path has none
+    assert intra_episode_steps((0.10, 0.10, 0.15, None, 0.15, 0.20)) == 2
+    assert intra_episode_steps((0.25,) * 6) == 0
+
+    def episode(eid, cost):
+        g = pd.DataFrame({
+            "episode_id": [eid] * 6, "date": ["2026-05-01"] * 6,
+            "hour_of_day": [9, 10, 11, 12, 13, 14],
+            "total_discount": [0.25] * 6, "original_price": [10_000.0] * 6,
+            "cost": [cost] * 6, "d_ref": [0.25] * 6,
+            "starting_inventory": [12, 12, 12, 12, 12, 12],
+            "units_sold": [0] * 6, "mu_ref_hat": [0.4] * 6,       # slow shelf
+            "r": [3.0] * 6, "eps": [-2.0] * 6, "is_observed": [True] * 6,
+            "sku_id": [7] * 6, "fc": ["FC1"] * 6, "category": ["FRUIT"] * 6,
+        })
+        g["ending_inventory"] = g.starting_inventory - g.units_sold
+        return _episode_frame(g)
+
+    rows = [_replay_one(episode(f"e{i}", cost), cfg)[0]
+            for i, cost in enumerate((3000.0, 5000.0, 7000.0, 7500.0))]
+    ep = pd.DataFrame(rows)
+    assert {"dp_steps", "legacy_model_steps"} <= set(ep.columns)
+    out = intra_episode_moves(ep, cfg)
+    bands = out["by_cost_ratio_band"]
+    assert set(bands) == {"cost_ratio<0.4", "0.4<=cost_ratio<0.6", "cost_ratio>=0.6"}
+    # the summary is arithmetic over the rows it was given
+    assert out["overall"]["episodes"] == 4
+    assert out["overall"]["mean_steps_per_episode"] == pytest.approx(ep.dp_steps.mean(), abs=1e-3)
+    assert out["overall"]["share_episodes_with_a_step"] == pytest.approx((ep.dp_steps > 0).mean(), abs=1e-4)
+    # the flat legacy schedule never steps; the deepening bar is read per band
+    assert out["overall"]["legacy_share_episodes_with_a_step"] == 0.0
+    assert bands["cost_ratio>=0.6"]["share_episodes_eps_above_threshold"] == 1.0
+    assert bands["0.4<=cost_ratio<0.6"]["share_episodes_eps_above_threshold"] == 0.0
+    # and the high-cost shelves, above the bar, step at least as often as the
+    # mid-cost ones below it (a fresh solve every hour, not a pinned price)
+    assert bands["cost_ratio>=0.6"]["mean_steps_per_episode"] >= \
+        bands["0.4<=cost_ratio<0.6"]["mean_steps_per_episode"]

@@ -319,6 +319,7 @@ Every paste has one source and one checker:
 | elasticity prior, dispersion | §5.5, §5.6; rules 1a, 2, 3, 7 |
 | DP, pricing, exploration, tau, budget | §5.7, §5.8, §5.10 |
 | backtest, replay, tau derivation | §5.14, §9; rule 17 |
+| "does the agent move after entry?" | §5.7 `intra_episode_moves` (steps on the DP arm's own path, by cost band) — NOT `pct_dp_deepened`, which compares episode means with legacy; shadow re-anchors on legacy's price and cannot measure it |
 | shadow phase | §5.13 (holdout default, sampling caveats, tau₀ derivation) |
 | posterior, update, operator gate | §5.9, §5.11 |
 | monitoring, guardrails, stop conditions, the pilot read | §5.12, §11, §12 |
