@@ -73,9 +73,6 @@ KEYS = {
     ("monitoring", "stop_conditions", "margin_deterioration_pct"):
         {"anchor": "    margin_deterioration_pct:", "measured": False,
          "rerun": "thresholds"},
-    ("ab_test", "min_detectable_effect_pct"):
-        {"anchor": "  min_detectable_effect_pct:", "measured": False,
-         "rerun": "none"},
     ("baseline_model", "calibration_gate_band"):
         {"anchor": "  calibration_gate_band:", "measured": True, "rerun": "none"},
 }
@@ -118,7 +115,7 @@ def stale_keys(report, moved):
 # config keys no report reads: runtime-only, paths, the driver's own knobs
 INERT_PREFIXES = ("meta.", "events.", "artifacts.", "tuning.", "assurance.",
                   "data.launch_date", "data.split_manifest_path",
-                  "ab_test.active", "learning.update_cadence_days",
+                  "learning.update_cadence_days",
                   "monitoring.alert_posterior_std_flat_days",
                   "posterior.path", "posterior.prior.path",
                   "baseline_model.model_path", "baseline_model.feature_schema_path",
@@ -408,8 +405,8 @@ def _derived(cfg, backtest, thresholds):
             "thresholds.bounded_step_recommendation + backtest.policy_deltas."
             "step_sensitivity"))
 
-    # guardrail stops: the floor IS the measurement -- 3-sigma of the control
-    # arm's own noise. Setting them at it is what the report recommends.
+    # guardrail stops: the floor IS the measurement -- 3-sigma of the series'
+    # own trailing noise. Setting them at it is what the report recommends.
     gr = (thresholds or {}).get("guardrail_threshold_recommendation") or {}
     for name, block in gr.items():
         if not isinstance(block, dict):
@@ -445,7 +442,7 @@ def _derived(cfg, backtest, thresholds):
         out.append(_finding(
             path, PASTE, OK if ok else ACT, cur, floor,
             f"{block.get('binding_label', '3-sigma')} "
-            f"{block.get('binding_basis', 'control_arm')} noise floor -- a "
+            f"{block.get('binding_basis', 'trailing')} noise floor -- a "
             "stop below it fires on noise. Raise it later if the pilot wants "
             "a looser trip, but never below this",
             f"thresholds.guardrail_threshold_recommendation.{name}"))
@@ -507,34 +504,6 @@ def _business(cfg, thresholds):
             "max_mean_step exceeds the launch prior std, so no shrink value "
             "makes the rails agree -- the step itself is the thing to revisit",
             "thresholds.bounded_step_recommendation.median_launch_std"))
-    ab = (thresholds or {}).get("ab_duration") or {}
-    by = ab.get("by_duration") or {}
-    cur = _get(cfg, ("ab_test", "min_detectable_effect_pct"))
-    if by:
-        # the achievable FRONTIER, not the --mde flag echoed back
-        achievable = sorted(
-            ((v.get("detectable_mde_rel"), k) for k, v in by.items()
-             if v.get("detectable_mde_rel") is not None))
-        best, best_dur = achievable[0] if achievable else (None, None)
-        target = ab.get("target_mde_rel")
-        passing = [k for k, v in by.items()
-                   if str(v.get("meets_target")).lower() == "true"]
-        frontier = ", ".join(f"{d} -> {m}" for m, d in achievable[:5])
-        out.append(_finding(
-            ("ab_test", "min_detectable_effect_pct"), OWNER,
-            OK if cur is not None else ACT, cur, best,
-            (f"detectable by duration: {frontier}. "
-             + (f"The {target} target is met by {', '.join(sorted(passing))}."
-                if passing else
-                f"NO duration reaches the {target} target -- the best the "
-                f"extract can resolve is {best} at {best_dur}.")
-             + " NOT measurable: the data says what is DETECTABLE, never what "
-               "size of effect is worth acting on. Set the smallest effect the "
-               "business would act on; if that is below the frontier above, "
-               "this A/B cannot resolve it at any duration and the honest "
-               "options are a longer pilot, more traffic, or a different "
-               "question"),
-            "thresholds.ab_duration.by_duration"))
     return out
 
 

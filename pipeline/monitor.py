@@ -12,7 +12,6 @@ import json
 import numpy as np
 import pandas as pd
 
-from common.ab import arm
 from common.config import load_config, deff_from_episodes
 from common.io import write_json
 from events.store import EventStore
@@ -32,12 +31,10 @@ def event_frame(decisions, outcomes, cfg):
     """Matched (decision, outcome) pairs as HOURLY rows in the prepared-frame
     vocabulary, so metrics.episode_economics is the one episode-grain
     definition on live events too -- floor and trigger measure one thing."""
-    alloc = cfg["ab_test"]["allocation"]
     return pd.DataFrame([{
         "episode_id": d["episode_id"], "date": decision_day(d),
         "hour_of_day": d["hour_of_day"],
         "category": d.get("category"), "fc": d["fc"], "sku_id": d["sku_id"],
-        "arm": arm(d["sku_id"], d["fc"], alloc),
         "original_price": d["original_price"], "offered_price": o["applied_price"],
         "cost": d["cost"], "starting_inventory": o["starting_inventory"],
         "units_sold": o["units_sold"], "ending_inventory": o["ending_inventory"],
@@ -63,7 +60,6 @@ def business_metrics(decisions, outcomes, cfg):
         "il_pct_aggregate": cut(ep),
         "il_pct_by_category": {k: cut(g) for k, g in ep.groupby("category")},
         "il_pct_by_fc": {k: cut(g) for k, g in ep.groupby("fc")},
-        "il_pct_by_arm": {k: cut(g) for k, g in ep.groupby("arm")},
         "sell_through": round(float(ep.units_sold.sum() / units), 4)
             if units > 0 else None,
         "waste_units": int(ep.scrap.sum()),
@@ -81,57 +77,26 @@ def business_metrics(decisions, outcomes, cfg):
 def guardrail_series(decisions, outcomes, cfg):
     """Daily scrap and realised-margin rates plus the 15.4 deterioration
     series, on metrics.daily_rates -- the series the noise floors are
-    measured on. Basis: the trailing window mean, unless `ab_test.active`
-    says an A/B is running AND both arms carry data. Before the A/B every
-    priced unit is system-priced and merely hash-LABELLED into arms, so an
-    arm comparison there is treatment-vs-treatment: a catalogue-wide
-    deterioration cancels exactly and the guardrail cannot fire (design 12)."""
+    measured on. Basis: the trailing window mean of the same system-priced
+    episodes (there is no control arm; the pilot runs on the episodes
+    engineering supplies)."""
     df = event_frame(decisions, outcomes, cfg)
     if df.empty:
         return {"note": "no finalized outcomes yet"}
     ep, _ = metrics.settled(metrics.episode_economics(df))
     overall = metrics.daily_rates(ep)
-    by_arm = {a: metrics.daily_rates(g) for a, g in ep.groupby("arm")}
     window = cfg["monitoring"]["guardrail_noise_window_days"]
-
     smoothing = cfg["monitoring"]["stop_conditions"]["deterioration_smoothing_days"]
-    ab_active = bool(cfg["ab_test"].get("active"))
 
     def deterioration(metric, worse_when_higher, smooth, dev_basis):
-        """Deterioration against baseline, positive = worse. Both series are
-        averaged over `smooth` days first, then compared via the shared
-        common.guardrail.deviation -- floor and trigger MUST use the same
-        smoothing AND basis, so the comparison lives in one function."""
-        treat = by_arm.get("treatment")
-        ctrl = by_arm.get("control")
-        # The control-arm basis needs a control arm that is NOT system-priced.
-        # `arm()` labels every priced SKU x FC by hash, so before the A/B both
-        # labels are present and both are treated: the comparison is
-        # treatment-vs-treatment and a catalogue-wide scrap doubling is a
-        # deviation of exactly ZERO. The guardrail was structurally inert for
-        # the whole pilot. `ab_test.active` is the only thing that can say
-        # which regime we are in -- it cannot be inferred from the labels.
-        note = None
-        if ab_active and treat is not None and ctrl is not None:
-            t = guard.smooth(treat[metric], smooth)
-            c = guard.smooth(ctrl[metric], smooth)
-            common = t.index.intersection(c.index)
-            t, c, basis = t.loc[common], c.loc[common], "control_arm"
-        else:
-            t = guard.smooth(overall[metric], smooth)
-            c = t.rolling(window, min_periods=window).mean().shift(smooth)
-            basis = f"trailing_{window}d_mean"
-            if ab_active and ctrl is None:
-                # control units are legacy-priced, so they emit no decisions
-                # and never reach the event store -- say so rather than let a
-                # silent fallback read as an arm comparison
-                note = ("ab_test.active is true but the event store holds no "
-                        "control-arm rows: control units are not system-priced, "
-                        "so their outcomes never enter it. Comparing against "
-                        "the trailing mean instead -- a genuine arm comparison "
-                        "needs control outcomes from the feed.")
+        """Deterioration against the trailing mean, positive = worse. Both
+        series are averaged over `smooth` days first, then compared via the
+        shared common.guardrail.deviation -- floor and trigger MUST use the
+        same smoothing AND basis, so the comparison lives in one function."""
+        t = guard.smooth(overall[metric], smooth)
+        c = t.rolling(window, min_periods=window).mean().shift(smooth)
         dev = guard.deviation(t, c, worse_when_higher, dev_basis)
-        return dev.replace([np.inf, -np.inf], np.nan).dropna(), basis, note
+        return dev.replace([np.inf, -np.inf], np.nan).dropna(), f"trailing_{window}d_mean"
 
     out = {"days_observed": int(len(overall)),
            "daily_scrap_rate": {str(k): round(float(v), 6)
@@ -141,11 +106,9 @@ def guardrail_series(decisions, outcomes, cfg):
     for metric, worse_high, key in (("scrap_rate", True, "scrap"),
                                     ("margin_rate", False, "margin")):
         dev_basis = guard.basis_for(key)
-        dev, basis, note = deterioration(metric, worse_high, smoothing[key],
-                                         dev_basis)
+        dev, basis = deterioration(metric, worse_high, smoothing[key], dev_basis)
         out[f"{key}_deterioration"] = {
             "basis": basis,
-            **({"basis_note": note} if note else {}),
             "deterioration_basis": dev_basis,
             # a reader cannot tell 0.15 relative from 0.15 pp by looking
             "units": guard.units_of(dev_basis),

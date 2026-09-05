@@ -262,20 +262,6 @@ def test_the_artifact_fits_read_the_config_and_the_dp_side_does_not():
         "the held-out comparison must not score the window the prior was fitted on"
 
 
-def test_il_is_reported_on_both_bases():
-    """One is what the business loses; the other is what the MVP can address.
-    Quoting either alone was how a sub-population figure became the headline."""
-    from common import metrics
-    d = pd.concat([_frame().assign(dp_eligible=True),
-                   _frame(episode_id="x").assign(dp_eligible=False)])
-    out = metrics.il_pct(d.assign(category="VEG", fc="F1",
-                                  sku_id=lambda f: f.episode_id))
-    by = out["by_population"]
-    assert by["integrity"]["episodes"] == 2
-    assert by["dp_eligible"]["episodes"] == 1
-    assert "population_note" in out
-
-
 def test_the_cost_floor_is_not_a_population_choice():
     """`dp_eligible` selects rows. It must never be the thing that keeps a
     below-cost price out of the action set -- that is structural."""
@@ -918,26 +904,3 @@ def test_a_restock_is_detected_from_the_source_convention():
     steep.loc[steep.hour_of_day > 15, "ending_inventory"] = 0
     steep.loc[steep.hour_of_day > 15, "units_sold"] = 0
     assert episode_flow(steep).arrived.eq(0).all()
-
-
-def test_ab_duration_blocks_take_whole_episodes(cfg, monkeypatch):
-    """Every other cut in the repo is episode-scoped. The A/B block cut was
-    by row date, so a cross-midnight episode at a block edge was split and
-    il_pct read a truncated frame whose last row was not the close."""
-    from bootstrap import derive_thresholds as dt
-
-    seen = []
-    monkeypatch.setattr(dt, "il_pct", lambda block: (
-        seen.append(sorted(block.episode_id.unique())) or
-        {"il_pct_ratio_se_clustered": 1.0, "il_pct_aggregate": 0.1}))
-    d = pd.DataFrame({
-        "episode_id": ["a", "a", "b", "b", "c"],
-        # `a` opens on the last day of block 1 and closes in block 2
-        "date": ["2026-03-07", "2026-03-08", "2026-03-02", "2026-03-02",
-                 "2026-03-15"],
-        "hour_of_day": [23, 0, 9, 10, 9],
-    })
-    c = dict(cfg, ab_test=dict(cfg["ab_test"], candidate_durations_weeks=[1],
-                               min_episodes_per_block=1))
-    dt.empirical_se_by_duration(d, c)
-    assert seen == [["a", "b"], ["c"]], seen

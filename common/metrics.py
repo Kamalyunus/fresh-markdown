@@ -1,15 +1,12 @@
-"""common.metrics -- the two shared measurements the pipeline consumes.
+"""common.metrics -- the shared measurements the pipeline consumes.
 
-Both were phase-0 measurements (m6, m10) and outlived it: phase 0 answered
-"is this problem tractable at all", a launch question asked once, and was
-removed with the rest of the descriptive layer. These two are different --
-they are read on every run by code that decides something:
-
-  il_pct                  -> bootstrap.derive_thresholds (A/B power)
+  episode_economics / settled / daily_rates -> every IL, scrap and margin
+      figure (guardrail floors, live guardrail, business metrics, shadow's
+      budget base)
   fidelity_decomposition  -> backtest.replay (the level gate value)
 
-They live here rather than in either caller because both callers need them
-and a second copy would drift.
+They live here rather than in any caller because several need them and a
+second copy would drift.
 """
 
 import numpy as np
@@ -17,13 +14,13 @@ import pandas as pd
 
 from common import episodes
 
-ECON_CARRY = ("category", "fc", "sku_id", "arm", "dp_eligible")
+ECON_CARRY = ("category", "fc", "sku_id", "dp_eligible")
 
 
 def episode_economics(d):
     """THE episode-grain frame every IL, scrap and margin consumer reads:
-    il_pct, the guardrail noise floors, the live guardrail series and the
-    business metrics. Five hand-synced copies of this groupby existed, kept
+    the guardrail noise floors, the live guardrail series and the business
+    metrics. Five hand-synced copies of this groupby existed, kept
     equal by comments saying "definitions match exactly".
 
     `d` is hourly in the prepared-frame vocabulary: episode_id, date,
@@ -73,73 +70,6 @@ def daily_rates(ep):
     day["scrap_rate"] = day.scrap / day.opening
     day["margin_rate"] = day.margin / day.revenue.replace(0, np.nan)
     return day
-
-
-def il_pct(d):
-    """IL% under legacy policy. Sets A/B power (design 2.2-2.3). Denominator
-    is original_price x units_sold -- ENDOGENOUS. Zero-sale episodes are
-    handled only by ratio-of-sums aggregation, never by averaging
-    per-episode ratios (undefined there)."""
-    ep, excluded = settled(episode_economics(d))
-
-    zero_denom_share = float((ep.denom <= 0).mean())
-
-    def ratio_of_sums(g):
-        den = g.denom.sum()
-        return round(float(g.il.sum() / den), 6) if den > 0 else None
-
-    # A/B unit is SKU x FC; ratio estimator, never a mean of unit ratios
-    unit = ep.groupby(["sku_id", "fc"]).agg(il=("il", "sum"), denom=("denom", "sum"))
-    unit_nonzero = unit[unit.denom > 0].copy()
-    unit_nonzero["il_pct"] = unit_nonzero.il / unit_nonzero.denom
-
-    # Linearised (delta-method) variance of the ratio estimator, clustered on unit.
-    # Var(R) ~ (1/ (n * Dbar^2)) * Var(il_i - R * denom_i)
-    R = float(unit.il.sum() / unit.denom.sum()) if unit.denom.sum() > 0 else np.nan
-    n = len(unit)
-    dbar = float(unit.denom.mean())
-    resid = unit.il - R * unit.denom
-    var_ratio = (float(resid.var(ddof=1)) / (n * dbar ** 2)) if n > 1 and dbar > 0 else np.nan
-
-    # TWO baselines: "integrity" is what the business loses; "dp_eligible" is
-    # what the MVP can address and the only valid policy/A-B comparison
-    dp = ep[ep.dp_eligible] if "dp_eligible" in ep else ep
-    by_population = {
-        "integrity": {"episodes": int(len(ep)), "il_pct": ratio_of_sums(ep),
-                      "il_absolute": round(float(ep.il.sum()), 1)},
-        "dp_eligible": {"episodes": int(len(dp)), "il_pct": ratio_of_sums(dp),
-                        "il_absolute": round(float(dp.il.sum()), 1)},
-    }
-
-    return {
-        "denominator_definition": "original_price * units_sold (endogenous)",
-        "il_pct_aggregate": ratio_of_sums(ep),
-        "il_pct_denominator_total": float(ep.denom.sum()),
-        "il_absolute_total": float(ep.il.sum()),
-        "by_population": by_population,
-        "population_note": (
-            "il_pct_aggregate is the INTEGRITY population -- what the business "
-            "loses. by_population.dp_eligible is what this MVP can address, and "
-            "is the figure the A/B and any policy comparison must use. Quoting "
-            "the wrong one overstates or understates the addressable loss."),
-        "share_episodes_zero_denominator": round(zero_denom_share, 4),
-        "scrap_basis": excluded,
-        "by_category": {k: {"il_pct": ratio_of_sums(g),
-                            "denominator": float(g.denom.sum()),
-                            "il_absolute": float(g.il.sum())}
-                        for k, g in ep.groupby("category")},
-        "by_fc": {k: {"il_pct": ratio_of_sums(g), "denominator": float(g.denom.sum())}
-                  for k, g in ep.groupby("fc")},
-        "sku_fc_units": int(n),
-        "sku_fc_units_zero_denominator": int((unit.denom <= 0).sum()),
-        "il_pct_ratio_estimator": round(R, 6) if R == R else None,
-        "il_pct_ratio_se_clustered": round(float(np.sqrt(var_ratio)), 6)
-            if var_ratio == var_ratio else None,
-        "il_pct_dispersion_across_units": round(float(unit_nonzero.il_pct.std(ddof=1)), 6)
-            if len(unit_nonzero) > 1 else None,
-        "note": "A/B power uses il_pct_ratio_se_clustered, not the per-unit dispersion. "
-                "Per-episode ratios are undefined for zero-sale episodes and are never used.",
-    }
 
 
 

@@ -103,7 +103,7 @@ And the standing prohibitions:
   - scrap, IL, margin at episode grain — `common.metrics.episode_economics`
     (+ `settled`, `daily_rates`) over `common.episodes.scrap_units`;
     live events enter it through `pipeline.monitor.event_frame`. The
-    floors, the live guardrail, `il_pct`, the business metrics and
+    floors, the live guardrail, the business metrics and
     shadow's budget base all read this one frame
   - decision↔outcome pairing and the trading day —
     `events.pairs.match_pairs` (`learnable=` excludes failed pushes),
@@ -173,7 +173,7 @@ phase — what runs, which config keys move, and who moves them:
 | tune | `tune --apply`, then `bootstrap.run --check-only`, until nothing is left to paste | `rho`, `calibration_fit_trailing_weeks`, `calibration_gate_band`, `information_increment`, `delta_min_log_bias` | the process, from the report that derives each |
 | posterior | `init_posterior`, once | none | — |
 | shadow | `pipeline.shadow` on the hold-out, every episode; then `tune --apply` | `tau_initial` | the process, from `shadow.tau_initial_derivation`. The forced rate is the budget's: to change it the owner reads `shadow.exploration_budget_sweep` (forced rate, spend, move, `information_rel` per `budget_share_of_il` × `delta_min_bias_multiple`), sets the pair, and shadow re-runs once |
-| owner | STOP | `scrap_deterioration_pct`, `margin_deterioration_pct`, `min_detectable_effect_pct`, the two learning rails, `ab_test.active` | you, from `thresholds.json` (advance prints floor, verdict, source) |
+| owner | STOP | `scrap_deterioration_pct`, `margin_deterioration_pct`, the two learning rails | you, from `thresholds.json` (advance prints floor, verdict, source) |
 | launch | STOP, then `--fit-calibration` + `seal` | `data.launch_date` | you, on launch day |
 | daily | ingest, `update --calibrate-tau`, monitor, assurance, export, status; STOP at `update --apply` | none | you approve each update |
 
@@ -284,7 +284,7 @@ is dropped (rule 14). Resolve via `prepare_data.population(d, cfg, which)`:
 | --- | --- |
 | baseline, `r`, `rho`, prior, level factors | `baseline_model.train_population` (default `eligible`) |
 | `m1` / gate 1 | `integrity`, always |
-| DP, backtest, shadow, calibration gate, A/B | `dp_eligible`, always (passed explicitly) |
+| DP, backtest, shadow, calibration gate | `dp_eligible`, always (passed explicitly) |
 
 The waterfall (13 rows, `artifacts/split_manifest.json`) records rows,
 episodes and COGS after every stage; `kind: hard_drop` drops, the two
@@ -303,8 +303,7 @@ Every paste has one source and one checker:
 | `calibration_fit_trailing_weeks`, `information_increment`, `calibration_gate_band` | the REPORT that derives each (`tune` names it) | `config mirrors reports` — these ship fixture values and cannot be null, so the check is the only thing between a pulled repo and a foreign number |
 | `exploration.tau_initial` | `reports/shadow.json` → `tau_initial_derivation` (backtest = cross-check only) | `tau_provenance_error` — shadow refuses a stale paste |
 | `exploration.delta_min_log_bias` | `tune` from `backtest.fidelity`, PER CATEGORY as a one-line mapping (own log ratio floored by MAE@W and the gate half-width; `_default` for unseen categories) — null = no floor, the fixture never ships a number | `config mirrors reports` |
-| `scrap/margin_deterioration_pct`, `min_detectable_effect_pct` | OWNER, from `reports/thresholds.json` — `TOO TIGHT`, `BLOCKED` and `LIKELY INERT` are all blocking | `guardrail floors` |
-| `ab_test.active` | OWNER — `false` until the A/B starts; the arm labels cannot say which regime is in force | `monitor.*_deterioration.basis` |
+| `scrap/margin_deterioration_pct` | OWNER, from `reports/thresholds.json` (trailing-mean floor) — `TOO TIGHT`, `BLOCKED` and `LIKELY INERT` are all blocking | `guardrail floors` |
 | `data.launch_date` | OWNER — null until launch day; once set, `--fit-calibration` schedules through the latest data (the weekly cron) while every sealed fit keeps its pre-launch scope. Never move `split.test_end` for this | `launch blockers`; `calibration_schedule_current` on every `--apply` |
 
 ## Where to look
@@ -318,7 +317,7 @@ Every paste has one source and one checker:
 | backtest, replay, tau derivation | §5.14, §9; rule 17 |
 | shadow phase | §5.13 (holdout default, sampling caveats, tau₀ derivation) |
 | posterior, update, operator gate | §5.9, §5.11 |
-| monitoring, guardrails, stop conditions, A/B | §5.12, §11, §12 |
+| monitoring, guardrails, stop conditions, the pilot read | §5.12, §11, §12 |
 | events, integration, quarantine | `docs/event_contract.html`; `events/store.py` |
 | provenance, seal, freshness | §5.14; rule 18 |
 | docs | `docs/maintaining_docs.md` |

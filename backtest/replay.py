@@ -1,7 +1,7 @@
 """backtest -- offline replay through the production decision path (design.md 5.14).
 
 Jobs: baseline fidelity (9.3 gate), tau_initial derivation (12.3), DP sanity.
-Replay output is never evidence the policy works; the A/B is that evidence.
+Replay output is never evidence the policy works; the pilot's own outcomes are.
 Deterministic: transitions use E[min(D, q)] under the truncated NB. Fidelity
 and policy blocks are never summed; IL% uses the section 3.2 denominator.
 """

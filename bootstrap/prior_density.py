@@ -101,7 +101,7 @@ def deflation_deff(rows, model, cfg):
     and deff exactly 1.0 for every category, so design 5.6's deflation could
     never engage and the pooled shrinkage ran on undeflated spans. The
     correlation that does exist between entry rows is the same unit recurring
-    across days: the same cluster the A/B randomises on, and the one that
+    across days: the unit the pilot's outcomes recur on, and the one that
     does not average away.
     """
     resid = rows.units_sold.to_numpy() - model.predict_mu_ref(rows)

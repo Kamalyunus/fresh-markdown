@@ -249,6 +249,17 @@ now. Dates are owner sign-off, 2026-08.
   Where a behaviour exists it is tested by calling the function; a source
   assertion is kept only for an architecture ban no behaviour can express.
 
+- **The A/B module, removed (owner, 2026-09-05).** Hash-assigned arms,
+  the empirical MDE-by-duration table, the control-arm guardrail basis and
+  `ab_test.active` all existed for a randomised readout the pilot will not
+  run: the system prices every episode engineering supplies, sampled across
+  FCs and categories, and is read pre/post on the same units (design §11).
+  The control-arm basis had also been structurally inert before any A/B
+  (both hash-labelled halves were system-priced, so a catalogue-wide
+  deterioration cancelled to exactly zero); the trailing-mean basis is the
+  one the floors are measured on and the only one left. Exploration's
+  evidence is unaffected: the forced moves are randomised within the pilot.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,

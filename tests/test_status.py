@@ -258,10 +258,9 @@ def test_a_measured_value_that_disagrees_with_its_report_fails(cfg, tmp_path):
     assert "not a paste" in r["detail"]
 
     # every key the check guards is one nobody CHOOSES -- owner preferences
-    # (max_mean_step, max_std_shrink, the MDE) must never appear here or the
-    # row would be permanently red on a legitimate disagreement
-    owner = {("learning", "max_mean_step"), ("learning", "max_std_shrink"),
-             ("ab_test", "min_detectable_effect_pct")}
+    # (max_mean_step, max_std_shrink) must never appear here or the row
+    # would be permanently red on a legitimate disagreement
+    owner = {("learning", "max_mean_step"), ("learning", "max_std_shrink")}
     assert not (tune.MEASURED_KEYS & owner)
 
 

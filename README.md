@@ -22,18 +22,18 @@ itself is learned in production from IL-budgeted randomized exploration.
 | `bootstrap/train_baseline.py` | 5.4, 9.2 | Frozen LightGBM/Tweedie `mu_ref` (price overwritten to `d_ref` at inference); level-calibration factors; convergence check. |
 | `bootstrap/estimate_prior.py` + `prior_density.py` | 5.6 | The elasticity prior as a profile-likelihood density (censored Poisson, entry rows, pooled shrinkage, no fallback constant) with its held-out comparison. |
 | `bootstrap/fit_dispersion.py` | 5.5 | Frozen NB `r` by subcategory and global `rho` vs fitted residuals, on the calib window. |
-| `bootstrap/derive_thresholds.py` | 12 | Evidence for the owner decisions: empirical A/B duration vs MDE, guardrail noise floors, the learning-rail consistency checks. |
+| `bootstrap/derive_thresholds.py` | 12 | Evidence for the owner decisions: guardrail noise floors on the trailing-mean basis, the learning-rail consistency checks. |
 | `bootstrap/init_posterior.py` | 5.9 | One-time posterior init from the prior; refuses overwrite without `--force`. |
 | `pricing/` | 5.7–5.9 | `demand.py` (mu(d), censored expectation), `dp.py` (monotone DP, absolute-IL reward), `explore.py` (uniform draw from the admissible, tau-affordable set; `delta_min` floor on the move; budget and the `walk_tau` controller; `SpreadLedger.sweep` — what each budget share × floor multiple buys in forced rate and information), `posterior.py` (bounded step, atomic exactly-once commit). |
 | `inference/decide.py` | 5.10 | State validation (reject, never an unsafe price), decision event emission. |
 | `events/store.py` | 5.10 | Append-only JSONL: dedup, quarantine with reasons, replay. |
 | `pipeline/` | 5.11–5.15 | `update.py` (censored NB grid update, `--apply` operator gate, `--calibrate-tau` daily tau walk), `monitor.py`, `shadow.py` (phase-1 harness), `assurance.py` (frozen artifacts vs the live world), `status.py` (exit 1 on FAIL), `tune.py` (the config loop as code), `ingest_outcomes.py` (outcome events built from the hourly feed — the minimal integration), `export_events.py` (decision/outcome tables for the warehouse — derived, never the record). |
-| `common/metrics.py` | 2.3 | `episode_economics` — the one episode-grain IL/scrap/margin frame behind `il_pct`, the noise floors, the live guardrail, the business metrics and shadow's budget base; `fidelity_decomposition`. |
+| `common/metrics.py` | 2.3 | `episode_economics` — the one episode-grain IL/scrap/margin frame behind the noise floors, the live guardrail, the business metrics and shadow's budget base; `fidelity_decomposition`. |
 | `common/io.py` | — | `read_json` / `write_json`: the one NaN-safe way an artifact or report is read and written. |
 | `events/pairs.py` | 5.10 | The one decision↔outcome pairing (`match_pairs`, `learnable=` excludes failed pushes) and the trading-day key (`decision_day`). |
 | `common/parallel.py` | — | `--workers N` for backtest/shadow; reports byte-identical serial or parallel. |
 | `tools/make_dummy_flc.py` | 6 | Synthetic FLC generator (legacy + randomized policies, known ground-truth elasticity); span defaults to covering `data.split`. |
-| `tools/scenario_deck.py` | 5.7–5.8 | Leadership deck: twelve interactive scenarios (heavy/light stock, hours left, high COGS, exploration cost, legacy ramp, demand shock, restock, dead stock, learning, refusals) answered by real `dp.solve` runs over a state grid → `reports/scenarios.html`. Demand is a slider, not a forecast; the A/B is the evidence. |
+| `tools/scenario_deck.py` | 5.7–5.8 | Leadership deck: twelve interactive scenarios (heavy/light stock, hours left, high COGS, exploration cost, legacy ramp, demand shock, restock, dead stock, learning, refusals) answered by real `dp.solve` runs over a state grid → `reports/scenarios.html`. Demand is a slider, not a forecast; the pilot's own outcomes are the evidence. |
 
 ## Running the bootstrap
 

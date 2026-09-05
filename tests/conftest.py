@@ -109,10 +109,7 @@ def _reports(root, **over):
                 "scrap_rate": {
                     "config_key": "monitoring.stop_conditions.scrap_deterioration_pct",
                     "binding_floor": 0.2656, "binding_label": "3-sigma",
-                    "binding_basis": "control_arm", "verdict": "null"}},
-            "ab_duration": {"target_mde_rel": 0.075, "by_duration": {
-                "4w": {"detectable_mde_rel": 0.241,
-                       "meets_target": "False"}}},
+                    "binding_basis": "trailing", "verdict": "null"}},
         },
     }
     base.update(over)

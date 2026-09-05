@@ -182,10 +182,9 @@ def test_export_events_writes_warehouse_safe_tables(tmp_path):
 
 def test_business_metrics_counts_shrink_like_the_guardrail_and_il_pct_do():
     """Scrap = leftover + shrink has ONE definition. business_metrics read
-    leftover only, so IL, waste_units, sell-through and the by-arm IL% -- the
-    A/B's primary metric and production's exploration-budget base -- were all
-    a different IL from the one the noise floors and common.metrics.il_pct
-    are measured on."""
+    leftover only, so IL, waste_units, sell-through -- the pilot's read and
+    production's exploration-budget base -- were all a different IL from the
+    one the noise floors are measured on."""
     from common.config import load_config
     from pipeline.monitor import business_metrics, guardrail_series
 
@@ -247,14 +246,11 @@ def test_a_zero_base_price_is_refused_not_priced_at_full_discount():
     assert "original_price" in rep["unusable_examples"][0]["reason"]
 
 
-def test_the_guardrail_is_not_inert_before_the_ab(tmp_path):
-    """arm() hash-labels every priced SKU x FC, so before the A/B both labels
-    exist and BOTH are system-priced: an arm comparison is
-    treatment-vs-treatment and a catalogue-wide scrap doubling cancels to
-    exactly zero. The guardrail was structurally unable to fire for the whole
-    pilot."""
-    import copy
-
+def test_the_guardrail_fires_on_a_catalogue_wide_deterioration(tmp_path):
+    """The basis is the trailing mean of the same system-priced episodes:
+    there is no control arm, so a catalogue-wide scrap doubling must show as
+    a positive deterioration (an arm comparison of two system-priced halves
+    once cancelled it to exactly zero)."""
     from common.config import load_config
     from pipeline.monitor import guardrail_series
 
@@ -285,14 +281,6 @@ def test_the_guardrail_is_not_inert_before_the_ab(tmp_path):
     pre = guardrail_series(decisions, outcomes, cfg)
     assert pre["scrap_deterioration"]["basis"].startswith("trailing_")
     assert pre["scrap_deterioration"]["latest"] > 0, pre["scrap_deterioration"]
-
-    live = copy.deepcopy(cfg)
-    live["ab_test"] = dict(live["ab_test"], active=True)
-    during = guardrail_series(decisions, outcomes, live)
-    assert during["scrap_deterioration"]["basis"] == "control_arm"
-    # and with both arms system-priced the deviation is exactly zero --
-    # which is precisely why this basis must not be the pre-A/B default
-    assert during["scrap_deterioration"]["latest"] == 0.0
 
 
 def test_a_discount_outside_percent_range_is_refused():

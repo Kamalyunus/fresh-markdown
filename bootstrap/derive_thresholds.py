@@ -1,11 +1,9 @@
 """bootstrap.derive_thresholds -- evidence for the SET BY OWNER config keys.
 
-Derives (1) A/B duration vs MDE: the clustered SE of the IL% ratio estimator,
-measured EMPIRICALLY on candidate-duration blocks (never sqrt(T)-scaled), with
-MDE_abs(T) = (z_{1-a/2} + z_pow) x 2 x SE_pooled(T) at 50/50; and (2) guardrail
-noise floors: a threshold below 3-sigma false-fires and silently suspends
-exploration (design 15.4).
-Run: python3 -m bootstrap.derive_thresholds --input data/prepared.parquet [--mde 0.075]
+Guardrail noise floors on the trailing-mean basis the monitor compares
+against (a threshold below 3-sigma false-fires and silently suspends
+exploration, design 15.4), and the two learning-rail consistency checks.
+Run: python3 -m bootstrap.derive_thresholds --input data/prepared.parquet
 """
 
 import argparse
@@ -13,97 +11,17 @@ import json
 
 import numpy as np
 import pandas as pd
-from scipy.stats import norm
 
-from common.ab import arm
 from common.config import load_config
 from common.io import write_json
 from common import episodes
 from common import guardrail
 from common import metrics
-from common.metrics import il_pct
 from bootstrap.prepare_data import pre_launch
 from common.provenance import config_fingerprint
 
 
-# ------------------------------------------------------------- A/B duration
-
-def empirical_se_by_duration(d, cfg):
-    """Median clustered SE of the IL% ratio estimator over non-overlapping
-    T-week blocks of history, per candidate duration T."""
-    ab = cfg["ab_test"]
-    dates = pd.to_datetime(d.date)
-    d = d.assign(_date=dates)
-    start, end = dates.min(), dates.max()
-
-    out = {}
-    for weeks in ab["candidate_durations_weeks"]:
-        span = pd.Timedelta(weeks=weeks)
-        ses, aggs, blocks = [], [], 0
-        t = start
-        while t + span <= end + pd.Timedelta(days=1):
-            # WHOLE episodes by opening date, like every other cut in the
-            # repo: a row-level cut split cross-midnight episodes, so the
-            # block's last row was not the episode's and scrap_units read
-            # a truncated frame
-            block = episodes.window_slice(
-                d, t.strftime("%Y-%m-%d"),
-                (t + span - pd.Timedelta(days=1)).strftime("%Y-%m-%d"))
-            t = t + span
-            if block.episode_id.nunique() < ab["min_episodes_per_block"]:
-                continue
-            m6 = il_pct(block)
-            if m6["il_pct_ratio_se_clustered"] is None:
-                continue
-            blocks += 1
-            ses.append(m6["il_pct_ratio_se_clustered"])
-            aggs.append(m6["il_pct_aggregate"])
-        if ses:
-            out[weeks] = {"blocks": blocks,
-                          "se_pooled_median": float(np.median(ses)),
-                          "il_pct_median": float(np.median(aggs))}
-    return out
-
-
-def duration_table(se_by_T, cfg, mde_rel):
-    ab = cfg["ab_test"]
-    z = float(norm.ppf(1 - ab["alpha"] / 2) + norm.ppf(ab["power"]))
-    # pooled all-units SE -> between-arm difference SE:
-    # SE_diff = SE_pooled / sqrt(a(1-a))  (= 2 x SE_pooled at 50/50)
-    arm_factor = 1.0 / np.sqrt(ab["allocation"] * (1 - ab["allocation"]))
-
-    rows, recommended = {}, None
-    for weeks in sorted(se_by_T):
-        e = se_by_T[weeks]
-        se_diff = arm_factor * e["se_pooled_median"]
-        mde_abs = z * se_diff
-        mde_rel_t = mde_abs / e["il_pct_median"] if e["il_pct_median"] else None
-        meets = (mde_rel_t is not None and mde_rel is not None
-                 and mde_rel_t <= mde_rel)
-        rows[f"{weeks}w"] = {
-            "blocks_measured": e["blocks"],
-            "se_pooled": round(e["se_pooled_median"], 6),
-            "se_arm_difference": round(se_diff, 6),
-            "detectable_mde_abs": round(mde_abs, 5),
-            "detectable_mde_rel": round(mde_rel_t, 4) if mde_rel_t else None,
-            "meets_target": meets,
-        }
-        if meets and recommended is None:
-            recommended = weeks
-    return {
-        "z_factor": round(z, 4),
-        "power": ab["power"], "alpha": ab["alpha"],
-        "target_mde_rel": mde_rel,
-        "by_duration": rows,
-        "recommended_duration_weeks": recommended,
-        "recommended_duration_days": recommended * 7 if recommended else None,
-        "note": ("SE measured on actual T-week blocks, not sqrt-scaled. "
-                 "If no duration meets the target, either the MDE or the MVP "
-                 "window must change (design 5.3 reassessment, measurement 6)."),
-    }
-
-
-# --------------------------------------------------------- guardrail noise
+# ------------------------------------------------------- guardrail floors
 
 def _sigma_summary(rel):
     """3-sigma and robust 3-sigma of a deviation series; shared by both bases
@@ -135,71 +53,15 @@ def _floor_of(block):
 _smooth = guardrail.smooth   # one definition, shared with pipeline.monitor
 
 
-def control_arm_noise(d, cfg):
-    """Same-day treatment-vs-control noise (the monitor's basis once the
-    A/B is live). Arms are smoothed BEFORE differencing, exactly as
-    pipeline.monitor does; arm assignment is common.ab.arm."""
-
-    ep, _ = metrics.settled(metrics.episode_economics(d))
-    alloc = cfg["ab_test"]["allocation"]
-    ep["arm"] = [arm(s_, f, alloc) for s_, f in zip(ep.sku_id, ep.fc)]
-
-    arms = {a: metrics.daily_rates(g) for a, g in ep.groupby("arm")}
-    if set(arms) < {"treatment", "control"}:
-        return {"note": "one arm empty -- cannot measure a same-day basis"}
-
-    sm = cfg["monitoring"]["stop_conditions"]["deterioration_smoothing_days"]
-    out = {"basis": ("same-day treatment vs control, each arm smoothed over "
-                     "deterioration_smoothing_days before differencing, "
-                     "arm hash as in monitor"),
-           "allocation": alloc}
-    for metric, worse_high, key in (("scrap_rate", True, "scrap"),
-                                    ("margin_rate", False, "margin")):
-        smooth = sm[key]
-        basis = guardrail.basis_for(key)
-        # smooth each arm FIRST, then intersect and difference -- monitor's
-        # order; anything else measures a floor the live comparison never sees
-        t = _smooth(arms["treatment"][metric], smooth)
-        c = _smooth(arms["control"][metric], smooth)
-        common = t.index.intersection(c.index)
-        t, c = t.loc[common], c.loc[common]
-        rel = guardrail.deviation(t, c, worse_high, basis)
-        rel = rel.replace([np.inf, -np.inf], np.nan).dropna()
-        if len(rel) < 8:
-            out[metric] = {"days": int(len(rel)), "smoothing_days": smooth,
-                           "deterioration_basis": basis,
-                           "note": f"too few paired days after {smooth}-day "
-                                   "smoothing"}
-            continue
-        out[metric] = {
-            "days": int(len(rel)),
-            "smoothing_days": smooth,
-            "deterioration_basis": basis,
-            "units": guardrail.units_of(basis),
-            **_sigma_summary(rel),
-            "median_gap": round(float(np.median(rel)), 4),
-        }
-    out["note"] = ("Set the A/B-phase threshold against THIS floor. The "
-                   "trailing-mean floor in guardrail_noise applies only "
-                   "before an A/B is running, where no control arm exists. "
-                   "One config value serves both phases, so it must clear the "
-                   "LARGER of the two -- see guardrail_threshold_recommendation.")
-    return out
-
-
-def recommend_thresholds(trailing, control_arm, cfg):
-    """Per metric: the floor from each basis, which binds, and whether the
-    configured threshold clears it (must sit above BOTH bases)."""
+def recommend_thresholds(trailing, cfg):
+    """Per metric: the trailing-mean floor (the basis the monitor compares
+    against) and whether the configured threshold clears it -- above it, but
+    not so far above that the guardrail can never fire."""
     sc = cfg["monitoring"]["stop_conditions"]
     out = {}
     for metric, key in (("scrap_rate", "scrap_deterioration_pct"),
                         ("margin_rate", "margin_deterioration_pct")):
-        t_floor, t_label = _floor_of(trailing.get(metric, {}))
-        c_floor, c_label = _floor_of((control_arm or {}).get(metric, {})
-                                     if isinstance(control_arm, dict) else {})
-        known = [(f, lab, basis) for f, lab, basis in
-                 ((t_floor, t_label, "trailing"),
-                  (c_floor, c_label, "control_arm")) if f is not None]
+        floor, label = _floor_of(trailing.get(metric, {}))
         threshold = sc[key]
         metric_key = "scrap" if metric == "scrap_rate" else "margin"
         dev_basis = guardrail.basis_for(metric_key)
@@ -207,20 +69,18 @@ def recommend_thresholds(trailing, control_arm, cfg):
                "deterioration_basis": dev_basis,
                "units": guardrail.units_of(dev_basis),
                "current_threshold": threshold,
-               "trailing_floor": t_floor,
-               "control_arm_floor": c_floor}
-        if not known:
-            rec["verdict"] = "insufficient history on either basis"
+               "trailing_floor": floor}
+        if floor is None:
+            rec["verdict"] = "insufficient history"
             out[metric] = rec
             continue
-        binding, label, basis = max(known, key=lambda x: x[0])
-        rec.update(binding_floor=binding, binding_basis=basis,
-                   binding_label=label)
+        basis = "trailing"
+        rec.update(binding_floor=floor, binding_basis=basis, binding_label=label)
         # a floor no threshold can clear is a BLOCKED guardrail, not a large
         # number -- said here too, the block an owner reads to pick a value
-        if guardrail.floor_is_unusable(binding, dev_basis):
+        if guardrail.floor_is_unusable(floor, dev_basis):
             rec["verdict"] = (
-                f"BLOCKED -- the binding {label} floor is {binding} on the "
+                f"BLOCKED -- the {label} floor is {floor} on the "
                 f"RELATIVE basis, i.e. ordinary daily swing exceeds the "
                 f"series' own level. No threshold can clear it without also "
                 f"clearing the failure this guardrail exists to catch. This is "
@@ -229,32 +89,29 @@ def recommend_thresholds(trailing, control_arm, cfg):
                 f"and re-derive.")
             out[metric] = rec
             continue
-        if c_floor is None:
-            rec["caveat"] = ("control-arm floor not measurable yet; re-derive "
-                             "before the A/B starts -- the binding floor can "
-                             "change basis once both arms carry data")
         if threshold is None:
             rec["verdict"] = (f"null -- owner should set it at or above the "
-                              f"{label} {basis} floor {binding}")
-        elif threshold < binding:
+                              f"{label} {basis} floor {floor}")
+        elif threshold < floor:
             rec["verdict"] = (f"TOO TIGHT -- {threshold} is below the {label} "
-                              f"{basis} floor {binding}; it will false-fire "
+                              f"{basis} floor {floor}; it will false-fire "
                               "and silently suspend exploration")
-        elif binding > 0 and threshold > 3 * binding:
+        elif floor > 0 and threshold > 3 * floor:
             # clearing the floor is necessary, not sufficient: a threshold
             # far above it cannot fire either
             rec["verdict"] = (
                 f"CLEARS THE FLOOR BUT LIKELY INERT -- {threshold} is "
-                f"{round(threshold / binding, 1)}x the {label} {basis} floor "
-                f"{binding}, and the {sc['persistence_days']}-day persistence "
+                f"{round(threshold / floor, 1)}x the {label} {basis} floor "
+                f"{floor}, and the {sc['persistence_days']}-day persistence "
                 "rule sits on top. A guardrail this loose will not fire; "
                 "consider a different metric or an absolute floor instead")
         else:
-            rec["verdict"] = (f"OK -- above the {label} {basis} floor {binding}")
+            rec["verdict"] = f"OK -- above the {label} {basis} floor {floor}"
         out[metric] = rec
-    out["note"] = ("The binding floor is the LARGER of the two bases because "
-                   "one config value is graded against the trailing mean "
-                   "before the A/B and against the control arm during it.")
+    out["note"] = ("The floor is the trailing-mean basis: the monitor compares "
+                   "every day against the trailing window of the same "
+                   "system-priced episodes, so this is the noise the threshold "
+                   "must clear.")
     return out
 
 
@@ -329,20 +186,18 @@ def guardrail_noise(d, cfg):
                    guardrail.basis_for("margin"))
 
     def verdict(block, key):
-        """Grades against the TRAILING floor only (pre-A/B basis). Necessary,
-        not sufficient -- the sign-off number lives in
-        guardrail_threshold_recommendation."""
+        """Grades against the trailing floor. Necessary, not sufficient --
+        the sign-off number lives in guardrail_threshold_recommendation."""
         threshold = sc[key]
         floor, basis = _floor_of(block)
         if floor is None:
             return "insufficient history to validate"
         if threshold is None:
             return (f"{key} is null -- owner should set it at or above the "
-                    f"trailing-basis {basis} floor {floor}, then check it "
-                    "against the control-arm floor too")
+                    f"trailing-basis {basis} floor {floor}")
         if threshold >= floor:
             return (f"clears the trailing-basis {basis} floor {floor} -- see "
-                    "guardrail_threshold_recommendation for the binding one")
+                    "guardrail_threshold_recommendation for the sign-off")
         return (f"TOO TIGHT -- {threshold} is below the trailing-basis {basis} "
                 f"floor {floor}; it will false-fire and silently suspend "
                 "exploration")
@@ -350,9 +205,8 @@ def guardrail_noise(d, cfg):
     return {
         "basis": ("daily ratio-of-sums series over all episodes, smoothed over "
                   "deterioration_smoothing_days; relative deviation vs "
-                  f"trailing {window}-day mean. Applies BEFORE the A/B; once "
-                  "both arms carry data the monitor switches to the control-arm "
-                  "basis and so must the threshold"),
+                  f"trailing {window}-day mean -- the basis the monitor "
+                  "compares against"),
         "scrap_rate": {**scrap,
                        "config_key": "monitoring.stop_conditions.scrap_deterioration_pct",
                        "verdict": verdict(scrap, "scrap_deterioration_pct")},
@@ -497,51 +351,27 @@ def main():
     ap = argparse.ArgumentParser(prog="bootstrap.derive_thresholds")
     ap.add_argument("--input", required=True)
     ap.add_argument("--config", default="config.yaml")
-    ap.add_argument("--mde", type=float, default=None,
-                    help="target relative MDE on IL% (falls back to "
-                         "ab_test.min_detectable_effect_pct)")
     ap.add_argument("--out", default="reports/thresholds.json")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    mde = args.mde if args.mde is not None \
-        else cfg["ab_test"]["min_detectable_effect_pct"]
     # RULE 16: the hold-out is read once, by pipeline.shadow. These floors
-    # and the MDE frontier are PASTED into config by pipeline.tune, so
+    # are PASTED into config by pipeline.tune, so
     # measuring them on the full extract tunes config on the window that
     # exists to grade it. backtest cuts the same way (backtest/__main__.py).
     d = pre_launch(pd.read_parquet(args.input), cfg)
 
-    se_by_T = empirical_se_by_duration(d, cfg)
     trailing = guardrail_noise(d, cfg)
-    control = control_arm_noise(d, cfg)
     report = {
         "config": config_fingerprint(cfg, "backtest"),
-        "ab_duration": duration_table(se_by_T, cfg, mde),
         "guardrail_noise": trailing,
-        "guardrail_noise_control_arm_basis": control,
-        "guardrail_threshold_recommendation": recommend_thresholds(
-            trailing, control, cfg),
+        "guardrail_threshold_recommendation": recommend_thresholds(trailing, cfg),
         "information_increment_recommendation": information_increment(cfg),
         "bounded_step_recommendation": bounded_step(cfg),
     }
 
     write_json(args.out, report)
 
-    ab = report["ab_duration"]
-    print(f"target MDE (relative)  : {mde if mde is not None else 'not set'}")
-    for label, row in ab["by_duration"].items():
-        print(f"  {label:>4s}: detectable {row['detectable_mde_rel']}"
-              f" rel ({row['blocks_measured']} blocks)"
-              + ("  <-- meets target" if row["meets_target"] else ""))
-    if ab["recommended_duration_weeks"]:
-        print(f"recommended duration   : {ab['recommended_duration_weeks']} weeks "
-              f"({ab['recommended_duration_days']} days) "
-              "-> the A/B window length is the owner's call; run it at "
-              "least this long (no config key -- it is a calendar decision)")
-    elif mde is not None:
-        print("NO candidate duration meets the target MDE -- "
-              "loosen the MDE or extend the window (design 5.3)")
     gn = report["guardrail_noise"]
     for key in ("scrap_rate", "margin_rate"):
         block = gn[key]
@@ -555,10 +385,8 @@ def main():
     for key, rec in report["guardrail_threshold_recommendation"].items():
         if not isinstance(rec, dict):
             continue
-        print(f"{key:12s}: trailing {rec.get('trailing_floor')} | "
-              f"control-arm {rec.get('control_arm_floor')} | "
-              f"binding {rec.get('binding_floor')} "
-              f"({rec.get('binding_basis')}) -> {rec['verdict']}")
+        print(f"{key:12s}: trailing floor {rec.get('trailing_floor')} "
+              f"-> {rec['verdict']}")
     ii = report["information_increment_recommendation"]
     if isinstance(ii, dict) and "recommended" in ii:
         print(f"{'info increment':12s}: configured {ii['configured']} | launch "

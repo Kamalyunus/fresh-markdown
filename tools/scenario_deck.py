@@ -167,7 +167,7 @@ SCENARIOS = [
      "state": {"q": 12, "h": 12, "gamma": 0.5, "mu": 1.0, "belief": "cold"},
      "ask": "Today's fixed schedule against the solver on the identical state.",
      "read": "Like-for-like under the same demand model -- not a claim about a real SKU; "
-             "the A/B is the evidence. Read leftover, scrap cost, discount cost, and the sum."},
+             "the pilot's own outcomes are the evidence. Read leftover, scrap cost, discount cost, and the sum."},
     {"id": "shock", "title": "Sales come in faster or slower than forecast",
      "state": {"q": 12, "h": 12, "gamma": 0.5, "mu": 1.0, "belief": "cold"},
      "ask": "The forecast is wrong by half, in either direction.",
@@ -318,7 +318,7 @@ function refuses(){return `<ul class="never">
 <li><b>Refused, not priced best-effort.</b> A state with no cost, a cost above list, no stock, or a forecast path that disagrees with the hours left raises <code>StateRejected</code>. The caller holds the current price and alerts on the rate.</li>
 <li><b>Never below cost.</b> The action set is built from tiers that keep price ≥ cost (grey on the curve is not "not chosen" — it does not exist as an option).</li>
 <li><b>Never a higher price within an episode.</b> Under an anchor the action set holds only tiers at or deeper than the price in force; exploration draws from that set.</li>
-<li><b>Stops itself.</b> When realised exploration spend exceeds ${D.config.stop_multiple}× the day's budget for ${D.config.persistence_days} consecutive days, or a scrap/margin guardrail breaches, exploration suspends for the cohort while exploitation pricing continues. τ moves at most ${(100*(D.config.tau_adjust_clip[1]-1)).toFixed(0)}% up or ${(100*(1-D.config.tau_adjust_clip[0])).toFixed(0)}% down per day.</li></ul>`}
+<li><b>Stops itself.</b> When realised exploration spend exceeds ${D.config.stop_multiple}× the day's budget for ${D.config.persistence_days} consecutive days, or a scrap/margin guardrail breaches, exploration suspends while exploitation pricing continues. τ moves at most ${(100*(D.config.tau_adjust_clip[1]-1)).toFixed(0)}% up or ${(100*(1-D.config.tau_adjust_clip[0])).toFixed(0)}% down per day.</li></ul>`}
 function render(){nav();const sc=D.scenarios.find(s=>s.id===cur.sc);const st=state();const m=document.getElementById('main');
  const taus=[0,500,1000,2000,4000,8000];if(!taus.includes(cur.tau))cur.tau=0;
  m.innerHTML=`<h2>${sc.title}<span class="pill">${D.beliefs[cur.belief]<0?'ε = '+D.beliefs[cur.belief]:''}</span></h2><p class="ask">${sc.ask}</p>
@@ -337,7 +337,7 @@ function render(){nav();const sc=D.scenarios.find(s=>s.id===cur.sc);const st=sta
  ${cur.sc==='explore'||cur.tau>0?`<div class="card" style="margin-top:16px"><h3>Exploration — the alternatives and what each costs</h3>${explore(st)}</div>`:''}
  ${cur.sc==='refuses'?`<div class="card" style="margin-top:16px"><h3>What it refuses — by construction</h3>${refuses()}</div>`:''}
  <div class="read"><b>How to read it.</b> ${sc.read}</div>
- <p class="foot">Every point is a solve of <code>pricing.dp.solve</code> — the code that prices the shelf — on this machine's config; sliders snap to the precomputed grid. Legacy ramp is an illustrative schedule (reference −15pp, reference, reference +15pp by thirds). The demand forecast is a slider; nothing here is a prediction about a real SKU. Like-for-like comparisons share one demand model; the A/B is the evidence.</p>`}
+ <p class="foot">Every point is a solve of <code>pricing.dp.solve</code> — the code that prices the shelf — on this machine's config; sliders snap to the precomputed grid. Legacy ramp is an illustrative schedule (reference −15pp, reference, reference +15pp by thirds). The demand forecast is a slider; nothing here is a prediction about a real SKU. Like-for-like comparisons share one demand model; the pilot's own outcomes are the evidence.</p>`}
 render();
 </script></body></html>
 """

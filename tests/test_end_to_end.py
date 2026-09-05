@@ -696,26 +696,19 @@ def test_derive_thresholds_cli(workspace):
     env = {**os.environ, "PYTHONPATH": ROOT}
     r = subprocess.run(
         [sys.executable, "-m", "bootstrap.derive_thresholds",
-         "--input", "data/prepared.parquet", "--mde", "0.075",
+         "--input", "data/prepared.parquet",
          "--out", "reports/thresholds.json"],
         cwd=workspace, env=env, capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
     with open("reports/thresholds.json") as f:
         report = json.load(f)
-    ab = report["ab_duration"]
-    assert ab["by_duration"], "no candidate duration produced an SE"
-    for row in ab["by_duration"].values():
-        assert row["se_pooled"] > 0
-        # difference SE must exceed the pooled SE (arm split loses precision)
-        assert row["se_arm_difference"] > row["se_pooled"]
+    assert "ab_duration" not in report          # the A/B module is gone
     assert "scrap_rate" in report["guardrail_noise"]
     assert "margin_rate" in report["guardrail_noise"]
-    # the sign-off block: both bases side by side, so a threshold can never be
-    # signed off against the trailing floor alone
+    # the sign-off block: the trailing floor the monitor compares against
     rec = report["guardrail_threshold_recommendation"]
     for metric in ("scrap_rate", "margin_rate"):
         assert "trailing_floor" in rec[metric]
-        assert "control_arm_floor" in rec[metric]
         assert rec[metric]["verdict"]
 
 
@@ -1040,7 +1033,7 @@ def test_a_missing_hour_drops_the_whole_window_not_just_a_fragment(
 
 def test_no_pre_launch_artifact_reads_past_test_end(workspace):
     """Rule 16: the hold-out is read once, by pipeline.shadow. derive_thresholds
-    PASTES guardrail floors and the MDE frontier into config via tune, and
+    PASTES guardrail floors into config via tune, and
     fit_dispersion's drift_by_window sets the retrain cadence -- both were
     measuring on the full extract, i.e. tuning config on the window that
     exists to grade it."""

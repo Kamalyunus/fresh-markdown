@@ -417,7 +417,7 @@ def test_guardrail_fires_only_after_persistence():
     a single day over, which is what the noise floor makes routine."""
     from pipeline.monitor import evaluate_guardrail
 
-    block = {"basis": "control_arm", "latest": 0.30,
+    block = {"basis": "trailing_28d_mean", "latest": 0.30,
              "by_day": {"2026-09-01": 0.05, "2026-09-02": 0.30}}
 
     one_day = evaluate_guardrail(block, threshold=0.20, persistence_days=2)
@@ -553,9 +553,9 @@ def test_noise_floor_and_monitor_use_the_same_smoothing():
     assert sm["scrap"] > 1 and sm["margin"] == 1
 
 
-def _paired_arm_frame(days=70, skus=60, seed=0):
-    """Episode-hour rows spanning both A/B arms, with a common day effect so
-    the same-day comparison has something to cancel."""
+def _daily_frame(days=70, skus=60, seed=0):
+    """Episode-hour rows over many days with a shared day effect, so the
+    trailing-mean floor has genuine day-to-day swing to measure."""
     rng = np.random.default_rng(seed)
     rows = []
     for i, day in enumerate(pd.date_range("2026-01-01", periods=days)):
@@ -571,7 +571,7 @@ def _paired_arm_frame(days=70, skus=60, seed=0):
     return pd.DataFrame(rows)
 
 
-def test_control_arm_floor_is_measured_on_the_smoothed_series():
+def test_trailing_floor_is_measured_on_the_smoothed_series():
     """Smoothing must actually be applied, not just mentioned. Measuring the
     same data at smoothing 1 must give a strictly wider floor -- if the two
     agree, the smoothing is being ignored and a threshold set from this floor
@@ -579,55 +579,49 @@ def test_control_arm_floor_is_measured_on_the_smoothed_series():
     import copy
     from bootstrap import derive_thresholds as dt
 
-    d = _paired_arm_frame()
+    d = _daily_frame()
     cfg_smoothed = copy.deepcopy(CFG)
     cfg_flat = copy.deepcopy(CFG)
     cfg_flat["monitoring"]["stop_conditions"]["deterioration_smoothing_days"] \
         ["scrap"] = 1
 
-    smoothed = dt.control_arm_noise(d, cfg_smoothed)["scrap_rate"]
-    flat = dt.control_arm_noise(d, cfg_flat)["scrap_rate"]
+    smoothed = dt.guardrail_noise(d, cfg_smoothed)["scrap_rate"]
+    flat = dt.guardrail_noise(d, cfg_flat)["scrap_rate"]
 
     assert smoothed["smoothing_days"] == \
         CFG["monitoring"]["stop_conditions"]["deterioration_smoothing_days"]["scrap"]
     assert flat["smoothing_days"] == 1
     assert smoothed["three_sigma"] < flat["three_sigma"]
-    # smoothing consumes the leading window
-    assert smoothed["days"] < flat["days"]
 
 
-def test_threshold_recommendation_binds_on_the_larger_floor():
-    """One config value is graded against the trailing mean before the A/B and
-    the control arm during it, so it must clear both -- and a value far above
-    the binding floor is called out rather than blessed."""
+def test_threshold_recommendation_grades_against_the_trailing_floor():
+    """The monitor compares against the trailing mean of the same
+    system-priced episodes (no control arm), so the threshold must clear
+    that floor -- and a value far above it is called out rather than
+    blessed."""
     import copy
     from bootstrap import derive_thresholds as dt
 
-    d = _paired_arm_frame()
+    d = _daily_frame()
     cfg = copy.deepcopy(CFG)
     trailing = dt.guardrail_noise(d, cfg)
-    control = dt.control_arm_noise(d, cfg)
 
-    rec = dt.recommend_thresholds(trailing, control, cfg)["scrap_rate"]
-    floors = [f for f in (rec["trailing_floor"], rec["control_arm_floor"])
-              if f is not None]
-    assert rec["binding_floor"] == max(floors)
+    rec = dt.recommend_thresholds(trailing, cfg)["scrap_rate"]
+    assert rec["binding_floor"] == rec["trailing_floor"] > 0
+    assert rec["binding_basis"] == "trailing"
 
-    binding = rec["binding_floor"]
+    floor = rec["binding_floor"]
     sc = cfg["monitoring"]["stop_conditions"]
 
-    sc["scrap_deterioration_pct"] = binding / 2
-    assert "TOO TIGHT" in dt.recommend_thresholds(
-        trailing, control, cfg)["scrap_rate"]["verdict"]
+    sc["scrap_deterioration_pct"] = floor / 2
+    assert "TOO TIGHT" in dt.recommend_thresholds(trailing, cfg)["scrap_rate"]["verdict"]
 
-    sc["scrap_deterioration_pct"] = binding * 1.5
-    assert dt.recommend_thresholds(
-        trailing, control, cfg)["scrap_rate"]["verdict"].startswith("OK")
+    sc["scrap_deterioration_pct"] = floor * 1.5
+    assert dt.recommend_thresholds(trailing, cfg)["scrap_rate"]["verdict"].startswith("OK")
 
     # a guardrail that cannot fire is a failure mode of its own, not a pass
-    sc["scrap_deterioration_pct"] = binding * 20
-    assert "INERT" in dt.recommend_thresholds(
-        trailing, control, cfg)["scrap_rate"]["verdict"]
+    sc["scrap_deterioration_pct"] = floor * 20
+    assert "INERT" in dt.recommend_thresholds(trailing, cfg)["scrap_rate"]["verdict"]
 
 
 def test_a_relative_floor_above_one_is_reported_as_blocked_not_as_a_number():
@@ -655,14 +649,14 @@ def test_a_relative_floor_above_one_is_reported_as_blocked_not_as_a_number():
     saved = guardrail.BASIS["margin"]
     try:
         guardrail.BASIS["margin"] = guardrail.RELATIVE
-        v = dt.recommend_thresholds(trailing, {}, cfg)["margin_rate"]["verdict"]
+        v = dt.recommend_thresholds(trailing, cfg)["margin_rate"]["verdict"]
     finally:
         guardrail.BASIS["margin"] = saved
     assert v.startswith("BLOCKED"), v
     assert "absolute_pp" in v, "the verdict must name the remedy, not just complain"
 
     # ...and on the shipped absolute_pp basis it is an ordinary, settable floor
-    v2 = dt.recommend_thresholds(trailing, {}, cfg)["margin_rate"]["verdict"]
+    v2 = dt.recommend_thresholds(trailing, cfg)["margin_rate"]["verdict"]
     assert not v2.startswith("BLOCKED"), v2
 
 

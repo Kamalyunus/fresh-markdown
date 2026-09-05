@@ -99,7 +99,7 @@ def test_shadow_runs_on_the_holdout_with_every_episode_and_then_gates():
 def test_owner_values_stop_the_driver_with_their_evidence():
     finding = {"key": "monitoring.stop_conditions.scrap_deterioration_pct",
                "class": tune.PASTE, "status": tune.ACT, "current": None,
-               "recommended": 0.27, "evidence": "3-sigma control_arm floor",
+               "recommended": 0.27, "evidence": "3-sigma trailing floor",
                "source": "thresholds.guardrail_threshold_recommendation.scrap"}
     steps = advance.plan(_state(
         nulls=["monitoring.stop_conditions.scrap_deterioration_pct",

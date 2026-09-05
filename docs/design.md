@@ -56,7 +56,7 @@ denominator is **endogenous**: deeper markdowns sell more units and enlarge
 it, so minimising IL and minimising IL% are different optimisations. Worked
 example (price 10,000, cost 2,000, 10 units): policy A at 9,000 sells 4
 (IL 16,000, IL% 40.0%); policy B at 7,000 sells 8 (IL 28,000, IL% 35.0%).
-The planner chooses A; IL% prefers B. The A/B will be read on a metric the
+The planner chooses A; IL% prefers B. The pilot will be read on a metric the
 planner does not optimise; the decision rule for "absolute IL improved, IL%
 flat" is pre-committed (§11.2).
 
@@ -194,8 +194,7 @@ OWNER` (business decision — **an agent must never invent one**). The
 runtime-required values `load_config(strict=True)` refuses on while null:
 `dispersion.rho`, `exploration.tau_initial`,
 `monitoring.stop_conditions.
-scrap_deterioration_pct` and `margin_deterioration_pct`, and
-`ab_test.min_detectable_effect_pct`. Config is the source of every tunable
+scrap_deterioration_pct` and `margin_deterioration_pct`. Config is the source of every tunable
 and of **no secret**: credentials live in `~/.env` as `REDSHIFT_*` — no
 hostname, credential, or connection string in config, code, or a commit.
 
@@ -236,7 +235,7 @@ report beats a silent removal upstream.
 | `contiguous_episodes_built` | *(not a filter)* re-segmentation — a NO-OP that RAISES if it stops being one |
 | `negative_window_recovered` | *(not a filter)* "manufacturing" SKUs enter with an already-negative counter; episodes fitting inside `data.manufacturing_window_hours` (24) get a synthetic countdown `(cap−1) − position` (a countdown, never a clamp — the counter drives episode ids, the DP horizon, and `extend_to_window`). Longer ones carry the `negative_window` flag. **Runs after the re-segmentation check** because it is the only step that mutates `hours_remaining` |
 | `eligible` | *(a GATE, drops nothing)* `accounting_closes & final_hour_clean & closed` — the population the frozen artifacts fit on, and the one every scrap/IL/clearance figure reads (`scrap_units` returns NaN outside it) |
-| `dp_eligible` | *(a GATE, drops nothing)* what the DP can act on. Read by the DP, the backtest, shadow, the calibration gate and the A/B |
+| `dp_eligible` | *(a GATE, drops nothing)* what the DP can act on. Read by the DP, the backtest, shadow and the calibration gate |
 
 Six conditions gate `dp_eligible`, each naming something the *solver*
 cannot do; an episode is labelled with the first it trips:
@@ -275,7 +274,7 @@ survived the chain — is read by `m1`/gate 1 only. The three populations are
 NESTED (integrity > eligible > dp_eligible) and resolved through
 `prepare_data.population(d, cfg[, which])` — always call it, never
 re-derive the filter. Artifact fits read `eligible`; the DP, calibration
-gate, backtest, shadow, tau and A/B pass `"dp_eligible"` explicitly.
+gate, backtest, shadow and tau pass `"dp_eligible"` explicitly.
 
 Every stage reports **`cogs_at_risk`** — unit cost × supply (opening +
 gross arrivals), once per episode — because rows are not the unit the
@@ -298,10 +297,9 @@ Only `bootstrap.prepare_data` accepts raw data.
 
 Before any component was built, a measurement pass produced every value the
 design needs but must not guess (cost-ratio distributions, same-hour price
-variation, censoring shares, correlation, A/B variance). Three measurement
-outcomes were designated in advance as design-changing (non-explorable
-catalogue → scope shrinks; no identifying variation → prior falls back; A/B
-variance too high → duration or effect must change), decided by humans
+variation, censoring shares, correlation). Two measurement outcomes were
+designated in advance as design-changing (non-explorable catalogue → scope
+shrinks; no identifying variation → prior falls back), decided by humans
 against the measured numbers.
 
 ### 5.4 Baseline demand model — frozen, and blind to price
@@ -437,8 +435,8 @@ The specification (`bootstrap.prior_density`):
   SKU × FC**, becomes `w(ε) ∝ exp(ll/deff)`. The cluster is the unit, not the
   episode: these are entry rows, one per episode, so a within-episode ICC is
   1.0 by construction and the deflation could never engage. What correlates
-  between entry rows is the same unit recurring across days — the cluster the
-  A/B randomises on, and the one that does not average away. The category's own density is the 50/50 arm
+  between entry rows is the same unit recurring across days — the unit the
+  pilot's outcomes recur on, and the one that does not average away. The category's own density is the 50/50 arm
   mixture, shrunk toward the pooled density (log-likelihoods summed across
   right-signed categories) with weight
   `own_information_weight = min(1, span/own_information_saturation)`.
@@ -771,8 +769,8 @@ only the day just closed, so a tau 8× too generous suspends exploration
 before the controller can correct). The trace seeds its trailing-IL base
 with pre-window closed-episode IL, scaled to the sample. The budget base —
 seed and in-window — is `common.metrics.episode_economics` over every
-observed hour: the same scrap and IL the guardrail floors, `il_pct` and
-the monitor read, never a local copy.
+observed hour: the same scrap and IL the guardrail floors and the
+monitor read, never a local copy.
 
 **The forced rate is the budget's, and the sweep says what a change
 buys.** The chooser explores whenever τ affords an admissible tier, so
@@ -807,13 +805,13 @@ observed reality against model-simulated outcomes charges all model bias to
 one side; observed-vs-model differences belong to *fidelity*, never the
 policy verdict. Even like-for-like, **replay output is never evidence the
 policy works** — the shared model's price response is an unvalidated prior;
-the A/B is the evidence.
+the pilot's own outcomes are the evidence (§11).
 
 **Three rungs, not interchangeable.** Replay is the agent against our model
-of the world; shadow is the same machine against the world itself; only the
-A/B answers whether the advice is better. Shadow says strictly *less* about
-the policy — no price was applied, so no IL figure exists in a shadow run
-at all. Never "replace replay with shadow".
+of the world; shadow is the same machine against the world itself; only
+applied prices answer whether the advice is better. Shadow says strictly
+*less* about the policy — no price was applied, so no IL figure exists in a
+shadow run at all. Never "replace replay with shadow".
 
 The replay's headline (production, corrected extract): the DP arm shows
 ~38% less IL than the legacy arm like-for-like, at ~1pp of clearance,
@@ -991,7 +989,6 @@ re-measure before quoting any figure against a newer extract.
 | Shadow gate | PASS — 12,771 decisions, completeness 0.9974, zero cost-floor violations, drift ratio 1.0225, solver p95 102 ms |
 | DP vs legacy (like-for-like) | −38.0% IL at −0.97pp clearance |
 | Intra-episode deepening | 0% of episodes; median \|ε\| needed 2.429 *(bracket-era prior — re-measure)* |
-| A/B minimum detectable effect | 6.75% relative at 2 weeks; the duration curve is flat |
 | Guardrail 3σ noise, trailing basis | margin well behaved; scrap outlier-dominated and unusable on that basis (§12) |
 
 ## 9. Evaluation gates
@@ -1155,10 +1152,9 @@ measured price consequence (`tuning.max_price_share_changed_for_auto_rail`,
 when exceeded.
 
 **What remains OWNER** — *a number that encodes what you are willing to
-lose, wait for, or risk*: `budget_share_of_il` (risk appetite);
-`ab_test.min_detectable_effect_pct` (the reports say what is DETECTABLE,
-never what is worth detecting — `tune` reports the frontier, not a
-recommendation); `learning.max_std_shrink` (which rail moves is a safety
+lose, wait for, or risk*: `budget_share_of_il` (risk appetite — the forced
+rate is its consequence; shadow's `exploration_budget_sweep` prices the
+alternatives); `learning.max_std_shrink` (which rail moves is a safety
 posture — `tune` computes both numbers, decides neither); and `data.split`
 (§6 gives sizing rules; how much history still represents the business is a
 market judgment).
@@ -1216,21 +1212,30 @@ prices in phase 1.
 | 1. Shadow | decisions logged, no prices applied | §9.4 |
 | 2. Exploit-only pilot | small SKU set, exploration off | price mismatch < 1%, finalization SLA |
 | 3. Learning pilot | exploration on at the configured budget | posterior std falling; spend within budget |
-| 4. A/B | §11 | powered duration; no guardrail breach |
-| 5. Scale | rollout | positive A/B on IL% |
+| 4. Pilot read | §11 | the pre-committed decision table on the pilot's own outcomes; no guardrail breach |
+| 5. Scale | more episodes from engineering, same read | absolute IL and IL% both improve |
 
-## 11. A/B evaluation
+## 11. Pilot evaluation — on the episodes engineering supplies
 
 ### 11.1 Design
 
-Randomisation unit: **SKU × FC by stable hash** — not episode (consecutive
-episodes share inventory carryover). Allocation 50/50. Primary metric: IL%
-as a ratio of sums, linearised (delta-method) ratio estimator, SEs
-clustered on the assignment unit. Absolute IL reported alongside. The A/B
-measures whether the *policy* beats legacy; it cannot estimate elasticity.
-Guardrails: sell-through, waste units, realised margin, stockout rate; a
-breach halts the treatment arm. Duration fixed before launch — no early
-reads.
+There is no A/B and no control arm. The pilot prices **every episode
+engineering hands the system**; the only requirement on that set is that
+it **spans FCs and categories** (several of each, so that no single site,
+season or category carries the read and exploration can be tested at a
+small scale across the catalogue). Evaluation is a **pre/post read on the
+same units**: the pilot window against the trailing history of the same
+SKU × FC units, on IL% as a ratio of sums with absolute IL and the
+denominator alongside, in every cut (overall, by category, by FC). This
+read cannot separate the policy from season or common day shocks — it is
+weaker evidence than a randomised comparison, by design and on purpose
+(owner decision, 2026-09-05); the risk register carries it as item 3. What
+it *can* say is whether the system did what it was built to do (§11.2), and
+the guardrails still stop it if it does not: sell-through, waste units,
+realised margin, on the trailing-mean basis of the same system-priced
+episodes. Exploration's own evidence is unaffected — the forced moves are
+randomised within the pilot, so the elasticity update is clean regardless
+of how the pilot's IL is read.
 
 ### 11.2 The pre-committed decision table
 
@@ -1248,35 +1253,12 @@ The second row is the case this design makes most likely.
 `bootstrap.derive_thresholds` produces the evidence for the SET BY OWNER
 thresholds.
 
-**A/B minimum detectable effect.** The SE is measured **empirically on
-actual T-week blocks** (never √T-scaled, which is optimistic under
-unit-level clustering), with
-`MDE_abs(T) = (z_{1−α/2} + z_pow) × SE_pooled(T)/√(a(1−a))`. On the
-production extract the duration curve was flat: extra weeks add correlated
-observations of the same SKU × FC units, not new clusters — if more power
-is needed, the lever is more units, not more weeks. Trust only durations
-with several measured blocks.
-
 **Guardrail stop thresholds.** The floor a threshold must clear is 3σ of
-the series' own noise **on the basis the monitor compares against**:
-trailing mean before the A/B, same-day treatment-vs-control during it (one
-config value serves both phases, so it must clear the larger —
-`guardrail_threshold_recommendation` reports both floors and which binds).
-
-**Which basis is in force is `ab_test.active`, never the arm labels.**
-`common.ab.arm` hash-labels every priced SKU × FC, so before the A/B both
-labels are present *and both arms are system-priced*: an arm comparison is
-then treatment-vs-treatment, a catalogue-wide deterioration cancels exactly,
-and the guardrail cannot fire at all. It was structurally inert for the whole
-pilot. With `active: false` the monitor uses the trailing mean. Note the
-converse too: during a real A/B the control units are legacy-priced, emit no
-decisions and so never reach the event store — the monitor reports
-`basis_note` and falls back to the trailing mean rather than silently
-presenting a one-armed comparison as an arm comparison.
-The control-arm floor is measured on the **smoothed** series
-(`deterioration_smoothing_days`, arms smoothed before differencing, the
-monitor's own order) with the monitor's own arm hash; the comparison itself
-lives once, in `common.guardrail.deviation`.
+the series' own noise **on the basis the monitor compares against**: the
+trailing mean of the same system-priced episodes, each day smoothed over
+`deterioration_smoothing_days` before the comparison, the monitor's own
+order (`guardrail_threshold_recommendation` reports the floor and the
+verdict). The comparison itself lives once, in `common.guardrail.deviation`.
 
 Bases are per metric in `common.guardrail.BASIS`: `scrap: relative`
 (strictly positive), `margin: absolute_pp` — `margin_rate` **crosses
@@ -1458,7 +1440,7 @@ legacy ramp-to-cap behaviour), so both arms run the same horizon.
 | --- | --- | --- |
 | 1 | **Learning throughput** — per-outcome information is small, the prior is wide where unidentified, monotonicity concentrates identification at entry | Shadow emits `learning_yield_would_be` so weeks-to-convergence is read before the pilot. Two floors bind separately: evidence (episodes per update) and calendar (one human-gated update per `learning.update_cadence_days`). Levers: budget share, coarser cells. 21-day flat-posterior alert |
 | 2 | **Frozen-model drift** over the window | Final retrain at the launch freeze; daily drift ratio; weekly level re-fit (§9.2) |
-| 3 | **A/B power** — the duration curve is flat (between-unit variance, recurring units) | Empirical duration table; if more power is needed the lever is more SKU × FC units, not more weeks |
+| 3 | **No control arm** — the pilot's read is pre/post on the same units, confounded by season and day shocks | Engineering's sample spans FCs × categories so no single site or season carries the read; absolute IL and IL% are read together with their denominators; the trailing-mean guardrail basis is the same series the floors were measured on; scale is gated on the decision table, not on a p-value |
 | 4 | **Metric divergence at readout** — planner optimises IL, business reads IL% | Both metrics + denominators everywhere; decision table pre-committed (§11.2) |
 | 5 | **Single-elasticity misspecification** | Residuals logged by discount region; piecewise response in phase 2 |
 | 6 | **Enter-and-hold at the launch prior** — deepening pays only when \|ε\| > (1−d)/(γ−d), measured median 2.429 | Track the threshold gap every run; pre-brief the pilot; exploration closes the gap |

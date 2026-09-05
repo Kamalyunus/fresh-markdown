@@ -9,8 +9,7 @@
 # `python3 -m pipeline.advance`: it bootstraps, re-derives every MEASURED
 # value through `pipeline.tune --apply`, and stops at each value only you can
 # set. The values that must never ship a number at all (tau_initial,
-# delta_min_log_bias, the guardrail stops, min_detectable_effect_pct,
-# launch_date) ship null; status lists them as launch blockers until you
+# delta_min_log_bias, the guardrail stops, launch_date) ship null; status lists them as launch blockers until you
 # paste your own, and delta_min_log_bias null simply means no floor.
 
 meta:
@@ -158,12 +157,3 @@ monitoring:
     scrap_deterioration_pct: null      # MEASURED  3-sigma of the trailing noise; SHIPS NULL -- paste from YOUR reports/thresholds.json
     margin_deterioration_pct: null     # MEASURED  3-sigma of the trailing noise; SHIPS NULL -- paste from YOUR reports/thresholds.json
   alert_posterior_std_flat_days: 21    # SET  learning-loop health
-
-ab_test:
-  active: false                        # SET BY OWNER  is the A/B running? Before it, every priced unit is system-priced and only hash-LABELLED into arms, so an arm comparison is treatment-vs-treatment and the guardrail cannot fire -- the monitor uses the trailing-mean basis until this is true
-  allocation: 0.50                     # SET
-  power: 0.80                          # SET  for duration derivation
-  alpha: 0.05                          # SET  two-sided
-  candidate_durations_weeks: [2, 3, 4, 5, 6, 8, 10, 12]  # SET  windows tested
-  min_episodes_per_block: 100          # SET  blocks below this are skipped
-  min_detectable_effect_pct: null      # SET BY OWNER  relative effect on IL%

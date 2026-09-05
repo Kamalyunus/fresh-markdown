@@ -48,7 +48,7 @@ cross-checked against the docs by `test_docs_match_the_code.py`.
 comparison, JSON I/O); read `common/episodes.py` if you touch anything that
 counts inventory — it is the single source of closure/scrap/censoring truth
 — and `common/metrics.py::episode_economics`, the one episode-grain frame
-every IL, scrap and margin figure (floors, live guardrail, `il_pct`,
+every IL, scrap and margin figure (floors, live guardrail,
 business metrics, shadow's budget base) is built on. `events/pairs.py` is
 the one decision↔outcome pairing.
 

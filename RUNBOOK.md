@@ -24,9 +24,13 @@ All commands run from the repo root. `data/`, `reports/`, `artifacts/`,
   `reports/scenarios.html`: twelve situations (heavy stock, hours left, high
   COGS, exploration cost, legacy ramp, demand shock, restock, dead stock,
   learning, refusals) answered by the production solver on the config in
-  force. Demand there is a slider, not a forecast; the A/B is the evidence.
-- **Engineering** — build Lane B (below) against the event contract, then
-  run the daily lane on a cron and read its stop:
+  force. Demand there is a slider, not a forecast; the pilot's own
+  outcomes are the evidence.
+- **Engineering** — build Lane B (below) against the event contract,
+  choose the pilot episodes (**spanning FCs and categories** — several of
+  each, so no single site or category carries the read and exploration is
+  tested across the catalogue at small scale; there is no A/B and no
+  control arm), then run the daily lane on a cron and read its stop:
 
 ```bash
 python3 -m pipeline.advance --plan       # where the chain is, what runs next; touches nothing
@@ -77,11 +81,9 @@ each decision.
 4. **The owner keys** (`advance` stops here): `scrap_deterioration_pct` and
    `margin_deterioration_pct` at or above the floor `thresholds.json`
    stamps (never on `TOO TIGHT`, `BLOCKED`, `LIKELY INERT` or
-   `insufficient history`); `min_detectable_effect_pct` from `ab_duration`;
-   the two learning rails — `max_std_shrink` first (`information_increment`
+   `insufficient history`); the two learning rails — `max_std_shrink` first (`information_increment`
    derives from it), then `max_mean_step`, reading
-   `bounded_step_recommendation` and `backtest.step_sensitivity`;
-   `ab_test.active` stays `false` until the A/B genuinely starts.
+   `bounded_step_recommendation` and `backtest.step_sensitivity`.
 5. **`data.launch_date`**, on launch day. It lets the weekly level re-fit
    schedule past `split.test_end`; never move `split.test_end` for this.
    `advance` then re-fits, re-seals, and `status` must be green.
@@ -143,7 +145,7 @@ in the caller.
 
 | Line | Response |
 | --- | --- |
-| stop condition fired (overspend >2×, mismatch, duplicates) | exploration suspends for the cohort automatically; **exploitation pricing continues**. Investigate, don't restart blindly |
+| stop condition fired (overspend >2×, mismatch, duplicates) | exploration suspends automatically; **exploitation pricing continues**. Investigate, don't restart blindly |
 | `config mirrors reports` FAIL | a MEASURED paste disagrees with the report that derives it, or the report could not measure it (NOT RUN). `python3 -m pipeline.tune` prints the reason; `advance` re-pastes what it can |
 | `guardrail floors` WARN | "insufficient history" — nobody measured the floor, so the stop was not checked. Not a pass: more closed-episode history, then re-run `derive_thresholds` |
 | `assurance · reproduction` FAIL | something moved under the solver (config edit, artifact swap, deploy, library). Diff the bundle first: `artifact bundle` line, then `artifact mirrors` |
@@ -151,7 +153,7 @@ in the caller.
 | `report vintages` FAIL | a report was produced against a model no longer on disk — its gate rows grade a ghost. `advance` re-runs it; do not launch on it |
 | `calibration_coverage` says `STALE FACTORS IN USE` | the weekly re-fit was missed: rows were priced on frozen factors. `advance` re-fits and re-seals; re-run the report |
 | posterior std flat ≥ alert days | the loop is dead: no committed update. Check batch age, tau, volumes — in that order |
-| guardrail breach (scrap/margin, 2 consecutive days) | business decision, not a code fix — escalate to the owner with the monitor's arm comparison |
+| guardrail breach (scrap/margin, 2 consecutive days) | business decision, not a code fix — escalate to the owner with the monitor's trailing comparison |
 | `INSUFFICIENT` verdicts | not a pass. A thin window said so; widen or wait. Assurance's top line stays `INSUFFICIENT` until every check ran |
 
 **Never** retrain between two runs you intend to compare (comparisons are
@@ -169,8 +171,8 @@ quarantine count to zero with a catch-all reason.
 | Run `advance`, CI, deploys | **R/A** (owner may run it via their agent) | — |
 | Prior gate verdict; level-diagnostic review | run & present | **A** |
 | MEASURED pastes into config | — (the process, from named report fields only) | informed |
-| `SET BY OWNER` thresholds, MDE, rails, `launch_date` | — | **A** |
+| `SET BY OWNER` thresholds, rails, `budget_share_of_il`, `launch_date` | — | **A** |
 | Lane B service, push-failure feed, daily cron | **R/A** | — |
 | Daily `--apply` approval | **R** (pilot: owner may retain) | consulted on escalations |
-| Guardrail breach response, A/B readout | informed | **A** (decision table in design §11.2) |
-| A/B duration & no-early-reads | enforce | **A** |
+| Guardrail breach response, pilot readout | informed | **A** (decision table in design §11.2) |
+| Pilot episode set spans FCs × categories | **R/A** | consulted |

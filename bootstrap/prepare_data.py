@@ -651,7 +651,7 @@ def tag_dp_eligibility(d, cfg):
     detail["note"] = (
         "FLAGGED, NOT DROPPED. below_cost_hours and edge_truncated are "
         "reported only and stay dp_eligible. Artifact fits read 'eligible'; "
-        "the DP, backtest, shadow, calibration gate and A/B read "
+        "the DP, backtest, shadow and calibration gate read "
         "'dp_eligible'. Reasons are first-match in the order "
         + ", ".join(n for n, _ in DP_INELIGIBLE)
         + "; counts overlap, so they do not sum to episodes_dp_ineligible.")

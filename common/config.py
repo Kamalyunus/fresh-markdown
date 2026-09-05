@@ -25,7 +25,6 @@ RUNTIME_REQUIRED = [
     ("exploration", "tau_initial"),
     ("monitoring", "stop_conditions", "scrap_deterioration_pct"),
     ("monitoring", "stop_conditions", "margin_deterioration_pct"),
-    ("ab_test", "min_detectable_effect_pct"),
 ]
 
 
