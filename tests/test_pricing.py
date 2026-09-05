@@ -474,10 +474,16 @@ def test_config_detects_stale_paste_from_frozen_artifact(tmp_path):
     drift = artifact_mirror_drift(cfg)
     assert len(drift) == 1 and "dispersion.rho" in drift[0]
     # a --check-only contraction step (~1e-3) is NOT drift: the tolerance is
-    # the config's, and sits above the step the loop takes while settling
+    # the config's 1% of the frozen rho, above the step the loop takes while
+    # settling -- and relative, so it means the same on 0.12 and 0.65
     rho_path.write_text(json.dumps({"rho": 0.3183 + 0.0012}))
     assert artifact_mirror_drift(cfg) == []
     assert artifact_mirror_drift(cfg, tol=5e-4)     # the old value re-pasted every settle
+    rho_path.write_text(json.dumps({"rho": 0.3183 * 1.02}))      # 2%: drift
+    assert artifact_mirror_drift(cfg)
+    cfg["dispersion"]["rho"] = 0.65
+    rho_path.write_text(json.dumps({"rho": 0.65 + 0.005}))       # <1% of 0.65
+    assert artifact_mirror_drift(cfg) == []
 
 
 def test_write_off_outcome_is_documented_not_quarantined():

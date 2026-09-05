@@ -49,12 +49,13 @@ def artifact_mirror_drift(cfg, tol=None):
 
     Returns a list of human-readable divergences (empty when consistent).
     A missing artifact is not drift -- bootstrap has not run yet. The
-    tolerance is `dispersion.rho_paste_tolerance_abs`: each --check-only
-    turn contracts rho by ~1e-3 while the loop is still converging, and a
-    tolerance below that step made every settle a new paste.
+    tolerance is `dispersion.rho_paste_tolerance_rel` of the frozen value
+    (1%): each --check-only turn contracts rho by ~1e-3 while the loop is
+    still converging, and a tolerance below that step made every settle a
+    new paste. Relative, so it means the same thing on a fixture rho of
+    0.12 and a production rho of 0.65. `tol`, when given, is absolute.
     """
-    if tol is None:
-        tol = float(cfg["dispersion"].get("rho_paste_tolerance_abs", 5e-3))
+    rel = float(cfg["dispersion"].get("rho_paste_tolerance_rel", 0.01))
     drift = []
     for path_key, field, cfg_path in ARTIFACT_MIRRORS:
         path = config_get(cfg, path_key)
@@ -65,7 +66,8 @@ def artifact_mirror_drift(cfg, tol=None):
         if field not in artifact:
             continue
         pasted, frozen = config_get(cfg, cfg_path), artifact[field]
-        if pasted is None or abs(float(pasted) - float(frozen)) > tol:
+        allow = tol if tol is not None else rel * abs(float(frozen))
+        if pasted is None or abs(float(pasted) - float(frozen)) > allow:
             drift.append(f"{'.'.join(cfg_path)}={pasted} but "
                          f"{path}:{field}={frozen}")
     return drift

@@ -196,7 +196,8 @@ now. Dates are owner sign-off, 2026-08.
   invocation. The second half of the same loop: the rho paste tolerance was
   5e-4 while each `--check-only` turn still contracts rho by ~1e-3, so every
   settle was a new paste; the tolerance is now the config's
-  `rho_paste_tolerance_abs` (0.005, ~0.4% of deff at m = 6). And shadow ran
+  `rho_paste_tolerance_rel` (1% of the frozen rho; tau's is 5% because tau
+  self-corrects daily and rho is frozen for the pilot). And shadow ran
   single-threaded for an hour per pass; `advance` and `bootstrap.run` now
   pass `--workers 0` (reports are byte-identical serial or parallel).
 - **Weekly learning gate, tried and reverted.** A weekly `--apply` was
