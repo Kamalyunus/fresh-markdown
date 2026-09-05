@@ -266,3 +266,14 @@ def test_the_tau_paste_is_journaled_under_the_shadow_phase():
                       "to_paste": [{"key": "exploration.tau_initial"},
                                    {"key": "dispersion.rho"}]})
     assert advance.plan(st)[0]["phase"] == "tune"
+
+
+def test_an_unlearned_posterior_is_reinitialised_when_the_launch_belief_moves():
+    """posterior.cold_start_shift_std changed after init: the file is state,
+    not a report, so no vintage check catches it. While it holds no outcome
+    a --force re-init is safe and due; once it has learned, never."""
+    steps = advance.plan(_state(posterior_stale=True))
+    assert steps[0]["args"] == ["bootstrap.init_posterior", "--force"]
+    assert steps[0]["phase"] == "posterior"
+    assert advance.plan(_state(posterior_stale=False))[0]["kind"] != "run" or \
+        advance.plan(_state(posterior_stale=False))[0]["args"][0] != "bootstrap.init_posterior"

@@ -40,6 +40,17 @@ def bounded_step(mean_before, std_before, raw_mean, raw_std, cfg):
     return new_mean, new_std, clipped
 
 
+def launch_belief(mean, std, cfg):
+    """The mean a cell LAUNCHES at: the prior mean pushed
+    `posterior.cold_start_shift_std` prior stds toward more elastic and
+    clipped to the epsilon range (design 5.9). The std is untouched, so the
+    push is largest where the prior is widest and evidence weighs the same;
+    the bounded step walks it back if outcomes disagree. 0 = the prior."""
+    pc = cfg["posterior"]
+    shifted = float(mean) - float(pc.get("cold_start_shift_std") or 0.0) * float(std)
+    return float(min(max(shifted, pc["epsilon_min"]), pc["epsilon_max"]))
+
+
 class PosteriorStore:
     def __init__(self, cfg, path=None):
         self.cfg = cfg
@@ -47,18 +58,18 @@ class PosteriorStore:
         with open(self.path) as f:
             self.state = json.load(f)
 
-    @classmethod
-    def initialise(cls, cfg, prior_by_category, episodes_per_week, path=None):
-        """Create posterior.json at launch from the design 5.5 prior and
-        phase-0 weekly episode volumes. Assignment does not move during the
-        MVP window."""
-        path = path or cfg["posterior"]["path"]
+    @staticmethod
+    def launch_state(cfg, prior_by_category, episodes_per_week):
+        """The state initialise() writes: every cell at its launch belief,
+        categories routed by phase-0 weekly volume (assignment does not move
+        during the MVP window). Pure, so launch_stale() can recompute it."""
         floor = cfg["posterior"]["min_episodes_per_week_for_cell"]
         cell_of = {c: (c if episodes_per_week.get(c, 0) >= floor else GLOBAL_CELL)
                    for c in prior_by_category}
 
         def record(mean, std):
-            return {"mean": float(mean), "std": float(std), "n_obs": 0,
+            return {"mean": launch_belief(mean, std, cfg), "prior_mean": float(mean),
+                    "std": float(std), "n_obs": 0,
                     "accumulated_information": 0.0,
                     "version": 0,
                     "updated_at": pd.Timestamp.now("UTC").isoformat()}
@@ -74,10 +85,17 @@ class PosteriorStore:
         cells[GLOBAL_CELL] = record(
             sum(m["mean"] for m in members) / len(members),
             max(m["std"] for m in members))
+        return {"cells": cells, "cell_of": cell_of,
+                "processed_outcome_ids": [],
+                "prior_source": "profile_density",
+                "cold_start_shift_std": float(
+                    cfg["posterior"].get("cold_start_shift_std") or 0.0)}
 
-        state = {"cells": cells, "cell_of": cell_of,
-                 "processed_outcome_ids": [],
-                 "prior_source": "profile_density"}
+    @classmethod
+    def initialise(cls, cfg, prior_by_category, episodes_per_week, path=None):
+        """Create posterior.json at launch (design 5.9)."""
+        path = path or cfg["posterior"]["path"]
+        state = cls.launch_state(cfg, prior_by_category, episodes_per_week)
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         cls._atomic_write(path, state)
         store = cls.__new__(cls)
@@ -100,6 +118,20 @@ class PosteriorStore:
             os.fsync(dir_fd)
         finally:
             os.close(dir_fd)
+
+    def launch_stale(self, prior_by_category, episodes_per_week):
+        """True while the store holds NO learning and its cells differ from
+        what initialise() would write now (the launch belief moved, or the
+        prior did). Once an outcome has been consumed the learner owns the
+        mean and the file is never re-initialised by the process."""
+        if self.state.get("processed_outcome_ids"):
+            return False
+        fresh = self.launch_state(self.cfg, prior_by_category, episodes_per_week)
+        mine = {c: (round(r["mean"], 9), round(r["std"], 9))
+                for c, r in self.state["cells"].items()}
+        want = {c: (round(r["mean"], 9), round(r["std"], 9))
+                for c, r in fresh["cells"].items()}
+        return mine != want or self.state["cell_of"] != fresh["cell_of"]
 
     def cell_name(self, category):
         return self.state["cell_of"].get(str(category), GLOBAL_CELL)

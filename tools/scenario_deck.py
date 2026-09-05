@@ -23,6 +23,7 @@ from common.io import read_json
 from common.parallel import map_episodes
 from pricing import dp as dp_mod
 from pricing.demand import expected_min_demand_inventory, mu_at
+from pricing.posterior import launch_belief
 
 P0 = 10_000.0          # list price; every currency figure scales with it
 GRID = {
@@ -40,7 +41,9 @@ def beliefs(cfg):
     posterior: the same shelf under a wide belief and a tighter, steeper one."""
     prior = read_json(cfg["posterior"]["prior"]["path"]) or {}
     per = prior.get("per_category") or {}
-    cold = float(np.mean([v["mean"] for v in per.values()])) if per else -1.0
+    # the belief the system LAUNCHES at (posterior.launch_belief), not the raw prior
+    cold = (float(np.mean([launch_belief(v["mean"], v["std"], cfg) for v in per.values()]))
+            if per else -1.0)
     cold = max(min(cold, -0.3), -2.5)
     return {"cold": round(cold, 3), "learned": round(max(cold * 1.4, -3.0), 3)}
 

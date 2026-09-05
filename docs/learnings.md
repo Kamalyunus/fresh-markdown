@@ -373,6 +373,17 @@ now. Dates are owner sign-off, 2026-08.
   windows read the trend). They live in §5.13–5.14 now; the reports point
   there.
 
+- **Launch at the prior's best guess → launch half a std steeper (owner,
+  2026-09-05).** Under the cold prior the DP was enter-and-hold on most
+  shelves and the owner would not carry the clearance loss into the pilot.
+  Rather than a new mechanism, the existing init step pushes each cell's
+  launch mean `cold_start_shift_std` prior stds toward more elastic (0.5;
+  std untouched, so evidence weighs the same and the bounded step walks it
+  back), the backtest prices its DP arm at that belief against a prior-mean
+  world so the launch record grades the policy that will run, and
+  `epsilon_min` was widened −4 → −5 under rule 3. k = 1 was judged too
+  aggressive.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,

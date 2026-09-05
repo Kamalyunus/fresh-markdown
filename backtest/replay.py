@@ -20,6 +20,7 @@ from common import episodes
 from common.parallel import map_episodes
 from pricing import dp as dp_mod
 from pricing import explore
+from pricing.posterior import launch_belief
 from pricing.demand import (mu_at, expected_min_demand_inventory,
                             expected_min_demand_inventory_vec)
 
@@ -47,8 +48,14 @@ def _attach_predictions(d, cfg, model, prior, r_lookup):
     """Predicted units at ACTUAL historical prices: mu_ref scaled by the prior
     elasticity, censored at starting inventory, over `predict_frame`."""
     d = predict_frame(d, cfg, model, r_lookup)
-    d["eps"] = d.category.map(
-        lambda c: prior["per_category"][str(c)]["mean"]).astype(float)
+    # the WORLD transitions at the prior mean; the DP arm PRICES at the launch
+    # belief (posterior.launch_belief), so the replay grades the policy that
+    # will actually run against the prior's best guess of the world
+    per = prior["per_category"]
+    d["eps"] = d.category.map(lambda c: per[str(c)]["mean"]).astype(float)
+    d["eps_belief"] = d.category.map(
+        lambda c: launch_belief(per[str(c)]["mean"], per[str(c)]["std"], cfg)
+    ).astype(float)
     ratio = (1 - d.total_discount.to_numpy()) / (1 - d.d_ref.to_numpy())
     mu = np.clip(d.mu_ref_hat.to_numpy() * ratio ** d.eps.to_numpy(),
                  cfg["pricing"]["demand_floor"], None)
@@ -483,6 +490,7 @@ def _episode_frame(g):
         "mu_ref_path": g.mu_ref_hat.to_numpy(),
         "r": float(g.r.iloc[0]),
         "eps": float(g.eps.iloc[0]),
+        "eps_belief": float(g.eps_belief.iloc[0]) if "eps_belief" in g else float(g.eps.iloc[0]),
         "episode_id": str(g.episode_id.iloc[0]),
         "sku_id": int(g.sku_id.iloc[0]),
         "fc": str(g.fc.iloc[0]),
@@ -585,7 +593,7 @@ def _replay_one(e, cfg):
         "legacy_model": _simulate_arm(
             e, cfg, lambda t, q_int, anchor: float(e["actual_discounts"][t]),
             e["eps"]),
-        "dp": _simulate_arm(e, cfg, _dp_price(e, cfg, e["eps"], spreads.append),
+        "dp": _simulate_arm(e, cfg, _dp_price(e, cfg, e["eps_belief"], spreads.append),
                             e["eps"]),
     }
 
@@ -628,6 +636,7 @@ def _replay_one(e, cfg):
     row.update({
         "date": e["date"],
         "eps": e["eps"],
+        "eps_belief": e["eps_belief"],
         "deepening_threshold": dp_mod.deepening_threshold_epsilon(
             e["original_price"], e["cost"], e["d_ref"]),
         "episode_id": e["episode_id"], "sku_id": e["sku_id"],
@@ -667,7 +676,7 @@ def intra_episode_moves(ep, cfg):
                 "legacy_share_episodes_with_a_step": round(
                     float((g.legacy_model_steps > 0).mean()), 4),
                 "share_episodes_eps_above_threshold": round(
-                    float((g.eps.abs() > g.deepening_threshold).mean()), 4)}
+                    float((g.eps_belief.abs() > g.deepening_threshold).mean()), 4)}
 
     return {"overall": summary(ep),
             "by_cost_ratio_band": {str(k): summary(g)
@@ -702,17 +711,17 @@ def step_sensitivity(frames, cfg, seed=0, sample=300):
 
     shifts = {"deeper_belief": -step, "shallower_belief": +step}
     out = {"step": step, "episodes_swept": take,
-           "note": ("DP arm re-solved at eps +- max_mean_step, world held "
-                    "at base eps; crossers are where the cap is "
-                    "load-bearing.")}
-    base = {id(e): _dp_arm(e, cfg, e["eps"]) for e in picked}
+           "note": ("DP arm re-solved at the launch belief +- max_mean_step, "
+                    "world held at the prior mean; crossers are where the cap "
+                    "is load-bearing.")}
+    base = {id(e): _dp_arm(e, cfg, e["eps_belief"], eps_world=e["eps"]) for e in picked}
     for label, shift in shifts.items():
         changed = il_base = il_shift = 0.0
         cross_n = cross_changed = 0
         disc_delta = 0.0
         for e in picked:
             b_il, b_disc, b_path = base[id(e)]
-            eps_s = float(np.clip(e["eps"] + shift, lo, hi))
+            eps_s = float(np.clip(e["eps_belief"] + shift, lo, hi))
             # belief shifts, the world stays at base eps -- the delta is the
             # cost of the changed prices alone
             s_il, s_disc, s_path = _dp_arm(e, cfg, eps_s, eps_world=e["eps"])
@@ -724,8 +733,8 @@ def step_sensitivity(frames, cfg, seed=0, sample=300):
             bar = dp_mod.deepening_threshold_epsilon(
                 e["original_price"], e["cost"], e["d_ref"])
             # crosser: bar lies between |eps| and |eps_shifted| (direction-aware)
-            lo_abs = min(abs(e["eps"]), abs(eps_s))
-            hi_abs = max(abs(e["eps"]), abs(eps_s))
+            lo_abs = min(abs(e["eps_belief"]), abs(eps_s))
+            hi_abs = max(abs(e["eps_belief"]), abs(eps_s))
             if np.isfinite(bar) and lo_abs < bar <= hi_abs:
                 cross_n += 1
                 cross_changed += moved
@@ -824,9 +833,11 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
         "intra_episode_deepening": {
             "median_threshold_abs_eps": round(float(
                 ep.deepening_threshold.replace(np.inf, np.nan).median()), 3),
-            "median_abs_eps_in_use": round(float(ep.eps.abs().median()), 3),
+            "median_abs_eps_in_use": round(float(ep.eps_belief.abs().median()), 3),
+            "median_abs_eps_prior": round(float(ep.eps.abs().median()), 3),
+            "cold_start_shift_std": float(cfg["posterior"].get("cold_start_shift_std") or 0.0),
             "share_episodes_eps_above_threshold": round(float(
-                (ep.eps.abs() > ep.deepening_threshold).mean()), 4),
+                (ep.eps_belief.abs() > ep.deepening_threshold).mean()), 4),
             "note": ("share near 0 = enter-and-hold at the current "
                      "elasticity; only the posterior moving past the bar "
                      "changes that, widening the action set cannot."),

@@ -117,6 +117,9 @@ READ_BY = (
     ("monitoring.stop_conditions.deterioration_smoothing_days", "thresholds"),
     ("monitoring.stop_conditions.persistence_days", "thresholds"),
     ("posterior.min_std", "thresholds"),
+    # the launch belief: the backtest prices its DP arm at it (the loop
+    # re-grades); the posterior file is re-initialised by advance while unlearned
+    ("posterior.cold_start_shift_std", "calibration"),
 )
 
 
@@ -547,6 +550,22 @@ def _business(cfg, thresholds):
 def _readings(cfg, backtest, shadow):
     """Findings with no config key: the ones that decide what to DO next."""
     out = []
+
+    # the launch belief: an owner's risk posture, never pasted, graded by the
+    # backtest (DP at the belief, world at the prior mean)
+    k = cfg["posterior"].get("cold_start_shift_std")
+    ie = ((backtest or {}).get("policy_deltas") or {}).get("intra_episode_deepening") or {}
+    gap = ((backtest or {}).get("policy_deltas") or {}).get("policy_gap_like_for_like") or {}
+    out.append(_finding(
+        ("posterior", "cold_start_shift_std"), OWNER, OK, k, None,
+        f"launch belief = prior mean - {k} prior std per cell (clipped to the "
+        f"epsilon range); median |eps| prior {ie.get('median_abs_eps_prior')} -> "
+        f"launch {ie.get('median_abs_eps_in_use')} against a deepening bar of "
+        f"{ie.get('median_threshold_abs_eps')}; the DP at this belief reduces "
+        f"IL by {gap.get('dp_il_reduction_pct_of_legacy')} of legacy under the "
+        "prior-mean world. A risk posture: steeper buys clearance and pays "
+        "discount if the prior is right; the learner walks it back",
+        "backtest.policy_deltas.intra_episode_deepening"))
 
     # calibration cadence -- the weekly cron is worth running only if it beats
     # the frozen anchor on the hold-out. Measured, not assumed.

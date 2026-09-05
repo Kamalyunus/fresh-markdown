@@ -69,6 +69,15 @@ def stale_reports(cfg, bundle, reports):
     return out
 
 
+def _posterior_stale(cfg):
+    from pricing.posterior import PosteriorStore
+    prior = read_json(cfg["posterior"]["prior"]["path"])
+    if not prior or not os.path.exists(cfg["posterior"]["path"]):
+        return False
+    return PosteriorStore(cfg).launch_stale(prior["per_category"],
+                                            prior["episodes_per_week"])
+
+
 def probe(cfg, root="reports", feed=None, retrain=False):
     """Everything plan() decides on, read once from disk."""
     reports = status.read_reports(root)
@@ -97,6 +106,9 @@ def probe(cfg, root="reports", feed=None, retrain=False):
         "have": {n for n, r in reports.items() if r},
         "tune": tune.collect(cfg, root, reports=reports),
         "posterior": os.path.exists(cfg["posterior"]["path"]),
+        # unlearned posterior whose cells differ from what init would write
+        # now (the launch belief or the prior moved): re-init is safe and due
+        "posterior_stale": _posterior_stale(cfg),
         "shadow_gate": ((reports["shadow"] or {}).get("shadow_gate") or {}
                         ).get("verdict"),
         "nulls": status.runtime_nulls(cfg),
@@ -176,9 +188,15 @@ def plan(st):
                       "reevaluate": True, "keys": keys})
         return steps
 
-    # 4. posterior, once
+    # 4. posterior, once -- re-initialised only while it holds no learning
+    #    and the launch belief it was written with has moved
     if not st["posterior"]:
         steps.append(_run("init posterior", ["bootstrap.init_posterior"],
+                          phase="posterior", reevaluate=True))
+        return steps
+    if st.get("posterior_stale"):
+        steps.append(_run("re-init posterior (launch belief moved; no outcome "
+                          "consumed yet)", ["bootstrap.init_posterior", "--force"],
                           phase="posterior", reevaluate=True))
         return steps
 

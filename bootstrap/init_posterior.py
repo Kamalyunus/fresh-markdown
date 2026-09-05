@@ -35,11 +35,13 @@ def main():
 
     store = PosteriorStore.initialise(cfg, prior["per_category"],
                                       prior["episodes_per_week"])
-    print(f"prior source: {prior['source']}")
+    print(f"prior source: {prior['source']}  |  launch belief = prior mean - "
+          f"{store.state['cold_start_shift_std']} std (posterior.cold_start_shift_std)")
     for cell, rec in store.state["cells"].items():
         members = [c for c, target in store.state["cell_of"].items()
                    if target == cell]
-        print(f"  {cell:16s} mean {rec['mean']:+.3f} std {rec['std']:.3f}"
+        print(f"  {cell:16s} prior {rec['prior_mean']:+.3f} -> launch "
+              f"{rec['mean']:+.3f} std {rec['std']:.3f}"
               + (f"  <- {', '.join(sorted(members))}" if cell == "GLOBAL"
                  and members else ""))
     print(f"wrote {path}")

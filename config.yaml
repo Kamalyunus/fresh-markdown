@@ -87,10 +87,11 @@ tuning:                                # SET  gates pipeline.tune checks before 
 
 posterior:
   min_episodes_per_week_for_cell: 150  # SET  below this, fall back to the global cell
-  epsilon_min: -4.00                   # SET  grid bound
+  epsilon_min: -5.00                   # SET  grid bound; the lower bound MAY be widened when a fit pins there (rule 3) -- widened -4 -> -5 (owner, 2026-09-05)
   epsilon_max: -0.05                   # SET  sign constraint
   grid_size: 801                       # SET
   min_std: 0.05                        # SET  floor on posterior std
+  cold_start_shift_std: 0.5            # SET BY OWNER  launch belief = prior mean - this many prior stds (steeper); 0 = the prior as measured. Applied by init_posterior and read by the backtest; inert once the posterior holds outcomes (the learner owns the mean)
   path: "artifacts/posterior.json"
   prior:
     min_rows_per_time_cell: 5          # SET  thinner time cells are dropped

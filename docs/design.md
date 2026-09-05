@@ -452,7 +452,8 @@ The specification (`bootstrap.prior_density`):
   A category the data says nothing about gets the uniform — mean
   `(lo+hi)/2`, std `(hi−lo)/√12` — by construction. The search bounds are
   `[epsilon_min, epsilon_max]`, a policy statement about the range the DP
-  supports.
+  supports; the lower bound was widened −4 → −5 (owner, 2026-09-05) under
+  rule 3's asymmetric remedy, the upper never moves.
 - **Thin time cells.** Controlled-arm cells with fewer than
   `min_rows_per_time_cell` uncensored rows get no multiplier — a cell
   fitted from a few observations absorbs the price response it is meant to
@@ -643,7 +644,23 @@ category three ways and each third takes three times the calendar; (3)
 where history cannot identify ε per category it certainly cannot per
 subcategory. Categories above `min_episodes_per_week_for_cell` earn their
 own cell; assignment fixed at launch. Phase-2 fix, if within-category
-variation shows up, is partial pooling, not a threshold ladder. The ledger
+variation shows up, is partial pooling, not a threshold ladder.
+
+**The launch belief** (`pricing.posterior.launch_belief`): each cell
+launches at the prior mean pushed `posterior.cold_start_shift_std` prior
+stds toward more elastic and clipped to the ε range, std untouched. An
+owner's risk posture (0.5 at 2026-09-05; 0 is the prior as measured): a
+steeper day-one belief moves |ε| toward the deepening bar, buys clearance
+and pays discount if the prior is right, and the push is largest exactly
+where the prior is widest — where the data cannot object. The std is
+unchanged so evidence weighs the same, and the bounded step walks the mean
+back at up to `max_mean_step` per update if outcomes disagree. The cell
+keeps `prior_mean` for audit. The same function sets the backtest's DP-arm
+belief (§5.14), so the launch record grades the policy that will run, and
+the deck's cold-start belief. The key is read at `init_posterior` only:
+`advance` re-initialises the file while it holds no consumed outcome and its
+cells differ from what init would write now (`launch_stale`); once an
+outcome is consumed the learner owns the mean and the key is inert. The ledger
 lives inside the posterior file because exactly-once learning requires
 "revision applied" and "outcomes consumed" to commit together — one file
 renames atomically, two cannot.
@@ -1471,6 +1488,14 @@ from the pre-launch scope to the latest data plus the week being priced,
 so the weekly cron reaches the week `calibration_current` checks. Every
 other fit keeps `pre_launch`; moving `split.test_end` would rescope them
 all and turn `--check-only` into a re-settle on hold-out rows.
+The DP arm is **priced at the launch belief and transitions at the prior
+mean** — the policy that will run, graded against the prior's best guess of
+the world — while the legacy arm transitions at the prior mean too, so a
+steeper launch belief changes what the DP does and never what legacy sells;
+the like-for-like IL gap is then what the belief costs if the prior is
+right. `step_sensitivity` shifts around the launch belief with the world
+held at the prior mean, and `intra_episode_deepening` reports both medians
+(`median_abs_eps_prior`, `median_abs_eps_in_use`).
 `derive_tau_initial` solves production's own equation: the budget is
 `explore.budget_today` at the widest launch prior std, Q-spreads are
 collected under `inference.decide`'s explorability gate, and `n_days` is

@@ -175,9 +175,9 @@ phase — what runs, which config keys move, and who moves them:
 | --- | --- | --- | --- |
 | bootstrap | `bootstrap.run` (train ONCE, loop to the fixed point, backtest, thresholds, seal) | none | — |
 | tune | `tune --apply`, then `bootstrap.run --check-only` / `derive_thresholds` / shadow as the pasted keys demand (`tune.stale_keys`), until nothing is left to paste | `rho`, `calibration_fit_trailing_weeks`, `calibration_gate_band`, `information_increment`, `delta_min_log_bias`, `scrap/margin_deterioration_pct` (the 3σ trailing floor), `max_mean_step` (inside its price-consequence gate) | the process, from the report that derives each |
-| posterior | `init_posterior`, once | none | — |
+| posterior | `init_posterior`, once — re-run with `--force` by the process only while the file holds no consumed outcome and its cells differ from what init would write now (the launch belief or the prior moved) | none | — |
 | shadow | `pipeline.shadow` on the hold-out, every episode; then `tune --apply` | `tau_initial` | the process, from `shadow.tau_initial_derivation`. The forced rate is the budget's: to change it the owner reads `shadow.exploration_budget_sweep` (forced rate, spend, move, `information_rel` per `budget_share_of_il` × `delta_min_bias_multiple`), sets the pair, and shadow re-runs once |
-| owner | STOP | `max_std_shrink`; `max_mean_step` when its re-price EXCEEDS the gate; a stop threshold only when its floor is `BLOCKED`, `TOO TIGHT`, `LIKELY INERT` or `insufficient history` | you, from `thresholds.json` (advance prints floor, verdict, source) |
+| owner | STOP | `max_std_shrink`; `max_mean_step` when its re-price EXCEEDS the gate; a stop threshold only when its floor is `BLOCKED`, `TOO TIGHT`, `LIKELY INERT` or `insufficient history`; `posterior.cold_start_shift_std` never stops (it ships 0.5) but is yours — `tune` reports it with the backtest evidence | you, from `thresholds.json` (advance prints floor, verdict, source) |
 | launch | STOP, then `--fit-calibration` + `seal` | `data.launch_date` | you, on launch day |
 | daily | ingest, `update --calibrate-tau`, monitor, assurance, export, status; STOP at `update --apply` | none | you approve each update. A fired stop condition SUSPENDS exploration (the monitor writes it into the posterior state; `decide` stops drawing; exploitation continues) until a human runs `update --resume-exploration` |
 
@@ -308,6 +308,7 @@ Every paste has one source and one checker:
 | `exploration.tau_initial` | `reports/shadow.json` → `tau_initial_derivation` (backtest = cross-check only) | `tau_provenance_error` — shadow refuses a stale paste |
 | `exploration.delta_min_log_bias` | `tune` from `backtest.fidelity`, PER CATEGORY as a one-line mapping (own log ratio floored by MAE@W and the gate half-width; `_default` for unseen categories) — null = no floor, the fixture never ships a number | `config mirrors reports` |
 | `scrap/margin_deterioration_pct` | `tune` pastes the 3σ trailing-mean floor from `reports/thresholds.json` (owner, 2026-08-30); OWNER only when the verdict is `TOO TIGHT`, `BLOCKED`, `LIKELY INERT` or `insufficient history` — all blocking, none pasted | `guardrail floors` |
+| `posterior.cold_start_shift_std` | OWNER — launch belief = prior mean − k·std per cell (0.5); read by `init_posterior` and the backtest's DP arm; inert once the posterior has consumed an outcome | `tune` (OWNER reading with `intra_episode_deepening` medians and the like-for-like IL gap) |
 | `data.launch_date` | OWNER — null until launch day; once set, `--fit-calibration` schedules through the latest data (the weekly cron) while every sealed fit keeps its pre-launch scope. Never move `split.test_end` for this | `launch blockers`; `calibration_schedule_current` on every `--apply` |
 
 ## Where to look

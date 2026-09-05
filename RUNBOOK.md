@@ -93,6 +93,13 @@ each decision.
    the 3σ trailing floor `thresholds.json` stamps; they come to you only
    on `TOO TIGHT`, `BLOCKED`, `LIKELY INERT` or `insufficient history`,
    and the answer there is the basis or the metric, never a number.
+   `posterior.cold_start_shift_std` (0.5) is how aggressive the day-one
+   belief is: launch |ε| = prior |ε| + k·std per cell. Read
+   `backtest.policy_deltas`: `intra_episode_deepening` (prior vs launch
+   median against the bar), `dp_clearance`, `dp_il_reduction_pct_of_legacy`
+   and `intra_episode_moves` — more k buys clearance and movement and pays
+   IL under the model. Change it before launch only; after the first
+   consumed outcome the learner owns the mean.
 5. **`data.launch_date`**, on launch day. It lets the weekly level re-fit
    schedule past `split.test_end`; never move `split.test_end` for this.
    `advance` then re-fits, re-seals, and `status` must be green.

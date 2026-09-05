@@ -965,3 +965,33 @@ def test_within_episode_moves_are_counted_on_the_arms_own_path(cfg):
     # mid-cost ones below it (a fresh solve every hour, not a pinned price)
     assert bands["cost_ratio>=0.6"]["mean_steps_per_episode"] >= \
         bands["0.4<=cost_ratio<0.6"]["mean_steps_per_episode"]
+
+
+def test_the_replay_prices_at_the_launch_belief_and_transitions_at_the_prior(cfg):
+    """The DP arm is the policy that will run (posterior.launch_belief); the
+    world is the prior's best guess. So a steeper launch belief changes what
+    the DP does, never what the legacy arm sells."""
+    from backtest.replay import _episode_frame, _replay_one
+
+    def frame(eps, eps_belief):
+        g = pd.DataFrame({
+            "episode_id": ["e"] * 6, "date": ["2026-05-01"] * 6,
+            "hour_of_day": [9, 10, 11, 12, 13, 14],
+            "total_discount": [0.25] * 6, "original_price": [10_000.0] * 6,
+            "cost": [7000.0] * 6, "d_ref": [0.25] * 6,
+            "starting_inventory": [12] * 6, "units_sold": [0] * 6,
+            "mu_ref_hat": [0.4] * 6, "r": [3.0] * 6,
+            "eps": [eps] * 6, "eps_belief": [eps_belief] * 6,
+            "is_observed": [True] * 6, "sku_id": [7] * 6, "fc": ["FC1"] * 6,
+            "category": ["FRUIT"] * 6})
+        g["ending_inventory"] = g.starting_inventory - g.units_sold
+        return _episode_frame(g)
+
+    plain = _replay_one(frame(-2.0, -2.0), cfg)[0]
+    steep = _replay_one(frame(-2.0, -3.5), cfg)[0]
+    assert steep["eps"] == -2.0 and steep["eps_belief"] == -3.5
+    # the legacy arm lives in the same world either way
+    assert steep["legacy_model_il"] == pytest.approx(plain["legacy_model_il"])
+    # the DP arm believes discounts move more, so it cuts at least as deep
+    assert steep["dp_mean_discount"] >= plain["dp_mean_discount"] - 1e-9
+    assert steep["dp_steps"] >= plain["dp_steps"]

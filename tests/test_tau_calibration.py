@@ -540,3 +540,34 @@ def test_calibrate_tau_commits_tau_without_touching_the_cells(cfg, tmp_path):
     for k, v in again.state["cells"].items():
         assert (v["mean"], v["std"], v["n_obs"]) == \
             (cells_before[k]["mean"], cells_before[k]["std"], cells_before[k]["n_obs"])
+
+
+# ------------------------------------------------------------ launch belief
+def test_the_launch_belief_is_the_prior_pushed_by_k_stds_and_clipped(cfg):
+    """posterior.cold_start_shift_std: launch = prior mean - k*std, clipped to
+    the epsilon range; std untouched (evidence weighs the same); k = 0 is the
+    prior as measured. Owner posture, 2026-09-05."""
+    from pricing.posterior import launch_belief
+    c = dict(cfg, posterior=dict(cfg["posterior"], cold_start_shift_std=0.5,
+                                 epsilon_min=-5.0, epsilon_max=-0.05))
+    assert launch_belief(-2.0, 0.5, c) == pytest.approx(-2.25)
+    assert launch_belief(-2.0, 0.2, c) == pytest.approx(-2.10)   # tight prior, small push
+    assert launch_belief(-4.9, 1.0, c) == -5.0                   # clipped at the bound
+    c0 = dict(c, posterior=dict(c["posterior"], cold_start_shift_std=0))
+    assert launch_belief(-2.0, 0.5, c0) == -2.0
+    # initialise writes the launch belief and keeps the prior mean for audit
+    import tempfile, os
+    with tempfile.TemporaryDirectory() as d:
+        p = PosteriorStore.initialise(
+            c, {"vegetables": {"mean": -2.0, "std": 0.5}}, {"vegetables": 500},
+            path=os.path.join(d, "posterior.json"))
+        rec = p.state["cells"]["vegetables"]
+        assert rec["mean"] == pytest.approx(-2.25) and rec["prior_mean"] == -2.0
+        assert rec["std"] == 0.5 and p.state["cold_start_shift_std"] == 0.5
+        # stale only while unlearned AND the launch belief moved
+        prior = {"vegetables": {"mean": -2.0, "std": 0.5}}
+        assert not p.launch_stale(prior, {"vegetables": 500})
+        p.cfg = dict(c, posterior=dict(c["posterior"], cold_start_shift_std=1.0))
+        assert p.launch_stale(prior, {"vegetables": 500})
+        p.state["processed_outcome_ids"] = ["O1"]           # the learner owns it now
+        assert not p.launch_stale(prior, {"vegetables": 500})
