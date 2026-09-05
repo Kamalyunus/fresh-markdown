@@ -5,7 +5,7 @@ without looking anything up. The authoritative specification — including the
 rationale and the measured incident behind every rule below — is
 **`docs/design.md`** (§ numbers refer to it). Superseded approaches live in
 `docs/learnings.md`. When this guide and the design doc disagree, the design
-doc wins. Doc maintenance: `docs/maintaining_docs.md`.
+doc wins. Doc maintenance: the last section of this file.
 
 ## Non-negotiables
 
@@ -15,11 +15,11 @@ statement and the incident that created the rule.
 1. **Never retrain the baseline between two runs you intend to compare** —
    a comparison is valid only when `artifact_versions.baseline_model_version`
    matches in both reports. `--fit-calibration` does NOT retrain; plain
-   `train_baseline` and `bootstrap.run` DO. (§5.4)
+   `train_baseline` and `ops.bootstrap_loop` DO. (§5.4)
 1a. **Changing the elasticity prior invalidates `rho`, `deff` and the level
    factor** — re-run `fit_dispersion` onward and re-paste `rho`. (§5.6)
-1b. **Drive the chain with `python3 -m pipeline.advance`, never by hand-running
-   the step list** — it calls `bootstrap.run` (which iterates steps 3b–5b to
+1b. **Drive the chain with `python3 -m ops.advance`, never by hand-running
+   the step list** — it calls `ops.bootstrap_loop` (which iterates steps 3b–5b to
    the fixed point, 8–9 turns on production data), settles every paste with
    `--check-only`, and retrains only when the model is absent or `--retrain`
    is given. Re-running the step list to settle calibration retrains the
@@ -54,7 +54,7 @@ statement and the incident that created the rule.
 9. **IL% is always a ratio of sums, with its denominator and absolute IL
    alongside** — per-episode IL% is undefined and must never be averaged.
    (§2.3)
-10. **`pipeline.update --apply` is the operator gate** — never work around a
+10. **`daily.update --apply` is the operator gate** — never work around a
     refusal; a second `--apply` consuming nothing is correct, not a bug.
     (§5.11)
 11. **The discount column is percent in raw data and a fraction after
@@ -72,12 +72,12 @@ statement and the incident that created the rule.
     `common.episodes.window_slice`; a row-level date cut manufactures
     orphan episodes at the midnight seam. (§12a)
 16. **Nothing pre-launch may see past `split.test_end`** — the hold-out is
-    read once, by `pipeline.shadow`, and never tuned on. (§5.13, §9)
+    read once, by `evaluate.shadow`, and never tuned on. (§5.13, §9)
 17. **A number a procedure solves for is not evidence about that number** —
     a bisection reports 1.00× on any population; grade fitted quantities
     where they were not fitted. (§5.14)
 18. **A metric is only current if its whole chain is current** — run
-    `python3 -m pipeline.status` before quoting or pasting from any report
+    `python3 -m ops.status` before quoting or pasting from any report
     and before ending a session that touched artifacts, config or reports;
     never use a report the `artifact bundle` / `artifact mirrors` /
     `report vintages` lines call stale. Re-run map: §5.14.
@@ -99,14 +99,14 @@ And the standing prohibitions:
 - Never hand-edit `artifacts/posterior.json` (production learning state).
 - Never re-derive logic that has one home. The homes, and what each
   replaced (a second copy of any of these is a review failure):
-  - population filter — `bootstrap.prepare_data.population`
+  - population filter — `fit.prepare_data.population`
   - episode-scoped cuts — `common.episodes.window_slice`,
     `trailing_weeks_window` (both factor-fit schedules), `week_key`,
     `calendar_days` (the one `n_days`)
   - outcome reconciliation — `common.episodes.adjustment_reason`
   - scrap, IL, margin at episode grain — `common.metrics.episode_economics`
     (+ `settled`, `daily_rates`) over `common.episodes.scrap_units`;
-    live events enter it through `pipeline.monitor.event_frame`. The
+    live events enter it through `daily.monitor.event_frame`. The
     floors, the live guardrail, the business metrics and
     shadow's budget base all read this one frame
   - decision↔outcome pairing and the trading day —
@@ -115,20 +115,20 @@ And the standing prohibitions:
   - anchor rows — `common.episodes.is_anchor_row`
   - guardrail deviation and verdicts — `common.guardrail.deviation`,
     `verdict_is_blocking`, `verdict_is_insufficient`
-  - the tiers a forced move may land on — `pricing.explore.admissible`
+  - the tiers a forced move may land on — `engine.explore.admissible`
     (`affordable_set`, `spread_costs` and the assurance uniformity check
     all read it; `delta_min` is derived there, never a second knob)
-  - spread accounting — `pricing.explore.SpreadLedger`; the tau controller
-    walk — `pricing.explore.walk_tau` (production and shadow's trace);
-    the backtest's forward simulation — `backtest.replay._simulate_arm`
+  - spread accounting — `engine.explore.SpreadLedger`; the tau controller
+    walk — `engine.explore.walk_tau` (production and shadow's trace);
+    the backtest's forward simulation — `evaluate.backtest._simulate_arm`
     (+ `_dp_price`)
   - rho — `common.config.intraclass_correlation`; `m` per batch —
     `deff_from_episodes`
   - JSON in/out — `common.io.read_json` / `write_json` (NaN-safe)
-  - the discount-grid epsilon — `pricing.dp.TIER_EPS`; own-data prior
+  - the discount-grid epsilon — `engine.dp.TIER_EPS`; own-data prior
     weight — `common.config.OWN_DATA_WEIGHT`
-  - pastable config keys — `pipeline.tune.KEYS` (anchor, measured, rerun);
-    the status "not run" prologue — `pipeline.status._needs`
+  - pastable config keys — `ops.tune.KEYS` (anchor, measured, rerun);
+    the status "not run" prologue — `ops.status._needs`
 - Never invent a SET BY OWNER value; never drive a quarantine count to zero
   with a catch-all reason.
 - **A code change ships with its doc change in the same commit** — this
@@ -152,15 +152,15 @@ All commands run from the repo root — paths in `config.yaml` are relative to
 it, and running a module from elsewhere silently reads/writes the wrong
 artifacts.
 
-## Driving the chain — `pipeline.advance`, not the step list
+## Driving the chain — `ops.advance`, not the step list
 
 ```bash
-python3 -m pipeline.advance --plan    # phase table + next steps, touches nothing
-python3 -m pipeline.advance           # runs to the next HUMAN decision and stops
+python3 -m ops.advance --plan    # phase table + next steps, touches nothing
+python3 -m ops.advance           # runs to the next HUMAN decision and stops
 ```
 
 **Two readers, one command.** The OWNER tells their agent: read this file,
-then run `pipeline.advance` until `reports/launch_readiness.md` says it is
+then run `ops.advance` until `reports/launch_readiness.md` says it is
 waiting on `data.launch_date`; the agent pulls the extract per the config's
 split and hold-out dates (`REDSHIFT_*` in `~/.env`), derives every MEASURED
 value, and stops at each owner decision with the evidence. ENGINEERING
@@ -173,10 +173,10 @@ phase — what runs, which config keys move, and who moves them:
 
 | phase | runs | config keys | moved by |
 | --- | --- | --- | --- |
-| bootstrap | `bootstrap.run` (train ONCE, loop to the fixed point, backtest, thresholds, seal) | none | — |
-| tune | `tune --apply`, then `bootstrap.run --check-only` / `derive_thresholds` / shadow as the pasted keys demand (`tune.stale_keys`), until nothing is left to paste | `rho`, `calibration_fit_trailing_weeks`, `calibration_gate_band`, `information_increment`, `delta_min_log_bias`, `scrap/margin_deterioration_pct` (the 3σ trailing floor), `max_mean_step` (inside its price-consequence gate) | the process, from the report that derives each |
+| bootstrap | `ops.bootstrap_loop` (train ONCE, loop to the fixed point, backtest, thresholds, seal) | none | — |
+| tune | `tune --apply`, then `ops.bootstrap_loop --check-only` / `derive_thresholds` / shadow as the pasted keys demand (`tune.stale_keys`), until nothing is left to paste | `rho`, `calibration_fit_trailing_weeks`, `calibration_gate_band`, `information_increment`, `delta_min_log_bias`, `scrap/margin_deterioration_pct` (the 3σ trailing floor), `max_mean_step` (inside its price-consequence gate) | the process, from the report that derives each |
 | posterior | `init_posterior`, once — re-run with `--force` by the process only while the file holds no consumed outcome and its cells differ from what init would write now (the launch belief or the prior moved) | none | — |
-| shadow | `pipeline.shadow` on the hold-out, every episode; then `tune --apply` | `tau_initial` | the process, from `shadow.tau_initial_derivation`. The forced rate is the budget's: to change it the owner reads `shadow.exploration_budget_sweep` (forced rate, spend, move, `information_rel` per `budget_share_of_il` × `delta_min_bias_multiple`), sets the pair, and shadow re-runs once |
+| shadow | `evaluate.shadow` on the hold-out, every episode; then `tune --apply` | `tau_initial` | the process, from `shadow.tau_initial_derivation`. The forced rate is the budget's: to change it the owner reads `shadow.exploration_budget_sweep` (forced rate, spend, move, `information_rel` per `budget_share_of_il` × `delta_min_bias_multiple`), sets the pair, and shadow re-runs once |
 | owner | STOP | `max_std_shrink`; `max_mean_step` when its re-price EXCEEDS the gate; a stop threshold only when its floor is `BLOCKED`, `TOO TIGHT`, `LIKELY INERT` or `insufficient history`; `posterior.cold_start_shift_std` never stops (it ships 0.5) but is yours — `tune` reports it with the backtest evidence | you, from `thresholds.json` (advance prints floor, verdict, source) |
 | launch | STOP, then `--fit-calibration` + `seal` | `data.launch_date` | you, on launch day |
 | daily | ingest, `update --calibrate-tau`, monitor, assurance, export, status; STOP at `update --apply` | none | you approve each update. A fired stop condition SUSPENDS exploration (the monitor writes it into the posterior state; `decide` stops drawing; exploitation continues) until a human runs `update --resume-exploration` |
@@ -193,24 +193,24 @@ routing `status`'s `report vintages` line also uses: W turns the loop,
 per key — pasted together, both re-run; a MEASURED paste that writes back
 what a report measured invalidates nothing); it refuses to run the same step a third time in one
 invocation; and it stops on every SET BY OWNER null with the evidence. Its daily lane walks tau
-(`pipeline.update --calibrate-tau`, no operator) and stops at
-`pipeline.update --apply`, which it never runs: learning is gated daily
+(`daily.update --calibrate-tau`, no operator) and stops at
+`daily.update --apply`, which it never runs: learning is gated daily
 and per cell — a fast category updates the day its batch has the evidence.
 Read its stop before doing anything by hand; the sections below explain
 the steps it runs.
 
-## Running the bootstrap — use `bootstrap.run`, not the step list
+## Running the bootstrap — use `ops.bootstrap_loop`, not the step list
 
 **Do not hand-run the steps in order. Run this:**
 
 ```bash
-python3 -m bootstrap.download_flc            # step 0, only if you need a fresh extract
-python3 -m bootstrap.run --input data/flc_raw.parquet
-python3 -m bootstrap.init_posterior          # step 8, once
-python3 -m pipeline.shadow --input data/prepared.parquet --out reports/shadow.json
+python3 -m fit.download_flc            # step 0, only if you need a fresh extract
+python3 -m ops.bootstrap_loop --input data/flc_raw.parquet
+python3 -m ops.init_posterior          # step 8, once
+python3 -m evaluate.shadow --input data/prepared.parquet --out reports/shadow.json
 ```
 
-`bootstrap.run` is the whole bootstrap: it runs 1 and 3, then **iterates
+`ops.bootstrap_loop` is the whole bootstrap: it runs 1 and 3, then **iterates
 3b–5b until the fixed point CONVERGES**, then 6, 6b, 11 and `status`. It
 exits non-zero if the loop never settles. The `status` it ends on is
 ADVISORY at that point — `tau_initial` is null and shadow has not run, so
@@ -227,15 +227,15 @@ fixture takes 3–4 because it is small — rule 19). Nobody is going to hand-ru
 that correctly, and the obvious repair is the wrong one: re-running the step
 list restarts at 3, which RETRAINS THE BASELINE, moves every artifact, resets
 the fixed point and breaks rule 1. That loop is the one an agent cannot
-escape by trying harder; `bootstrap.run` trains once, outside the loop, and
+escape by trying harder; `ops.bootstrap_loop` trains once, outside the loop, and
 is the only supported way to reach a converged chain.
 
 After a **config paste**, settle without retraining:
 
 ```bash
-python3 -m bootstrap.run --check-only      # loop against the artifacts on
+python3 -m ops.bootstrap_loop --check-only      # loop against the artifacts on
                                            # disk, NO retrain. What
-                                           # pipeline.tune tells you to run.
+                                           # ops.tune tells you to run.
 ```
 
 `--max-turns` (default 20) is a runaway guard, not a budget — the STALL test
@@ -253,28 +253,28 @@ The artifact still gets a FULL prior once the loop settles. (§9.2)
 
 ```
 step                                          writes
-0. bootstrap.download_flc                     data/flc_raw.parquet   (Redshift; REDSHIFT_* from ~/.env)
-1. bootstrap.prepare_data --input <raw>       data/prepared.parquet, artifacts/split_manifest.json
-3. bootstrap.train_baseline --input prepared  artifacts/baseline_model.txt, feature_schema.json
-3b. bootstrap.train_baseline --fit-calibration artifacts/calibration.json    ┐
-4. bootstrap.estimate_prior --input prepared  artifacts/prior.json           │ ONE TURN
-5. bootstrap.fit_dispersion --input prepared  artifacts/r_lookup.json, rho.json │ of a loop —
-5b. bootstrap.train_baseline --check-convergence  (dry run: did it settle?)  ┘ 8-9 of these
+0. fit.download_flc                     data/flc_raw.parquet   (Redshift; REDSHIFT_* from ~/.env)
+1. fit.prepare_data --input <raw>       data/prepared.parquet, artifacts/split_manifest.json
+3. fit.train_baseline --input prepared  artifacts/baseline_model.txt, feature_schema.json
+3b. fit.train_baseline --fit-calibration artifacts/calibration.json    ┐
+4. fit.estimate_prior --input prepared  artifacts/prior.json           │ ONE TURN
+5. fit.fit_dispersion --input prepared  artifacts/r_lookup.json, rho.json │ of a loop —
+5b. fit.train_baseline --check-convergence  (dry run: did it settle?)  ┘ 8-9 of these
 6. backtest --input prepared                  reports/backtest.json
-6b. bootstrap.derive_thresholds               reports/thresholds.json  (pipeline.tune reads it)
-8. bootstrap.init_posterior                   artifacts/posterior.json       (once; --force to overwrite)
-9. pipeline.shadow --input prepared           reports/shadow.json            (holdout by default)
-11. bootstrap.seal                            artifacts/bundle.json
+6b. evaluate.derive_thresholds               reports/thresholds.json  (ops.tune reads it)
+8. ops.init_posterior                   artifacts/posterior.json       (once; --force to overwrite)
+9. evaluate.shadow --input prepared           reports/shadow.json            (holdout by default)
+11. ops.seal                            artifacts/bundle.json
 ```
 
 Daily production loop (Lane C — full operator guidance in `RUNBOOK.md`):
 
 ```bash
-python3 -m pipeline.update --calibrate-tau   # daily tau walk, no operator
-python3 -m pipeline.update --apply     # OPERATOR GATE (rule 10), daily
-python3 -m pipeline.monitor
-python3 -m pipeline.assurance
-python3 -m pipeline.status             # done = every line green
+python3 -m daily.update --calibrate-tau   # daily tau walk, no operator
+python3 -m daily.update --apply     # OPERATOR GATE (rule 10), daily
+python3 -m daily.monitor
+python3 -m daily.assurance
+python3 -m ops.status             # done = every line green
 ```
 
 ## Populations
@@ -315,7 +315,7 @@ Every paste has one source and one checker:
 
 | Working on | Read first |
 | --- | --- |
-| filter chain, waterfall, eligibility, restocks, scrap | §5.2, §12a; `bootstrap/prepare_data.py`, `common/episodes.py`; rules 13–15 |
+| filter chain, waterfall, eligibility, restocks, scrap | §5.2, §12a; `fit/prepare_data.py`, `common/episodes.py`; rules 13–15 |
 | baseline, calibration, fidelity | §5.4, §9.2 (incl. the gate decision tree); rules 1, 4–6 |
 | elasticity prior, dispersion | §5.5, §5.6; rules 1a, 2, 3, 7 |
 | DP, pricing, exploration, tau, budget | §5.7, §5.8, §5.10 |
@@ -326,13 +326,18 @@ Every paste has one source and one checker:
 | monitoring, guardrails, stop conditions, the pilot read | §5.12, §11, §12 |
 | events, integration, quarantine | `docs/event_contract.html`; `events/store.py` |
 | provenance, seal, freshness | §5.14; rule 18 |
-| docs | `docs/maintaining_docs.md` |
-| operating the chain end to end, phase order | `pipeline/advance.py` (`--plan`); rule 1b |
+| operating the chain end to end, phase order | `ops/advance.py` (`--plan`); rule 1b |
 | operator runbook, review tiers | `RUNBOOK.md`, `REVIEW_GUIDE.md` |
 | why is it not done the other way? | `docs/learnings.md` |
 
 ## Repo conventions
 
+- One package per responsibility: `engine/` prices and learns, `events/`
+  records, `common/` defines, `fit/` builds the frozen artifacts,
+  `evaluate/` grades them (backtest, shadow, thresholds), `daily/` is the
+  production lane in run order, `ops/` drives and gates (`advance`,
+  `bootstrap_loop`, `tune`, `status`, `init_posterior`, `seal`), `tools/`
+  is out of review scope. A new module goes where its reader is.
 - Run modules as `python3 -m package.module` from the repo root.
 - `--workers N` (`0` = all cores but one) parallelises backtest and shadow;
   reports are byte-identical serial or parallel — results return in
@@ -352,6 +357,27 @@ Every paste has one source and one checker:
 - Leadership deck: `python3 -m tools.scenario_deck --workers 0` writes
   `reports/scenarios.html` — twelve scenarios answered by the real solver on
   this machine's config over a state grid (~2 min). Regenerate after any change
-  to `pricing/dp.py`, `pricing/explore.py`, the tier/entry/δ_min config, or the
+  to `engine/dp.py`, `engine/explore.py`, the tier/entry/δ_min config, or the
   posterior prior; rule 19 applies to every number on it. It states what the
   solver does under a chosen demand input, never what a SKU will sell.
+
+## Maintaining the documents
+
+The doc surface is small on purpose: `docs/design.md` (the spec),
+`docs/learnings.md` (superseded designs), `docs/event_contract.html` (the
+integration contract), this file, `README.md`, `RUNBOOK.md`,
+`REVIEW_GUIDE.md`. Two are guarded by tests: `design.md` (every waterfall
+stage, gate, flag and population must appear, no retired rule may read as
+live — `test_docs_match_the_code.py`) and `event_contract.html` (checked
+against `events/store.py` in both directions; its quoted thresholds are NOT
+guarded — re-read them when `monitoring.*` moves; the worked episode is real
+solver output, regenerate it rather than hand-patch numbers).
+
+**A code change ships with its doc change in the same commit**: this
+file's one-home list and paste table, the RUNBOOK step it touches, the
+design section, the event contract for any event field, and a learnings
+entry when a design was superseded. This file is a router, not a
+reference — a 400-line budget, enforced by test; new material goes to
+design.md or learnings.md with a one-liner and a pointer here. Quote only
+from a gate-passing run, never invent a figure, and never present a
+fixture number as a production finding (rule 19).

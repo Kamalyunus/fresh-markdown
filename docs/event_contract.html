@@ -455,7 +455,7 @@
     when it sets a price, and an outcome event when that hour closes. The decision event
     needs nothing from you beyond the state you send to ask for a price. The outcome event is
     <strong>built by the agent from the hourly FLC feed</strong>
-    (<code>pipeline.ingest_outcomes</code>), matched to decisions by SKU, FC, date and hour —
+    (<code>daily.ingest_outcomes</code>), matched to decisions by SKU, FC, date and hour —
     so your whole integration is: <strong>call the API, apply the returned price, and tell
     the agent when a price push fails</strong>. <strong>Start with §01</strong> — the
     definitions and claims to align on; the field lists only mean what §01 says they mean.
@@ -610,16 +610,16 @@
       working state however you like — JSON, a temp table, anything; none of it is read.
       What matters is that <strong>once a day</strong> the table carries a row for every
       priced hour of the previous day — zero-sale hours included, which it does today —
-      and <code>pipeline.ingest_outcomes</code> runs on it as a daily batch, builds the
+      and <code>daily.ingest_outcomes</code> runs on it as a daily batch, builds the
       outcome events, and matches them to decisions. Daily is not a compromise: learning
-      (<code>pipeline.update</code>) is itself a daily batch, so an hourly outcome stream
+      (<code>daily.update</code>) is itself a daily batch, so an hourly outcome stream
       would buy nothing.
     </p>
     <p>
       The JSONL event streams described on this page are the agent's own storage — you never
       write or read JSON. Your two deliverables are both tables: the production table you
       already ship, and a small failed-pushes table (see §05). Going the other way, the agent
-      dumps its decision and outcome logs as tables daily (<code>pipeline.export_events</code>
+      dumps its decision and outcome logs as tables daily (<code>daily.export_events</code>
       — parquet, list fields JSON-encoded) for loading into the warehouse; those tables are a
       derived convenience for analytics and joins, never the audit record.
     </p>
@@ -628,7 +628,7 @@
   <div class="note">
     <h4>Why the decision event is so wide</h4>
     <p>
-      It is an audit trail, not a log line. <code>pipeline.assurance</code> takes a logged
+      It is an audit trail, not a log line. <code>daily.assurance</code> takes a logged
       decision, re-runs the solver from the event's own fields, and checks it gets the same
       price back. That is how a drifted model artifact or a bad config deploy is caught in
       production — but it only works if the event carries the full demand forecast
@@ -799,7 +799,7 @@
   <h2><span class="num">05</span>The outcome event — built from your feed</h2>
   <div class="prose">
     <p>
-      <strong>You do not produce this event.</strong> <code>pipeline.ingest_outcomes</code>
+      <strong>You do not produce this event.</strong> <code>daily.ingest_outcomes</code>
       constructs exactly one finalized outcome per decision from the hourly FLC feed — the
       same snapshot the bootstrap already ingests — matched by (SKU, FC, date, hour). The
       fields are listed so you know what gets stored and what the feed must carry. The only
@@ -1238,8 +1238,8 @@
   <p>
     Field lists are read directly from the running system — <code>events/store.py</code>
     (<code>DECISION_REQUIRED</code>, <code>OUTCOME_REQUIRED</code>),
-    <code>inference/decide.py</code> for what the agent emits,
-    <code>pipeline/ingest_outcomes.py</code> for how outcomes are built from the feed, and
+    <code>engine/decide.py</code> for what the agent emits,
+    <code>daily/ingest_outcomes.py</code> for how outcomes are built from the feed, and
     <code>config.yaml</code> for every threshold quoted in §07.
   </p>
   <p>

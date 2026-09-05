@@ -291,7 +291,7 @@ percent conversion produces discounts of 25.0 with no error; the realised-
 price column is 0 on zero-sale rows (~78% — reconstructing offered price
 from it drops the demand signal at shallow discounts); the source has no
 episode ID, so the construction rule is persisted with the split manifest.
-Only `bootstrap.prepare_data` accepts raw data.
+Only `fit.prepare_data` accepts raw data.
 
 ### 5.3 Historical measurement — measure first, then build
 
@@ -435,7 +435,7 @@ a confound artifact, not evidence elasticity is near zero. Wrong-signed
 categories are measured *backwards, not weakly*; only exogenous price
 variation fixes them.
 
-The specification (`bootstrap.prior_density`):
+The specification (`fit.prior_density`):
 
 - **Estimator.** Per category and arm, the censored Poisson log-likelihood
   over the ε grid with frozen `μ_ref` as baseline; censored hours enter as
@@ -614,13 +614,13 @@ each side, both keyed by the decision's TRADING day
 which for an hour-23 decision is D+1 and put the controller a day ahead of
 the IL side. Zero realised spend on a priced day is under-spend, not
 absence of signal: nothing was affordable, τ rises by the clip, and that is
-the only way a τ cut below the smallest spread recovers. `pipeline.shadow`'s
+the only way a τ cut below the smallest spread recovers. `evaluate.shadow`'s
 controller trace walks the same arithmetic, so "would the pilot survive its
 first week" grades the controller production actually runs — literally:
 both call `explore.walk_tau`, one clipped step per closed day since the
 last calibration (`tau_calibrated_through`), so a missed day is graded,
 never skipped. τ moves on **spend**,
-not evidence, so it needs no operator: `pipeline.update --calibrate-tau`
+not evidence, so it needs no operator: `daily.update --calibrate-tau`
 commits the walk daily, and `--apply` commits it too.
 τ persists in the posterior artifact; `exploration.tau_initial` is only the
 launch value, and a production caller reads `PosteriorStore.tau(cfg)` or τ
@@ -646,7 +646,7 @@ subcategory. Categories above `min_episodes_per_week_for_cell` earn their
 own cell; assignment fixed at launch. Phase-2 fix, if within-category
 variation shows up, is partial pooling, not a threshold ladder.
 
-**The launch belief** (`pricing.posterior.launch_belief`): each cell
+**The launch belief** (`engine.posterior.launch_belief`): each cell
 launches at the prior mean pushed `posterior.cold_start_shift_std` prior
 stds toward more elastic and clipped to the ε range, std untouched. An
 owner's risk posture (0.5 at 2026-09-05; 0 is the prior as measured): a
@@ -675,7 +675,7 @@ corrected claim is a code change here, never work on their side.
 
 Validation checks nine invariants and **rejects the state rather than
 returning any price** — the worst failure is a confidently wrong price, not
-"no answer". Outcomes are constructed by `pipeline.ingest_outcomes` from
+"no answer". Outcomes are constructed by `daily.ingest_outcomes` from
 the hourly FLC feed (matched by SKU, FC, date, hour; `adjustment_reason`,
 `is_stockout` and the offered price derived), so the integration surface is
 the price request, applying the price, and a failed-push report. Every
@@ -747,7 +747,7 @@ takes moments.
 **What `--apply` moves:** posterior mean/std/version on INFORMATION (only
 when a cell crosses the increment); `processed_outcome_ids` with the
 revision, same atomic write; `tau` on SPEND, every run.
-`bootstrap.init_posterior` refuses to overwrite without `--force`.
+`ops.init_posterior` refuses to overwrite without `--force`.
 
 ### 5.12 Monitoring — three families, three questions
 
@@ -766,7 +766,7 @@ expensive draws and the τ controller halves τ on it the next morning) **suspen
 exploration — exploitation pricing continues**: the monitor writes
 `exploration_suspended` into the posterior state, `decide` selects with no
 budget (no draw) while it is set, `status` reads WARN with the reason, and
-only a human lifts it (`pipeline.update --resume-exploration`). Nothing
+only a human lifts it (`daily.update --resume-exploration`). Nothing
 auto-resumes: a stop is a finding to investigate, not a transient. The
 guardrail series is keyed by an episode's **close day**, so the newest
 days count every episode that closed rather than only the early
@@ -809,7 +809,7 @@ path mismatch (affordable sets measured ~1.66× apart). The pre-window week
 is out-of-window for the run, so day one of the controller trace is an
 out-of-sample test of the launch value. Too-thin weeks fall back to the
 `exploration.tau_initial` paste, behind
-`pricing.explore.tau_provenance_error` (refuses a paste with no source or
+`engine.explore.tau_provenance_error` (refuses a paste with no source or
 that no longer matches its derivation). Shadow also reports
 `tau_recommended` (the bisection pooled over the whole window — a
 cross-check) and `tau_controller_trace` (day-by-day walk: `tau_next` reads
@@ -889,7 +889,7 @@ deflates evidence against one model's residuals, the level factors correct
 that model, the prior was estimated from its predictions and that
 `r_lookup`. Mixing vintages raises no error — the numbers just stop
 describing the same world. **The bundle id is the baseline model version.**
-Each artifact carries a `provenance` block; `bootstrap.seal` writes
+Each artifact carries a `provenance` block; `ops.seal` writes
 `artifacts/bundle.json` with a SHA-256 of every file and refuses an
 inconsistent set. Re-run `seal` after `--fit-calibration`.
 
@@ -926,14 +926,14 @@ snapshot is also the answer to "what config was in force for each phase" —
 read `reports/<name>.json → config.snapshot`. `meta.config_version` stays as
 a human label only; nothing depends on anyone remembering to bump it.
 
-**The operating instruction:** run `python3 -m pipeline.status` before
+**The operating instruction:** run `python3 -m ops.status` before
 quoting from any report and before ending any session that touched
 artifacts, config, or reports. Never quote or paste from a report a
 freshness line calls stale. The re-run map:
 
 | after changing | re-run | re-paste |
 | --- | --- | --- |
-| baseline (retrain) | `bootstrap.run` (whole loop) → `shadow` | `rho` |
+| baseline (retrain) | `ops.bootstrap_loop` (whole loop) → `shadow` | `rho` |
 | elasticity prior | `fit_dispersion` onward (§5.5) | `rho` |
 | a config tunable a report reads | that report onward — `status` names the moved keys until you do | — |
 | the extract | everything from `prepare_data` | — |
@@ -941,7 +941,7 @@ freshness line calls stale. The re-run map:
 ### 5.15 Production assurance — testing the assumptions, not the code
 
 The unit suite checks logic against fixtures; what has actually broken the
-system every time is an assumption about real data. `pipeline.assurance`
+system every time is an assumption about real data. `daily.assurance`
 runs daily and tests the frozen artifacts against the live world:
 
 | Check | Question | Why nothing else catches it |
@@ -1072,7 +1072,7 @@ blocking conditions were fixed before the numbers were seen.
 always applied (fit on anchor rows only, so slope error cannot contaminate
 them; with no artifact on disk every factor is 1.0). The anchor-level band
 is a reported **diagnostic**: out of band means drift or staleness to
-investigate, surfaced as WARN in `pipeline.status`, never a launch blocker.
+investigate, surfaced as WARN in `ops.status`, never a launch blocker.
 
 The diagnostic judges the frozen model on its only production
 responsibility: **the demand level at the reference discount** (inference
@@ -1127,7 +1127,7 @@ artifact:
 The schedule runs through the whole extract (production re-fits weekly and
 a forward replay at week *k* legitimately reads weeks < *k* — no
 look-ahead). But a factor re-fit *inside* the graded window has read the
-rows it is graded on, so `backtest.replay.fidelity` calls
+rows it is graded on, so `evaluate.backtest.fidelity` calls
 `model.freeze_calibration_from(gate_start)` and prices the graded window
 off the anchor, reporting the mechanism reading beside it as
 `fidelity.weekly_refit`. The spread between them is what weekly re-fitting
@@ -1138,7 +1138,7 @@ never share a verdict.
 
 **Shadow reports both calibration regimes.** The artifact's schedule stops
 at `test_end`, so every hold-out row falls back to the frozen anchor —
-"launch and never re-calibrate". `pipeline.shadow.weekly_refit_schedule`
+"launch and never re-calibrate". `evaluate.shadow.weekly_refit_schedule`
 re-fits the factors per shadow week (trailing window ending strictly before
 each week, fitted in shadow rather than the artifact so the pre-launch
 bundle stays clean of hold-out rows — rule 16) and `calibration_regimes`
@@ -1170,13 +1170,13 @@ those three mean anything.
 
 In production the loop does not turn (only calibration and ε re-fit; the
 model, `r`, `rho` stay frozen — a one-directional `f ← r`).
-`pipeline.assurance` watches the decay on live outcomes. What re-turns the
+`daily.assurance` watches the decay on live outcomes. What re-turns the
 loop is a retrain of the prior or dispersion; the `convergence` block
 records digests of the artifacts it was checked against so `status`
 reports the verdict as STALE once any of them moves.
 
 **The loop is the slowest thing in the pipeline** (production: hours), so
-`bootstrap.run` cuts the costs that buy nothing: `estimate_prior --fast`
+`ops.bootstrap_loop` cuts the costs that buy nothing: `estimate_prior --fast`
 skips `fold_spread` on loop turns (it only widens the std FLOOR, while the
 loop compares factors, which follow the prior MEAN), and
 `--commit-convergence` keeps the check's re-solve — turn *k*'s check
@@ -1193,7 +1193,7 @@ two ran). A cell whose bisection pinned at `calibration_factor_search_bounds`
 carries `detail[cell].at_bound` (rule 3); thin cells are shrunk toward the
 parent by `calibration_shrinkage_units`, never "left at 1.0" — only a whole
 window under `calibration_min_anchor_rows` is. A failing `--check-convergence`
-stops `bootstrap.run`'s loop with its own message rather than iterating to
+stops `ops.bootstrap_loop`'s loop with its own message rather than iterating to
 `--max-turns` with a stall test that can never fire. The verdict lands in
 `calibration.json → convergence` (status row is WARN — chain health, not a
 launch gate).
@@ -1202,13 +1202,13 @@ launch gate).
 turns** from a bare chain on the production extract with nothing wrong; the
 repo fixture settles in 3–4 because it is small — never size a cap or an
 impatience threshold on the fixture. The block carries a `history`; a
-contracting series simply needs another turn. `bootstrap.run` stops only
+contracting series simply needs another turn. `ops.bootstrap_loop` stops only
 after three turns with no new best (a two-turn plateau inside a nine-turn
 settle is ordinary). `worst_cell_anchor_rows` sizes the evidence behind the
 worst cell: the max is unweighted, so a thin shrinkage-dominated cell reads
 identically to an unsettled loop unless the row count is shown.
 
-**The tuning loop is a program** (`pipeline.tune`): each check names the
+**The tuning loop is a program** (`ops.tune`): each check names the
 report field it reads, and the CLASS decides who may act — **PASTE** (a
 MEASURED value; `--apply` writes it), **OWNER** (never auto-applied;
 reported with evidence), **READ** (no config key), **BLOCK** (an invariant
@@ -1235,7 +1235,7 @@ market judgment).
 
 **`--apply` names the MINIMUM sufficient re-run**: `none` for values read
 at runtime or mirroring an artifact; `calibration` for
-`calibration_fit_trailing_weeks` (the loop turns — `bootstrap.run
+`calibration_fit_trailing_weeks` (the loop turns — `ops.bootstrap_loop
 --check-only`, **no retrain**); `retrain` only for `data.split`, which is
 OWNER, so `--apply` never writes one. It backs up the config and appends
 what was written, its source field, and outstanding owner decisions to
@@ -1324,7 +1324,7 @@ The second row is the case this design makes most likely.
 
 ## 12. Open owner decisions — recommendations and tooling
 
-`bootstrap.derive_thresholds` produces the evidence for the SET BY OWNER
+`evaluate.derive_thresholds` produces the evidence for the SET BY OWNER
 thresholds.
 
 **Guardrail stop thresholds.** The floor a threshold must clear is 3σ of
@@ -1434,7 +1434,7 @@ zero ending with stock owed is shrink), and `unexplained_shortfall`
 interpret, and a quarantined outcome never lands, so leaving shrink unnamed
 failed the shadow completeness gate at the feed's whole shrink rate).
 `common.episodes.adjustment_reason` is the one implementation, and
-`pipeline.ingest_outcomes` runs it when it builds outcomes from the hourly
+`daily.ingest_outcomes` runs it when it builds outcomes from the hourly
 feed — the classification is derived, never asked of an integration.
 
 **Restocked episodes are kept and gate nothing**: `ending[t] ==
@@ -1475,7 +1475,7 @@ anywhere → treat everything closed"): it fails in the invisible direction —
 a feed that stops emitting the sentinel reads as perfectly healthy. Missing
 sentinel reads as unclosed, loudly; `write_off_convention_in_force` names
 the cause. Live, an in-flight episode's most recent row carries honest
-inventory — stock on the shelf, not in the bin — and `pipeline.monitor`
+inventory — stock on the shelf, not in the bin — and `daily.monitor`
 calls the same classifier.
 
 **The backtest sees nothing past the gate window**: `pre_launch` slices to
@@ -1498,7 +1498,7 @@ held at the prior mean, and `intra_episode_deepening` reports both medians
 (`median_abs_eps_prior`, `median_abs_eps_in_use`).
 `derive_tau_initial` solves production's own equation: the budget is
 `explore.budget_today` at the widest launch prior std, Q-spreads are
-collected under `inference.decide`'s explorability gate, and `n_days` is
+collected under `engine.decide`'s explorability gate, and `n_days` is
 the calendar span (`episodes.calendar_days`) — the same three definitions
 shadow's derivation uses, so the cross-check can only disagree on the
 path, never on the bookkeeping.
@@ -1544,52 +1544,52 @@ recover exploitation outcomes.
 
 ```
 step                                          writes
-0. bootstrap.download_flc                     data/flc_raw.parquet   (Redshift; REDSHIFT_* from ~/.env)
-1. bootstrap.prepare_data --input <raw>       data/prepared.parquet, artifacts/split_manifest.json
-3. bootstrap.train_baseline --input prepared  artifacts/baseline_model.txt, feature_schema.json
+0. fit.download_flc                     data/flc_raw.parquet   (Redshift; REDSHIFT_* from ~/.env)
+1. fit.prepare_data --input <raw>       data/prepared.parquet, artifacts/split_manifest.json
+3. fit.train_baseline --input prepared  artifacts/baseline_model.txt, feature_schema.json
 3b. train_baseline --fit-calibration          artifacts/calibration.json    ┐
-4. bootstrap.estimate_prior --input prepared  artifacts/prior.json          │ ONE TURN of the
-5. bootstrap.fit_dispersion --input prepared  artifacts/r_lookup.json, rho.json │ f<->r loop
+4. fit.estimate_prior --input prepared  artifacts/prior.json          │ ONE TURN of the
+5. fit.fit_dispersion --input prepared  artifacts/r_lookup.json, rho.json │ f<->r loop
 5b. train_baseline --check-convergence        (dry run: settled?)           ┘
-6. backtest --input prepared                  reports/backtest.json
-6b. bootstrap.derive_thresholds               reports/thresholds.json
-8. bootstrap.init_posterior                   artifacts/posterior.json      (once; --force to overwrite)
-9. pipeline.shadow --input prepared           reports/shadow.json           (holdout by default)
-11. bootstrap.seal                            artifacts/bundle.json
+6. evaluate.backtest --input prepared         reports/backtest.json
+6b. evaluate.derive_thresholds               reports/thresholds.json
+8. ops.init_posterior                   artifacts/posterior.json      (once; --force to overwrite)
+9. evaluate.shadow --input prepared           reports/shadow.json           (holdout by default)
+11. ops.seal                            artifacts/bundle.json
 ```
 
 ```bash
 # THE driver: probes the state on disk, runs every step below that needs no
 # human, stops at the next decision (owner keys, launch_date, update --apply).
-python3 -m pipeline.advance --plan       # touches nothing
-python3 -m pipeline.advance              # to the next human decision
-python3 -m pipeline.advance --feed <yesterday's parquet>   # the daily lane
+python3 -m ops.advance --plan       # touches nothing
+python3 -m ops.advance              # to the next human decision
+python3 -m ops.advance --feed <yesterday's parquet>   # the daily lane
 
 # what it runs, for stepping through one at a time:
 # the bootstrap: 1, 3, then 3b-5b iterated to CONVERGED, then 6, 6b, 11, status.
 # RETRAINS THE MODEL (rule 1) — never re-run it to settle calibration.
-python3 -m bootstrap.run --input data/flc_raw.parquet
-python3 -m bootstrap.run --check-only     # settle after a config paste, NO retrain
+python3 -m ops.bootstrap_loop --input data/flc_raw.parquet
+python3 -m ops.bootstrap_loop --check-only     # settle after a config paste, NO retrain
 
 # launch
-python3 -m bootstrap.init_posterior
-python3 -m pipeline.shadow --input data/prepared.parquet --out reports/shadow.json
+python3 -m ops.init_posterior
+python3 -m evaluate.shadow --input data/prepared.parquet --out reports/shadow.json
 #   --max-episodes 0 sweeps everything (final pre-launch record);
 #   --workers N (0 = every core but one); byte-identical serial or parallel
 
 # tuning loop
-python3 -m pipeline.tune              # what to change, on what evidence
-python3 -m pipeline.tune --apply      # paste MEASURED values, log decisions
+python3 -m ops.tune              # what to change, on what evidence
+python3 -m ops.tune --apply      # paste MEASURED values, log decisions
 
 # daily production loop -- advance --feed runs it in this order
-python3 -m pipeline.ingest_outcomes --feed <yesterday's parquet>
-python3 -m pipeline.update --calibrate-tau   # tau walks every closed day, no operator
-python3 -m pipeline.monitor
-python3 -m pipeline.assurance
-python3 -m pipeline.export_events
-python3 -m pipeline.status             # exits 1 on any FAIL
-python3 -m pipeline.update --apply     # human-gated bounded update (§5.11)
-python3 -m pipeline.update --resume-exploration   # human: lift a stop-condition suspension
+python3 -m daily.ingest_outcomes --feed <yesterday's parquet>
+python3 -m daily.update --calibrate-tau   # tau walks every closed day, no operator
+python3 -m daily.monitor
+python3 -m daily.assurance
+python3 -m daily.export_events
+python3 -m ops.status             # exits 1 on any FAIL
+python3 -m daily.update --apply     # human-gated bounded update (§5.11)
+python3 -m daily.update --resume-exploration   # human: lift a stop-condition suspension
 
 # leadership deck: twelve scenarios answered by dp.solve on this config
 python3 -m tools.scenario_deck --workers 0   # reports/scenarios.html (~2 min)

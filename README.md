@@ -10,43 +10,34 @@ itself is learned in production from IL-budgeted randomized exploration.
 
 ## Layout
 
-| Path | Design | Responsibility |
+One package per responsibility; each maps to one REVIEW_GUIDE tier and one
+`ops.advance` phase.
+
+| Package | Design | What lives there |
 | --- | --- | --- |
 | `config.yaml` | 5.1 | Every tunable. Single source of truth; no numeric literals in code. |
-| `common/config.py` | 5.1 | Loader; strict mode refuses to start on null MEASURED values. |
-| `bootstrap/download_flc.py` | 5.2 | Redshift extract of the raw hourly FLC feed (`REDSHIFT_*` from `~/.env`). |
-| `bootstrap/prepare_data.py` | 5.2 | Schema mapping, integrity/scope filter chain + eligibility flags, window-keyed episode construction, waterfall with COGS at risk, split manifest. |
-| `common/episodes.py` | 5.2, 12a | One definition of episode endings, leftover, censoring, the flow identity, and window extension. |
-| `pipeline/advance.py` | — | The order of operations as code: probes the state on disk, runs every step that needs no human, stops at the next decision (owner keys, launch date, `update --apply`). `--plan` touches nothing; every stop writes `reports/launch_readiness.md`, the handover report. |
-| `bootstrap/run.py` | 5.14 | The pipeline with its loop driven to convergence: prepare, train ONCE, iterate calibration → prior → dispersion → convergence until settled, then backtest, thresholds, seal, status. `--check-only` settles with no retrain. |
-| `bootstrap/train_baseline.py` | 5.4, 9.2 | Frozen LightGBM/Tweedie `mu_ref` (price overwritten to `d_ref` at inference); level-calibration factors; convergence check. |
-| `bootstrap/estimate_prior.py` + `prior_density.py` | 5.6 | The elasticity prior as a profile-likelihood density (censored Poisson, entry rows, pooled shrinkage, no fallback constant) with its held-out comparison. |
-| `bootstrap/fit_dispersion.py` | 5.5 | Frozen NB `r` by subcategory and global `rho` vs fitted residuals, on the calib window. |
-| `bootstrap/derive_thresholds.py` | 12 | Evidence for the owner decisions: guardrail noise floors on the trailing-mean basis, the learning-rail consistency checks. |
-| `bootstrap/init_posterior.py` | 5.9 | One-time posterior init from the prior; refuses overwrite without `--force`. |
-| `pricing/` | 5.7–5.9 | `demand.py` (mu(d), censored expectation), `dp.py` (monotone DP, absolute-IL reward), `explore.py` (uniform draw from the admissible, tau-affordable set; `delta_min` floor on the move; budget and the `walk_tau` controller; `SpreadLedger.sweep` — what each budget share × floor multiple buys in forced rate and information), `posterior.py` (bounded step, atomic exactly-once commit). |
-| `inference/decide.py` | 5.10 | State validation (reject, never an unsafe price), decision event emission. |
-| `events/store.py` | 5.10 | Append-only JSONL: dedup, quarantine with reasons, replay. |
-| `pipeline/` | 5.11–5.15 | `update.py` (censored NB grid update, `--apply` operator gate, `--calibrate-tau` daily tau walk), `monitor.py`, `shadow.py` (phase-1 harness), `assurance.py` (frozen artifacts vs the live world), `status.py` (exit 1 on FAIL), `tune.py` (the config loop as code), `ingest_outcomes.py` (outcome events built from the hourly feed — the minimal integration), `export_events.py` (decision/outcome tables for the warehouse — derived, never the record). |
-| `common/metrics.py` | 2.3 | `episode_economics` — the one episode-grain IL/scrap/margin frame behind the noise floors, the live guardrail, the business metrics and shadow's budget base; `fidelity_decomposition`. |
-| `common/io.py` | — | `read_json` / `write_json`: the one NaN-safe way an artifact or report is read and written. |
-| `events/pairs.py` | 5.10 | The one decision↔outcome pairing (`match_pairs`, `learnable=` excludes failed pushes) and the trading-day key (`decision_day`). |
-| `common/parallel.py` | — | `--workers N` for backtest/shadow; reports byte-identical serial or parallel. |
-| `tools/make_dummy_flc.py` | 6 | Synthetic FLC generator (legacy + randomized policies, known ground-truth elasticity); span defaults to covering `data.split`. |
-| `tools/scenario_deck.py` | 5.7–5.8 | Leadership deck: twelve interactive scenarios (heavy/light stock, hours left, high COGS, exploration cost, legacy ramp, demand shock, restock, dead stock, learning, refusals) answered by real `dp.solve` runs over a state grid → `reports/scenarios.html`. Demand is a slider, not a forecast; the pilot's own outcomes are the evidence. |
+| `engine/` | 5.7–5.10 | What prices a shelf and learns: `demand.py` (mu(d), censored expectation), `dp.py` (monotone DP, absolute-IL reward), `explore.py` (uniform draw from the admissible, tau-affordable set; `delta_min`; budget, `walk_tau`, `SpreadLedger.sweep`), `posterior.py` (launch belief, bounded step, atomic exactly-once commit, exploration suspension), `decide.py` (state validation — reject, never an unsafe price — and the decision event). |
+| `events/` | 5.10 | `store.py` (append-only JSONL: dedup, quarantine with reasons, torn-line safe), `pairs.py` (the one decision↔outcome pairing and trading-day key). |
+| `common/` | 5.1, 5.2, 2.3 | Shared definitions: `config.py` (loader, strict mode), `episodes.py` (endings, leftover, censoring, flow identity, window extension), `metrics.py` (`episode_economics`, `fidelity_decomposition`), `guardrail.py`, `provenance.py` (stamps, seal, config fingerprint), `io.py`, `parallel.py`. |
+| `fit/` | 5.2–5.6 | The frozen artifacts: `download_flc.py` (Redshift extract, `REDSHIFT_*` from `~/.env`), `prepare_data.py` (filter chain, eligibility flags, episodes, waterfall, split manifest), `train_baseline.py` (LightGBM/Tweedie `mu_ref`, level calibration, convergence check), `estimate_prior.py` + `prior_density.py` (the elasticity prior as a profile-likelihood density), `fit_dispersion.py` (NB `r`, `rho`). |
+| `evaluate/` | 5.13, 5.14, 12 | Grades the artifacts before launch: `backtest.py` (like-for-like replay, fidelity, tau derivation, step sensitivity, within-episode moves), `shadow.py` (the full decision path on the hold-out, no prices applied), `derive_thresholds.py` (guardrail floors, learning-rail checks). |
+| `daily/` | 5.11, 5.12, 5.15 | The production lane, in run order: `ingest_outcomes.py` (outcome events from the hourly feed), `update.py` (censored NB grid update; `--calibrate-tau` daily; `--apply` and `--resume-exploration` are the human gates), `monitor.py` (business, learning, safety; stop conditions), `assurance.py` (frozen artifacts vs the live world), `export_events.py` (warehouse tables — derived, never the record). |
+| `ops/` | 9, App. A | Drivers and gates: `advance.py` (the order of operations as code; `--plan`, `--feed`, `--report`), `bootstrap_loop.py` (train ONCE, iterate the calibration ↔ dispersion loop to convergence, backtest, thresholds, seal), `tune.py` (the config loop as code), `status.py` (the checks that gate a decision; exit 1 on FAIL), `init_posterior.py`, `seal.py`. |
+| `tools/` | 6, 5.7 | `make_dummy_flc.py` (synthetic FLC generator, legacy + randomized policies), `scenario_deck.py` (the leadership deck: twelve scenarios answered by `dp.solve` → `reports/scenarios.html`). |
+| `tests/` | — | One file per module plus `test_end_to_end.py` and `test_docs_match_the_code.py`; shared builders in `conftest.py`. |
 
 ## Running the bootstrap
 
 ```bash
 pip install -r requirements.txt
-python3 -m bootstrap.download_flc --days 120      # step 0: data/flc_raw.parquet
-python3 -m bootstrap.run --input data/flc_raw.parquet
-python3 -m bootstrap.init_posterior
-python3 -m pipeline.shadow --input data/prepared.parquet --out reports/shadow.json
+python3 -m fit.download_flc --days 120      # step 0: data/flc_raw.parquet
+python3 -m ops.bootstrap_loop --input data/flc_raw.parquet
+python3 -m ops.init_posterior
+python3 -m evaluate.shadow --input data/prepared.parquet --out reports/shadow.json
 ```
 
 Step 0 needs `REDSHIFT_*` in `~/.env` (gitignored, outside the repo); with
-an extract in hand, skip it and pass the file. `bootstrap.run` trains the
+an extract in hand, skip it and pass the file. `ops.bootstrap_loop` trains the
 baseline once, then **iterates the calibration ↔ dispersion loop to
 convergence** — never hand-run the steps or re-run the script to settle it
 (AGENTS rule 1b). Then:
@@ -56,7 +47,7 @@ convergence** — never hand-run the steps or re-run the script to settle it
    `mean/std/std_basis`, and `holdout_comparison` against `oracle` and
    `uniform` (read `information_available_per_row` first). A pooled or
    uniform prior is a designed outcome.
-2. **Tune from the reports:** `python3 -m pipeline.tune` says what config
+2. **Tune from the reports:** `python3 -m ops.tune` says what config
    should be, with the report field behind every recommendation;
    `--apply` pastes the MEASURED values and logs why. The owner sets the
    SET BY OWNER keys; `load_config(strict=True)` refuses to start until
@@ -72,11 +63,11 @@ on the hold-out and it stops being one.
 Daily production loop after the shadow gate passes:
 
 ```bash
-python3 -m pipeline.advance --feed <yesterday's parquet>   # the whole lane, in order:
+python3 -m ops.advance --feed <yesterday's parquet>   # the whole lane, in order:
 #   ingest_outcomes -> update --calibrate-tau (tau walks daily, no operator)
 #   -> monitor -> assurance -> export_events -> status, stopping at
-python3 -m pipeline.update --apply     # bounded posterior updates (the human gate)
-python3 -m pipeline.update --resume-exploration   # after a stop condition, a human's call
+python3 -m daily.update --apply     # bounded posterior updates (the human gate)
+python3 -m daily.update --resume-exploration   # after a stop condition, a human's call
 ```
 
 ## Validating against synthetic data
@@ -85,7 +76,7 @@ python3 -m pipeline.update --resume-exploration   # after a stop condition, a hu
 python3 -m tools.make_dummy_flc --skus 300 --policy randomized \
     --out data/flc_synth.parquet     # module form: script form cannot read
                                      # config and falls back to a 90-day span
-python3 -m bootstrap.run --input data/flc_synth.parquet
+python3 -m ops.bootstrap_loop --input data/flc_synth.parquet
 python3 -m pytest tests/
 ```
 

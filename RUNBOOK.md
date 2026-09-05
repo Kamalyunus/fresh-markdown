@@ -1,7 +1,7 @@
 # Runbook — operating the Perishable Markdown MVP
 
 For the engineering team and the product owner. The order of operations is
-code — `python3 -m pipeline.advance` — so this document is about the parts
+code — `python3 -m ops.advance` — so this document is about the parts
 the process cannot do: what engineering builds, what the owner decides, and
 what a stop or a red line means. The authoritative spec is
 `docs/design.md`; the integration contract is `docs/event_contract.html`;
@@ -14,7 +14,7 @@ All commands run from the repo root. `data/`, `reports/`, `artifacts/`,
 
 ## Who does what
 
-- **Owner** — tell your agent: *read `AGENTS.md`, then run `pipeline.advance`
+- **Owner** — tell your agent: *read `AGENTS.md`, then run `ops.advance`
   until `reports/launch_readiness.md` says it is waiting on
   `data.launch_date`.* It pulls the extract for the config's split and
   hold-out dates (`download_flc` exits non-zero if a pull does not cover
@@ -35,10 +35,10 @@ All commands run from the repo root. `data/`, `reports/`, `artifacts/`,
   control arm), then run the daily lane on a cron and read its stop:
 
 ```bash
-python3 -m pipeline.advance --plan       # where the chain is, what runs next; touches nothing
-python3 -m pipeline.advance              # run to the next human decision, then stop
-python3 -m pipeline.advance --feed <yesterday's hourly parquet>   # the daily lane
-python3 -m pipeline.advance --report     # regenerate reports/launch_readiness.md
+python3 -m ops.advance --plan       # where the chain is, what runs next; touches nothing
+python3 -m ops.advance              # run to the next human decision, then stop
+python3 -m ops.advance --feed <yesterday's hourly parquet>   # the daily lane
+python3 -m ops.advance --report     # regenerate reports/launch_readiness.md
 ```
 
 `advance` recomputes the state from disk every run, so running it again
@@ -50,7 +50,7 @@ itself measured invalidates nothing); it never invents a value. Every stop write
 process changed (before, after, why, source), the config in force, status,
 and what is waited on. Its stops, in order: a tune BLOCK · a failed shadow
 gate · the owner keys · `data.launch_date` · a stale extract · a red
-`status` · and, daily, **`pipeline.update --apply`**, which stays a human's.
+`status` · and, daily, **`daily.update --apply`**, which stays a human's.
 
 ---
 
@@ -123,7 +123,7 @@ no-op, and a missed day is graded, not skipped.
 
 ## Lane B — Price (hourly; the only lane where engineering builds code)
 
-The engine is `inference.decide`: state in, price + decision event out, or
+The engine is `engine.decide`: state in, price + decision event out, or
 `StateRejected` — it never returns a best-effort price for a state it cannot
 validate. Engineering owns everything on the other side of the event
 contract:
@@ -141,7 +141,7 @@ contract:
   ingests outcomes, walks tau, writes monitor/assurance/status/exports and
   stops at `--apply`.
 
-Outcomes are NOT engineering's to produce: `pipeline.ingest_outcomes`
+Outcomes are NOT engineering's to produce: `daily.ingest_outcomes`
 builds them from the hourly FLC feed, matched to decisions by (SKU, FC,
 date, hour), deriving `adjustment_reason`, `is_stockout` and the offered
 price itself. §08 of the contract page is the pre-build feasibility
@@ -161,8 +161,8 @@ in the caller.
 
 | Line | Response |
 | --- | --- |
-| stop condition fired (overspend >2× on `persistence_days` consecutive days, mismatch, duplicates, guardrail) | the monitor suspends exploration in the posterior state; `decide` stops drawing and **exploitation pricing continues**; `status` shows `exploration SUSPENDED since …`. Investigate, then a human resumes with `python3 -m pipeline.update --resume-exploration` — never restart blindly |
-| `config mirrors reports` FAIL | a MEASURED paste disagrees with the report that derives it, or the report could not measure it (NOT RUN). `python3 -m pipeline.tune` prints the reason; `advance` re-pastes what it can |
+| stop condition fired (overspend >2× on `persistence_days` consecutive days, mismatch, duplicates, guardrail) | the monitor suspends exploration in the posterior state; `decide` stops drawing and **exploitation pricing continues**; `status` shows `exploration SUSPENDED since …`. Investigate, then a human resumes with `python3 -m daily.update --resume-exploration` — never restart blindly |
+| `config mirrors reports` FAIL | a MEASURED paste disagrees with the report that derives it, or the report could not measure it (NOT RUN). `python3 -m ops.tune` prints the reason; `advance` re-pastes what it can |
 | `guardrail floors` WARN | "insufficient history" — nobody measured the floor, so the stop was not checked. Not a pass: more closed-episode history, then re-run `derive_thresholds` |
 | `assurance · reproduction` FAIL | something moved under the solver (config edit, artifact swap, deploy, library). Diff the bundle first: `artifact bundle` line, then `artifact mirrors` |
 | `artifact mirrors` FAIL | config paste and its source disagree (rho). Read the **bundle** line before re-pasting — the stale side is not always config |

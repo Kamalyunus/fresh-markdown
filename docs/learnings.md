@@ -13,7 +13,7 @@ now. Dates are owner sign-off, 2026-08.
   was produced by nothing measured and once overwrote a measured bracket;
   on the first held-out comparison the bracket scored below a flat prior.
   Now: the whole deff-deflated profile likelihood is the prior as a density
-  (`bootstrap.prior_density`) — the 50/50 arm mixture reproduces the
+  (`fit.prior_density`) — the 50/50 arm mixture reproduces the
   bracket in the sharp limit and degrades to the uniform where the data
   says nothing. No fallback constant, no std_floor; every run writes
   `holdout_comparison`.
@@ -206,7 +206,7 @@ now. Dates are owner sign-off, 2026-08.
   procedure solves for is not evidence about that number). Spreads are
   collected at every decision hour; shadow derives the launch tau on its
   own anchored path.
-- **Poisson information under an NB likelihood.** `pipeline.update`
+- **Poisson information under an NB likelihood.** `daily.update`
   accumulated `μ·L²` while the likelihood is NB (information
   `μ·L²·r/(r+μ)`), overstating evidence ~1.6–1.9× on top of what deff
   corrects. Fixed by theorem on both paths.
@@ -248,7 +248,7 @@ now. Dates are owner sign-off, 2026-08.
   settle was a new paste; the tolerance is now the config's
   `rho_paste_tolerance_rel` (1% of the frozen rho; tau's is 5% because tau
   self-corrects daily and rho is frozen for the pilot). And shadow ran
-  single-threaded for an hour per pass; `advance` and `bootstrap.run` now
+  single-threaded for an hour per pass; `advance` and `ops.bootstrap_loop` now
   pass `--workers 0` (reports are byte-identical serial or parallel).
 - **Weekly learning gate, tried and reverted.** A weekly `--apply` was
   considered to lighten the daily chore. It buys nothing: the trigger is
@@ -262,7 +262,7 @@ now. Dates are owner sign-off, 2026-08.
   graded. `learning.update_cadence_days` stays as the knob, at 1.
 - **Backtest tau on its own budget rule → production's.** The backtest
   solved against the bare `budget_share_of_il` share, collected Q-spreads
-  without `inference.decide`'s explorability gate, and counted `n_days` as
+  without `engine.decide`'s explorability gate, and counted `n_days` as
   days-with-decisions while shadow used the calendar span — three ways for
   its cross-check to disagree with the value it checks. All three now
   share production's definitions.
@@ -384,10 +384,19 @@ now. Dates are owner sign-off, 2026-08.
   `epsilon_min` was widened −4 → −5 under rule 3. k = 1 was judged too
   aggressive.
 
+- **Packages by phase → packages by responsibility (2026-09-05).**
+  `pipeline/` held the hourly production lane, the pre-launch harness and
+  the operator tooling side by side; `bootstrap/` held the fits and the
+  driver that runs them; `backtest/` was the only package run as
+  `python -m backtest`. Now `engine/` prices and learns, `fit/` builds the
+  artifacts, `evaluate/` grades them, `daily/` is the production lane in
+  run order, `ops/` drives and gates. One package per REVIEW_GUIDE tier
+  and `advance` phase; the tests mirror the modules.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,
 common day shocks), and every estimator change above is a way of being
 honest about that rather than fixing it. The fix is exogenous price
-variation: `pricing.explore`'s uniform draw is the randomisation, tau its
+variation: `engine.explore`'s uniform draw is the randomisation, tau its
 budget. The prior only needs to be *not confidently wrong* until then.
