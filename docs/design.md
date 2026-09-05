@@ -1500,6 +1500,9 @@ python3 -m pipeline.update --apply     # human-gated bounded update (§5.11)
 python3 -m pipeline.monitor
 python3 -m pipeline.assurance
 python3 -m pipeline.status             # exits 1 on any FAIL
+
+# leadership deck: twelve scenarios answered by dp.solve on this config
+python3 -m tools.scenario_deck --workers 0   # reports/scenarios.html (~2 min)
 ```
 
 Run outputs (`data/`, `reports/`, `artifacts/`, `events_store*/`) are never

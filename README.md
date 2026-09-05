@@ -33,6 +33,7 @@ itself is learned in production from IL-budgeted randomized exploration.
 | `events/pairs.py` | 5.10 | The one decision↔outcome pairing (`match_pairs`, `learnable=` excludes failed pushes) and the trading-day key (`decision_day`). |
 | `common/parallel.py` | — | `--workers N` for backtest/shadow; reports byte-identical serial or parallel. |
 | `tools/make_dummy_flc.py` | 6 | Synthetic FLC generator (legacy + randomized policies, known ground-truth elasticity); span defaults to covering `data.split`. |
+| `tools/scenario_deck.py` | 5.7–5.8 | Leadership deck: twelve interactive scenarios (heavy/light stock, hours left, high COGS, exploration cost, legacy ramp, demand shock, restock, dead stock, learning, refusals) answered by real `dp.solve` runs over a state grid → `reports/scenarios.html`. Demand is a slider, not a forecast; the A/B is the evidence. |
 
 ## Running the bootstrap
 

@@ -343,3 +343,9 @@ Every paste has one source and one checker:
   recoverable elasticity, `--policy legacy` = the production confound). It
   must keep emitting both source inventory conventions — regenerate the
   fixture after any change to them, and read the two printed counts.
+- Leadership deck: `python3 -m tools.scenario_deck --workers 0` writes
+  `reports/scenarios.html` — twelve scenarios answered by the real solver on
+  this machine's config over a state grid (~2 min). Regenerate after any change
+  to `pricing/dp.py`, `pricing/explore.py`, the tier/entry/δ_min config, or the
+  posterior prior; rule 19 applies to every number on it. It states what the
+  solver does under a chosen demand input, never what a SKU will sell.

@@ -54,7 +54,8 @@ the one decision↔outcome pairing.
 
 ## Out of review scope
 
-`tools/` (the fixture generator) and `docs/` pages. The test suite is the
+`tools/` (the fixture generator and the leadership scenario deck, which only
+calls the reviewed solver) and `docs/` pages. The test suite is the
 reviewers' asset, not their burden: every non-obvious rule named above has a
 test whose docstring states it in prose.
 

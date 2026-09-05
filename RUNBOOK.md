@@ -20,6 +20,11 @@ All commands run from the repo root. `data/`, `reports/`, `artifacts/`,
   hold-out dates, trains once, derives and pastes every MEASURED value,
   runs shadow on the hold-out, and stops at each decision only you can
   make, printing the evidence. Read the section *What the owner decides*.
+  For leadership, `python3 -m tools.scenario_deck --workers 0` writes
+  `reports/scenarios.html`: twelve situations (heavy stock, hours left, high
+  COGS, exploration cost, legacy ramp, demand shock, restock, dead stock,
+  learning, refusals) answered by the production solver on the config in
+  force. Demand there is a slider, not a forecast; the A/B is the evidence.
 - **Engineering** — build Lane B (below) against the event contract, then
   run the daily lane on a cron and read its stop:
 
