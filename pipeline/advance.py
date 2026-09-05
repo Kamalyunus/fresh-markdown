@@ -41,19 +41,36 @@ MAX_TUNE_ROUNDS = 4
 
 # ------------------------------------------------------------------ probe
 
+# which reports a re-run class invalidates
+INVALIDATES = {"thresholds": {"thresholds"},
+               "shadow": {"shadow"},
+               "calibration": {"backtest", "thresholds", "shadow"},
+               "retrain": {"backtest", "thresholds", "shadow"}}
+
+
 def stale_reports(cfg, bundle, reports):
-    """Reports produced against a bundle or config no longer in force --
-    the same test status.report_vintages applies, as a list to act on."""
-    live = provenance.config_fingerprint(cfg, phase=None)["digest"]
-    out = []
+    """Reports produced against a bundle no longer on disk, or under a
+    config whose MOVED KEYS they actually read (tune.rerun_for). A MEASURED
+    paste that only writes back what a report measured invalidates nothing:
+    treating every digest change as staleness re-ran shadow after every
+    tau paste and chased the fixed point for a day. Returns {name: why}."""
+    out = {}
     for name, rep in reports.items():
         if not rep:
             continue
         av = rep.get("artifact_versions") or {}
         if bundle and av.get("baseline_model_version") not in (None, bundle):
-            out.append(name)
-        elif (rep.get("config") or {}).get("digest") not in (None, live):
-            out.append(name)
+            out[name] = f"ran against bundle {av['baseline_model_version']}"
+            continue
+        fp = rep.get("config") or {}
+        if not fp.get("snapshot"):
+            continue
+        moved = [m.split(":")[0] for m in
+                 provenance.config_diff(fp["snapshot"], cfg)]
+        need = tune.rerun_for(moved)
+        if name in INVALIDATES.get(need, set()):
+            out[name] = f"{need}: " + ", ".join(
+                k for k in moved if tune.rerun_for([k]) != "none")
     return out
 
 
@@ -139,10 +156,16 @@ def plan(st):
                           phase="bootstrap", reevaluate=True))
         return steps
 
-    # 2. reports that grade a bundle or config no longer in force
-    if {"backtest", "thresholds"} & set(st["stale"]):
-        steps.append(_run("re-grade under the config now in force",
+    # 2. reports that grade a bundle or config no longer in force -- only
+    #    for the keys they read (stale_reports says which)
+    if "backtest" in st["stale"]:
+        steps.append(_run(f"re-grade ({st['stale']['backtest']})",
                           ["bootstrap.run", "--check-only"],
+                          phase="tune", reevaluate=True))
+        return steps
+    if "thresholds" in st["stale"]:
+        steps.append(_run(f"re-derive thresholds ({st['stale']['thresholds']})",
+                          ["bootstrap.derive_thresholds", "--input", PREPARED],
                           phase="tune", reevaluate=True))
         return steps
 
@@ -167,7 +190,9 @@ def plan(st):
 
     # 5. shadow on the hold-out, the launch record
     if "shadow" not in st["have"] or "shadow" in st["stale"]:
-        steps.append(_run("shadow (hold-out, every episode)",
+        steps.append(_run("shadow (hold-out, every episode"
+                          + (f"; {st['stale']['shadow']}" if "shadow" in st["stale"] else "")
+                          + ")",
                           ["pipeline.shadow", "--input", PREPARED,
                            "--out", "reports/shadow.json", "--max-episodes", "0"],
                           phase="shadow", reevaluate=True))
@@ -393,7 +418,7 @@ def main():
         print(text)
         return 0
 
-    rounds = 0
+    rounds, seen = 0, {}
     while True:
         cfg = load_config(args.config)
         st = probe(cfg, args.reports, feed=args.feed,
@@ -403,6 +428,18 @@ def main():
         if args.plan:
             return 0
         rounds += 1
+        # the same expensive step a third time in one invocation is a loop,
+        # not progress: stop and name it rather than run shadow for a day
+        for s in steps:
+            if s["kind"] == "run":
+                mod = s["args"][0]
+                seen[mod] = seen.get(mod, 0) + 1
+                if seen[mod] > 2:
+                    raise SystemExit(
+                        f"advance is looping: {mod} would run a third time in "
+                        "this invocation. Something re-invalidates it after each "
+                        "run -- read the plan above (the stale reason names the "
+                        "moved keys) and reports/launch_readiness.md")
         if rounds > 2 * MAX_TUNE_ROUNDS:
             raise SystemExit("advance did not settle -- a step keeps "
                              "invalidating another; read the plan above")

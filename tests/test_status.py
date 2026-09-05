@@ -315,12 +315,19 @@ def test_report_vintages_names_the_config_values_that_moved(cfg, tmp_path):
     assert row["verdict"] == status.PASS
     assert "shadow=shadow" in row["detail"]           # phase is reported
 
+    # a MEASURED paste that writes back what shadow itself derived is not a
+    # reason to re-grade shadow: this WARN re-ran shadow after every tau
+    # paste and chased the fixed point for a day
     pasted = _copy.deepcopy(cfg)
     pasted["exploration"]["tau_initial"] = 999.0
     row = status._vintages(pasted, state, {"shadow": same})
+    assert row["verdict"] == status.PASS and "inert pastes since" in row["detail"]
+    # a key a report READS is
+    edited = _copy.deepcopy(cfg)
+    edited["pricing"]["tier_step"] = 0.05
+    row = status._vintages(edited, state, {"shadow": same})
     assert row["verdict"] == status.WARN
-    assert "exploration.tau_initial" in row["detail"]
-    assert "999.0" in row["detail"]
+    assert "pricing.tier_step" in row["detail"] and "0.05" in row["detail"]
 
     # a model mismatch still outranks a config move, and is FAIL
     other = {"artifact_versions": {"baseline_model_version": "m0"},

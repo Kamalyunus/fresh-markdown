@@ -184,6 +184,16 @@ now. Dates are owner sign-off, 2026-08.
   the under-spend design 5.8 raises tau on, and the only way a tau cut
   below the smallest spread ever recovers. Shadow's trace already walked
   that rule; production held still and the two disagreed on one log.
+- **Every digest change staled every report.** `advance` treated any
+  config change as invalidating every report, so pasting `tau_initial`
+  (what shadow itself derived) staled shadow, shadow re-ran for hours,
+  derived a tau a few percent different, which pasted, which staled
+  shadow — a day on the owner's extract with no readiness report. Staleness
+  is now judged on the keys a report READS (`tune.rerun_for`: W turns the
+  loop, `delta_min` re-runs shadow, a stop threshold re-derives
+  thresholds, unclassified edits re-grade everything, MEASURED write-backs
+  nothing), and `advance` refuses to run the same step a third time in one
+  invocation.
 - **Weekly learning gate, tried and reverted.** A weekly `--apply` was
   considered to lighten the daily chore. It buys nothing: the trigger is
   per cell, so under a daily gate a fast category updates the day its

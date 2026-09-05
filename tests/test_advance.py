@@ -12,7 +12,7 @@ from pipeline import tune
 def _state(**over):
     st = {
         "raw": True, "prepared": True, "model": True, "bundle": "b1",
-        "retrain": False, "stale": [],
+        "retrain": False, "stale": {},
         "have": {"backtest", "thresholds", "shadow"},
         "tune": {"findings": [], "blocked": False, "to_paste": [],
                  "owner_decisions": []},
@@ -56,7 +56,7 @@ def test_the_bootstrap_runs_only_when_the_model_is_absent_or_asked_for():
 
 
 def test_a_stale_report_is_regraded_before_anything_is_pasted():
-    steps = advance.plan(_state(stale=["backtest"],
+    steps = advance.plan(_state(stale={"backtest": "calibration: baseline_model.calibration_fit_trailing_weeks"},
                                 tune={"findings": [], "blocked": False,
                                       "to_paste": [{"key": "dispersion.rho"}],
                                       "owner_decisions": []}))
@@ -176,3 +176,46 @@ def test_the_readiness_report_is_assembled_from_the_journal_and_the_decision_log
     assert "## Status" in text
     assert "**[launch] data.launch_date is null**" in text
     assert "set it on launch day" in text
+
+
+def test_a_measured_paste_does_not_stale_the_report_that_derived_it(cfg):
+    """Every digest change used to stale every report: paste tau -> shadow
+    stale -> re-run shadow (hours) -> slightly different tau -> paste ->
+    ... for a day on the owner's extract. Staleness is judged on the keys a
+    report actually READS (tune.rerun_for)."""
+    import copy
+    from common.provenance import config_fingerprint
+    reps = {n: {"artifact_versions": {"baseline_model_version": "b"},
+                "config": config_fingerprint(cfg, n)}
+            for n in ("backtest", "thresholds", "shadow")}
+    assert advance.stale_reports(cfg, "b", reps) == {}
+    # the pastes the process makes: none of them re-grades anything
+    c = copy.deepcopy(cfg)
+    c["exploration"]["tau_initial"] = 999.0
+    c["dispersion"]["rho"] = 0.5
+    c["learning"]["information_increment"] = 0.9
+    c["baseline_model"]["calibration_gate_band"] = [0.95, 1.05]
+    assert advance.stale_reports(c, "b", reps) == {}
+    # keys a report reads DO, and only the reports that read them
+    c = copy.deepcopy(cfg)
+    c["exploration"]["delta_min_log_bias"] = 0.2
+    assert set(advance.stale_reports(c, "b", reps)) == {"shadow"}
+    c = copy.deepcopy(cfg)
+    c["monitoring"]["stop_conditions"]["scrap_deterioration_pct"] = 0.3
+    assert set(advance.stale_reports(c, "b", reps)) == {"thresholds"}
+    c = copy.deepcopy(cfg)
+    c["baseline_model"]["calibration_fit_trailing_weeks"] = 4
+    assert set(advance.stale_reports(c, "b", reps)) == {"backtest", "thresholds", "shadow"}
+    c = copy.deepcopy(cfg)
+    c["pricing"]["tier_step"] = 0.05                      # an unclassified edit
+    assert set(advance.stale_reports(c, "b", reps)) == {"backtest", "thresholds", "shadow"}
+    # and a bundle mismatch always
+    reps["backtest"]["artifact_versions"]["baseline_model_version"] = "old"
+    assert "backtest" in advance.stale_reports(cfg, "b", reps)
+
+
+def test_only_the_invalidated_report_is_re_run():
+    steps = advance.plan(_state(stale={"thresholds": "thresholds: monitoring.stop_conditions.scrap_deterioration_pct"}))
+    assert steps[0]["args"][0] == "bootstrap.derive_thresholds"
+    steps = advance.plan(_state(stale={"shadow": "shadow: exploration.delta_min_log_bias"}))
+    assert steps[0]["args"][0] == "pipeline.shadow"

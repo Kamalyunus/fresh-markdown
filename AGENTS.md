@@ -181,9 +181,13 @@ Every stop writes `reports/launch_readiness.md` (`--report` regenerates
 it): what ran per phase, every value the process changed with before,
 after, why and source, the config in force, status, and what is still
 waited on — the handover document, assembled from the journal and tune's
-decision log, never from memory. It never retrains unless the model is absent or `--retrain`
-is given, re-grades any report whose bundle or config moved, and stops on
-every SET BY OWNER null with the evidence. Its daily lane walks tau
+decision log, never from memory. It never retrains unless the model is
+absent or `--retrain` is given; it re-grades a report only when its bundle
+moved or a config key that report READS moved (`tune.rerun_for`: W turns
+the loop, `delta_min` re-runs shadow, a stop threshold re-derives
+thresholds; a MEASURED paste that writes back what a report measured
+invalidates nothing); it refuses to run the same step a third time in one
+invocation; and it stops on every SET BY OWNER null with the evidence. Its daily lane walks tau
 (`pipeline.update --calibrate-tau`, no operator) and stops at
 `pipeline.update --apply`, which it never runs: learning is gated daily
 and per cell — a fast category updates the day its batch has the evidence.

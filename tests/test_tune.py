@@ -215,7 +215,7 @@ def test_apply_names_the_minimum_rerun_and_never_asks_for_a_retrain(
 
     # runtime-only values require nothing; the message must not send anyone
     # back to the bootstrap
-    assert res["rerun"] in ("none", "calibration")
+    assert res["rerun"] != "retrain" and res["rerun"] in tune.RERUN_STEPS
     # only the "retrain" class may send anyone to the full script, and only
     # data.split reaches it -- which is SET BY OWNER, so --apply never writes
     # one. The calibration text mentions retraining solely to forbid it.
@@ -235,9 +235,13 @@ def test_apply_names_the_minimum_rerun_and_never_asks_for_a_retrain(
     for key in (("learning", "information_increment"),
                 ("learning", "max_mean_step"),
                 ("exploration", "tau_initial"),
-                ("dispersion", "rho"),
-                ("monitoring", "stop_conditions", "scrap_deterioration_pct")):
+                ("dispersion", "rho")):
         assert tune.RERUN.get(key, "none") == "none", key
+    # a stop threshold re-derives its own verdict (cheap) -- never the loop
+    assert tune.RERUN[("monitoring", "stop_conditions",
+                       "scrap_deterioration_pct")] == "thresholds"
+    # and the forced-move floor re-runs shadow, whose spreads it changes
+    assert tune.RERUN[("exploration", "delta_min_log_bias")] == "shadow"
 
     # and the decision log records which re-run the run required
     log = json.load(open(res["log"]))["runs"][-1]

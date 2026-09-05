@@ -61,7 +61,7 @@ KEYS = {
     ("exploration", "tau_initial"):
         {"anchor": "  tau_initial:", "measured": True, "rerun": "none"},
     ("exploration", "delta_min_log_bias"):
-        {"anchor": "  delta_min_log_bias:", "measured": True, "rerun": "none"},
+        {"anchor": "  delta_min_log_bias:", "measured": True, "rerun": "shadow"},
     ("dispersion", "rho"):
         {"anchor": "  rho:", "measured": True, "rerun": "none"},
     ("baseline_model", "calibration_fit_trailing_weeks"):
@@ -69,10 +69,10 @@ KEYS = {
          "rerun": "calibration"},
     ("monitoring", "stop_conditions", "scrap_deterioration_pct"):
         {"anchor": "    scrap_deterioration_pct:", "measured": False,
-         "rerun": "none"},
+         "rerun": "thresholds"},
     ("monitoring", "stop_conditions", "margin_deterioration_pct"):
         {"anchor": "    margin_deterioration_pct:", "measured": False,
-         "rerun": "none"},
+         "rerun": "thresholds"},
     ("ab_test", "min_detectable_effect_pct"):
         {"anchor": "  min_detectable_effect_pct:", "measured": False,
          "rerun": "none"},
@@ -82,9 +82,51 @@ KEYS = {
 MEASURED_KEYS = {k for k, v in KEYS.items() if v["measured"]}
 RERUN = {k: v["rerun"] for k, v in KEYS.items() if v["rerun"] != "none"}
 
+# what a config change invalidates, weakest to strongest. A MEASURED paste
+# writes back what a report measured -- it invalidates NOTHING unless the
+# key is an INPUT to a report (W turns the loop; delta_min changes shadow's
+# spreads and tau; a stop threshold changes derive_thresholds' verdict).
+# Re-grading every report on every paste chased the fixed point for a day.
+RERUN_ORDER = ["none", "thresholds", "shadow", "calibration", "retrain"]
+
+# config keys no report reads: runtime-only, paths, the driver's own knobs
+INERT_PREFIXES = ("meta.", "events.", "artifacts.", "tuning.", "assurance.",
+                  "data.launch_date", "data.split_manifest_path",
+                  "ab_test.active", "learning.update_cadence_days",
+                  "monitoring.alert_posterior_std_flat_days",
+                  "posterior.path", "posterior.prior.path",
+                  "baseline_model.model_path", "baseline_model.feature_schema_path",
+                  "baseline_model.calibration_factor_path",
+                  "dispersion.r_lookup_path", "dispersion.rho_path")
+
+
+def rerun_for(keys):
+    """The strongest re-run a set of moved dotted config keys demands. A key
+    tune owns says so itself; an inert key says none; anything else is an
+    edit nobody classified, so every report is re-graded (calibration)."""
+    need = "none"
+    for key in keys:
+        entry = KEYS.get(tuple(key.split(".")))
+        if entry is not None:
+            r = entry["rerun"]
+        elif key.startswith(INERT_PREFIXES):
+            r = "none"
+        else:
+            r = "calibration"
+        if RERUN_ORDER.index(r) > RERUN_ORDER.index(need):
+            need = r
+    return need
+
+
 RERUN_STEPS = {
     "none": ("nothing to re-run: every value written is read at runtime or "
              "mirrors an artifact that already holds it"),
+    "thresholds": ("a stop threshold moved -- re-derive its verdict:\n"
+                   "    python3 -m bootstrap.derive_thresholds --input "
+                   "data/prepared.parquet"),
+    "shadow": ("shadow's own inputs moved (the forced-move floor) -- re-run "
+               "pipeline.shadow so its tau derivation and gate are graded "
+               "under the value in force"),
     "calibration": (
         "the calibration loop turned -- settle it WITHOUT retraining:\n"
         "    python3 -m bootstrap.run --check-only\n"
@@ -698,9 +740,7 @@ def apply(report, config_path="config.yaml", out_dir="artifacts"):
                  "bootstrap after applying: a changed increment or rail "
                  "changes what the next run measures."),
     })
-    order = ["none", "calibration", "retrain"]
-    needed = max((RERUN.get(tuple(f_["key"].split(".")), "none")
-                  for f_ in applied), key=order.index, default="none")
+    needed = rerun_for([f_["key"] for f_ in applied])
     history["runs"][-1]["rerun_required"] = needed
     write_json(log_path, history)
     return {"backup": backup, "log": log_path, "applied": applied,

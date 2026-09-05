@@ -32,8 +32,9 @@ python3 -m pipeline.advance --report     # regenerate reports/launch_readiness.m
 
 `advance` recomputes the state from disk every run, so running it again
 after any action is always safe. It never retrains unless the model is
-absent or `--retrain` is given; it re-runs any report that grades a bundle
-or config no longer in force; it never invents a value. Every stop writes
+absent or `--retrain` is given; it re-runs a report only when its bundle
+moved or a config key that report reads moved (a paste of what the report
+itself measured invalidates nothing); it never invents a value. Every stop writes
 `reports/launch_readiness.md` — what ran per phase, every config value the
 process changed (before, after, why, source), the config in force, status,
 and what is waited on. Its stops, in order: a tune BLOCK · a failed shadow

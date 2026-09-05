@@ -264,11 +264,18 @@ def _vintages(cfg, state, reports):
         fp = rep.get("config")
         if fp:
             if fp.get("digest") != live:
+                from pipeline import tune                    # sibling; no cycle
                 diff = provenance.config_diff(fp.get("snapshot") or {}, cfg)
-                moved.append(f"{name} ({fp.get('phase')}) ran under config "
-                             f"{fp.get('digest')}; since then: "
-                             + ("; ".join(diff) if diff else "keys unchanged, "
-                                "values re-serialised"))
+                # a paste that only writes back what a report measured, or a
+                # key no report reads, is not a reason to re-grade it
+                live_moves = [d for d in diff
+                              if tune.rerun_for([d.split(":")[0]]) != "none"]
+                if live_moves:
+                    moved.append(f"{name} ({fp.get('phase')}) ran under config "
+                                 f"{fp.get('digest')}; since then: "
+                                 + "; ".join(live_moves))
+                else:
+                    checked.append(f"{name}={fp.get('phase')} (inert pastes since)")
             else:
                 checked.append(f"{name}={fp.get('phase')}")
         elif av:                    # a report from before fingerprints
