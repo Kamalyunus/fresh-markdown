@@ -49,3 +49,34 @@ def test_page_embeds_valid_json_and_no_placeholders(deck, cfg, tmp_path):
     assert len(data["scenarios"]) == 12
     assert data["config"]["config_version"] == cfg["meta"]["config_version"]
     assert "pricing.dp.solve" in html
+
+
+def test_no_fixed_schedule_prices_below_cost(deck):
+    """The legacy ramp deepened to d_ref + 0.15 whatever d_max was, so at high
+    COGS the comparison arm sold below cost -- a price the system itself can
+    never emit. Every fixed schedule is capped at d_max (dp.feasible_tiers)."""
+    assert any(g >= 0.7 for g in deck["grid"]["gamma"]), "no high-COGS state on the grid"
+    for st in deck["states"]:
+        gamma = st["key"][0]
+        for name in ("flat_reference", "legacy_ramp"):
+            for r in st["paths"][name]["path"]:
+                if r["d"] is None:
+                    continue
+                assert r["d"] <= st["d_max"] + 1e-9, (name, st["key"], r)
+                assert sd.P0 * (1 - r["d"]) >= sd.P0 * gamma - 1e-6
+    # the ramp still ramps where it can
+    assert sd.legacy_ramp(0.30, 12, 0.60) == pytest.approx(
+        [0.15] * 4 + [0.30] * 4 + [0.45] * 4)
+    assert sd.legacy_ramp(0.30, 12, 0.30) == pytest.approx([0.15] * 4 + [0.30] * 8)
+
+
+def test_the_refusals_state_the_stop_rules_the_monitor_applies(deck, cfg, tmp_path):
+    """pipeline.monitor: the overspend stop compares ONE day's realised spend
+    against that day's budget (a single day fires it); persistence_days is
+    the scrap/margin guardrails' consecutive-day rule (evaluate_guardrail)."""
+    out = tmp_path / "deck.html"
+    sd.write_page(deck, cfg, out)
+    html = out.read_text()
+    assert "a single day is enough" in html
+    assert "consecutive days over their threshold" in html
+    assert "for ${D.config.persistence_days} consecutive days, or a scrap" not in html

@@ -34,7 +34,6 @@ def _episodes_per_week(d, cfg):
 
 def estimate_prior(d, cfg, fast=False):
     """The prior as a density per category, with its own evidence attached."""
-    pc = cfg["posterior"]["prior"]
     model = BaselineModel(cfg)
     grid, per_category, densities, pooled = prior_density.estimate(
         d, cfg, model, fast=fast)
@@ -73,6 +72,10 @@ def estimate_prior(d, cfg, fast=False):
         # backwards, not weakly, and must not hide per category
         "wrong_sign_categories": sorted(
             c for c, v in per_category.items() if v.get("wrong_sign")),
+        # a peak pinned at epsilon_min: rule 3, and the one bound that MAY be
+        # widened -- read `boundary_note` per category
+        "lower_boundary_categories": sorted(
+            c for c, v in per_category.items() if v.get("boundary") == "lower"),
         "no_price_variation_categories": sorted(
             c for c, v in per_category.items() if "no_price_variation" in v),
         "holdout_comparison": comparison,
@@ -102,6 +105,7 @@ def _print(prior):
           f"{'peak':>7s} {'own':>5s} {'span':>9s} {'deff':>5s}  note")
     for cat, v in prior["per_category"].items():
         note = ("WRONG SIGN -- pooled" if v.get("wrong_sign")
+                else "AT epsilon_min -- pooled" if v.get("boundary") == "lower"
                 else "NO PRICE VARIATION -- pooled" if "no_price_variation" in v
                 else "own data" if v["own_information_weight"] >= OWN_DATA_WEIGHT
                 else f"{v['own_information_weight']:.0%} own, rest pooled")
@@ -119,6 +123,13 @@ def _print(prior):
               + ". Their own densities are discarded and they take the pooled "
                 "one. `peak` above is where the likelihood really wanted to "
                 "sit before search_bounds clipped it.")
+    if prior.get("lower_boundary_categories"):
+        print(f"\n  !! {len(prior['lower_boundary_categories'])} category(s) "
+              f"with a peak AT epsilon_min: "
+              + ", ".join(prior["lower_boundary_categories"])
+              + ". A boundary solution is not an estimate (rule 3): pooled, "
+                "and left out of the pool. epsilon_min is the one bound that "
+                "MAY be widened -- see boundary_note per category.")
 
 
 

@@ -43,7 +43,6 @@ def test_declared_columns_match_the_source_schema():
 
 def test_the_generator_emits_both_source_inventory_conventions():
     """A fixture missing one of these does not FAIL. It passes, quietly."""
-    import numpy as np
     from tools.make_dummy_flc import generate
 
     df, _ = generate(n_skus=40, n_days=60, policy="randomized", seed=11,
@@ -69,7 +68,6 @@ def test_the_generator_emits_both_source_inventory_conventions():
 
 def test_the_negative_window_dirt_lands_on_WHOLE_windows(): # noqa: N802
     """A negative counter is a property of a window, not of one row."""
-    import pandas as pd
     from tools.make_dummy_flc import generate
 
     df, _ = generate(n_skus=60, n_days=60, policy="randomized", seed=5,
@@ -145,3 +143,76 @@ def test_summarise_reports_the_null_shares_that_drop_episodes():
 def test_schema_is_pyarrow_typed():
     # guards the import above against a refactor that turns SCHEMA into a list
     assert isinstance(SCHEMA, pa.Schema)
+
+
+# ------------------------------------------------- the pull covers the config
+
+def test_a_pull_that_stops_short_of_the_configured_windows_is_refused():
+    """`--days 120` from yesterday is the manual default, and it silently
+    left the calib window (or the hold-out) empty: fit_dispersion then died
+    about 'no rows' three steps later. The requested range is checked against
+    train_start .. holdout.end (or test_end), the range pipeline.advance
+    passes, and the exit is non-zero with the dates named."""
+    from datetime import date
+    from common.config import load_config
+
+    cfg = load_config()
+    need_start, need_end = download_flc.required_range(cfg)
+    assert need_start == date.fromisoformat(cfg["data"]["split"]["train_start"])
+    assert need_end == date.fromisoformat(cfg["data"]["holdout"]["end"])
+
+    # exactly the config's range, and a superset of it, both cover
+    assert download_flc.coverage_gap(need_start, need_end, cfg) is None
+    assert download_flc.coverage_gap(need_start.replace(day=1),
+                                     need_end.replace(year=need_end.year + 1),
+                                     cfg) is None
+
+    # short at either end is refused, and the message names both ranges
+    from datetime import timedelta
+    late = download_flc.coverage_gap(need_start + timedelta(days=1), need_end, cfg)
+    early = download_flc.coverage_gap(need_start, need_end - timedelta(days=1), cfg)
+    for gap in (late, early):
+        assert gap and str(need_start) in gap and str(need_end) in gap
+        assert "train_start" in gap and "holdout" in gap
+
+    # without a hold-out the requirement falls back to split.test_end
+    no_holdout = dict(cfg, data={**cfg["data"], "holdout": None})
+    assert download_flc.required_range(no_holdout)[1] == \
+        date.fromisoformat(cfg["data"]["split"]["test_end"])
+
+
+def test_main_exits_non_zero_when_the_range_does_not_cover(monkeypatch, tmp_path):
+    """The check is wired into the CLI: the extract is still written (it is
+    data), but the exit code says the chain cannot run on it."""
+    import sys
+    import pandas as pd
+    from common.config import load_config
+
+    cfg = load_config()
+    train_start = cfg["data"]["split"]["train_start"]
+
+    class _Conn:
+        def close(self):
+            pass
+
+    frame = pd.DataFrame({c: [1] for c in download_flc.REQUIRED_COLUMNS})
+    frame["date"] = train_start
+    monkeypatch.setattr(download_flc, "get_conn", lambda env_file=None: _Conn())
+    monkeypatch.setattr(pd, "read_sql", lambda q, conn: frame)
+    out = str(tmp_path / "flc_raw.parquet")
+
+    # covering range: exits cleanly
+    end = cfg["data"]["holdout"]["end"]
+    monkeypatch.setattr(sys, "argv", ["download_flc", "--start-date", train_start,
+                                      "--end-date", end, "--out", out])
+    download_flc.main()
+    assert (tmp_path / "flc_raw.parquet").exists()
+
+    # ten days: refused, after the file is written
+    monkeypatch.setattr(sys, "argv", ["download_flc", "--start-date", train_start,
+                                      "--days", "10", "--out", out,
+                                      "--end-date", train_start])
+    with pytest.raises(SystemExit) as exc:
+        download_flc.main()
+    assert "EXTRACT TOO SHORT" in str(exc.value)
+    assert end in str(exc.value)

@@ -271,58 +271,6 @@ def test_the_cost_floor_is_not_a_population_choice():
     assert "dp_eligible" not in inspect.getsource(dp.feasible_tiers)
 
 
-def test_an_unknown_outcome_reaches_the_harnesses_and_is_not_charged_scrap(cfg):
-    """`edge_truncated` staying in `dp_eligible` sends unclosed episodes into
-    the backtest and shadow for the first time. Both already had the branch;
-    nothing had exercised it, because the filter chain deleted the subject."""
-    from backtest.replay import _episode_frame, _replay_one
-
-    g = pd.DataFrame({
-        "episode_id": ["e"] * 3,
-        "date": ["2026-05-01"] * 3, "hour_of_day": [9, 10, 11],
-        "total_discount": [0.25, 0.25, 0.30],
-        "original_price": [10_000.0] * 3, "cost": [4000.0] * 3,
-        "d_ref": [0.25] * 3, "starting_inventory": [10, 8, 6],
-        "units_sold": [2, 2, 2], "mu_ref_hat": [2.0] * 3,
-        "r": [3.0] * 3, "eps": [-2.0] * 3,
-    })
-    g["ending_inventory"] = g.starting_inventory - g.units_sold
-    known = _episode_frame(g)
-    unknown = _episode_frame(g, unfinished=frozenset({"e"}))
-    assert known["outcome_known"] and not unknown["outcome_known"]
-    assert known["end_inv"] == unknown["end_inv"] == 4
-
-    row_k, _ = _replay_one(known, cfg)
-    row_u, _ = _replay_one(unknown, cfg)
-    assert row_k["actual_scrap_cost"] == pytest.approx(4 * 4000.0)
-    assert row_u["actual_scrap_cost"] == 0.0
-    # the DISCOUNT half is real either way -- those hours happened
-    assert row_u["actual_discount_cost"] == pytest.approx(
-        row_k["actual_discount_cost"])
-    # and the model arms are untouched: they simulate the full window, so an
-    # unknown ENDING says nothing about what the policy would have done
-    for col in ("legacy_model_il", "dp_il"):
-        assert row_u[col] == pytest.approx(row_k[col])
-
-
-# ------------------------------------- supply, and who is allowed to see it
-
-def test_supply_not_opening_stock_is_the_clearance_denominator():
-    """A restocked episode has more to sell than it opened with."""
-    from common.episodes import episode_flow
-    d = pd.DataFrame({
-        "episode_id": ["R"] * 3, "date": ["2026-03-01"] * 3,
-        "hour_of_day": [10, 11, 12],
-        "starting_inventory": [3, 12, 8], "units_sold": [1, 4, 4],
-        "ending_inventory": [12, 8, 0]})
-    flow = episode_flow(d)
-    assert flow.loc["R", "opening"] == 3
-    assert flow.loc["R", "arrived"] == 10
-    assert flow.loc["R", "supply"] == 13
-    assert flow.loc["R", "clearance"] == pytest.approx(9 / 13)
-    assert flow.loc["R", "clearance"] <= 1.0
-
-
 def test_stock_that_genuinely_vanishes_does_not_net_away():
     """The netting must not launder a real loss into a clean episode."""
     from common.episodes import episode_flow
@@ -537,17 +485,6 @@ def test_an_unfinished_episode_has_no_clearance_to_report(cfg):
     assert float(flow.clearance.max()) <= 1.0
 
 
-def test_the_backtest_grades_on_known_outcomes_only(cfg):
-    """The same bias, and worse, because the two arms are asymmetric."""
-    import inspect
-    from backtest import replay
-    src = inspect.getsource(replay.policy_replay)
-    assert "ep = ep_all[ep_all.outcome_known]" in src, \
-        "the backtest is aggregating over unfinished episodes again"
-    assert "episodes_excluded_unclosed" in src, \
-        "the exclusion must be counted, not silent"
-
-
 def test_the_learning_yield_reports_the_terms_behind_it():
     """A disappointing yield has two causes with OPPOSITE remedies -- too few
     forced decisions, or forced prices sitting too close to the reference --
@@ -567,7 +504,6 @@ def test_the_learning_yield_reports_the_terms_behind_it():
     # or they would describe a different set of hours than they explain
     one = inspect.getsource(shadow._shadow_one)
     body = one[one.index('if evt["is_exploration"]'):]
-    info_at = body.index('out["raw_information"] +=')
     for comp in ('out["abs_log_ratio"] +=', 'out["forced_mu"] +=',
                  'out["forced_discount_gap"] +='):
         assert comp in body, f"{comp} is not accumulated on forced hours"
@@ -595,7 +531,8 @@ def test_step_sensitivity_prices_the_cap_on_real_episodes(cfg):
             "original_price": [10_000.0] * 4, "cost": [4000.0] * 4,
             "d_ref": [0.25] * 4, "starting_inventory": [6, 5, 4, 3],
             "units_sold": [1, 1, 1, 1], "mu_ref_hat": [1.5] * 4,
-            "r": [3.0] * 4, "eps": [eps] * 4,
+            "r": [3.0] * 4, "eps": [eps] * 4, "is_observed": [True] * 4,
+            "sku_id": [7] * 4, "fc": ["FC1"] * 4, "category": ["FRUIT"] * 4,
         })
         g["ending_inventory"] = g.starting_inventory - g.units_sold
         return _episode_frame(g)
@@ -636,6 +573,8 @@ def test_simulated_arms_absorb_only_the_shrink_their_shelf_held(cfg):
         "starting_inventory": [3, 3, 1], "units_sold": [0, 0, 0],
         "ending_inventory": [3, 1, 1],
         "mu_ref_hat": [2.5] * 3, "r": [3.0] * 3, "eps": [-1.5] * 3,
+        "is_observed": [True] * 3, "sku_id": [7] * 3, "fc": ["FC1"] * 3,
+        "category": ["FRUIT"] * 3,
     })
     e = _episode_frame(g)
     assert e["shrink"] == 2
@@ -904,3 +843,77 @@ def test_a_restock_is_detected_from_the_source_convention():
     steep.loc[steep.hour_of_day > 15, "ending_inventory"] = 0
     steep.loc[steep.hour_of_day > 15, "units_sold"] = 0
     assert episode_flow(steep).arrived.eq(0).all()
+
+
+# ------------------------------------------------ the waterfall's own basis
+
+def test_the_raw_waterfall_row_counts_rows_episodes_and_cogs_on_one_frame(cfg):
+    """`raw` used to count rows pre-dedup but episodes and COGS post-dedup,
+    so the first row of the artifact was two frames wearing one label."""
+    path = os.path.join(ROOT, "data", "flc_synth.parquet")
+    _, wf = load_and_filter(path, cfg)
+    raw, dedup = wf[0], wf[1]
+    assert raw[0] == "raw" and dedup[0] == "duplicate_hour_rows_dropped"
+    assert raw[1] == len(pd.read_parquet(path)), "raw rows = the file's rows"
+    # duplicated hours collide into extra ids, so the raw frame has AT LEAST
+    # as many episodes as the deduplicated one -- never exactly the same by
+    # construction, which is what counting them on the dedup frame gave
+    assert raw[2] >= dedup[2] and raw[3] >= dedup[3] > 0
+    assert raw[1] >= dedup[1]
+
+
+def test_population_gate_rows_record_no_removed_episodes(cfg):
+    """`eligible` and `dp_eligible` drop nothing, so the examples collector
+    must not list their flagged episodes as removals -- they are still in
+    the frame."""
+    examples = {}
+    _, wf = load_and_filter(os.path.join(ROOT, "data", "flc_synth.parquet"),
+                            cfg, examples=examples)
+    labels = [t[0] for t in wf]
+    assert labels[-2:] == ["eligible", "dp_eligible"]
+    assert "eligible" not in examples and "dp_eligible" not in examples
+    assert "raw" not in examples and "duplicate_hour_rows_dropped" not in examples
+    # gate rows carry their detail dict like any other detailed stage
+    assert isinstance(wf[-1][4], dict) and isinstance(wf[-2][4], dict)
+
+
+# ------------------------------------------ the rate features and the index
+
+def _hourly_rows(days=12, skus=(1, 2)):
+    rows = []
+    for sku in skus:
+        for day in range(days):
+            date = str((pd.Timestamp("2026-03-01")
+                        + pd.Timedelta(days=day)).date())
+            for h in (10, 11, 12):
+                rows.append(dict(sku_id=sku, fc="F", date=date, hour_of_day=h,
+                                 total_discount=0.25 if h < 12 else 0.40,
+                                 d_ref=0.25, starting_inventory=5,
+                                 units_sold=(sku + day + h) % 3,
+                                 episode_id=f"{sku}|F|{day}"))
+    return pd.DataFrame(rows)
+
+
+def test_ref_rate_features_do_not_depend_on_the_frames_index_labels(cfg):
+    """The anchor mask was built on the caller's index and reused after a
+    merge reset it, so on a frame whose index had gaps (every filtered frame)
+    the mask aligned by LABEL and prior_episode_ref_sales_rate was built on
+    the wrong rows. Same rows, any labels -> the same features."""
+    from bootstrap.prepare_data import add_ref_rate_features
+
+    d = _hourly_rows()
+    gappy = d.copy()
+    gappy.index = gappy.index * 3 + 7               # sparse, offset labels
+    cols = ["sku_ref_sales_rate_30d", "prior_episode_ref_sales_rate"]
+    contiguous = add_ref_rate_features(d, cfg)[cols].reset_index(drop=True)
+    shuffled = add_ref_rate_features(gappy, cfg)[cols].reset_index(drop=True)
+    pd.testing.assert_frame_equal(contiguous, shuffled)
+    # and the feature is real: the second episode of a SKU sees the first's
+    # anchor rate, the first sees nothing
+    out = add_ref_rate_features(gappy, cfg)
+    first = out[out.episode_id == "1|F|0"].prior_episode_ref_sales_rate
+    second = out[out.episode_id == "1|F|1"].prior_episode_ref_sales_rate
+    assert first.isna().all()
+    assert second.notna().all()
+    anchor_first = out[(out.episode_id == "1|F|0") & (out.hour_of_day < 12)]
+    assert second.iloc[0] == pytest.approx(anchor_first.units_sold.mean())

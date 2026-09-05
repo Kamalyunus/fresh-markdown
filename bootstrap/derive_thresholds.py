@@ -14,7 +14,6 @@ import pandas as pd
 
 from common.config import load_config
 from common.io import write_json
-from common import episodes
 from common import guardrail
 from common import metrics
 from bootstrap.prepare_data import pre_launch
@@ -23,20 +22,26 @@ from common.provenance import config_fingerprint
 
 # ------------------------------------------------------- guardrail floors
 
-def _sigma_summary(rel):
+# MAD -> sigma for a normal distribution (1 / Phi^-1(3/4)); a constant of the
+# estimator, not a tunable
+MAD_TO_SIGMA = 1.4826
+
+
+def _sigma_summary(rel, outlier_ratio):
     """3-sigma and robust 3-sigma of a deviation series; shared by both bases
     so the two floors cannot drift apart. `outlier_dominated` marks a raw
-    sigma inflated by low-denominator days -- set thresholds from the robust
-    figure there."""
+    sigma above `outlier_ratio` x the robust one -- inflated by
+    low-denominator days; set thresholds from the robust figure there."""
     sigma = float(rel.std(ddof=1))
     mad = float(np.median(np.abs(rel - np.median(rel))))
-    sigma_robust = 1.4826 * mad
+    sigma_robust = MAD_TO_SIGMA * mad
     return {
         "daily_rel_dev_sigma": round(sigma, 4),
         "three_sigma": round(3 * sigma, 4),
         "daily_rel_dev_sigma_robust": round(sigma_robust, 4),
         "three_sigma_robust": round(3 * sigma_robust, 4),
-        "outlier_dominated": bool(sigma_robust > 0 and sigma > 2 * sigma_robust),
+        "outlier_dominated": bool(sigma_robust > 0
+                                  and sigma > outlier_ratio * sigma_robust),
     }
 
 
@@ -58,6 +63,7 @@ def recommend_thresholds(trailing, cfg):
     against) and whether the configured threshold clears it -- above it, but
     not so far above that the guardrail can never fire."""
     sc = cfg["monitoring"]["stop_conditions"]
+    inert_multiple = float(cfg["tuning"]["guardrail_inert_floor_multiple"])
     out = {}
     for metric, key in (("scrap_rate", "scrap_deterioration_pct"),
                         ("margin_rate", "margin_deterioration_pct")):
@@ -74,8 +80,11 @@ def recommend_thresholds(trailing, cfg):
             rec["verdict"] = "insufficient history"
             out[metric] = rec
             continue
-        basis = "trailing"
-        rec.update(binding_floor=floor, binding_basis=basis, binding_label=label)
+        # `binding_*` are what pipeline.tune and pipeline.status read; the
+        # trailing basis is the only one left, so binding_floor IS
+        # trailing_floor and binding_basis is always "trailing"
+        rec.update(binding_floor=floor, binding_basis="trailing",
+                   binding_label=label)
         # a floor no threshold can clear is a BLOCKED guardrail, not a large
         # number -- said here too, the block an owner reads to pick a value
         if guardrail.floor_is_unusable(floor, dev_basis):
@@ -91,22 +100,24 @@ def recommend_thresholds(trailing, cfg):
             continue
         if threshold is None:
             rec["verdict"] = (f"null -- owner should set it at or above the "
-                              f"{label} {basis} floor {floor}")
+                              f"{label} trailing floor {floor}")
         elif threshold < floor:
             rec["verdict"] = (f"TOO TIGHT -- {threshold} is below the {label} "
-                              f"{basis} floor {floor}; it will false-fire "
+                              f"trailing floor {floor}; it will false-fire "
                               "and silently suspend exploration")
-        elif floor > 0 and threshold > 3 * floor:
+        elif floor > 0 and threshold > inert_multiple * floor:
             # clearing the floor is necessary, not sufficient: a threshold
             # far above it cannot fire either
             rec["verdict"] = (
                 f"CLEARS THE FLOOR BUT LIKELY INERT -- {threshold} is "
-                f"{round(threshold / floor, 1)}x the {label} {basis} floor "
-                f"{floor}, and the {sc['persistence_days']}-day persistence "
-                "rule sits on top. A guardrail this loose will not fire; "
-                "consider a different metric or an absolute floor instead")
+                f"{round(threshold / floor, 1)}x the {label} trailing floor "
+                f"{floor} (tuning.guardrail_inert_floor_multiple "
+                f"{inert_multiple:g}), and the {sc['persistence_days']}-day "
+                "persistence rule sits on top. A guardrail this loose will "
+                "not fire; consider a different metric or an absolute floor "
+                "instead")
         else:
-            rec["verdict"] = f"OK -- above the {label} {basis} floor {floor}"
+            rec["verdict"] = f"OK -- above the {label} trailing floor {floor}"
         out[metric] = rec
     out["note"] = ("The floor is the trailing-mean basis: the monitor compares "
                    "every day against the trailing window of the same "
@@ -117,17 +128,22 @@ def recommend_thresholds(trailing, cfg):
 
 def guardrail_noise(d, cfg):
     """3-sigma daily noise of scrap rate and realised margin rate, as relative
-    deviation from a trailing-window mean."""
-    window = cfg["monitoring"]["guardrail_noise_window_days"]
+    deviation from a trailing-window mean. Measurement only: the verdict per
+    metric lives in `recommend_thresholds` (guardrail_threshold_recommendation
+    in the report), the one place that grades a threshold."""
+    mon = cfg["monitoring"]
+    window = mon["guardrail_noise_window_days"]
+    min_days = window + int(mon["guardrail_noise_min_extra_days"])
+    outlier_ratio = float(mon["guardrail_outlier_sigma_ratio"])
     day = metrics.daily_rates(metrics.settled(metrics.episode_economics(d))[0])
 
     def noise(series, smooth=1, basis=guardrail.RELATIVE):
         # average `smooth` days BEFORE comparing; the trailing baseline is
         # shifted by the same amount so the two windows never overlap
         s = _smooth(series, smooth)
-        if len(s) < window + 7:
+        if len(s) < min_days:
             return {"days": int(len(s)),
-                    "note": f"needs at least {window + 7} days"}
+                    "note": f"needs at least {min_days} days"}
         # FULL trailing window only: min_periods below `window` manufactures
         # huge deviations that are an estimator artifact, not the series
         trailing = s.rolling(window, min_periods=window).mean().shift(smooth)
@@ -145,10 +161,10 @@ def guardrail_noise(d, cfg):
             "units": guardrail.units_of(basis),
             "mean_level": round(float(s.mean()), 4),
             # the fact that decides whether RELATIVE is even defined for this
-            # metric: a series that changes sign has no meaningful ratio to its
-            # own mean, and this is what made the margin floor read 65.4497
+            # metric: a series that changes sign has no meaningful ratio to
+            # its own mean
             "days_at_or_below_zero": int((s <= 0).sum()),
-            **_sigma_summary(rel_dev),
+            **_sigma_summary(rel_dev, outlier_ratio),
             "p95_abs_rel_dev": round(float(np.percentile(np.abs(rel_dev), 95)), 4),
             "worst_observed_rel_dev": round(float(rel_dev.abs().max()), 4),
         }
@@ -185,23 +201,6 @@ def guardrail_noise(d, cfg):
     margin = noise(day.margin_rate, sm["margin"],
                    guardrail.basis_for("margin"))
 
-    def verdict(block, key):
-        """Grades against the trailing floor. Necessary, not sufficient --
-        the sign-off number lives in guardrail_threshold_recommendation."""
-        threshold = sc[key]
-        floor, basis = _floor_of(block)
-        if floor is None:
-            return "insufficient history to validate"
-        if threshold is None:
-            return (f"{key} is null -- owner should set it at or above the "
-                    f"trailing-basis {basis} floor {floor}")
-        if threshold >= floor:
-            return (f"clears the trailing-basis {basis} floor {floor} -- see "
-                    "guardrail_threshold_recommendation for the sign-off")
-        return (f"TOO TIGHT -- {threshold} is below the trailing-basis {basis} "
-                f"floor {floor}; it will false-fire and silently suspend "
-                "exploration")
-
     return {
         "basis": ("daily ratio-of-sums series over all episodes, smoothed over "
                   "deterioration_smoothing_days; relative deviation vs "
@@ -209,10 +208,10 @@ def guardrail_noise(d, cfg):
                   "compares against"),
         "scrap_rate": {**scrap,
                        "config_key": "monitoring.stop_conditions.scrap_deterioration_pct",
-                       "verdict": verdict(scrap, "scrap_deterioration_pct")},
+                       "verdict_in": "guardrail_threshold_recommendation.scrap_rate"},
         "margin_rate": {**margin,
                         "config_key": "monitoring.stop_conditions.margin_deterioration_pct",
-                        "verdict": verdict(margin, "margin_deterioration_pct")},
+                        "verdict_in": "guardrail_threshold_recommendation.margin_rate"},
         "units": ("all sigma figures are RELATIVE deviations, not percentage "
                   "points: 0.1336 = 13.36%, 9.1386 = 914%. Read the magnitude "
                   "before quoting one -- a floor above 1.0 means the series "
@@ -286,6 +285,8 @@ def bounded_step(cfg):
     Cross-check the price consequence in backtest.step_sensitivity."""
     lc = cfg["learning"]
     shrink, step = lc["max_std_shrink"], lc["max_mean_step"]
+    band_lo, band_hi = (float(x) for x in
+                        cfg["tuning"]["bounded_step_consistent_band"])
     pull_frac = 1.0 - (1.0 - shrink) ** 2
     min_std = cfg["posterior"]["min_std"]
     with open(cfg["posterior"]["prior"]["path"]) as f:
@@ -322,10 +323,12 @@ def bounded_step(cfg):
                              "one-prior-std surprise -- set here, both rails "
                              "trip at the same surprise instead of one "
                              "clipping every batch"),
+        "consistent_band_std": [band_lo, band_hi],
         "verdict": (
             f"CONSISTENT -- both rails trip near a "
-            f"{clips_at_std:.2f}-std surprise"
-            if clips_at_std is not None and 0.7 <= clips_at_std <= 1.4 else
+            f"{clips_at_std:.2f}-std surprise (inside "
+            f"tuning.bounded_step_consistent_band [{band_lo:g}, {band_hi:g}])"
+            if clips_at_std is not None and band_lo <= clips_at_std <= band_hi else
             f"MEAN RAIL BINDS FIRST -- max_mean_step {step} clips at a "
             f"{clips_at_std:.2f}-std surprise while max_std_shrink needs a "
             f"full cap-sized update, so the mean cap does the work and "
@@ -333,7 +336,7 @@ def bounded_step(cfg):
             f"max_mean_step toward {consistent:.2f} (check the price "
             f"consequence in backtest.step_sensitivity FIRST), or lower "
             f"max_std_shrink so the two agree"
-            if clips_at_std is not None and clips_at_std < 0.7 else
+            if clips_at_std is not None and clips_at_std < band_lo else
             f"STD RAIL BINDS FIRST -- max_mean_step {step} only clips beyond a "
             f"{clips_at_std:.2f}-std surprise, so convergence is limited by "
             f"max_std_shrink alone" if clips_at_std is not None else

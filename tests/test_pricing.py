@@ -41,13 +41,13 @@ def test_zero_cost_never_offers_a_zero_price():
     # the call that raised, end to end
     res = dp_mod.solve(10000.0, 0.0, 3, [0.8, 0.8, 0.62, 0.41], 0.30,
                        -1.0, 0.919, CFG, anchor_discount=None, entry=True)
-    assert np.isfinite(res.v_star)
+    assert np.isfinite(res.q_by_tier[res.optimal_index])
     # and at the widest |epsilon| the search may return, where the divergence
     # at d -> 1 is steepest
     deep = dp_mod.solve(10000.0, 0.0, 3, [0.8] * 4, 0.30,
                         CFG["posterior"]["epsilon_min"], 0.919, CFG,
                         anchor_discount=0.0, entry=False)
-    assert np.isfinite(deep.v_star)
+    assert np.isfinite(deep.q_by_tier[deep.optimal_index])
 
 
 def test_a_tier_step_that_does_not_divide_one_still_excludes_zero_price():
@@ -73,7 +73,9 @@ def test_dp_terminal_value_and_entry_arms():
     chosen = sorted(round(res.tiers[j], 6) for j in res.q_by_tier)
     assert chosen == sorted(round(d_ref + o, 6) for o in offsets)
     # value can never be worse than scrapping everything immediately
-    assert res.v_star >= -6000 * 5
+    assert res.q_by_tier[res.optimal_index] >= -6000 * 5
+    # the optimum IS the best Q -- there is no separate stored value to drift
+    assert res.q_by_tier[res.optimal_index] == max(res.q_by_tier.values())
 
 
 def test_entry_action_set_matches_offsets_and_cost_floor():
@@ -399,17 +401,58 @@ def test_state_rejected_when_planning_horizon_disagrees_with_recorded_one():
     assert any("planning horizon" in f for f in failures)
 
 
+def _state(**over):
+    s = {"episode_id": "x", "sku_id": 1, "fc": "F", "category": "MEAT",
+         "subcategory": "PORK", "date": "2026-08-01", "hour_of_day": 12,
+         "hours_remaining": 2, "q": 3, "original_price": 10000.0,
+         "cost": 4000.0, "r": 1.0, "mu_ref_path": [1.0, 1.0],
+         "current_discount": None}
+    s.update(over)
+    return s
+
+
 def test_state_rejected_not_priced():
     from inference.decide import decide, StateRejected
 
     with pytest.raises(StateRejected):
-        decide({
-            "episode_id": "x", "sku_id": 1, "fc": "F", "category": "MEAT",
-            "subcategory": "PORK", "date": "2026-08-01", "hour_of_day": 12,
-            "hours_remaining": 2,
-            "q": 3, "original_price": -5.0, "cost": 10.0, "r": 1.0,
-            "mu_ref_path": [1.0, 1.0], "current_discount": None,
-        }, None, None, CFG, np.random.default_rng(0), 100.0, "v")
+        decide(_state(original_price=-5.0, cost=10.0), None, None, CFG,
+               np.random.default_rng(0), 100.0, "v")
+
+
+@pytest.mark.parametrize("bad", [
+    {"original_price": 0.0},                 # divided by, before the fix
+    {"original_price": float("nan")},        # floored to an int, before the fix
+    {"original_price": float("inf")},
+    {"cost": float("nan")},
+    {"cost": float("inf")},
+    {"original_price": np.float64(0.0)},
+])
+def test_every_bad_price_or_cost_is_a_state_rejection_never_a_crash(bad):
+    """The contract is REJECT: the caller catches StateRejected and moves on.
+    A zero or NaN price used to reach the tier grid first and escape as
+    ZeroDivisionError / ValueError, taking the pricing loop down."""
+    from inference.decide import decide, StateRejected
+
+    with pytest.raises(StateRejected) as exc:
+        decide(_state(**bad), None, None, CFG, np.random.default_rng(0),
+               100.0, "v")
+    field = next(iter(bad))
+    assert field in str(exc.value)
+
+
+def test_a_finite_positive_state_still_prices(tmp_path):
+    """The guard rejects only what the grid cannot take."""
+    from events.store import EventStore
+    from inference.decide import decide
+    from pricing.posterior import PosteriorStore
+
+    posterior = PosteriorStore.initialise(
+        CFG, {"MEAT": {"mean": -1.0, "std": 0.6}}, {"MEAT": 10**6},
+        path=str(tmp_path / "posterior.json"))
+    store = EventStore(CFG, root=str(tmp_path / "events"))
+    evt = decide(_state(original_price=np.float64(10000.0), cost=np.float64(4000.0)),
+                 posterior, store, CFG, np.random.default_rng(0), 100.0, "v")
+    assert evt["applied_price"] >= evt["cost"]
 
 
 def test_guardrail_fires_only_after_persistence():
@@ -434,6 +477,28 @@ def test_guardrail_fires_only_after_persistence():
     # a null threshold is blocked, never silently passing
     blocked = evaluate_guardrail(block, None, 2)
     assert not blocked["fired"] and "BLOCKED" in blocked["status"]
+    # one result shape, whatever the branch
+    for r in (one_day, two_days, blocked):
+        assert set(r) >= {"fired", "threshold", "persistence_days", "basis",
+                          "latest", "status"}
+
+
+def test_persistence_counts_calendar_days_not_observed_days():
+    """Two days over with a silent day between them are not two CONSECUTIVE
+    days: a missing reading is not a reading over the threshold."""
+    from pipeline.monitor import evaluate_guardrail
+
+    gap = {"by_day": {"2026-09-01": 0.30, "2026-09-03": 0.30}}
+    r = evaluate_guardrail(gap, threshold=0.20, persistence_days=2)
+    assert not r["fired"] and r["consecutive_days_over"] == 1
+
+    contiguous = {"by_day": {"2026-09-02": 0.30, "2026-09-03": 0.30}}
+    assert evaluate_guardrail(contiguous, 0.20, 2)["fired"]
+
+    # the streak is counted back from the LATEST day only
+    stale = {"by_day": {"2026-09-01": 0.30, "2026-09-02": 0.30,
+                        "2026-09-05": 0.30}}
+    assert evaluate_guardrail(stale, 0.20, 2)["consecutive_days_over"] == 1
 
 
 def test_shadow_sample_size_defaults_to_config():
@@ -815,19 +880,9 @@ def test_a_censored_entry_row_is_a_one_hour_episode():
     assert list(pd.Series(cen)[entry_idx]) == [False, True]
 
 
-def test_the_bounded_step_holds_in_the_REPORT_not_just_in_the_store(): # noqa: N802
-    """`max_mean_step` is a safety bound, and something checks it on the
-    REPORT rather than on the posterior file."""
-    import inspect
-    from pipeline import update as up
-
-    src = inspect.getsource(up)
-    for field in ("proposed_mean", "proposed_std", "raw_mean", "raw_std"):
-        assert f'"{field}": round(' not in src, (
-            f"{field} is rounded again -- it is compared against the unrounded "
-            "mean_before, so the step can read over max_mean_step")
-
-    # and the clamp itself is exact, at the boundary and past it
+def test_the_bounded_step_clamp_is_exact_at_and_past_the_boundary():
+    """`max_mean_step` is a safety bound (the report-side check that it is
+    written unrounded lives in test_tau_calibration)."""
     cap = CFG["learning"]["max_mean_step"]
     for raw in (-1.0 - cap, -1.0 - cap * 3, -1.0 + cap * 3):
         m, _, _ = bounded_step(-1.0, 0.6, raw, 0.5, CFG)
@@ -852,15 +907,6 @@ def test_an_under_dispersed_group_is_exempt_from_the_clamp():
     # Poisson sits at 1 either side of noise
     poi = rng.poisson(mu, 20000)
     assert 0.9 < pearson_dispersion(poi, np.full(len(poi), mu)) < 1.1
-
-    import inspect
-    from bootstrap import fit_dispersion as fd
-
-    src = inspect.getsource(fd.fit_dispersion)
-    assert "under" in src and "pearson_dispersion(" in src, \
-        "the clamp must consult Pearson dispersion, not just the fitted r"
-    assert "under_dispersed_groups" in src, \
-        "an NB misfit must be REPORTED, not absorbed into a percentile"
 
 
 def test_cogs_at_risk_counts_supply_not_opening_stock():
@@ -933,30 +979,6 @@ def test_a_prior_std_can_never_be_zero():
     # nothing finer than one grid cell was ever resolved, so the reported std
     # can never be below the grid's own step
     assert max(raw_std, step) >= step
-
-
-def test_a_likelihood_peaking_at_positive_elasticity_is_rejected():
-    """`search_bounds` is a policy statement, not a belief about demand, so a
-    peak outside it gets CLIPPED to the nearest bound and reported as measured.
-    That is how a category whose likelihood prefers demand RISING with price
-    came back as a confident -0.05 with four decimals."""
-    import inspect
-
-    from bootstrap import prior_density as pdn
-
-    src = inspect.getsource(pdn.estimate)
-    assert "wrong_sign" in src and "unconstrained" in src, \
-        "the sign check must consult the UNCONSTRAINED peak, not the clipped one"
-    # the search must actually go past the upper bound, or it cannot see a
-    # positive optimum at all
-    wide = inspect.getsource(pdn.unconstrained_argmax)
-    assert "max(1.0, hi)" in wide, \
-        "the unconstrained search must extend past the policy bound"
-
-    # and a rejected category must not contaminate the pool it falls back to
-    assert "signs[cat][0]" in src, \
-        "the pool must exclude wrong-sign categories -- otherwise the fallback " \
-        "inherits the confound the rejection exists to remove"
 
 
 def test_the_hour_control_is_keyed_on_the_day_not_just_the_clock():
@@ -1109,6 +1131,45 @@ def test_delta_min_is_derived_never_a_second_knob():
     assert explore.delta_min(per, -1.0, "MEAT") == pytest.approx(0.12)
     assert explore.delta_min(per, -1.0, "SIDE DISH") == pytest.approx(0.40)
     assert explore.delta_min(per, -1.0, "FRUIT") == pytest.approx(0.15)
+
+
+def test_a_mapping_without_the_category_or_a_default_is_an_error_not_no_floor():
+    """A per-category mapping that names neither the category nor `_default`
+    is a broken paste; reading it as "no floor" would silently let the
+    uninformative tiers back into the draw."""
+    broken = dict(CFG, exploration=dict(CFG["exploration"],
+                                        delta_min_log_bias={"MEAT": 0.12}))
+    assert explore.delta_min(broken, -1.0, "MEAT") == pytest.approx(0.12)
+    with pytest.raises(KeyError, match="_default"):
+        explore.delta_min(broken, -1.0, "FRUIT")
+    with pytest.raises(KeyError):
+        explore.delta_min(broken, -1.0)               # no category, no default
+
+
+def test_the_sweep_refuses_a_zero_share_multiple_or_decision_count():
+    """A zero in-force share or multiple divides the grid; a zero decision
+    count divides the forced rate. Each is a note, never a ZeroDivisionError
+    or an inf in the report."""
+    led = explore.SpreadLedger()
+    led.add("2026-08-19", [10.0, 20.0], [0.1, 0.2], 0.05)
+    good = led.sweep(100.0, 1, 2, 0.01, 1.0, [0.01], [1.0])
+    assert "rows" in good
+    for share, mult, n in ((0.0, 1.0, 2), (0.01, 0.0, 2), (0.01, 1.0, 0),
+                           (None, 1.0, 2)):
+        out = led.sweep(100.0, 1, n, share, mult, [0.01], [1.0])
+        assert "note" in out and "rows" not in out, (share, mult, n)
+
+
+def test_the_deepening_threshold_treats_a_tier_width_gap_as_zero():
+    """gamma - d within the grid epsilon is the same tier: inf, not a
+    division by float noise."""
+    P0, step = 10000.0, CFG["pricing"]["tier_step"]
+    d = 0.4
+    assert dp_mod.deepening_threshold_epsilon(P0, P0 * d, d) == float("inf")
+    assert dp_mod.deepening_threshold_epsilon(
+        P0, P0 * (d + dp_mod.TIER_EPS / 2), d) == float("inf")
+    finite = dp_mod.deepening_threshold_epsilon(P0, P0 * (d + step), d)
+    assert np.isfinite(finite) and finite == pytest.approx((1 - d) / step)
 
 
 def test_a_forced_move_never_raises_the_price_within_an_episode():

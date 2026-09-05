@@ -55,6 +55,18 @@ now. Dates are owner sign-off, 2026-08.
   pins there; the upper bound (`epsilon_max`) is a sign constraint, never
   widened.
 
+- **Only the upper bound was searched past.** `unconstrained_argmax`
+  widened the top of the grid to catch wrong signs and left the bottom at
+  `epsilon_min`, so a likelihood monotone to −4 was read as "measured −4"
+  and pooled. The search now extends below the bound too; a peak at or
+  below it that strictly beats every interior point is a boundary, rejected
+  to the pool and named in `lower_boundary_categories` (a flat curve whose
+  argmax lands on the first grid point is not).
+- **Deflation that could never engage.** The old episode grouping made
+  `sizes >= 3` empty, so rho read 0 and deff exactly 1.0 for every
+  category; the pooled shrinkage ran on undeflated spans until the grouping
+  followed the recurring unit across days.
+
 ## Dispersion
 
 - **Clamp everything high → under-dispersion exemption.** An `r` at the
@@ -76,6 +88,14 @@ now. Dates are owner sign-off, 2026-08.
   the biased form survived in `drift_by_window` and the prior-density
   deflation, so the drift baseline and the frozen value disagreed by
   (1−ρ)/m until `common.config.intraclass_correlation` became the one home.
+
+- **Pinned `r` fed the clamp.** An `r` at the search ceiling was stored
+  unflagged and counted in the clamp percentile, so a thin extract with
+  ≥ 10% of groups at the ceiling set `cap = bounds[1]` — no clamp at all.
+  Pinned groups are flagged (`at_bound`) and excluded from the percentile.
+- **The drift baseline ran the biased ICC.** `drift_by_window` kept the
+  `var(means)/var(all)` form after the frozen fit moved to the ANOVA ICC,
+  so baseline and frozen value disagreed by (1−ρ)/m with no drift at all.
 
 ## Population and data quality
 
@@ -111,6 +131,18 @@ now. Dates are owner sign-off, 2026-08.
   million-hour counters; compare in numeric hours bounded by the extract's
   own span.
 
+- **A mask built before the merge.** `add_ref_rate_features` built its
+  anchor mask on the incoming frame's labels, merged (which resets the
+  index), then reused the mask — pandas aligned by label, and on the gappy
+  frames `load_and_filter` always hands over, `prior_episode_ref_sales_rate`
+  was wrong on about a third of rows. The baseline trained on it. The mask
+  is recomputed after the merge; a test pins gappy = contiguous.
+- **`units_gt_inventory_dropped`** once ran in the filter chain and deleted
+  every restock (18.1pp of COGS); a NULL cost once sailed through and handed
+  the DP a NaN `d_max`; `population()` refuses an unknown name rather than
+  falling back; the waterfall's `raw` row once mixed a pre-dedup row count
+  with post-dedup episodes and COGS.
+
 ## Calibration
 
 - **Blocking gate → always applied, level as a diagnostic** (owner,
@@ -127,6 +159,18 @@ now. Dates are owner sign-off, 2026-08.
   sized on the small fixture; production settles in 8–9 turns. Caps and
   impatience thresholds are sized for production, and the stall test needs
   three turns with no new best.
+
+- **Boundary factors returned as estimates.** `_solve_level_factors`
+  returned the literal bracket bound silently when the bisection failed to
+  bracket; cells now carry `at_bound`. The payload said thin cells were
+  "left at 1.0" while the code shrank them toward the parent; and
+  `convergence.method` said "dry run" under `--commit-convergence`.
+- **A row-level date cut on the unfiltered frame** once put ineligible rows
+  into the level fit, so the gate and the fit solved on different rows.
+- **A failing 5b iterated to `--max-turns`.** When `--check-convergence`
+  itself failed, the artifact carried no `convergence` block, the stall test
+  had nothing to compare and prior/dispersion re-ran twenty times; a failing
+  5b now stops the loop with its own message.
 
 ## Exploration budget and tau
 
@@ -223,6 +267,35 @@ now. Dates are owner sign-off, 2026-08.
   its cross-check to disagree with the value it checks. All three now
   share production's definitions.
 
+- **The seed on the wrong population.** Shadow's pre-window IL seed ran
+  `episode_economics` on the full frame while `frac` and `seed_scale` were
+  dp_eligible counts, inflating the day-one budget and the derived tau by
+  the ineligible episodes' IL. And `daily_budget` averaged over the seed
+  days too, the first of which has no trailing history and a budget of
+  exactly zero. Both now read the dp_eligible window's decision days.
+- **Three `n_days`.** The window's span was computed on the extended frame
+  (a next-day row with no decisions), the pre-window's after sampling (a
+  sample shrinks the span), and the backtest's IL mean over days with
+  episodes while its spend divided by a calendar span crossing the
+  exclusion gap. One count each, on the unsampled, unextended frame.
+- **The τ walk after the commit.** `--apply` committed the cells first, so
+  the walk priced past days' budgets on the post-update std and disagreed
+  with the dry run on the same store; the std is snapshotted before the
+  commit loop.
+- **Keying spend on `finalized_at`** once put the controller a day ahead:
+  one hour of spend graded against a full day's budget ratcheted τ +25%
+  a day and `tau_calibrated_through` skipped the other 23 hours. Spend is
+  keyed by the decision's trading day.
+- **Entry-only spread collection** funded ~1 exploration per episode
+  against a system that explores every hour (~8× under); every decision
+  hour is recorded, tau-independent, before the draw.
+- **The budget pinned at the launch std** by an unrouted GLOBAL cell: max
+  over all cells never moved, `budget_scale_floor` was unreachable and the
+  flat-std alert listed GLOBAL forever. Both read the routed cells.
+- **Poisson information overstated NB evidence** ~1.6–1.9×; `k >= inv`
+  censoring marked every restock hour censored. The update reads
+  `mu·L²·r/(r+mu)` and the shared censoring rule.
+
 ## Evaluation
 
 - **Judging estimators by their outputs → held-out comparison.** "Is
@@ -259,6 +332,46 @@ now. Dates are owner sign-off, 2026-08.
   deterioration cancelled to exactly zero); the trailing-mean basis is the
   one the floors are measured on and the only one left. Exploration's
   evidence is unaffected: the forced moves are randomised within the pilot.
+
+- **The strongest re-run class swallowed the weaker one**, and a
+  per-category paste diffed one key per category that `rerun_for` did not
+  recognise, so a floor re-round routed to `calibration` and tripped the
+  loop guard; the round budget then counted plans instead of work and raised
+  on a legitimate ninth-round stop before writing the journal. Routing is
+  per key on the longest `KEYS` prefix (`READ_BY` for keys tune does not
+  paste), the union over keys, and only run steps count toward the budget.
+- **Stop conditions that suspended nothing.** The monitor wrote
+  `suspend_exploration` and nothing read it; `decide` took τ from the
+  caller. The monitor now writes the suspension into the posterior state,
+  `decide` prices with no budget while it is set, and only
+  `update --resume-exploration` lifts it.
+- **Survivorship on the newest days.** Daily scrap/margin rates were keyed
+  by OPENING day over settled episodes, so the days the persistence rule
+  evaluates counted only the early sell-outs. Both floor and trigger key by
+  close day.
+- **Gates that could not fire.** `duplicate_counts` moved only on emit
+  (update and monitor only load); the reproduction check counted an
+  exception as a mismatch but not as checked, so a broken solver read
+  INSUFFICIENT; `artifact mirrors` read PASS with no artifact on disk;
+  `config mirrors reports` read PASS when no report produced a finding;
+  `verify()` compared hashes only for files present, so a deleted sealed
+  artifact passed. Each now reads the honest verdict.
+- **The ingest gap from day two.** `decisions_without_feed_row` counted
+  every stored decision absent from THIS feed — everything already ingested
+  and everything not yet due. It counts inside the feed's date range only.
+- **Assurance's own histories.** Judging correlation drift on rho alone
+  was blind to the m channel (m was a frozen paste of legacy episode
+  length); a p-value-only uniformity test tightened every day on an
+  append-only store, so the same draw passed in week one and failed at
+  volume. `int(nan)` once aborted a whole daily ingest before the store saw
+  a row; a zero base price once booked the whole list price as IL.
+- **Hand-written ledger notes.** The shadow and replay reports carried
+  paragraphs of reading guidance (`tau_recommended` is a cross-check not a
+  correction; the controller trace looks jumpier on a sample and
+  `spend_over_budget` is the sample-invariant figure to quote; the paired
+  calibration comparison removes between-week variance; rolling-origin
+  windows read the trend). They live in §5.13–5.14 now; the reports point
+  there.
 
 ## The lesson under all of it
 

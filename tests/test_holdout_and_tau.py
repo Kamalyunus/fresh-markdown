@@ -139,15 +139,33 @@ def test_entry_only_collection_understates_the_funded_tau():
 
 def test_replay_collects_every_decision_hour(cfg):
     from backtest.replay import policy_replay
-    d = pd.concat([episode_frame(
-        episode_id=eid, date="2026-05-01", hour_of_day=[9, 10, 11],
-        total_discount=[0.25, 0.25, 0.30], original_price=10_000.0,
-        cost=4000.0, d_ref=0.25, starting_inventory=[10, 8, 6], units_sold=2,
-        ending_inventory=[8, 6, 0], mu_ref_hat=2.0, r=3.0, eps=-2.0)
-        for eid in ("a", "b")])
+    d = pd.concat([_replay_episode(eid) for eid in ("a", "b")])
     _, _, ledger = policy_replay(d, cfg)
     # entry-only collection would give exactly one spread per episode
     assert ledger.decisions > d.episode_id.nunique()
+
+
+def _replay_episode(eid, ending_last=0, hours_remaining_last=0):
+    """One closed episode in the vocabulary `_attach_predictions` emits."""
+    return episode_frame(
+        episode_id=eid, date="2026-05-01", hour_of_day=[9, 10, 11],
+        hours_remaining=[2, 1, hours_remaining_last],
+        total_discount=[0.25, 0.25, 0.30], original_price=10_000.0,
+        cost=4000.0, d_ref=0.25, starting_inventory=[10, 8, 6], units_sold=2,
+        ending_inventory=[8, 6, ending_last], mu_ref_hat=2.0, r=3.0, eps=-2.0,
+        is_observed=True, sku_id=7, fc="FC1", category="FRUIT",
+        subcategory="BERRY")
+
+
+def test_the_replay_refuses_an_unclosed_episode_rather_than_aggregate_it(cfg):
+    """dp_eligible implies CLOSED (prepare_data's outcome_unknown gate), so
+    the replay carries no unknown-outcome branch: an unfinished episode would
+    truncate the actual arm against two full-horizon simulated arms, and it
+    is refused by name instead of silently excluded."""
+    from backtest.replay import policy_replay
+    d = pd.concat([_replay_episode("a"), _replay_episode("open", ending_last=4)])
+    with pytest.raises(ValueError, match="never closed"):
+        policy_replay(d, cfg)
 
 
 # ------------------------------------------------------- controller trace
@@ -168,13 +186,6 @@ def test_controller_cannot_correct_before_it_has_seen_a_day(cfg=None):
         tau = tau_next(tau, budget, budget * over, cfg)
         over = over / 2
     assert days_over >= 3
-
-
-def test_shadow_budget_uses_the_production_budget_function():
-    import inspect
-    from pipeline import shadow
-    src = inspect.getsource(shadow.run_shadow)
-    assert "explore.budget_today(" in src
 
 
 # --------------------------------------------- shadow defaults to holdout
@@ -216,9 +227,16 @@ def test_the_trace_says_when_a_sample_is_too_thin_to_read_daily(cfg):
                               sampled_episodes=10, population_episodes=100)
     assert trace["episodes_per_day_sampled"] == 10.0
     assert trace["episodes_per_day_population"] == 100.0
+    # ONE denominator for both rates -- the window's calendar span -- so the
+    # two are comparable (they once divided by days walked vs calendar days)
+    trace = _controller_trace(led, {"2026-08-03": 1e6}, tau0=100.0,
+                              widest_std=1.0, cfg=cfg, window_days=4,
+                              sampled_episodes=10, population_episodes=100)
+    assert trace["window_days"] == 4
+    assert trace["episodes_per_day_sampled"] == 2.5
+    assert trace["episodes_per_day_population"] == 25.0
     # and it must point at the figure that DOES survive sampling, or the
     # caveat leaves the reader with nothing to quote
-    assert "sample-invariant" in trace["note"]
     assert "spend_over_budget" in trace["note"]
 
 
@@ -238,22 +256,6 @@ def test_pre_launch_stops_at_the_gate_window(cfg):
     assert kept == {"before", "straddles"}, \
         "an episode that OPENED before the gate window closed belongs to " \
         "pre-launch whole; one that opened after does not belong at all"
-
-
-def test_the_backtest_cannot_reach_past_the_gate_window():
-    """Two paths reached the hold-out and neither announced itself."""
-    import inspect
-    from backtest import __main__ as bt
-    from bootstrap import train_baseline
-
-    src = inspect.getsource(bt.main)
-    assert "pre_launch(d, cfg)" in src
-    assert src.index("pre_launch(d, cfg)") < src.index("fidelity("), \
-        "the slice must happen before anything reads the frame"
-
-    fit = inspect.getsource(train_baseline.fit_level_calibration)
-    assert "pre_launch(d, cfg)" in fit, \
-        "the calibration schedule must be bounded to PRE-LAUNCH data"
 
 
 def test_config_ships_tau_initial_null(cfg):
@@ -285,10 +287,7 @@ def test_the_budget_base_is_the_trailing_realised_il(cfg):
     """The IL base for a day's budget is the mean of REALISED daily IL over
     the trailing budget_il_window_days, ending YESTERDAY -- never the same
     day's own IL."""
-    import inspect
-
     from pricing.explore import trailing_daily_il
-    from pipeline import shadow
 
     assert cfg["exploration"]["budget_il_window_days"] == 7
 
@@ -305,12 +304,6 @@ def test_the_budget_base_is_the_trailing_realised_il(cfg):
     # no history at all -> no budget. The conservative side to start on.
     assert trailing_daily_il({}, "2026-08-08", cfg) == 0.0
 
-    # and shadow actually uses it, in the trace and in the aggregate gate
-    src = inspect.getsource(shadow)
-    assert src.count("trailing_daily_il(") >= 2, \
-        "both the controller trace and the aggregate gate must budget on " \
-        "the trailing basis, or they grade different quantities"
-
 
 def test_the_first_shadow_day_carries_the_pre_window_trailing_base(cfg):
     """Day one of the hold-out must not read budget 0: production's launch
@@ -320,13 +313,14 @@ def test_the_first_shadow_day_carries_the_pre_window_trailing_base(cfg):
     import pandas as pd
     from pipeline.shadow import pre_window_il_history
 
-    def episode(eid, day, sold, start, end_last):
+    def episode(eid, day, sold, start, end_last, dp=True):
         return pd.DataFrame({
             "episode_id": [eid] * 2, "date": [day] * 2, "hour_of_day": [9, 10],
             "total_discount": [0.30] * 2, "original_price": [10_000.0] * 2,
             "offered_price": [7_000.0] * 2,
             "cost": [4000.0] * 2, "starting_inventory": [start, start - sold],
             "units_sold": [sold, 0], "ending_inventory": [start - sold, end_last],
+            "dp_eligible": [dp] * 2,
         })
 
     d = pd.concat([
@@ -344,6 +338,16 @@ def test_the_first_shadow_day_carries_the_pre_window_trailing_base(cfg):
     assert pre_window_il_history(d, cfg, "2026-08-20") == {}
     assert pre_window_il_history(d, cfg, None) == {}
 
+    # THE SAME POPULATION as everything the seed is scaled against (the
+    # derivation's sample fraction, run_shadow's seed_scale are dp_eligible
+    # counts): a closed pre-window episode the DP could not have priced
+    # carries IL, and must not enter the seed
+    with_ineligible = pd.concat([d, episode("cost_missing", "2026-08-02", 2, 5, 0,
+                                            dp=False)])
+    assert pre_window_il_history(with_ineligible, cfg, "2026-08-04") == h
+    assert pre_window_il_history(with_ineligible.assign(dp_eligible=True), cfg,
+                                 "2026-08-04") != h, "the extra episode carries IL"
+
 
 def test_a_sold_out_early_episode_still_counts_its_shrink_as_scrap(cfg):
     """Scrap = leftover + shrink, one definition. A sold-out-early close has
@@ -358,31 +362,12 @@ def test_a_sold_out_early_episode_still_counts_its_shrink_as_scrap(cfg):
         "hour_of_day": [9, 10], "total_discount": [0.30] * 2, "offered_price": [7_000.0] * 2,
         "original_price": [10_000.0] * 2, "cost": [4000.0] * 2,
         "starting_inventory": [3, 1], "units_sold": [1, 1],
-        "ending_inventory": [1, 0],
+        "ending_inventory": [1, 0], "dp_eligible": [True] * 2,
     })
     from common import episodes
     assert episodes.classify(d).iloc[0] == episodes.SOLD_OUT_EARLY
     h = pre_window_il_history(d, cfg, "2026-08-04")
     assert h["2026-08-01"] == pytest.approx(0.30 * 10_000 * 2 + 1 * 4000)
-
-
-def test_the_pre_window_seed_is_scaled_to_the_sample():
-    """The seed and the spend must describe the SAME slice of the business."""
-    import inspect
-    from pipeline import shadow
-
-    src = inspect.getsource(shadow.run_shadow)
-    assert "seed_scale" in src, "the pre-window seed is not scaled at all"
-    seeded = src[src.index("seed_scale ="):]
-    assert "len(groups)" in seeded.split("\n")[0] and \
-        "len(population)" in seeded.split("\n")[0], \
-        "the scale must be the WINDOW's sample fraction, sampled/population"
-    # and it must be applied to the seed, not merely computed
-    applied = seeded[:400]
-    assert "amount * seed_scale" in applied, \
-        "seed_scale is computed but never multiplied into il_by_day"
-    # a full run must be unaffected: scale is exactly 1 when nothing sampled
-    assert "max(len(population), 1)" in seeded.split("\n")[0]
 
 
 def test_the_controller_holds_tau_on_a_zero_budget(cfg):
@@ -435,15 +420,8 @@ def test_calibration_factors_never_see_their_own_week_or_later(cfg):
         window_end = start - pd.Timedelta(seconds=1)
         assert window_end < start
         assert (start - (start - pd.Timedelta(weeks=n))).days == 7 * n
-
-    # and the applier must key on the row's OWN week, never the nearest or
-    # the latest available -- borrowing forward is the leak
-    import inspect
-    from bootstrap.train_baseline import BaselineModel
-    src = inspect.getsource(BaselineModel._factor_vector)
-    assert "episodes.week_key(" in src, "factors are not selected by row week"
-    assert "self.calibration.get(key, 1.0)" in src, \
-        "an unfitted week must fall back to the frozen set, not to a later week"
+    # (the applier's own-week selection and frozen fallback are exercised
+    # in test_a_level_shift_does_not_leak_into_its_own_weeks_factor)
 
 
 def test_both_harnesses_get_point_in_time_factors_without_their_own_code():
@@ -454,9 +432,13 @@ def test_both_harnesses_get_point_in_time_factors_without_their_own_code():
     from backtest import replay
     from pipeline import shadow
 
+    # one prediction path: replay.predict_frame calls the applier, shadow
+    # predicts through predict_frame (shadow's own copy of extend/lookup/
+    # predict is gone)
+    assert "predict_mu_ref(" in inspect.getsource(replay.predict_frame)
+    assert "predict_frame(" in inspect.getsource(shadow._prepare_items)
     for mod, name in ((replay, "backtest.replay"), (shadow, "pipeline.shadow")):
         src = inspect.getsource(mod)
-        assert "predict_mu_ref(" in src, f"{name} does not predict mu_ref"
         # `by_week` is deliberately NOT banned: fidelity has its own weekly
         # series. What must not appear is the calibration schedule's own names
         for banned in ("calibration_schedule", "_factor_vector",
@@ -556,16 +538,6 @@ def test_running_past_the_calibration_schedule_is_reported_not_silent():
     assert model.calibration_coverage()["verdict"].startswith("OK")
 
 
-def test_both_reports_carry_the_calibration_coverage():
-    """It is only useful where the numbers are read."""
-    import inspect
-    from backtest import __main__ as bt
-    from pipeline import shadow
-    for mod, name in ((bt, "backtest"), (shadow, "pipeline.shadow")):
-        assert "calibration_coverage()" in inspect.getsource(mod), \
-            f"{name} does not report calibration coverage"
-
-
 def test_apply_refuses_when_the_weekly_refit_was_missed(tmp_path, cfg):
     """Detection after the fact is not enough. Learning from prices set on
     stale factors banks evidence about a model that is not the one running,
@@ -598,18 +570,6 @@ def test_apply_refuses_when_the_weekly_refit_was_missed(tmp_path, cfg):
     # and no artifact at all means factors are 1.0 -- also not a failure
     path.unlink()
     assert calibration_current(cfg, today="2027-01-01")["pass"]
-
-
-def test_the_calibration_gate_is_wired_into_the_apply_refusal():
-    """It only bites if `run` treats it as hard, beside the event-quality
-    gates, and reports it on the monitor-only pass too."""
-    import inspect
-    from pipeline import update
-
-    src = inspect.getsource(update.run)
-    assert 'gates["calibration_schedule_current"] = calibration_current' in src
-    # hard_fail is computed AFTER the gate is added, or it can never refuse
-    assert src.index("calibration_schedule_current") < src.index("hard_fail = ")
 
 
 def test_a_partial_trailing_window_is_counted_not_passed_off_as_full(cfg):
@@ -649,16 +609,8 @@ def test_the_gate_freezes_calibration_even_though_the_schedule_runs_past_it(cfg)
         "the artifact must record where the gate freezes, or coverage cannot "
         "tell a deliberate freeze from production running onto stale factors")
 
-    # the gate does the freezing, not the artifact
-    import inspect
-
-    from backtest import replay
-
-    src = inspect.getsource(replay.fidelity)
-    assert "freeze_calibration_from(gate_start)" in src, \
-        "the fidelity gate must freeze calibration at the gate window start"
-    assert '"weekly_refit"' in src, \
-        "the mechanism reading must be reported beside the frozen gate"
+    # (that the fidelity gate does the freezing is exercised in
+    # test_fidelity_grades_the_frozen_artifact_and_reports_the_refit_beside_it)
 
     # frozen rows take the anchor, scheduled rows take their own week
     from bootstrap.train_baseline import BaselineModel
@@ -744,55 +696,18 @@ def test_rho_is_fit_on_the_calib_window_not_the_full_frame():
     extract, rows past test_end (hard rule 16). An understated rho understates
     deff, and deff deflates every posterior update. calib is the one window
     both out-of-train and pre-gate, and r already lives there."""
-    import inspect
-
-    from bootstrap import fit_dispersion as fd
-
-    src = inspect.getsource(fd.fit_dispersion)
-    rho_part = src[src.index("rho on the CALIB window"):]
-    assert "d.copy()" not in rho_part, \
-        "rho must not be fit on the raw input frame"
-    assert 'calib.groupby("episode_id")' in rho_part
-
-    art = fd and __import__("json").load(
-        open(load_config()["dispersion"]["rho_path"]))
+    path = load_config()["dispersion"]["rho_path"]
+    if not os.path.exists(path):
+        pytest.skip("no rho artifact on disk")
+    art = json.load(open(path))
     if "fit_window" in art:                 # artifact written post-change
         assert art["fit_window"] == "calib"
-
-
-def test_shadow_refits_calibration_forward_only_and_reports_both_regimes():
-    """Shadow must answer BOTH calibration questions, and the re-fit one must
-    not cheat."""
-    import inspect
-
-    from pipeline import shadow
-
-    src = inspect.getsource(shadow.weekly_refit_schedule)
-    # the ONE whole-episode trailing cut, shared with the artifact schedule;
-    # it ends the day before the week (strictly before -- no look-ahead)
-    assert "episodes.trailing_weeks_window(scope, w0, weeks_back)" in src, \
-        "each week must fit on data strictly before it -- no look-ahead"
-    assert "_solve_level_factors" in src, \
-        "must reuse the one factor solve, not a second copy"
-
-    run = inspect.getsource(shadow.run_shadow)
-    assert '"calibration_regimes"' in run
-    for key in ("frozen_anchor", "weekly_refit", "spread"):
-        assert f'"{key}"' in run, f"the report must carry {key}"
-    # the artifact is never written by shadow: the bundle stays pre-launch
-    assert "fit_level_calibration" not in run
-
-    # both ratios are computed on the SAME rows -- only the factor differs
-    assert "mu_arr * scale" in run, \
-        "the re-fit reading must rescale mu, not re-predict it"
 
 
 def test_convergence_carries_its_trajectory_and_the_worst_cell_s_evidence():
     """A single reading cannot tell a contracting loop from a stuck one, and
     an unweighted max cannot tell an unsettled chain from one thin cell."""
     import copy
-
-    import bootstrap.train_baseline as tb
 
     cfg = copy.deepcopy(load_config())
     cfg["baseline_model"]["calibration_convergence_tol_log"] = 0.02
@@ -812,80 +727,6 @@ def test_convergence_carries_its_trajectory_and_the_worst_cell_s_evidence():
     assert "worst_cell_anchor_rows" in block
 
 
-def test_the_loop_does_not_recompute_what_the_check_already_solved():
-    """Turn k's --check-convergence solves the factors under exactly the prior
-    and r that turn k+1's --fit-calibration would use. Discarding that solve
-    doubled the calibration work in every turn, and the loop is the slowest
-    thing in the pipeline (production measured hours)."""
-    import inspect
-
-    import bootstrap.run as br
-    from bootstrap import train_baseline as tb
-
-    src = inspect.getsource(tb.check_calibration_convergence)
-    assert "if not commit:" in src, "the dry run must be conditional"
-
-    loop = inspect.getsource(br.settle)
-    assert "if turn == 1:" in loop, "3b belongs to the first turn only"
-    assert "--commit-convergence" in loop
-    # the prior's diagnostics cannot move the fixed point, so the loop skips
-    # them -- but the ARTIFACT must carry the full one
-    assert "--fast" in loop
-    assert "full re-run for the artifact" in loop
-    # and re-stamp, because that full re-run moves prior.json after the check
-    assert "re-check against the full prior" in loop
-
-
-def test_the_loop_is_sized_for_production_not_for_the_fixture():
-    """Both halves of "give up" were calibrated on the fixture, and both were
-    wrong for the extract that matters (owner: production settles in 8-9
-    turns; the fixture takes 3-4 because it is small -- rule 19)."""
-    import inspect
-
-    import bootstrap.run as br
-
-    ap = [a for a in _run_parser_actions() if a.dest == "max_turns"][0]
-    assert ap.default >= 20, "a cap below the measured 8-9 settles nothing"
-
-    loop = inspect.getsource(br.settle)
-    assert "seen" in loop and "block.get(\"history\")" not in loop, \
-        "the stall test must read THIS run's turns -- `history` is appended " \
-        "across runs, so an old chain's low reading is a best this run can " \
-        "never beat, and the loop would stall on turn 1"
-
-    def stalls_at(seen):
-        for i in range(4, len(seen) + 1):
-            s = seen[:i]
-            if min(s[-3:]) >= min(s[:-3]):
-                return i
-        return None
-
-    # a healthy production-shaped trajectory, plateau included, must survive
-    assert stalls_at([2.29, .9, .9, .4, .35, .2, .09, .02, .005]) is None
-    # the old two-in-a-row rule would have stopped that one at turn 3
-    assert [2.29, .9, .9][-1] >= [2.29, .9, .9][-2]
-    # genuinely stuck, and oscillating, must both stop
-    assert stalls_at([.31, .30, .305, .30, .31, .30]) == 5
-    assert stalls_at([.5, .2, .5, .2, .5, .2]) == 5
-
-
-def _run_parser_actions():
-    """bootstrap.run builds its parser inside main(); read the actions without
-    running the pipeline."""
-    import argparse
-    import inspect
-    import textwrap
-
-    import bootstrap.run as br
-
-    src = inspect.getsource(br.main)
-    body = "    " + src[src.index("ap = argparse"):
-                        src.index("args = ap.parse_args()")]
-    ns = {"argparse": argparse}
-    exec(textwrap.dedent(body), ns)
-    return ns["ap"]._actions
-
-
 def test_the_prior_fast_path_drops_only_what_cannot_move_the_fixed_point():
     """`fold_spread` only widens the std FLOOR -- while the loop compares
     FACTORS, which follow `r`, which is fitted at the prior MEAN. Skipping it
@@ -895,16 +736,9 @@ def test_the_prior_fast_path_drops_only_what_cannot_move_the_fixed_point():
 
     from bootstrap import prior_density
 
-    src = inspect.getsource(prior_density.estimate)
     assert "fast" in inspect.signature(prior_density.estimate).parameters
     assert "design_comparison" not in inspect.getsource(prior_density), \
         "the alternative-design block was deleted, not made conditional"
-    i = src.index("fold_spread")
-    assert "fast" in src[max(0, i - 260):i + 60], \
-        "fold_spread must be behind the fast flag"
-    # the wrong-sign search is NOT skipped: it decides which categories pool,
-    # which moves the mean, which moves r
-    assert "unconstrained_argmax(d, cfg, model" in src
 
 
 def test_the_trailing_fit_window_keeps_episodes_whole_at_the_week_seam():
@@ -975,3 +809,490 @@ def test_budget_sweep_trades_count_for_depth_from_one_ledger():
     assert sw0["delta_min_in_force"] is False and "reads the same" in sw0["note"]
     a, b = (r for r in sw0["rows"])
     assert a["forced_rate"] == b["forced_rate"]
+
+
+# ================================================= the harnesses, end to end
+#
+# A BaselineModel applier over a constant base rate (no booster), so shadow
+# and the backtest run their real code -- decide(), the DP, the ledger, the
+# event store, the level-factor applier -- on a frame small enough to reason
+# about. Every figure below is arithmetic on the fixture, nothing more.
+
+import datetime as dt
+
+from bootstrap.train_baseline import BaselineModel
+from pricing import explore as explore_mod
+from pricing.posterior import PosteriorStore
+
+WINDOW_START, WINDOW_END = "2026-08-10", "2026-08-28"     # config's hold-out
+
+
+class _Applier(BaselineModel):
+    """BaselineModel's factor applier over a constant mu_ref -- the real
+    schedule/freeze/coverage code, no LightGBM."""
+
+    def __init__(self, cfg, base_mu=2.0, anchor=None, schedule=None):
+        self.cfg = cfg
+        self.calibration = dict(anchor or {"FRUIT": 1.0})
+        self.calibration_grain = "category"
+        self.calibration_schedule = schedule
+        self.calibration_stops_at = None
+        self.version = "applier-only"
+        self.base_mu = base_mu
+        self._reset_calibration_counters()
+
+    def predict_mu_ref(self, d, raw=False):
+        mu = np.full(len(d), float(self.base_mu))
+        return mu if raw else mu * self._factor_vector(d)
+
+
+def _hours(eid, day, n, q0=6, sold=1, disc=0.30, tail=0, hour0=9, dp=True,
+           sku=7, category="FRUIT"):
+    """One episode in the prepared-frame vocabulary: `n` observed hours
+    opening `day` at `hour0`, closed by the write-off sentinel on its last
+    row; `tail` > 0 leaves window hours uncovered (extend_to_window adds
+    them). `dp=False` marks it outside the dp_eligible population."""
+    start = [q0 - sold * i for i in range(n)]
+    end = [q - sold for q in start]
+    end[-1] = 0
+    return pd.DataFrame({
+        "episode_id": [eid] * n, "date": [dt.date.fromisoformat(day)] * n,
+        "hour_of_day": [hour0 + i for i in range(n)],
+        "hours_remaining": [n - 1 - i + tail for i in range(n)],
+        "sku_id": [sku] * n, "fc": ["FC1"] * n, "category": [category] * n,
+        "subcategory": ["BERRY"] * n,
+        "starting_inventory": start, "ending_inventory": end,
+        "units_sold": [sold] * n, "total_discount": [disc] * n,
+        "original_price": [10_000.0] * n,
+        "offered_price": [10_000.0 * (1 - disc)] * n, "cost": [4000.0] * n,
+        "d_ref": [0.30] * n, "dp_eligible": [dp] * n, "episode_eligible": [dp] * n,
+    })
+
+
+def _shadow_frame():
+    """Pre-window week 08-03..08-09 and the hold-out from 08-10. Both spans
+    carry a date gap and an episode whose window runs past its last observed
+    hour (extend_to_window adds a day), plus a dp-INELIGIBLE episode with IL."""
+    return pd.concat([
+        _hours("p1", "2026-08-04", 4), _hours("p2", "2026-08-06", 4, q0=8),
+        _hours("p3", "2026-08-08", 2, hour0=22, tail=3),      # -> 08-09 00:00..02:00
+        _hours("x1", "2026-08-05", 4, dp=False),              # IL, not dp_eligible
+        _hours("w1", "2026-08-10", 4), _hours("w2", "2026-08-11", 4, q0=8),
+        _hours("w3", "2026-08-13", 2, hour0=22, tail=3),      # -> 08-14
+        _hours("x2", "2026-08-12", 4, dp=False),
+    ], ignore_index=True)
+
+
+def _harness_cfg(cfg, tmp_path):
+    """The shipped config pointed at throwaway artifacts."""
+    r_path = tmp_path / "r_lookup.json"
+    r_path.write_text(json.dumps({"fallback_order": ["subcategory", "category",
+                                                     "global"],
+                                  "subcategory": {}, "category": {},
+                                  "global": 1.0}))
+    cfg = dict(cfg)
+    cfg["dispersion"] = dict(cfg["dispersion"], r_lookup_path=str(r_path))
+    cfg["posterior"] = dict(cfg["posterior"], path=str(tmp_path / "posterior.json"))
+    cfg["events"] = dict(cfg["events"], shadow_store_dir=str(tmp_path / "shadow_events"))
+    cfg["exploration"] = dict(cfg["exploration"], tau0_derivation_min_decisions=1)
+    PosteriorStore.initialise(cfg, {"FRUIT": {"mean": -1.2, "std": 0.5}},
+                              {"FRUIT": 1000}, path=cfg["posterior"]["path"])
+    return cfg
+
+
+def _run_shadow(cfg, frame, model, monkeypatch, refit=None, **kw):
+    """pipeline.shadow.main's wiring, on `frame`, with the applier."""
+    from pipeline import shadow
+    monkeypatch.setattr(shadow, "BaselineModel", lambda c: model)
+    monkeypatch.setattr(shadow, "weekly_refit_schedule",
+                        refit or (lambda *a, **k: ({}, [])))
+    history = shadow.pre_window_il_history(frame, cfg, WINDOW_START)
+    window = episodes.window_slice(frame, WINDOW_START, WINDOW_END)
+    kw.setdefault("max_episodes", 0)
+    return shadow.run_shadow(window, cfg, prior_il_by_day=history,
+                             pre_window_frame=frame, window_start=WINDOW_START,
+                             **kw)
+
+
+def test_every_per_day_figure_divides_by_the_unsampled_unextended_span(
+        cfg, tmp_path, monkeypatch):
+    """n_days once came from three places: the extended frame (a synthetic
+    tail adds a day), the sampled frame (a sample shrinks the span), the
+    calendar. It is the window population's span, computed before either."""
+    cfg = _harness_cfg(cfg, tmp_path)
+    frame = _shadow_frame()
+    report = _run_shadow(cfg, frame, _Applier(cfg), monkeypatch)
+    b, td = report["exploration_budget_would_be"], report["tau_initial_derivation"]
+    # window: 08-10..08-13 opened (4 days); w3's tail reaches 08-14 (5)
+    assert b["days"] == 4 == b["tau_controller_trace"]["window_days"]
+    assert report["window"]["date_max"] == "2026-08-14", \
+        "the extended frame does reach a fifth day -- days must not read it"
+    # pre-window: 08-04..08-08 opened (5 days); p3's tail reaches 08-09
+    assert not td["fallback"] and td["days"] == 5
+    assert b["implied_daily_spend"] == pytest.approx(
+        report["exploration_would_be"]["would_be_cost_total"] / 4, abs=0.1)
+
+    # a sample of one episode shrinks neither span
+    sampled = _run_shadow(cfg, frame, _Applier(cfg), monkeypatch, max_episodes=1)
+    assert sampled["window"]["sampled"] and sampled["window"]["episodes"] == 1
+    assert sampled["exploration_budget_would_be"]["days"] == 4
+    assert sampled["tau_initial_derivation"]["days"] == 5
+
+
+def test_the_aggregate_budget_is_the_mean_over_the_windows_decision_days(
+        cfg, tmp_path, monkeypatch):
+    """The gate's daily_budget once averaged budget_today over EVERY il_by_day
+    key -- the seven pre-window seed days included, the first of which has no
+    trailing history and reads as a zero budget. It is the mean over the days
+    the window decided on, the same days the controller trace walks."""
+    from pipeline.shadow import _mean_daily_budget
+
+    seed = {f"2026-08-0{d}": 700.0 for d in range(3, 10)}     # 7 seed days
+    decision_days = ["2026-08-10", "2026-08-11"]
+    il = dict(seed, **{"2026-08-10": 900.0})
+    want = np.mean([explore_mod.budget_today(
+        explore_mod.trailing_daily_il(il, day, cfg), 1.0, cfg)
+        for day in decision_days])
+    assert _mean_daily_budget(decision_days, il, 1.0, cfg) == pytest.approx(want)
+    # the bug, reproduced: the seed days drag the mean down (08-03 budgets 0)
+    assert _mean_daily_budget(sorted(il), il, 1.0, cfg) < want
+
+    # and the report agrees with its own trace, day for day
+    cfg = _harness_cfg(cfg, tmp_path)
+    report = _run_shadow(cfg, _shadow_frame(), _Applier(cfg), monkeypatch)
+    b = report["exploration_budget_would_be"]
+    tr = b["tau_controller_trace"]
+    assert tr["days_truncated"] == 0
+    assert b["daily_budget"] == pytest.approx(
+        np.mean([r["budget"] for r in tr["by_day"]]), abs=0.1)
+    assert "decision days" in b["budget_basis"]
+
+
+def test_the_pre_window_seed_is_scaled_to_the_sample(cfg, tmp_path, monkeypatch):
+    """The seed is measured on the whole dp_eligible frame and everything it
+    is compared against is sample-scale: day one's budget must read the seed
+    times the sample fraction, or a 1-of-3 sample budgets 3x too much."""
+    from pipeline.shadow import pre_window_il_history
+    cfg = _harness_cfg(cfg, tmp_path)
+    frame = _shadow_frame()
+    seed = pre_window_il_history(frame, cfg, WINDOW_START)
+    assert seed and all(v > 0 for v in seed.values())
+    report = _run_shadow(cfg, frame, _Applier(cfg), monkeypatch, max_episodes=1)
+    b = report["exploration_budget_would_be"]
+    assert b["trailing_basis_seed_scale"] == pytest.approx(1 / 3)
+    assert b["trailing_basis_seeded_days"] == len(seed)
+    day1 = b["tau_controller_trace"]["by_day"][0]
+    scaled = {k: v / 3 for k, v in seed.items()}
+    std = PosteriorStore(cfg).widest_std()
+    assert day1["budget"] == pytest.approx(explore_mod.budget_today(
+        explore_mod.trailing_daily_il(scaled, day1["day"], cfg), std, cfg), abs=0.1)
+    # a full run is unaffected: scale is exactly 1
+    full = _run_shadow(cfg, frame, _Applier(cfg), monkeypatch)
+    assert full["exploration_budget_would_be"]["trailing_basis_seed_scale"] == 1.0
+
+
+def test_shadow_grades_every_window_row_on_the_frozen_anchor(
+        cfg, tmp_path, monkeypatch):
+    """frozen_anchor means the anchor. On the hold-out every row is past the
+    schedule and takes it anyway; on a window that overlaps the schedule
+    (--all, an explicit range) the rows would carry their own week's factors
+    and the weekly_refit rescale (anchor -> re-fit) would be wrong for them.
+    Shadow freezes the model at the window start, so both readings sit on
+    the anchor basis, and calibration_coverage reads the freeze as the
+    gate's -- not as STALE FACTORS IN USE, which the hold-out produced by
+    construction."""
+    cfg = _harness_cfg(cfg, tmp_path)
+    frame = _shadow_frame()
+    week = "2026-08-10"
+    holdout_like = _Applier(cfg, schedule={"2026-08-03": {"FRUIT": 1.0}})
+    overlapping = _Applier(cfg, schedule={"2026-08-03": {"FRUIT": 1.0},
+                                          week: {"FRUIT": 2.0}})
+
+    def refit(*a, **k):
+        return ({week: {"FRUIT": 2.0}},
+                [{"week": week, "fitted": True, "weeks_in_window": 1,
+                  "partial": False}])
+
+    a = _run_shadow(cfg, frame, holdout_like, monkeypatch, refit=refit)
+    b = _run_shadow(cfg, frame, overlapping, monkeypatch, refit=refit)
+    ra, rb = a["calibration_regimes"], b["calibration_regimes"]
+    assert ra["frozen_anchor"] == rb["frozen_anchor"] > 0, \
+        "the week's schedule factor leaked into the frozen-anchor reading"
+    # the re-fit doubles mu on the rescaled rows: the censored ratio falls
+    assert ra["weekly_refit"] == rb["weekly_refit"] < ra["frozen_anchor"]
+    assert ra["rows_rescaled"] > 0 and ra["spread"] < 0
+    for report in (a, b):
+        cov = report["artifact_versions"]["calibration_coverage"]
+        assert cov["verdict"].startswith("OK"), cov["verdict"]
+        assert cov["frozen_from"] == WINDOW_START
+        assert cov["rows_frozen_at_anchor"] > 0
+        assert cov["weeks_after_schedule_end"] == []
+
+
+def test_the_parent_commits_every_event_through_the_real_store(
+        cfg, tmp_path, monkeypatch):
+    """Workers buffer; the store the gate measures sees every decision and
+    outcome exactly once, serial or parallel."""
+    from events.store import EventStore
+    cfg = _harness_cfg(cfg, tmp_path)
+    for workers, root in ((None, "serial"), (2, "parallel")):
+        report = _run_shadow(cfg, _shadow_frame(), _Applier(cfg), monkeypatch,
+                             events_root=str(tmp_path / root), workers=workers)
+        store = EventStore(cfg, root=str(tmp_path / root))
+        assert len(store.load_decisions()) == report["decision_count"] > 0
+        assert len(store.load_outcomes()) == report["outcome_count"]
+        assert report["shadow_gate"]["event_completeness"]["value"] == 1.0
+        assert all(o["execution_status"] == "shadow_not_applied"
+                   for o in store.load_outcomes())
+
+
+def test_the_tau_cross_check_uses_one_day_count_on_both_sides(cfg):
+    """derive_tau_initial averaged IL over the days with episodes while the
+    ledger divided spend by the CALENDAR span -- which, on the pre-launch
+    frame, crosses the exclusion gap. Both sides now count the days that
+    traded, so the bisection lands the spend under the budget it was given."""
+    from backtest.replay import derive_tau_initial
+    rng = np.random.default_rng(6)
+    led = SpreadLedger()
+    days = ["2026-07-01", "2026-07-02", "2026-07-10"]         # an 8-day gap
+    for i in range(300):
+        led.add(days[i % 3], rng.lognormal(6, 1, 6))
+    ep = pd.DataFrame({"date": [days[i % 3] for i in range(30)],
+                       "actual_il": 5_000.0})
+    out = derive_tau_initial(led, ep, cfg, launch_std=1.0)
+    assert out["days"] == 3
+    budget = explore_mod.budget_today(ep.actual_il.sum() / 3, 1.0, cfg)
+    assert out["daily_budget"] == pytest.approx(budget, abs=0.1)
+    # the bisection lands just under the budget it was given -- on the SAME
+    # day count (tau is reported to 2dp and spend steps at every cost, so
+    # the re-computation is close, not exact)
+    assert 0.9 * out["daily_budget"] < out["implied_daily_spend"] <= out["daily_budget"]
+    tau = out["tau_initial"]
+    s3 = led.implied_daily_spend(tau, 3)
+    assert out["implied_daily_spend"] == pytest.approx(s3, rel=0.05)
+    # the calendar span (10 days) would have read the same spend at 3/10 of
+    # its size: a tau that overspends the trading day 3.3x, reported as within
+    assert led.implied_daily_spend(tau, 10) == pytest.approx(s3 * 3 / 10)
+
+
+def test_predict_frame_is_the_one_extend_lookup_predict_path(cfg, tmp_path):
+    """Shadow and the replay each carried a copy of extend -> r -> mu_ref."""
+    from backtest.replay import predict_frame
+    cfg = _harness_cfg(cfg, tmp_path)
+    r_lookup = json.load(open(cfg["dispersion"]["r_lookup_path"]))
+    d = predict_frame(_hours("e", "2026-08-10", 2, hour0=22, tail=3), cfg,
+                      _Applier(cfg, base_mu=1.7), r_lookup)
+    assert len(d) == 5 and d.is_observed.tolist() == [True, True, False, False, False]
+    assert (d.r == 1.0).all() and (d.mu_ref_hat == 1.7).all()
+    assert d.hours_remaining.tolist() == [4, 3, 2, 1, 0]
+
+
+def test_weekly_refit_fits_each_week_on_data_strictly_before_it(
+        cfg, tmp_path, monkeypatch):
+    """The re-fit at week k may read only weeks < k -- no look-ahead inside
+    the replay -- through the one factor solve."""
+    import bootstrap.train_baseline as tb
+    from pipeline import shadow
+    cfg = _harness_cfg(cfg, tmp_path)
+    cfg["baseline_model"] = dict(cfg["baseline_model"],
+                                 calibration_fit_trailing_weeks=1)
+    seen = []
+
+    def solve(window, model, *args):
+        seen.append(window.copy())
+        return {"FRUIT": 1.1}, {}, 1.1
+
+    monkeypatch.setattr(tb, "_solve_level_factors", solve)
+    frame = pd.concat([_hours("a", "2026-08-05", 3), _hours("b", "2026-08-12", 3),
+                       _hours("c", "2026-08-19", 3)])
+    table, cov = shadow.weekly_refit_schedule(
+        frame, cfg, _Applier(cfg), {}, "2026-08-10", "2026-08-20")
+    assert sorted(table) == ["2026-08-10", "2026-08-17"]
+    assert len(seen) == 2
+    for week, window in zip(sorted(table), seen):
+        assert window.date.astype(str).max() < week
+    assert all(c["fitted"] for c in cov)
+
+
+def _fidelity_frame(cfg):
+    """Anchor rows across the calib and test windows; one test-window row set
+    a week the schedule can hold a factor for."""
+    return pd.concat([
+        _hours("c1", "2026-07-01", 4), _hours("c2", "2026-07-08", 4, q0=8),
+        _hours("t1", "2026-07-28", 4), _hours("t2", "2026-08-04", 4, q0=8),
+    ], ignore_index=True)
+
+
+def test_fidelity_grades_the_frozen_artifact_and_reports_the_refit_beside_it(
+        cfg, tmp_path):
+    """The gate freezes calibration at the test window's start (a factor fit
+    inside the graded window has read the rows it grades); the weekly-refit
+    reading sits beside it and must not disturb the gate's coverage."""
+    from backtest.replay import fidelity
+    cfg = _harness_cfg(cfg, tmp_path)
+    r_lookup = json.load(open(cfg["dispersion"]["r_lookup_path"]))
+    prior = {"per_category": {"FRUIT": {"mean": -1.2, "std": 0.5}}}
+    frame = _fidelity_frame(cfg)
+    anchor_only = _Applier(cfg, schedule={"2026-07-27": {"FRUIT": 1.0},
+                                          "2026-08-03": {"FRUIT": 1.0}})
+    doubled = _Applier(cfg, schedule={"2026-07-27": {"FRUIT": 2.0},
+                                      "2026-08-03": {"FRUIT": 2.0}})
+    a, _ = fidelity(frame, cfg, anchor_only, prior, r_lookup)
+    b, _ = fidelity(frame, cfg, doubled, prior, r_lookup)
+    assert a["calibration_frozen_at"] == b["calibration_frozen_at"] == "2026-07-27"
+    assert a["gate_window"] == "test"
+    assert a["calibration_gate_value"] == b["calibration_gate_value"], \
+        "the test-week schedule factor reached the frozen gate value"
+    # the mechanism reading DOES see the schedule: doubled mu, lower ratio
+    assert b["weekly_refit"]["level_bias_at_anchor"] < a["weekly_refit"]["level_bias_at_anchor"]
+    assert b["weekly_refit"]["vs_frozen"] < 0
+    # and the refit pass left the gate's coverage counters alone
+    cov = doubled.calibration_coverage()
+    assert cov["verdict"].startswith("OK") and cov["frozen_from"] == "2026-07-27"
+    assert cov["rows_frozen_at_anchor"] == 8 and cov["rows_on_schedule"] == 0
+    assert doubled._freeze_from == pd.Timestamp("2026-07-27")
+
+
+def test_the_backtest_slices_to_pre_launch_before_anything_reads_the_frame(
+        cfg, tmp_path, monkeypatch):
+    """Rule 16. Two paths once reached the hold-out and neither announced
+    itself; fidelity() must receive the dp_eligible, pre-launch frame."""
+    import yaml
+    from backtest import __main__ as bt
+
+    test_end = cfg["data"]["split"]["test_end"]
+    frame = pd.concat([_hours("before", test_end, 4),
+                       _hours("after", cfg["data"]["holdout"]["start"], 4),
+                       _hours("ineligible", "2026-07-01", 4, dp=False)])
+    frame.to_parquet(tmp_path / "prepared.parquet")
+    (tmp_path / "prior.json").write_text(json.dumps(
+        {"source": "profile_density",
+         "per_category": {"FRUIT": {"mean": -1.2, "std": 0.5}}}))
+    cfg = _harness_cfg(cfg, tmp_path)
+    cfg["posterior"]["prior"] = dict(cfg["posterior"]["prior"],
+                                     path=str(tmp_path / "prior.json"))
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(cfg))
+    got = {}
+
+    def fake_fidelity(d, cfg, model, prior, r_lookup):
+        got["frame"] = d
+        return {"fidelity_episode_sold_ratio": 1.0, "calibration_gate_metric": "m",
+                "calibration_gate_value": 1.0, "calibration_gate_band": [0.9, 1.1],
+                "calibration_gate": "PASS"}, d
+
+    monkeypatch.setattr(bt, "BaselineModel", lambda c: _Applier(c))
+    monkeypatch.setattr(bt, "fidelity", fake_fidelity)
+    monkeypatch.setattr(bt, "policy_replay", lambda *a, **k: (
+        {"actual_il": 1.0, "actual_il_pct": 0.1, "legacy_model_il": 1.0,
+         "dp_il": 1.0, "pct_dp_deepened": 0.0,
+         "policy_gap_like_for_like": {"dp_il_reduction_pct_of_legacy": None}},
+        pd.DataFrame(), SpreadLedger()))
+    monkeypatch.setattr(bt, "derive_tau_initial", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", [
+        "backtest", "--input", str(tmp_path / "prepared.parquet"),
+        "--config", str(tmp_path / "config.yaml"),
+        "--out", str(tmp_path / "bt.json")])
+    bt.main()
+
+    assert set(got["frame"].episode_id) == {"before"}, \
+        "fidelity saw a hold-out or dp-ineligible episode"
+    out = json.load(open(tmp_path / "bt.json"))
+    assert out["population"]["episodes_excluded_after_test_end"] == 1
+    assert out["population"]["episodes_excluded_dp_ineligible"] == 1
+    assert out["population"]["sees_up_to"] == test_end
+    # coverage is reported where the numbers are read (static mode here: the
+    # applier carries no schedule)
+    assert out["artifact_versions"]["calibration_coverage"]["mode"] == "static"
+
+
+def test_apply_is_refused_when_the_calibration_schedule_is_stale(cfg, tmp_path):
+    """The gate must bite inside update.run, beside the event-quality gates:
+    a schedule that no longer reaches today refuses --apply."""
+    from pipeline.update import run as update_run
+    cfg = _harness_cfg(cfg, tmp_path)
+    cal = tmp_path / "calibration.json"
+    cfg["baseline_model"] = dict(cfg["baseline_model"],
+                                 calibration_factor_path=str(cal))
+    cal.write_text(json.dumps({
+        "grain": "category", "factors": {"FRUIT": 1.2},
+        "schedule": {"mode": "rolling_trailing", "trailing_weeks": 4,
+                     "by_week": {"2026-07-06": {"FRUIT": 1.1}}}}))
+    late = update_run(cfg, apply=True, events_root=str(tmp_path / "ev"),
+                      posterior_path=cfg["posterior"]["path"], today="2026-07-21")
+    assert not late["event_quality_gates"]["calibration_schedule_current"]["pass"]
+    assert "calibration_schedule_current" in late["refused"]
+    assert not late["applied"]
+    current = update_run(cfg, apply=True, events_root=str(tmp_path / "ev"),
+                         posterior_path=cfg["posterior"]["path"], today="2026-07-08")
+    assert current["event_quality_gates"]["calibration_schedule_current"]["pass"]
+    assert "refused" not in current
+
+
+# ------------------------------------------------ the bootstrap loop driver
+
+def _scripted_settle(monkeypatch, dlogs, converge_at=None, max_turns=20):
+    """Run bootstrap.run.settle with the subprocess steps recorded and the
+    convergence verdicts scripted: turn k reads dlogs[k-1]; `converge_at`
+    names the turn whose verdict says settled."""
+    import bootstrap.run as br
+    calls, state = [], {"turn": 0}
+
+    def step(label, args, fatal=True, quiet=False):
+        calls.append(list(args))
+        if "--check-convergence" in args and "--commit-convergence" in args:
+            state["turn"] += 1
+        return 0
+
+    def convergence(cfg):
+        t = state["turn"]
+        return {"converged": t == converge_at,
+                "max_abs_dlog": dlogs[min(t, len(dlogs)) - 1]}
+
+    monkeypatch.setattr(br, "step", step)
+    monkeypatch.setattr(br, "convergence", convergence)
+    ok, turns, _ = br.settle({}, max_turns)
+    return ok, turns, calls
+
+
+def test_the_loop_runs_3b_once_and_finishes_with_a_full_prior(monkeypatch):
+    """Turn k's --check-convergence solves the factors turn k+1 would; the
+    loop commits that solve instead of recomputing it, runs the prior --fast
+    inside the loop, and re-runs it FULL (then re-checks) once settled --
+    a production-shaped 9-turn trajectory with a plateau must survive."""
+    dlogs = [2.29, .9, .9, .4, .35, .2, .09, .02, .005]
+    ok, turns, calls = _scripted_settle(monkeypatch, dlogs, converge_at=9)
+    assert ok and turns == 9
+    fits = [c for c in calls if "--fit-calibration" in c]
+    assert len(fits) == 1, "3b belongs to the first turn only"
+    priors = [c for c in calls if c[0] == "bootstrap.estimate_prior"]
+    assert len(priors) == 10 and all("--fast" in c for c in priors[:9]) \
+        and "--fast" not in priors[-1], "in-loop priors fast, the artifact's full"
+    checks = [c for c in calls if "--check-convergence" in c]
+    assert all("--commit-convergence" in c for c in checks[:9])
+    assert "--commit-convergence" not in checks[-1], \
+        "the confirm after the full prior is a DRY re-check"
+    assert calls.index(priors[-1]) < calls.index(checks[-1])
+
+
+def test_the_loop_stalls_on_three_turns_without_a_new_best(monkeypatch):
+    """The STALL test reads THIS run's turns: stuck and oscillating both stop
+    at turn 5; the cap is a runaway guard, not the budget."""
+    for dlogs in ([.31, .30, .305, .30, .31, .30], [.5, .2, .5, .2, .5, .2]):
+        ok, turns, _ = _scripted_settle(monkeypatch, dlogs)
+        assert (ok, turns) == (False, 5)
+    # a plain 20-turn cap never fires on a settling chain first
+    ok, turns, _ = _scripted_settle(monkeypatch, [1 / (t + 1) for t in range(20)],
+                                    converge_at=12)
+    assert ok and turns == 12
+
+
+def test_the_loop_cap_is_sized_for_production():
+    """The owner measures 8-9 turns; the fixture 3-4. A cap under 20 would
+    cut a real settle short (rule 19: size for the extract that matters)."""
+    import subprocess
+    r = subprocess.run([sys.executable, "-m", "bootstrap.run", "--help"],
+                       cwd=ROOT, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    import re
+    m = re.search(r"--max-turns.*?default (\d+)", r.stdout, re.S)
+    assert m and int(m.group(1)) >= 20

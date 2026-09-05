@@ -1,6 +1,6 @@
 """pipeline.assurance -- does live production still match what we froze?
 
-Tests the frozen artifacts against the live world (design section 16): four
+Tests the frozen artifacts against the live world (design 5.15): four
 checks -- reproduction, dispersion, correlation, exploration -- each built to
 fail LOUDLY on an assumption break that would otherwise be silent. None
 suspends pricing on its own; verdicts are read at the operator gate.
@@ -13,6 +13,7 @@ import numpy as np
 from scipy.stats import chi2 as chi2_dist
 from scipy.stats import nbinom
 
+from common import episodes
 from common.config import (design_effect, intraclass_correlation,
                            load_config)
 from events.store import EventStore
@@ -43,7 +44,7 @@ def _tier_index(tiers, discount, step):
 
 
 def _replayable(decisions):
-    """Events carrying the inputs a re-solve needs (section 16.1)."""
+    """Events carrying the inputs a re-solve needs (design 5.15)."""
     return [d for d in decisions
             if d.get("mu_ref_path") and "epsilon_posterior_mean" in d]
 
@@ -63,14 +64,16 @@ def reproduction(decisions, cfg):
     worst_il = 0.0
     failures = []
     for evt in sample:
+        checked += 1
         try:
             res = _resolve(evt, cfg)
-        except Exception as exc:  # a decision that no longer solves
+        except Exception as exc:
+            # a decision that no longer solves WAS checked, and failed: a
+            # broken solver must read FAIL, never INSUFFICIENT
             failures.append({"decision_id": evt.get("decision_id"),
                              "error": f"{type(exc).__name__}: {exc}"})
             mismatches += 1
             continue
-        checked += 1
 
         d_opt = res.tiers[res.optimal_index]
         j_applied = _tier_index(res.tiers, evt["applied_discount"], step)
@@ -101,7 +104,8 @@ def reproduction(decisions, cfg):
         "decisions_checked": checked,
         "decisions_skipped_no_inputs": skipped,
         "mismatch_count": mismatches,
-        "mismatch_rate": round(mismatches / checked, 6) if checked else None,
+        "mismatch_rate": (round(min(mismatches / checked, 1.0), 6)
+                          if checked else None),
         "worst_expected_il_delta": round(worst_il, 6),
         "failures": failures,
         # a deterministic solver that does not reproduce is never benign
@@ -122,16 +126,20 @@ def _pairs(decisions, outcomes):
 def dispersion_fit(decisions, outcomes, cfg):
     """Is live demand as lumpy as the frozen r says? Two statistics are EXACT
     under censoring (with stock on hand): P(sold=0) = P(D=0) and
-    P(sold>=q) = P(D>=q), so both compare against the NB with no correction.
-    Binned by mu: only miscalibration that grows with mu indicts r."""
+    P(shelf emptied) = P(D>=q), so both compare against the NB with no
+    correction. Binned by mu: only miscalibration that grows with mu indicts
+    r. "Emptied" is the shared censoring rule (episodes.is_censored_hour),
+    never `sold >= q`; a restocked hour (`intraday_restock`) has no single q
+    to empty and is left out of this check."""
     ac = cfg["assurance"]
     pcfg = cfg["pricing"]
-    pairs = _pairs(decisions, outcomes)
+    pairs = [(d, o) for d, o in _pairs(decisions, outcomes)
+             if o.get("adjustment_reason") != episodes.RESTOCK]
     if len(pairs) < ac["dispersion_min_outcomes"]:
         return {"outcomes": len(pairs), "verdict": "INSUFFICIENT",
                 "required": ac["dispersion_min_outcomes"]}
 
-    mu, r, q, sold = [], [], [], []
+    mu, r, q, sold, end = [], [], [], [], []
     for d, o in pairs:
         mu.append(mu_at(d["reference_mu"], d["applied_discount"],
                         d["reference_discount"], d["epsilon_posterior_mean"],
@@ -139,13 +147,14 @@ def dispersion_fit(decisions, outcomes, cfg):
         r.append(d["dispersion_r"])
         q.append(int(o["starting_inventory"]))
         sold.append(int(o["units_sold"]))
-    mu, r, q, sold = map(np.asarray, (mu, r, q, sold))
+        end.append(int(o["ending_inventory"]))
+    mu, r, q, sold, end = map(np.asarray, (mu, r, q, sold, end))
 
     p = r / (r + mu)
     p_zero = nbinom.pmf(0, r, p)                    # P(D = 0)
     p_out = nbinom.sf(np.maximum(q, 1) - 1, r, p)   # P(D >= q)
     obs_zero = (sold == 0).astype(float)
-    obs_out = (sold >= q).astype(float)
+    obs_out = episodes.is_censored_hour(q, sold, end).astype(float)
 
     edges = np.quantile(mu, np.linspace(0, 1, ac["dispersion_bins"] + 1))
     edges[0], edges[-1] = -np.inf, np.inf
@@ -219,17 +228,10 @@ def correlation_drift(decisions, outcomes, cfg):
     deff_live = design_effect(rho_live, hours)
 
     rho_frozen = cfg["dispersion"]["rho"]
-    # BOTH sides at the LIVE clustering: m is now measured per batch wherever
-    # deff is applied (common.config.deff_from_episodes), so the forced-hours
-    # channel cannot drift by construction and this check isolates what IS
-    # still frozen -- rho -- weighted by the consequence it has today.
+    # both sides at the LIVE clustering (m is measured per batch wherever
+    # deff is applied), so the verdict prices the one frozen term -- rho --
+    # by the consequence it has today; rho_drift says which term moved
     deff_frozen = design_effect(rho_frozen, hours)
-    # deff = 1 + (m - 1) * rho divides accumulated information, and it drifts
-    # through BOTH terms. Judging on rho alone was blind to the m channel:
-    # forced hours per episode can move (an exploration-rate change moves it
-    # by design) and rescale every update while rho sits still. Judge the
-    # quantity with the consequence; rho_drift stays as the diagnostic that
-    # says WHICH term moved.
     deff_drift = abs(deff_live - deff_frozen) / max(deff_frozen, 1e-9)
     return {
         "episodes": len(usable),
@@ -287,12 +289,8 @@ def exploration_uniformity(decisions, cfg):
     expected = n / bins
     stat = float(((counts - expected) ** 2 / expected).sum())
     pval = float(chi2_dist.sf(stat, bins - 1))
-    # SIGNIFICANT **and** LARGE. chi-square power grows with n, and this store
-    # is append-only with no window, so a p-value alone tightens every day the
-    # system runs: the same draw distribution that passes in week one fails at
-    # volume with nothing about the draw having changed. The effect size is
-    # scale-free and carries the meaning -- how far a bin actually sits from
-    # uniform -- while p still guards against calling noise a bias at low n.
+    # SIGNIFICANT and LARGE: the scale-free bin deviation carries the
+    # meaning, p only stops noise being called bias at low n
     max_dev = float(np.max(np.abs(counts - expected)) / expected)
     biased = pval < ac["uniformity_alert_p"] and max_dev > ac["uniformity_max_bin_deviation"]
     return {

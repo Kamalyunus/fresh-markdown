@@ -1,24 +1,15 @@
 """pipeline.ingest_outcomes -- construct outcome events from the hourly feed.
 
-The minimal integration: engineering calls the price API and applies the
-price; outcomes are built HERE from the same hourly FLC feed the bootstrap
-ingests, matched to decisions by (sku_id, fc, date, hour_of_day). Everything
-the old producer contract asked for is derived:
-
-  adjustment_reason   common.episodes.adjustment_reason on (start, sold, end)
-  is_stockout         common.episodes.is_censored_hour -- the shelf EMPTIED
-                      (reconciling and start - sold == 0), never the naive
-                      sold >= starting, which misreads a restocked hour
-  applied_price       original_price x (1 - discount) -- the OFFERED price,
-                      never the realised-price column (zeroed on no-sale rows)
-  outcome_id          "feed-<decision_id>" (idempotent re-runs dedup)
-  finalized_at        the hour's close, UTC
-
-The one fact only engineering knows -- did the price push succeed -- arrives
-as an optional failures input: a table (parquet/CSV) or JSONL, one row per
-failed push (sku_id, fc, date, hour_of_day, reason). No row = ok. Runs as a
-DAILY batch over the previous day's table rows; learning is a daily batch
-too, so hourly delivery would buy nothing.
+Engineering applies the price; outcomes are built HERE from the same hourly
+FLC feed the bootstrap ingests, matched to decisions by (sku_id, fc, date,
+hour_of_day). Every outcome field is derived from the feed row:
+`adjustment_reason` and `is_stockout` through the common.episodes rules,
+`applied_price` as the OFFERED price (original_price x (1 - discount)),
+`outcome_id` as "feed-<decision_id>" (re-runs dedup), `finalized_at` as the
+hour's close in UTC. The one fact only engineering knows -- did the price
+push succeed -- arrives as an optional failures input (parquet/CSV/JSONL,
+one row per failed push: sku_id, fc, date, hour_of_day, reason). Runs as a
+DAILY batch over the previous day's rows.
 
 Run: python3 -m pipeline.ingest_outcomes --feed <hourly parquet> [--failures f.jsonl]
 """
@@ -60,10 +51,16 @@ def build_outcomes(decisions, feed, failures=None):
 
     Returns (outcomes, report). A decision with no feed row yields no outcome
     -- that is the completeness gap the shadow gate measures, so it is
-    counted, never invented.
+    counted, never invented. Only decisions whose trading day lies inside
+    THIS feed's date range can be missing from it: a decision already
+    ingested yesterday, or one not yet due, is outside the feed and is
+    reported separately, never as a gap.
     """
     failures = failures or {}
     feed = feed.rename(columns=SOURCE_TO_CANONICAL)
+    if len(feed):
+        # one spelling of the day, whatever dtype the feed carries
+        feed = feed.assign(date=pd.to_datetime(feed["date"]).dt.strftime("%Y-%m-%d"))
     rows = {}
     dup_feed = 0
     for r in feed.itertuples():
@@ -73,21 +70,24 @@ def build_outcomes(decisions, feed, failures=None):
             rows[k] = None
         else:
             rows[k] = r
+    feed_days = sorted(set(feed["date"])) if len(feed) else []
+    feed_range = (feed_days[0], feed_days[-1]) if feed_days else None
 
     outcomes, unmatched, reasons, unusable = [], [], {}, []
+    outside = 0
     for dec in decisions:
-        k = _key(dec["sku_id"], dec["fc"], dec["date"], dec["hour_of_day"])
+        day = str(dec["date"])
+        if feed_range is None or not (feed_range[0] <= day <= feed_range[1]):
+            outside += 1         # not this feed's business: no gap, no match
+            continue
+        k = _key(dec["sku_id"], dec["fc"], day, dec["hour_of_day"])
         r = rows.get(k)
         if r is None:
             unmatched.append(dec["decision_id"])
             continue
-        # ONE bad row must not take the day's batch with it: int(nan) raises,
-        # and the whole daily ingest used to abort before the store -- whose
-        # entire design is "quarantine with the problem attached, never
-        # silently discard" -- ever saw a row. A zero base price is the live
-        # counterpart of the offline ffill/drop at prepare_data: it makes
-        # applied_price 0.0, which the store accepts and the monitor then
-        # charges as full-list discount, inflating IL.
+        # one unusable row costs its own decision, never the day's batch: it
+        # is counted below, and a zero/absent base price is refused rather
+        # than priced as a full-list discount
         try:
             start = int(round(float(r.starting_inventory)))
             sold = int(float(r.units_sold))
@@ -133,6 +133,10 @@ def build_outcomes(decisions, feed, failures=None):
 
     report = {
         "decisions": len(decisions),
+        "feed_date_range": list(feed_range) if feed_range else None,
+        # decisions whose trading day lies OUTSIDE this feed: already
+        # ingested, or not yet due -- neither is a completeness gap
+        "decisions_outside_feed_range": outside,
         "outcomes_built": len(outcomes),
         "decisions_without_feed_row": len(unmatched),
         "unmatched_decision_ids": unmatched[:20],
@@ -172,7 +176,9 @@ def main():
         - store.quarantined_this_run
     report["quarantined"] = store.quarantined_this_run
 
-    print(f"decisions          : {report['decisions']:,}")
+    print(f"decisions          : {report['decisions']:,} "
+          f"({report['decisions_outside_feed_range']:,} outside the feed's "
+          f"date range {report['feed_date_range']})")
     print(f"outcomes built     : {report['outcomes_built']:,} "
           f"(emitted {report['emitted']:,}, "
           f"duplicates {report['duplicates_skipped']:,}, "

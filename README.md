@@ -72,11 +72,11 @@ on the hold-out and it stops being one.
 Daily production loop after the shadow gate passes:
 
 ```bash
-python3 -m pipeline.update             # monitor only
-python3 -m pipeline.update --apply     # bounded posterior updates (operator gate)
-python3 -m pipeline.monitor
-python3 -m pipeline.assurance
-python3 -m pipeline.status
+python3 -m pipeline.advance --feed <yesterday's parquet>   # the whole lane, in order:
+#   ingest_outcomes -> update --calibrate-tau (tau walks daily, no operator)
+#   -> monitor -> assurance -> export_events -> status, stopping at
+python3 -m pipeline.update --apply     # bounded posterior updates (the human gate)
+python3 -m pipeline.update --resume-exploration   # after a stop condition, a human's call
 ```
 
 ## Validating against synthetic data

@@ -27,7 +27,11 @@ statement and the incident that created the rule.
 2. **`posterior.epsilon_max` (−0.05) is a sign constraint, never a bound to
    widen** — positive elasticity must remain unrepresentable. (§5.6)
 3. **A boundary solution is not an estimate** — a fit pinned at a search
-   bound means the likelihood ran off the support. (§5.6)
+   bound means the likelihood ran off the support: the prior searches past
+   both bounds and rejects a lower-pinned category to the pool
+   (`lower_boundary_categories`; widen `epsilon_min`, never `epsilon_max`);
+   `r_lookup.at_bound` and `calibration.detail[cell].at_bound` flag the
+   others. (§5.5, §5.6, §9.2)
 4. **The calibration gate window must be DISJOINT from the fit window** —
    read `fidelity.gate_window`, never assume it. (§9.2)
 5. **Level factors are fit on anchor rows only** over
@@ -170,12 +174,12 @@ phase — what runs, which config keys move, and who moves them:
 | phase | runs | config keys | moved by |
 | --- | --- | --- | --- |
 | bootstrap | `bootstrap.run` (train ONCE, loop to the fixed point, backtest, thresholds, seal) | none | — |
-| tune | `tune --apply`, then `bootstrap.run --check-only`, until nothing is left to paste | `rho`, `calibration_fit_trailing_weeks`, `calibration_gate_band`, `information_increment`, `delta_min_log_bias` | the process, from the report that derives each |
+| tune | `tune --apply`, then `bootstrap.run --check-only` / `derive_thresholds` / shadow as the pasted keys demand (`tune.stale_keys`), until nothing is left to paste | `rho`, `calibration_fit_trailing_weeks`, `calibration_gate_band`, `information_increment`, `delta_min_log_bias`, `scrap/margin_deterioration_pct` (the 3σ trailing floor), `max_mean_step` (inside its price-consequence gate) | the process, from the report that derives each |
 | posterior | `init_posterior`, once | none | — |
 | shadow | `pipeline.shadow` on the hold-out, every episode; then `tune --apply` | `tau_initial` | the process, from `shadow.tau_initial_derivation`. The forced rate is the budget's: to change it the owner reads `shadow.exploration_budget_sweep` (forced rate, spend, move, `information_rel` per `budget_share_of_il` × `delta_min_bias_multiple`), sets the pair, and shadow re-runs once |
-| owner | STOP | `scrap_deterioration_pct`, `margin_deterioration_pct`, the two learning rails | you, from `thresholds.json` (advance prints floor, verdict, source) |
+| owner | STOP | `max_std_shrink`; `max_mean_step` when its re-price EXCEEDS the gate; a stop threshold only when its floor is `BLOCKED`, `TOO TIGHT`, `LIKELY INERT` or `insufficient history` | you, from `thresholds.json` (advance prints floor, verdict, source) |
 | launch | STOP, then `--fit-calibration` + `seal` | `data.launch_date` | you, on launch day |
-| daily | ingest, `update --calibrate-tau`, monitor, assurance, export, status; STOP at `update --apply` | none | you approve each update |
+| daily | ingest, `update --calibrate-tau`, monitor, assurance, export, status; STOP at `update --apply` | none | you approve each update. A fired stop condition SUSPENDS exploration (the monitor writes it into the posterior state; `decide` stops drawing; exploitation continues) until a human runs `update --resume-exploration` |
 
 Every stop writes `reports/launch_readiness.md` (`--report` regenerates
 it): what ran per phase, every value the process changed with before,
@@ -282,7 +286,7 @@ is dropped (rule 14). Resolve via `prepare_data.population(d, cfg, which)`:
 
 | Consumer | Population |
 | --- | --- |
-| baseline, `r`, `rho`, prior, level factors | `baseline_model.train_population` (default `eligible`) |
+| baseline, `r`, `rho`, prior, level factors | `eligible`, always |
 | `m1` / gate 1 | `integrity`, always |
 | DP, backtest, shadow, calibration gate | `dp_eligible`, always (passed explicitly) |
 
@@ -303,7 +307,7 @@ Every paste has one source and one checker:
 | `calibration_fit_trailing_weeks`, `information_increment`, `calibration_gate_band` | the REPORT that derives each (`tune` names it) | `config mirrors reports` — these ship fixture values and cannot be null, so the check is the only thing between a pulled repo and a foreign number |
 | `exploration.tau_initial` | `reports/shadow.json` → `tau_initial_derivation` (backtest = cross-check only) | `tau_provenance_error` — shadow refuses a stale paste |
 | `exploration.delta_min_log_bias` | `tune` from `backtest.fidelity`, PER CATEGORY as a one-line mapping (own log ratio floored by MAE@W and the gate half-width; `_default` for unseen categories) — null = no floor, the fixture never ships a number | `config mirrors reports` |
-| `scrap/margin_deterioration_pct` | OWNER, from `reports/thresholds.json` (trailing-mean floor) — `TOO TIGHT`, `BLOCKED` and `LIKELY INERT` are all blocking | `guardrail floors` |
+| `scrap/margin_deterioration_pct` | `tune` pastes the 3σ trailing-mean floor from `reports/thresholds.json` (owner, 2026-08-30); OWNER only when the verdict is `TOO TIGHT`, `BLOCKED`, `LIKELY INERT` or `insufficient history` — all blocking, none pasted | `guardrail floors` |
 | `data.launch_date` | OWNER — null until launch day; once set, `--fit-calibration` schedules through the latest data (the weekly cron) while every sealed fit keeps its pre-launch scope. Never move `split.test_end` for this | `launch blockers`; `calibration_schedule_current` on every `--apply` |
 
 ## Where to look

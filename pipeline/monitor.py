@@ -1,8 +1,12 @@
 """pipeline.monitor -- learning, business, and safety series (design 5.12).
 
 Reads the event store and posterior; emits one JSON snapshot of the three
-metric families plus stop-condition evaluation (15.4). IL% is a ratio of sums
-reported WITH its denominator, absolute IL alongside every IL% (3.6).
+metric families plus stop-condition evaluation. IL% is a ratio of sums
+reported WITH its denominator, absolute IL alongside every IL% (design 2.3).
+A fired stop condition SUSPENDS forced exploration (recorded in the
+posterior store, read by inference.decide); exploitation pricing continues,
+and only `pipeline.update --resume-exploration` clears it. Assurance is its
+own step (`pipeline.assurance`); status reads its report directly.
 Run: python3 -m pipeline.monitor --out reports/monitor.json
 """
 
@@ -17,17 +21,15 @@ from common.io import write_json
 from events.store import EventStore
 from events.pairs import match_pairs, decision_day, price_matches
 from pricing.posterior import PosteriorStore
-from pipeline import assurance as assurance_mod
 from pipeline import update as update_mod
 from pricing import explore
-from common import episodes
 from common import metrics
 from common.provenance import config_fingerprint
 # aliased: stop_conditions() takes a parameter named `guardrail`
 from common import guardrail as guard
 
 
-def event_frame(decisions, outcomes, cfg):
+def event_frame(decisions, outcomes):
     """Matched (decision, outcome) pairs as HOURLY rows in the prepared-frame
     vocabulary, so metrics.episode_economics is the one episode-grain
     definition on live events too -- floor and trigger measure one thing."""
@@ -41,10 +43,10 @@ def event_frame(decisions, outcomes, cfg):
     } for d, o in match_pairs(decisions, outcomes)])
 
 
-def business_metrics(decisions, outcomes, cfg):
+def business_metrics(decisions, outcomes):
     if not outcomes:
         return {"note": "no finalized outcomes yet"}
-    df = event_frame(decisions, outcomes, cfg)
+    df = event_frame(decisions, outcomes)
     if df.empty:
         return {"note": "no outcome matches a decision -- nothing to measure"}
     ep, excluded = metrics.settled(metrics.episode_economics(df))
@@ -75,12 +77,12 @@ def business_metrics(decisions, outcomes, cfg):
 
 
 def guardrail_series(decisions, outcomes, cfg):
-    """Daily scrap and realised-margin rates plus the 15.4 deterioration
-    series, on metrics.daily_rates -- the series the noise floors are
-    measured on. Basis: the trailing window mean of the same system-priced
-    episodes (there is no control arm; the pilot runs on the episodes
-    engineering supplies)."""
-    df = event_frame(decisions, outcomes, cfg)
+    """Daily scrap and realised-margin rates plus the deterioration series
+    (design 5.12), on metrics.daily_rates -- keyed by CLOSE day, the series
+    the noise floors are measured on. Basis: the trailing window mean of the
+    same system-priced episodes (there is no control arm; the pilot runs on
+    the episodes engineering supplies)."""
+    df = event_frame(decisions, outcomes)
     if df.empty:
         return {"note": "no finalized outcomes yet"}
     ep, _ = metrics.settled(metrics.episode_economics(df))
@@ -99,6 +101,7 @@ def guardrail_series(decisions, outcomes, cfg):
         return dev.replace([np.inf, -np.inf], np.nan).dropna(), f"trailing_{window}d_mean"
 
     out = {"days_observed": int(len(overall)),
+           "day_key": "close_day",
            "daily_scrap_rate": {str(k): round(float(v), 6)
                                 for k, v in overall.scrap_rate.items()},
            "daily_margin_rate": {str(k): round(float(v), 6)
@@ -120,9 +123,11 @@ def guardrail_series(decisions, outcomes, cfg):
 
 
 def evaluate_guardrail(block, threshold, persistence_days):
-    """Fires only after `persistence_days` CONSECUTIVE days over threshold.
-    Persistence is load-bearing, not decoration: it buys sensitivity for
-    thresholds sitting just above the measured noise floor (design 15.4)."""
+    """Fires only after `persistence_days` CONSECUTIVE CALENDAR days over
+    threshold, ending on the latest day in the series. Persistence is
+    load-bearing, not decoration: it buys sensitivity for thresholds sitting
+    just above the measured noise floor (design 5.12). A calendar day with
+    no reading breaks the streak -- an unobserved day is not a day over."""
     base = {"fired": False, "threshold": threshold,
             "persistence_days": persistence_days,
             "basis": block.get("basis"), "latest": block.get("latest")}
@@ -134,28 +139,29 @@ def evaluate_guardrail(block, threshold, persistence_days):
         # window legitimately has nothing to compare yet
         return {**base, "consecutive_days_over": 0,
                 "status": "no comparable days yet"}
-    days = sorted(by_day)
-    streak = 0
-    for day in reversed(days):
-        if by_day[day] > threshold:
-            streak += 1
-        else:
+    streak, prev = 0, None
+    for day in sorted(by_day, reverse=True):
+        stamp = pd.Timestamp(day)
+        if prev is not None and (prev - stamp).days != 1:
+            break                                  # a missing calendar day
+        if not by_day[day] > threshold:
             break
+        streak += 1
+        prev = stamp
+    fired = streak >= persistence_days
     return {
-        "fired": streak >= persistence_days,
+        **base,
+        "fired": fired,
         "consecutive_days_over": streak,
-        "persistence_days": persistence_days,
-        "threshold": threshold,
-        "latest": block.get("latest"),
-        "basis": block.get("basis"),
         "status": (f"FIRED -- over {threshold} for {streak} consecutive days"
-                   if streak >= persistence_days else
+                   if fired else
                    f"{streak}/{persistence_days} consecutive days over threshold"),
     }
 
 
 def learning_metrics(decisions, posterior, cfg, outcomes=()):
     cells = posterior.state["cells"]
+    cell_of = posterior.state["cell_of"]
     forced = [d for d in decisions if d["is_exploration"]]
     realised_cost = sum(d["exploration_cost"] for d in forced)
     empty_rate = (np.mean([d["affordable_set_size"] == 0 for d in decisions])
@@ -163,7 +169,7 @@ def learning_metrics(decisions, posterior, cfg, outcomes=()):
     return {
         # routing, so the budget's widest-std is taken over cells a category
         # actually reaches (an unrouted GLOBAL never narrows)
-        "cell_of": dict(posterior.state["cell_of"]),
+        "cell_of": dict(cell_of),
         "posterior_by_cell": {
             c: {"mean": r["mean"], "std": r["std"], "n_obs": r["n_obs"],
                 "accumulated_information": round(r["accumulated_information"], 2),
@@ -183,18 +189,21 @@ def learning_metrics(decisions, posterior, cfg, outcomes=()):
             k: round(v, 1) for k, v in
             update_mod.daily_exploration_spend(decisions, outcomes).items()},
         "latest_priced_day": update_mod.latest_priced_day(decisions, outcomes),
+        # the budget the last decision was priced with: None while
+        # exploration is suspended (design 5.12)
         "tau_current": decisions[-1]["tau_current"] if decisions else None,
         "deff_applied": round(deff_from_episodes(
             cfg["dispersion"]["rho"],
             [d["episode_id"] for d in forced]), 3),
         # std only moves when an update commits, so "std flat for N days" is
-        # exactly "no committed update in N days" (section 15.2 alert)
+        # exactly "no committed update in N days" (design 5.12). Over the
+        # cells that CAN learn -- an unrouted GLOBAL takes no outcome and
+        # would be listed forever
         "posterior_std_flat_alert": sorted(
-            c for c, r in cells.items()
+            c for c in PosteriorStore.active_cells(cells, cell_of)
             if (pd.Timestamp.now("UTC")
-                - pd.Timestamp(r["updated_at"])).days
+                - pd.Timestamp(cells[c]["updated_at"])).days
             >= cfg["monitoring"]["alert_posterior_std_flat_days"]),
-        "realised_vs_predicted_sold_ratio": None,  # filled by safety_metrics
     }
 
 
@@ -208,7 +217,6 @@ def safety_metrics(store, decisions, outcomes):
     for d, o in pairs:
         expected_denom += d["expected_denominator"]
         realised_denom += d["original_price"] * o["units_sold"]
-    n_out = max(len(outcomes), 1)
     return {
         "decision_count": len(decisions),
         "finalized_outcome_count": len(outcomes),
@@ -216,6 +224,7 @@ def safety_metrics(store, decisions, outcomes):
                                       if d["decision_id"] in matched),
         "unmatched_outcome_count": sum(1 for o in outcomes
                                        if o["decision_id"] not in dec),
+        # seen on emit AND on load (a producer writing the JSONL directly)
         "duplicate_decision_count": store.duplicate_counts["decision"],
         "duplicate_outcome_count": store.duplicate_counts["outcome"],
         # a rate over the outcomes that HAVE a decision to compare against;
@@ -241,7 +250,7 @@ def safety_metrics(store, decisions, outcomes):
 
 
 def stop_conditions(safety, learning, business, guardrail, cfg):
-    """Section 15.4. Suspension stops forced exploration only; exploitation
+    """Design 5.12. Suspension stops forced exploration only; exploitation
     pricing continues. Owner-null thresholds cannot fire and are reported as
     blocked."""
     sc = cfg["monitoring"]["stop_conditions"]
@@ -255,12 +264,9 @@ def stop_conditions(safety, learning, business, guardrail, cfg):
         safety["price_mismatch_count"] / max(safety["compared_pair_count"], 1)
         > sc["price_mismatch_rate"])
 
-    # realised exploration cost vs budget over the event window; the budget
-    # uses TRAILING realised IL as the projection and the widest cell std --
-    # the same two per-day numbers pipeline.update's tau controller moves on
-    # (design 5.8). Comparing all-time spend against all-time IL made both
-    # blind together: the ratio tends to 1.0 as history grows, so a day at
-    # 10x budget could not fire it.
+    # realised exploration cost vs budget on the day the controller prices,
+    # from the same two per-day numbers pipeline.update's tau controller
+    # moves on (design 5.8): trailing realised IL and the widest cell std
     il_by_day = business.get("il_by_close_day") or {}
     cells = learning["posterior_by_cell"]
     # the SAME day the controller prices (update.latest_priced_day) -- the
@@ -293,6 +299,18 @@ def stop_conditions(safety, learning, business, guardrail, cfg):
             "suspend_exploration": any(v is True for v in fired.values())}
 
 
+def apply_stop_conditions(stop, posterior, since):
+    """Record a fired stop in the posterior store so inference.decide stops
+    drawing (design 5.12): forced exploration is suspended, exploitation
+    continues. Never resumes -- a stop that no longer fires still leaves
+    the suspension standing until `pipeline.update --resume-exploration`.
+    Returns the suspension record in force, or None."""
+    if stop["suspend_exploration"]:
+        reasons = sorted(k for k, v in stop["fired"].items() if v is True)
+        posterior.suspend_exploration(reasons, since)
+    return posterior.exploration_suspended()
+
+
 def main():
     ap = argparse.ArgumentParser(prog="pipeline.monitor")
     ap.add_argument("--out", default="reports/monitor.json")
@@ -310,26 +328,28 @@ def main():
     learning["realised_vs_predicted_sold_ratio"] = \
         safety["realised_vs_predicted_sold_ratio"]
 
-    business = business_metrics(decisions, outcomes, cfg)
+    business = business_metrics(decisions, outcomes)
     guardrail = guardrail_series(decisions, outcomes, cfg)
-    # assurance asks whether the frozen artifacts still describe the world;
-    # it informs the operator gate, it does not suspend pricing
-    assurance = assurance_mod.run(decisions, outcomes, cfg)
     report = {
         "config": config_fingerprint(cfg, "production"),
         "business": business,
         "guardrails": guardrail,
         "learning": learning,
         "safety": safety,
-        "assurance": assurance,
     }
     report["stop_conditions"] = stop_conditions(
         safety, learning, business, guardrail, cfg)
+    since = learning.get("latest_priced_day") or str(pd.Timestamp.now("UTC").date())
+    report["exploration_suspended"] = apply_stop_conditions(
+        report["stop_conditions"], posterior, since)
 
     write_json(args.out, report)
     print(json.dumps(report["stop_conditions"], indent=2))
-    print("assurance: " + ("PASS" if assurance["verdict"] == "PASS"
-                           else "FAIL -> " + ", ".join(assurance["failing"])))
+    if report["exploration_suspended"]:
+        s = report["exploration_suspended"]
+        print(f"EXPLORATION SUSPENDED since {s['since']} "
+              f"({', '.join(s['reasons'])}); exploitation continues. "
+              "`pipeline.update --resume-exploration` clears it.")
     print(f"wrote {args.out}")
 
 

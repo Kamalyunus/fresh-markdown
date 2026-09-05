@@ -133,13 +133,18 @@ def verify(cfg, sealed=None):
     unstamped = [r["artifact"] for r in present
                  if r["artifact"] not in UNSTAMPABLE and not r.get("bundle")]
 
-    changed = []
+    changed, gone, added = [], [], []
     if sealed:
         by_name = {r["artifact"]: r for r in present}
+        sealed_names = set(sealed.get("sha256") or {})
         for name, digest in (sealed.get("sha256") or {}).items():
             row = by_name.get(name)
-            if row and row["sha256"] != digest:
+            if row is None:
+                gone.append(name)                   # sealed, now deleted
+            elif row["sha256"] != digest:
                 changed.append(name)
+        added = [r["artifact"] for r in present
+                 if r["artifact"] not in sealed_names]
 
     problems = []
     if len(bundles) > 1:
@@ -149,6 +154,10 @@ def verify(cfg, sealed=None):
         problems.append("no provenance: " + ", ".join(unstamped))
     if changed:
         problems.append("changed since sealing: " + ", ".join(changed))
+    if gone:
+        problems.append("sealed but no longer on disk: " + ", ".join(gone))
+    if added:
+        problems.append("fitted after sealing (re-seal): " + ", ".join(added))
     if sealed and bundles and sealed.get("bundle") not in bundles:
         problems.append(f"sealed bundle {sealed.get('bundle')} "
                         f"is not on disk ({', '.join(bundles)})")

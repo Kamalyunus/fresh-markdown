@@ -18,15 +18,28 @@ from pricing.demand import mu_at, expected_min_demand_inventory
 
 
 class StateRejected(ValueError):
-    """Raised instead of returning an unsafe price (section 11.4)."""
+    """Raised instead of returning an unsafe price (design 5.10)."""
+
+
+def _finite_number(v):
+    return (isinstance(v, (int, float, np.integer, np.floating))
+            and not isinstance(v, (bool, np.bool_)) and math.isfinite(v))
+
+
+def priceable_economics(original_price, cost):
+    """Can a tier grid be built from this price and cost at all? Finite,
+    positive price and a finite cost -- anything else has no d_max, and the
+    grid builder must not be asked (it would divide by zero or floor a NaN)."""
+    return (_finite_number(original_price) and original_price > 0
+            and _finite_number(cost))
 
 
 def validate_state(s, tiers, anchor_discount, mu_ref_path):
     failures = []
-    if not (s["original_price"] > 0):
-        failures.append("original_price must be positive")
-    if not (0 <= s["cost"] <= s["original_price"]):
-        failures.append("cost must be within [0, original_price]")
+    if not (_finite_number(s["original_price"]) and s["original_price"] > 0):
+        failures.append("original_price must be a finite positive number")
+    if not (_finite_number(s["cost"]) and 0 <= s["cost"] <= s["original_price"]):
+        failures.append("cost must be finite and within [0, original_price]")
     if not (isinstance(s["q"], (int, np.integer)) and s["q"] >= 0):
         failures.append("q must be a non-negative integer")
     if not (isinstance(s["hours_remaining"], (int, np.integer))
@@ -57,18 +70,27 @@ def validate_state(s, tiers, anchor_discount, mu_ref_path):
 
 def decide(state, posterior_store, event_store, cfg, rng, tau_current,
            baseline_version, spread_sink=None):
-    """Price one decision interval and emit the 16.1 decision event.
-    `state` carries the episode context (mu_ref_path index 0 = now;
-    current_discount None at entry). `spread_sink` receives
-    (costs, log moves, delta_min) over the admissible tiers out of band,
-    before the draw, so the record is tau-independent."""
+    """Price one decision interval and emit the decision event (design 5.10;
+    field contract in docs/event_contract.html). `state` carries the episode
+    context (mu_ref_path index 0 = now; current_discount None at entry).
+    `spread_sink` receives (costs, log moves, delta_min) over the admissible
+    tiers out of band, before the draw, so the record is tau-independent.
+
+    While the posterior store carries an exploration suspension (design
+    5.12, set by pipeline.monitor) the decision is priced with NO budget:
+    exploitation continues, nothing is drawn, and `tau_current` is recorded
+    as None so the event says why it did not explore."""
     s = state
     d_ref = reference_discount(cfg, s["category"])
     entry = s["current_discount"] is None
     anchor = None if entry else float(s["current_discount"])
 
-    tiers, d_max = dp_mod.feasible_tiers(
-        s["original_price"], s["cost"], cfg["pricing"]["tier_step"])
+    # the contract is REJECT, never crash: a bad price or cost has no tier
+    # grid, so validate first and only then build one
+    tiers, d_max = [], float("nan")
+    if priceable_economics(s["original_price"], s["cost"]):
+        tiers, d_max = dp_mod.feasible_tiers(
+            s["original_price"], s["cost"], cfg["pricing"]["tier_step"])
     failures = validate_state(s, tiers, anchor, s["mu_ref_path"])
     if failures:
         raise StateRejected("; ".join(failures))
@@ -76,11 +98,8 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
     cell = posterior_store.get(s["category"])
     eps = cell["mean"]
 
-    # the contract is REJECT, never crash: validate_state accepts q == 0
-    # ("non-negative integer"), but the DP cannot price an empty shelf and
-    # raises a bare ValueError -- which would escape the caller's
-    # StateRejected handler and take the pricing loop down for a state that
-    # is merely unpriceable (inventory hit zero between snapshot and call)
+    # same contract for the solver: a state it cannot price (an empty shelf
+    # between snapshot and call) is rejected, never a bare ValueError
     try:
         result = dp_mod.solve(
             s["original_price"], s["cost"], int(s["q"]), s["mu_ref_path"],
@@ -88,10 +107,8 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
     except ValueError as e:
         raise StateRejected(str(e))
 
-    # explorability is a property of the actions allowed AT THIS DECISION, not
-    # of the full grid: late in an episode the monotonicity anchor can leave
-    # one action while the grid still has twenty, and at entry the coarse arm
-    # set is the action set. Judging on len(tiers) overstated both.
+    # explorability is judged on the actions allowed AT THIS DECISION
+    # (result.q_by_tier), never on the size of the full grid
     explorable = len(result.q_by_tier) >= cfg["exploration"]["min_feasible_tiers"]
     # the smallest informative move for THIS cell: tiers closer to p* than
     # this are neither drawn nor priced into tau (explore.admissible)
@@ -99,7 +116,9 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
     if spread_sink is not None and explorable:
         costs, moves = explore.spread_table(result, dmin)
         spread_sink((costs, moves, dmin))
-    choice = explore.select(result, tau_current, rng, explorable=explorable,
+    suspended = posterior_store.exploration_suspended()
+    tau_in_force = None if suspended else tau_current
+    choice = explore.select(result, tau_in_force, rng, explorable=explorable,
                             delta_min=dmin)
 
     d_opt = result.tiers[result.optimal_index]
@@ -132,7 +151,7 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
         "action_set_size": len(result.q_by_tier),
         "optimal_price": float(s["original_price"] * (1 - d_opt)),
         "optimal_discount": float(d_opt),
-        # absolute IL under the chosen policy -- the objective (section 3.1)
+        # absolute IL under the chosen policy -- the objective (design 2.2)
         "expected_il": float(-result.q_by_tier[choice["chosen_index"]]),
         # diagnostic only: enables predicted-vs-realised IL% tracking
         "expected_denominator": float(s["original_price"] * expected_sold_now),
@@ -141,7 +160,9 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
         "is_exploration": choice["is_exploration"],
         "exploration_cost": choice["exploration_cost"],
         "affordable_set_size": choice["affordable_set_size"],
-        "tau_current": tau_current,
+        # None while exploration is suspended (design 5.12): the budget was
+        # not in force for this decision, whatever tau the store holds
+        "tau_current": tau_in_force,
         "delta_min": float(dmin),
         "epsilon_posterior_mean": float(cell["mean"]),
         "epsilon_posterior_std": float(cell["std"]),

@@ -75,7 +75,7 @@ def collect_batch(store, posterior, cfg):
 
 def grid_update(pairs, cell_record, cfg):
     """Evaluate the censored likelihood on the grid, add the log prior,
-    normalise with log-sum-exp, and take moments (13.2)."""
+    normalise with log-sum-exp, and take moments (design 5.11)."""
     pc = cfg["posterior"]
     grid = np.linspace(pc["epsilon_min"], pc["epsilon_max"], pc["grid_size"])
 
@@ -84,10 +84,8 @@ def grid_update(pairs, cell_record, cfg):
     mu0 = np.array([d["reference_mu"] for d, _, _ in pairs])
     r = np.array([d["dispersion_r"] for d, _, _ in pairs])
     log_ratio = np.log([ratio for _, _, ratio in pairs])
-    # `k >= inv` was wrong in one direction and it was the expensive one: it
-    # marked every restock hour censored, and a restock hour is where the
-    # stock was. `ending_inventory` is required on every outcome, so the same
-    # rule the offline fits use applies live -- see episodes.censored_hours.
+    # censoring is the shared rule (the shelf EMPTIED), never `sold >= q`,
+    # which reads a restocked hour as censored
     end = np.array([o["ending_inventory"] for _, o, _ in pairs])
     censored = episodes.is_censored_hour(inv, k, end)
     lgamma_const = gammaln(k + r) - gammaln(r) - gammaln(k + 1)
@@ -109,11 +107,9 @@ def grid_update(pairs, cell_record, cfg):
     raw_mean = float(np.sum(w * grid))
     raw_std = float(np.sqrt(np.sum(w * (grid - raw_mean) ** 2)))
 
-    # SEQUENTIAL PREDICTIVE CHECK: the batch arrived after the current
-    # posterior was set, so its log marginal predictive under the PRE-update
-    # posterior is an out-of-sample grade of the belief, bracketed by oracle
-    # and uniform (design 5.11). Correlated hours inflate all three scores
-    # alike -- read differences, never absolutes.
+    # sequential predictive check (design 5.11): the batch's log marginal
+    # predictive under the PRE-update posterior, bracketed by oracle and
+    # uniform -- read differences, never absolutes
     n = len(pairs)
     log_w_prior = log_prior - logsumexp(log_prior)
     pred_posterior = float((logsumexp(loglik + log_w_prior)) / n)
@@ -135,7 +131,7 @@ def grid_update(pairs, cell_record, cfg):
     }
 
     # NB Fisher information at the pre-update mean: mu * L^2 * r/(r+mu),
-    # never the Poisson mu * L^2 (overstates ~1.6-1.9x; learnings.md)
+    # never the Poisson mu * L^2 (design 5.11)
     mu_at_mean = np.clip(mu0 * np.exp(cell_record["mean"] * log_ratio),
                          cfg["pricing"]["demand_floor"], None)
     information = float(np.sum(
@@ -155,41 +151,47 @@ def grid_update(pairs, cell_record, cfg):
     }
 
 
-def latest_priced_day(decisions, outcomes):
-    """The TRADING date of the most recent decision that has a finalized
-    outcome -- the day the controller prices and the stop condition backstops.
+def finalized_days(decisions, outcomes):
+    """ONE pass over the matched pairs with a finalized outcome, keyed on the
+    TRADING day the decision priced (events.pairs.decision_day, never the
+    UTC clock of `finalized_at`). Returns (priced_days ascending,
+    {day: realised exploration spend} over the forced decisions) -- the day
+    key and the spend the tau controller and the monitor's stop condition
+    both read, so the correction and its backstop cannot drift apart."""
+    days, spend = set(), {}
+    for d, o in match_pairs(decisions, outcomes):
+        if not o.get("finalized_at"):
+            continue
+        day = decision_day(d)
+        days.add(day)
+        if d.get("is_exploration"):
+            spend[day] = spend.get(day, 0.0) + float(d["exploration_cost"])
+    return sorted(days), spend
 
-    Keyed by the decision's `date`, never by `finalized_at`: an outcome
-    finalizes at the hour's close in UTC, so an hour-23 decision on day D
-    finalizes at D+1T00:00Z. Keying on that put the controller one day ahead
-    of the IL side -- it graded ONE HOUR of spend against a full day's budget,
-    ratcheted tau up 25% a day on that basis, and `tau_calibrated_through`
-    then guaranteed the other 23 hours were never priced at all.
-    """
-    days = [decision_day(d) for d, o in match_pairs(decisions, outcomes)
-            if o.get("finalized_at")]
-    return max(days) if days else None
+
+def latest_priced_day(decisions, outcomes):
+    """The TRADING date of the most recent decision with a finalized outcome
+    -- the day the controller prices and the stop condition backstops."""
+    days, _ = finalized_days(decisions, outcomes)
+    return days[-1] if days else None
 
 
 def daily_exploration_spend(decisions, outcomes):
-    """Realised exploration cost by TRADING date -- the ONE definition shared
-    by the tau controller and the monitor's stop condition, on the same day
-    key `latest_priced_day` uses, so the correction and its backstop cannot
-    drift apart. Counts a forced decision once its outcome has finalized."""
-    by_day = {}
-    for d, o in match_pairs(decisions, outcomes):
-        if not d.get("is_exploration") or not o.get("finalized_at"):
-            continue
-        day = decision_day(d)
-        by_day[day] = by_day.get(day, 0.0) + float(d["exploration_cost"])
-    return by_day
+    """Realised exploration cost by TRADING date, once the outcome has
+    finalized -- the one per-day spend the controller and the monitor read."""
+    return finalized_days(decisions, outcomes)[1]
 
 
-def tau_calibration(decisions, outcomes, posterior, cfg):
+def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None):
     """Move tau toward the budget from realised spend (design 5.8) -- on
     the SAME two numbers the monitor's stop condition compares, so the
     correction and the backstop cannot disagree. Always returns a block;
-    `commit` False means nothing to calibrate from."""
+    `commit` False means nothing to calibrate from.
+
+    `widest_std` is the posterior std the budget is sized for; it defaults
+    to the store's current widest routed std. `run` passes the value read
+    BEFORE any cell is committed, so a dry run and `--apply` price the same
+    days from the same posterior."""
     from pipeline.monitor import business_metrics      # sibling; no cycle
 
     tau_now = posterior.tau(cfg)
@@ -200,10 +202,11 @@ def tau_calibration(decisions, outcomes, posterior, cfg):
                             "force to calibrate")
         return block
 
-    through = latest_priced_day(decisions, outcomes)
-    if through is None:
+    priced_days, spend_by_day = finalized_days(decisions, outcomes)
+    if not priced_days:
         block["skipped"] = "no finalized outcomes"
         return block
+    through = priced_days[-1]
     done = posterior.tau_calibrated_through()
     if done == through:
         block["skipped"] = f"already calibrated through {through}"
@@ -217,11 +220,17 @@ def tau_calibration(decisions, outcomes, posterior, cfg):
     # priced day is NOT skipped: nothing was affordable, which is exactly
     # the under-spend the rule raises tau on, and the only way a tau cut
     # below the smallest spread ever recovers.
-    spend_by_day = daily_exploration_spend(decisions, outcomes)
-    days = sorted({decision_day(d) for d, o in match_pairs(decisions, outcomes)
-                   if o.get("finalized_at")})
-    days = [d for d in days if done is None or d > str(done)]
-    business = business_metrics(decisions, outcomes, cfg)
+    days = [d for d in priced_days if done is None or d > str(done)]
+    if not days:
+        # the posterior says tau is calibrated PAST the store's latest priced
+        # day: the store is behind (restored from an older copy, or pointed
+        # at the wrong directory). Nothing to walk -- report, never index
+        block["skipped"] = (f"posterior is calibrated through {done}, ahead "
+                            f"of the store's latest priced day {through}; "
+                            "no day to walk")
+        block["through_date"] = through
+        return block
+    business = business_metrics(decisions, outcomes)
     il_by_day = business.get("il_by_close_day") or {}
     cells = posterior.state["cells"]
     if not il_by_day or not cells:
@@ -231,7 +240,8 @@ def tau_calibration(decisions, outcomes, posterior, cfg):
 
     # the widest ROUTED cell's std, matching the monitor: the budget is sized
     # for the cell that still has the most to learn
-    widest_std = posterior.widest_std()
+    if widest_std is None:
+        widest_std = posterior.widest_std()
     tau_end, rows = explore.walk_tau(
         tau_now, days, lambda day, _tau: spend_by_day.get(day, 0.0),
         il_by_day, widest_std, cfg)
@@ -293,7 +303,7 @@ def calibration_current(cfg, today=None):
 
 
 def run(cfg, apply=False, events_root=None, posterior_path=None, today=None,
-        calibrate_tau=False):
+        calibrate_tau=False, resume_exploration=False):
     store = EventStore(cfg, root=events_root)
     posterior = PosteriorStore(cfg, path=posterior_path)
     per_cell, gates, decision_list, outcome_list = collect_batch(
@@ -303,7 +313,17 @@ def run(cfg, apply=False, events_root=None, posterior_path=None, today=None,
     gates["calibration_schedule_current"] = calibration_current(cfg, today)
 
     hard_fail = [name for name, g in gates.items() if not g["pass"]]
-    report = {"event_quality_gates": gates, "cells": {}, "applied": False}
+    report = {"event_quality_gates": gates, "cells": {}, "applied": False,
+              "exploration_suspended": posterior.exploration_suspended()}
+
+    # tau moves on SPEND, not on evidence, so it is calibrated whether or not
+    # any cell crosses the information threshold -- a day that explored and
+    # learned nothing still cost money, and that is exactly what tau prices.
+    # Computed BEFORE the commit loop: the budget is sized on the posterior
+    # the days were priced under, so a dry run and --apply agree on tau_after.
+    report["tau_calibration"] = tau_calibration(
+        decision_list, outcome_list, posterior, cfg,
+        widest_std=posterior.widest_std())
 
     for cell, pairs in sorted(per_cell.items()):
         rec = posterior.state["cells"][cell]
@@ -353,12 +373,6 @@ def run(cfg, apply=False, events_root=None, posterior_path=None, today=None,
             posterior.commit_update(cell, new_mean, new_std, len(pairs),
                                     eff_info, outcome_ids, applied=trigger)
 
-    # tau moves on SPEND, not on evidence, so it is calibrated whether or not
-    # any cell crossed the information threshold -- a day that explored and
-    # learned nothing still cost money, and that is exactly what tau prices.
-    report["tau_calibration"] = tau_calibration(
-        decision_list, outcome_list, posterior, cfg)
-
     # tau is committed by --apply AND by --calibrate-tau: it moves on spend,
     # not evidence, so it needs no operator and must not wait for the
     # learning cadence (weekly --apply with a daily tau)
@@ -371,6 +385,13 @@ def run(cfg, apply=False, events_root=None, posterior_path=None, today=None,
             posterior.commit_tau(tc["tau_after"], tc["through_date"])
         report["tau_committed"] = bool(tc["commit"])
         report["applied"] = bool(apply)
+
+    # the HUMAN gate on exploration (design 5.12): a fired stop condition
+    # suspends forced exploration and nothing resumes it automatically --
+    # the operator reads the monitor, fixes the cause, and clears it here
+    if resume_exploration:
+        report["exploration_resumed"] = posterior.resume_exploration()
+        report["exploration_suspended"] = None
     return report
 
 
@@ -382,11 +403,16 @@ def main():
     ap.add_argument("--calibrate-tau", action="store_true",
                     help="commit the tau walk only (daily, no operator): "
                          "spend, not evidence")
+    ap.add_argument("--resume-exploration", action="store_true",
+                    help="clear the exploration suspension a stop condition "
+                         "set (operator gate: nothing resumes it "
+                         "automatically)")
     ap.add_argument("--config", default="config.yaml")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    report = run(cfg, apply=args.apply, calibrate_tau=args.calibrate_tau)
+    report = run(cfg, apply=args.apply, calibrate_tau=args.calibrate_tau,
+                 resume_exploration=args.resume_exploration)
 
     for name, g in report["event_quality_gates"].items():
         print(f"gate {name}: {g['value']} vs {g['threshold']} "
@@ -419,6 +445,18 @@ def main():
               "operator gate")
     else:
         print("monitor only -- rerun with --apply to commit")
+
+    if "exploration_resumed" in report:
+        cleared = report["exploration_resumed"]
+        print("exploration resumed -- cleared: "
+              + (f"suspended since {cleared['since']} for "
+                 f"{', '.join(cleared['reasons'])}" if cleared
+                 else "nothing (exploration was not suspended)"))
+    elif report["exploration_suspended"]:
+        s = report["exploration_suspended"]
+        print(f"EXPLORATION SUSPENDED since {s['since']} "
+              f"({', '.join(s['reasons'])}); exploitation continues. Clear "
+              "with --resume-exploration once the cause is fixed.")
 
 
 if __name__ == "__main__":

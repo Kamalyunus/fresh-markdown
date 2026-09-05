@@ -156,3 +156,14 @@ def test_config_fingerprint_moves_on_any_value_and_names_what_moved():
     assert any(d.startswith("exploration.tau_initial:") for d in diff)
     assert any(d.startswith("dispersion.rho:") for d in diff)
     assert len(diff) == 2
+
+
+def test_a_sealed_artifact_that_vanished_or_appeared_is_caught(cfg):
+    """verify() compared hashes only for files present, so `rm r_lookup.json`
+    after sealing still read PASS; a fit made after sealing was invisible too."""
+    import os
+    _full_bundle(cfg)
+    sealed = seal_mod.seal(cfg)
+    os.remove(provenance._path(cfg, ("dispersion", "r_lookup_path")))
+    v = provenance.verify(cfg, sealed)
+    assert v["verdict"] == "FAIL" and any("no longer on disk" in p for p in v["problems"])

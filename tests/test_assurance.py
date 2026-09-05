@@ -6,48 +6,66 @@ import numpy as np
 import pytest
 from scipy.stats import nbinom
 
+from conftest import P0, COST, decision_event
 from pipeline import assurance
 from pricing import dp as dp_mod
+from pricing import explore
 from pricing.demand import mu_at
 
 
-P0, COST, D_REF, R = 10000.0, 4000.0, 0.30, 0.919
+D_REF, R = 0.30, 0.919
 
 
 def _decision(cfg, q, path, eps=-1.0, anchor=0.0, tau=None, rng=None,
               episode="ep", entry=False):
-    """A decision event built the way inference.decide builds one."""
+    """A decision event built the way inference.decide builds one: the
+    shared contract builder, with the solver's own answer for this state
+    and a uniform draw from the affordable set when a tau is in force."""
     anchor = None if entry else anchor
     res = dp_mod.solve(P0, COST, q, path, D_REF, eps, R, cfg,
                        anchor_discount=anchor, entry=entry)
     star = res.optimal_index
     chosen = star
-    is_expl, affordable = False, []
+    is_expl, affordable, cost = False, [], 0.0
     if tau is not None:
-        costs = {j: res.q_by_tier[star] - res.q_by_tier[j] for j in res.q_by_tier}
-        affordable = [j for j in res.q_by_tier if j != star and costs[j] <= tau]
+        affordable, costs = explore.affordable_set(res, tau)
         if affordable:
             chosen = affordable[int(rng.integers(0, len(affordable)))]
-            is_expl = True
-    return {
-        "decision_id": str(uuid.uuid4()), "episode_id": episode,
-        "is_entry": entry, "q_remaining": q, "hours_remaining": len(path),
-        "original_price": P0, "cost": COST,
-        "mu_ref_path": [float(m) for m in path],
-        "anchor_discount": anchor,
-        "reference_discount": D_REF, "reference_mu": float(path[0]),
-        "dispersion_r": R, "epsilon_posterior_mean": eps,
-        "optimal_discount": float(res.tiers[star]),
-        "applied_discount": float(res.tiers[chosen]),
-        "expected_il": float(-res.q_by_tier[chosen]),
-        "is_exploration": is_expl, "affordable_set_size": len(affordable),
-        "tau_current": tau, "delta_min": 0.0,
-    }
+            is_expl, cost = True, float(costs[chosen])
+    return decision_event(
+        decision_id=str(uuid.uuid4()), episode_id=episode, is_entry=entry,
+        q_remaining=q, hours_remaining=len(path),
+        mu_ref_path=[float(m) for m in path], anchor_discount=anchor,
+        reference_discount=D_REF, reference_mu=float(path[0]),
+        dispersion_r=R, epsilon_posterior_mean=eps,
+        optimal_discount=float(res.tiers[star]),
+        optimal_price=P0 * (1 - float(res.tiers[star])),
+        applied_discount=float(res.tiers[chosen]),
+        applied_price=P0 * (1 - float(res.tiers[chosen])),
+        expected_il=float(-res.q_by_tier[chosen]),
+        is_exploration=is_expl, exploration_cost=cost,
+        affordable_set_size=len(affordable), tau_current=tau, delta_min=0.0)
 
 
-def _outcome(dec, sold, q):
+def _outcome(dec, sold, q, end=None):
+    """An outcome for `dec`: `end` defaults to the reconciling count."""
     return {"outcome_id": str(uuid.uuid4()), "decision_id": dec["decision_id"],
-            "units_sold": int(sold), "starting_inventory": int(q)}
+            "units_sold": int(sold), "starting_inventory": int(q),
+            "ending_inventory": int(q - sold if end is None else end)}
+
+
+# Solve sets are expensive (hundreds of DP solves) and every test reads the
+# same one for the same arguments: built once per module, handed out as
+# copies so a test that edits its events cannot leak into the next. The
+# shipped config is identical across tests (conftest's `cfg` reloads it),
+# which is what makes the argument tuple a sufficient key.
+_SOLVED = {}
+
+
+def _cached(key, build):
+    if key not in _SOLVED:
+        _SOLVED[key] = build()
+    return copy.deepcopy(_SOLVED[key])
 
 
 # ------------------------------------------------------------- 1 · reproduce
@@ -86,20 +104,39 @@ def test_reproduction_reports_events_it_cannot_replay(cfg):
     assert out["verdict"] == "PASS"             # skipped, not silently counted
 
 
+def test_a_solver_that_raises_on_every_decision_is_a_fail_not_insufficient(cfg, monkeypatch):
+    """An exception in the re-solve counted as a mismatch but not as a check,
+    so a broken solver read INSUFFICIENT (status WARN) instead of FAIL."""
+    decs = [_decision(cfg, q=3, path=[0.8] * 4) for _ in range(4)]
+
+    def boom(evt, cfg):
+        raise RuntimeError("solver broken")
+    monkeypatch.setattr(assurance, "_resolve", boom)
+    out = assurance.reproduction(decs, cfg)
+    assert out["verdict"] == "FAIL"
+    assert out["decisions_checked"] == 4 and out["mismatch_count"] == 4
+    assert out["mismatch_rate"] == 1.0
+    assert all("RuntimeError" in f["error"] for f in out["failures"])
+    # and the top-line verdict follows
+    assert assurance.run(decs, [], cfg)["verdict"] == "FAIL"
+
+
 # ------------------------------------------------------------ 2 · dispersion
 def _demand_pairs(cfg, n, r_true, seed=0):
     """Decisions plus outcomes drawn from NB(mu, r_true) and censored."""
-    rng = np.random.default_rng(seed)
-    decs, outs = [], []
-    for i in range(n):
-        q = int(rng.integers(1, 4))
-        d = _decision(cfg, q=q, path=[0.8] * 2, episode=f"ep{i}")
-        mu = mu_at(d["reference_mu"], d["applied_discount"], D_REF,
-                   d["epsilon_posterior_mean"], cfg["pricing"]["demand_floor"])
-        demand = nbinom.rvs(r_true, r_true / (r_true + mu), random_state=rng)
-        decs.append(d)
-        outs.append(_outcome(d, min(demand, q), q))
-    return decs, outs
+    def build():
+        rng = np.random.default_rng(seed)
+        decs, outs = [], []
+        for i in range(n):
+            q = int(rng.integers(1, 4))
+            d = _decision(cfg, q=q, path=[0.8] * 2, episode=f"ep{i}")
+            mu = mu_at(d["reference_mu"], d["applied_discount"], D_REF,
+                       d["epsilon_posterior_mean"], cfg["pricing"]["demand_floor"])
+            demand = nbinom.rvs(r_true, r_true / (r_true + mu), random_state=rng)
+            decs.append(d)
+            outs.append(_outcome(d, min(demand, q), q))
+        return decs, outs
+    return _cached(("demand", n, r_true, seed), build)
 
 
 def test_dispersion_passes_when_the_world_matches_r(cfg):
@@ -122,23 +159,47 @@ def test_dispersion_reports_insufficient_rather_than_guessing(cfg):
     assert assurance.dispersion_fit(decs, outs, cfg)["verdict"] == "INSUFFICIENT"
 
 
+def test_dispersion_reads_a_stockout_by_the_shared_censoring_rule(cfg):
+    """`sold >= q` called a restocked hour a stockout: the shelf never sat
+    empty, demand was observed exactly. The check uses the ONE censoring
+    rule (episodes.is_censored_hour) and leaves restocked hours out."""
+    decs, outs = _demand_pairs(cfg, 1500, r_true=R, seed=1)
+    n_min = cfg["assurance"]["dispersion_min_outcomes"]
+    # restock every hour that would otherwise read as a stockout
+    restocked = 0
+    for o in outs:
+        if o["units_sold"] >= o["starting_inventory"]:
+            o["ending_inventory"] = o["starting_inventory"] + 3   # stock arrived
+            o["adjustment_reason"] = "intraday_restock"
+            restocked += 1
+    assert restocked > 0
+    out = assurance.dispersion_fit(decs, outs, cfg)
+    assert out["outcomes"] == len(outs) - restocked        # left out, not misread
+    assert out["outcomes"] >= n_min
+    # and a write-off row (ending 0 with stock left) is not a stockout either:
+    # with every sell-out gone the observed stockout rate is exactly zero
+    assert all(b["observed"] == 0.0 for b in out["stockout"]["bins"])
+
+
 # ----------------------------------------------------------- 3 · correlation
 def _episodes(cfg, n_ep, hours, episode_shift, seed=0):
     """episode_shift > 0 gives every hour of an episode a shared offset --
     exactly the structure rho measures."""
-    rng = np.random.default_rng(seed)
-    decs, outs = [], []
-    for e in range(n_ep):
-        shared = rng.normal(0, episode_shift)
-        for _ in range(hours):
-            d = _decision(cfg, q=3, path=[0.8] * 2, episode=f"ep{e}")
-            mu = mu_at(d["reference_mu"], d["applied_discount"], D_REF,
-                       -1.0,
-                       cfg["pricing"]["demand_floor"])
-            sold = max(0, int(round(mu + shared + rng.normal(0, 0.3))))
-            decs.append(d)
-            outs.append(_outcome(d, min(sold, 3), 3))
-    return decs, outs
+    def build():
+        rng = np.random.default_rng(seed)
+        decs, outs = [], []
+        for e in range(n_ep):
+            shared = rng.normal(0, episode_shift)
+            for _ in range(hours):
+                d = _decision(cfg, q=3, path=[0.8] * 2, episode=f"ep{e}")
+                mu = mu_at(d["reference_mu"], d["applied_discount"], D_REF,
+                           -1.0,
+                           cfg["pricing"]["demand_floor"])
+                sold = max(0, int(round(mu + shared + rng.normal(0, 0.3))))
+                decs.append(d)
+                outs.append(_outcome(d, min(sold, 3), 3))
+        return decs, outs
+    return _cached(("episodes", n_ep, hours, episode_shift, seed), build)
 
 
 def _frozen_at_live_rho(cfg, decs, outs):
@@ -161,11 +222,9 @@ def test_correlation_passes_when_the_world_has_not_moved(cfg):
 
 
 def test_deff_is_measured_at_the_live_clustering_not_a_frozen_paste(cfg):
-    """m was a config paste -- and not forced hours at all, but the mean
-    LENGTH of legacy episodes whose discount changed. It is now measured
-    wherever deff is applied, so the forced-hours channel cannot drift: the
-    same world at half the hours per episode is not an alarm, it is a
-    different (correctly computed) divisor on both sides."""
+    """m is measured wherever deff is applied, so the forced-hours channel
+    cannot drift: the same world at half the hours per episode is not an
+    alarm, it is a different (correctly computed) divisor on both sides."""
     base_hours = cfg["assurance"]["rho_min_hours_per_episode"] * 2
     for hours in (base_hours, base_hours // 2):
         decs, outs = _episodes(cfg, 300, hours=hours, episode_shift=0.25,
@@ -178,7 +237,7 @@ def test_deff_is_measured_at_the_live_clustering_not_a_frozen_paste(cfg):
 
 def test_correlation_catches_drift_that_would_rescale_every_update(cfg):
     """Hours almost perfectly correlated within an episode: deff should climb
-    far above the frozen 3.347, and evidence is being over-counted until it
+    far above the frozen value, and evidence is being over-counted until it
     does."""
     decs, outs = _episodes(cfg, 300, hours=4, episode_shift=3.0, seed=5)
     out = assurance.correlation_drift(decs, outs, cfg)
@@ -193,51 +252,62 @@ def test_correlation_reports_insufficient_on_a_thin_window(cfg):
 
 
 # ----------------------------------------------------------- 4 · exploration
-def _exploration_events(cfg, n, rng, biased=False):
-    decs = []
-    for i in range(n):
-        d = _decision(cfg, q=1, path=[0.8], tau=2000.0,
-                      rng=rng, episode=f"ep{i}")
-        if biased and d["is_exploration"]:
-            # a draw that always takes the shallowest affordable tier: prices
-            # stay legal, IL stays reported, and the evidence stops being causal
-            res = dp_mod.solve(P0, COST, 1, [0.8], D_REF, -1.0, R, cfg,
-                               anchor_discount=0.0, entry=False)
-            star = res.optimal_index
-            costs = {j: res.q_by_tier[star] - res.q_by_tier[j] for j in res.q_by_tier}
-            affordable = [j for j in res.q_by_tier if j != star and costs[j] <= 2000.0]
-            if affordable:
-                d["applied_discount"] = float(res.tiers[affordable[0]])
-                d["expected_il"] = float(-res.q_by_tier[affordable[0]])
-        decs.append(d)
-    return decs
+def _exploration_events(cfg, n, seed, biased=False):
+    def build():
+        rng = np.random.default_rng(seed)
+        decs = []
+        for i in range(n):
+            d = _decision(cfg, q=1, path=[0.8], tau=2000.0,
+                          rng=rng, episode=f"ep{i}")
+            if biased and d["is_exploration"]:
+                # a draw that always takes the shallowest affordable tier:
+                # prices stay legal, IL stays reported, and the evidence stops
+                # being causal
+                res = dp_mod.solve(P0, COST, 1, [0.8], D_REF, -1.0, R, cfg,
+                                   anchor_discount=0.0, entry=False)
+                affordable, _ = explore.affordable_set(res, 2000.0)
+                if affordable:
+                    d["applied_discount"] = float(res.tiers[affordable[0]])
+                    d["expected_il"] = float(-res.q_by_tier[affordable[0]])
+            decs.append(d)
+        return decs
+    return _cached(("exploration", n, seed, biased), build)
 
 
 def test_uniformity_passes_on_an_honest_uniform_draw(cfg):
-    rng = np.random.default_rng(7)
-    out = assurance.exploration_uniformity(_exploration_events(cfg, 600, rng), cfg)
+    out = assurance.exploration_uniformity(_exploration_events(cfg, 600, 7), cfg)
     assert out["verdict"] == "PASS", out
     assert out["exploration_draws"] >= cfg["assurance"]["uniformity_min_draws"]
 
 
 def test_uniformity_catches_a_biased_draw(cfg):
-    rng = np.random.default_rng(8)
     out = assurance.exploration_uniformity(
-        _exploration_events(cfg, 600, rng, biased=True), cfg)
+        _exploration_events(cfg, 600, 8, biased=True), cfg)
     assert out["verdict"] == "FAIL", out
 
 
 def test_uniformity_catches_an_affordable_set_that_never_explored(cfg):
     """select() draws whenever the affordable set is non-empty, so a decision
     reporting a set and no exploration means the two disagree."""
-    rng = np.random.default_rng(9)
-    decs = _exploration_events(cfg, 300, rng)
+    decs = _exploration_events(cfg, 300, 9)
     for d in decs[:5]:
         d["is_exploration"] = False
         d["affordable_set_size"] = 3
     out = assurance.exploration_uniformity(decs, cfg)
     assert out["affordable_but_not_explored"] == 5
     assert out["verdict"] == "FAIL"
+
+
+def test_a_suspended_decision_is_not_a_contradiction(cfg):
+    """While exploration is suspended decide() records tau_current None and an
+    empty affordable set; that is exploitation by design, not a draw that
+    failed to happen."""
+    decs = _exploration_events(cfg, 300, 9)
+    for d in decs[:20]:
+        d.update(is_exploration=False, affordable_set_size=0, tau_current=None,
+                 applied_discount=d["optimal_discount"])
+    out = assurance.exploration_uniformity(decs, cfg)
+    assert out["affordable_but_not_explored"] == 0
 
 
 # ------------------------------------------------------------------- wiring
@@ -254,10 +324,8 @@ def test_run_aggregates_and_names_the_failing_checks(cfg):
 
 def test_uniformity_needs_size_as_well_as_significance(cfg):
     """chi-square power grows with n and the event store is append-only with
-    no window, so a p-value alone tightens every day the system runs: at 100
-    draws it takes a ~47% bin deviation to FAIL, at a million ~0.5%. The same
-    draw distribution would pass in week one and fail at volume. The effect
-    size carries the meaning; p only stops noise being called bias."""
+    no window, so a p-value alone tightens every day the system runs. The
+    effect size carries the meaning; p only stops noise being called bias."""
     import numpy as np
     from scipy.stats import chi2 as chi2_dist
 
@@ -283,8 +351,7 @@ def test_uniformity_needs_size_as_well_as_significance(cfg):
                            and max_dev > size_gate) else "PASS")
 
     tiny = size_gate / 3
-    # a deviation too small to matter stays PASS at every scale -- the old
-    # p-only rule flipped this to FAIL as n grew
+    # a deviation too small to matter stays PASS at every scale
     assert verdict(10_000, tiny) == "PASS"
     assert verdict(1_000_000, tiny) == "PASS"
     # a real bias still fails once there is enough data to be sure of it
@@ -317,8 +384,7 @@ def test_a_stale_rho_still_fails_weighted_by_todays_clustering(cfg):
 
 def test_run_is_insufficient_until_every_check_ran(cfg):
     """Nothing failing and one check that saw almost nothing is not a PASS:
-    the operator gate read the top-line verdict and signed off a window in
-    which dispersion and correlation were never checked."""
+    the operator gate reads the top-line verdict."""
     decs = [_decision(cfg, q=3, path=[0.8] * 4) for _ in range(4)]
     report = assurance.run(decs, [], cfg)
     assert report["reproduction"]["verdict"] == "PASS"
@@ -328,8 +394,8 @@ def test_run_is_insufficient_until_every_check_ran(cfg):
 
 
 def test_icc_survives_a_nan_residual():
-    """One NaN poisoned every sum and returned 0.0 -- 'no clustering', so
-    deff read 1 and every posterior step was over-weighted."""
+    """One NaN must not poison every sum into 0.0 -- 'no clustering', deff 1,
+    every posterior step over-weighted."""
     import numpy as np
     from common.config import intraclass_correlation
     rng = np.random.default_rng(0)
@@ -345,8 +411,7 @@ def test_icc_survives_a_nan_residual():
 
 def test_assurance_grades_only_prices_that_were_actually_charged(cfg):
     """A failed push sold at a price we did not choose. Grading r on it
-    indicts the model for the integration's miss -- the learning path
-    already excluded those; assurance paired every outcome."""
+    indicts the model for the integration's miss."""
     from events.pairs import match_pairs
     decs, outs = _demand_pairs(cfg, 30, r_true=R, seed=4)
     for o in outs[:10]:
@@ -360,7 +425,6 @@ def test_uniformity_reconstructs_the_set_with_the_decision_own_delta_min(cfg):
     """The affordable set the chooser drew from excluded tiers below the
     decision's delta_min; a reconstruction without it would call every
     honest draw non-uniform (the near tiers never appear)."""
-    from pricing import explore
     rng = np.random.default_rng(5)
     decs = []
     for _ in range(150):

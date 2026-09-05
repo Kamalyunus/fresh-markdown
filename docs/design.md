@@ -358,7 +358,10 @@ genuinely steadier than Poisson also lands there (no NB can represent
 Pearson < 1) and clamping it inflates the variance claimed for exactly the
 cell with least. Pearson dispersion tells them apart; under-dispersed
 groups are exempt and listed in `r_lookup.under_dispersed_groups` (a long
-list indicts the NB family for the extract).
+list indicts the NB family for the extract). An `r` within
+`r_bound_tolerance_rel` of either search bound is stored but flagged in
+`r_lookup.at_bound` (rule 3) and excluded from the clamp percentile, so a
+thin extract with many pinned groups cannot talk the clamp up to the ceiling.
 
 `rho` is one global scalar fitted against the model's own residuals **on
 the calib window** (in-train rows understate it — the model fits its own
@@ -417,7 +420,13 @@ runs before the dispersion fit with nothing circular between them.
 **No fallback constant.** A flat likelihood degrades to the uniform on the
 support; a wrong-signed one (unconstrained peak at or above zero, searched
 *past* the sign bounds) is discarded for the pooled density and named in
-`wrong_sign_categories`; the std is the widest of three measured floors
+`wrong_sign_categories`; a **lower-pinned** one (the search extends
+`unconstrained_search_below` past `epsilon_min` too, and a peak at or below
+the bound that strictly beats every interior point means the likelihood ran
+off the support — rule 3) is likewise replaced by the pool, excluded from
+it, and named in `lower_boundary_categories` with a `boundary_note`
+recommending that `epsilon_min` be widened (never `epsilon_max`); a flat
+curve whose argmax merely lands on the first grid point is not pinned; the std is the widest of three measured floors
 (density width, grid resolution, fold spread) and can never be zero — a
 zero-width prior would freeze the posterior. `posterior.epsilon_max`
 (−0.05) is a **sign constraint, never to be widened**: an estimate pinned
@@ -713,16 +722,23 @@ revision, same atomic write; `tau` on SPEND, every run.
 ### 5.12 Monitoring — three families, three questions
 
 Business (is IL improving — ratio-of-sums IL% with denominators, absolute
-IL alongside, by category/FC/arm); learning (is the posterior moving — per-
+IL alongside, by category/FC); learning (is the posterior moving — per-
 cell trajectories, forced counts, spend vs budget, affordable-set-empty
 rate, current τ); safety (is the event pipeline healthy — match/duplicate/
 mismatch rates, quarantine, latency). A posterior std flat for 21 days
 alerts directly; `affordable_set_empty_rate` is the leading indicator of a
 non-explorable catalogue; `realised_vs_predicted_sold_ratio` is the daily
-continuation of the calibration diagnostic. Stop conditions (§15.4 family:
-cost-floor violation, event-quality breach, mismatch, overspend > 2×
-budget, scrap/margin deterioration) **suspend exploration only for the
-affected cohort — exploitation pricing continues**.
+continuation of the calibration diagnostic. Stop conditions (cost-floor
+violation, event-quality breach, mismatch, overspend > 2× budget on a
+single day, scrap/margin deterioration over `persistence_days`) **suspend
+exploration — exploitation pricing continues**: the monitor writes
+`exploration_suspended` into the posterior state, `decide` selects with no
+budget (no draw) while it is set, `status` reads WARN with the reason, and
+only a human lifts it (`pipeline.update --resume-exploration`). Nothing
+auto-resumes: a stop is a finding to investigate, not a transient. The
+guardrail series is keyed by an episode's **close day**, so the newest
+days count every episode that closed rather than only the early
+sell-outs, and floor and trigger read the same, unbiased series.
 
 ### 5.13 Shadow harness — full rehearsal at zero pricing risk
 
@@ -767,10 +783,23 @@ that no longer matches its derivation). Shadow also reports
 cross-check) and `tau_controller_trace` (day-by-day walk: `tau_next` reads
 only the day just closed, so a tau 8× too generous suspends exploration
 before the controller can correct). The trace seeds its trailing-IL base
-with pre-window closed-episode IL, scaled to the sample. The budget base —
-seed and in-window — is `common.metrics.episode_economics` over every
-observed hour: the same scrap and IL the guardrail floors and the
-monitor read, never a local copy.
+with pre-window closed-episode IL on the **dp_eligible population**, scaled
+to the sample — the same population every figure it is scaled against
+(`frac`, `seed_scale`) counts, or the day-one budget is inflated by the
+ineligible episodes' IL. The budget base — seed and in-window — is
+`common.metrics.episode_economics` over every observed hour: the same
+scrap and IL the guardrail floors and the monitor read, never a local copy.
+`daily_budget` is the mean of `budget_today` over the window's **decision
+days** (`ledger.days`, the days the controller trace walks), never over the
+seed days, whose first day has no trailing history and a budget of exactly
+zero. Every per-day figure divides by one `n_days`: the calendar span of
+the unsampled, unextended window frame (a sample can shrink the span; the
+window extension adds a next-day row with no decisions). Shadow freezes the
+calibration at the window start (`freeze_calibration_from`) before
+predicting, so `calibration_regimes.frozen_anchor` is the anchor by
+construction on any window, and `calibration_coverage` reads the deliberate
+freeze as OK rather than STALE. `tau_initial_derivation.days` is the count
+of trading days the ledger and the IL mean share.
 
 **The forced rate is the budget's, and the sweep says what a change
 buys.** The chooser explores whenever τ affords an admissible tier, so
@@ -840,14 +869,21 @@ fingerprint** — the phase it belongs to (`backtest` / `shadow` /
 `status` compares them against disk: model mismatch is FAIL; a config key
 **the report reads** that has moved since is WARN and names it
 (`tune.stale_keys` routes moved keys to the reports they invalidate, and
-`advance` re-runs by the same table: W turns the loop, `delta_min` re-runs
-shadow, a stop threshold re-derives thresholds, an unclassified edit
-re-grades everything, and a MEASURED paste that writes back what a report
-measured is inert; the classes do not nest, so a paste of several keys
-re-runs the union — the strongest class alone once swallowed the
-stop-threshold paste behind `delta_min`'s and left thresholds un-derived.
-The backtest's exploration ledger reads `delta_min` too, but no pasted
-value comes from it, so it is not re-graded). Treating every digest change as staleness made
+`advance` re-runs by the same table: W turns the loop; `delta_min` re-runs
+shadow; a stop threshold, `max_std_shrink` or `information_increment`
+re-derives thresholds; `max_mean_step` re-derives thresholds AND re-runs
+shadow; keys tune does not paste but one report reads are routed by prefix
+(`tune.READ_BY`: the budget and controller knobs to shadow, the guardrail
+window/smoothing/persistence to thresholds); runtime-only knobs are inert;
+an unclassified edit re-grades everything; a MEASURED paste that writes
+back what a report measured is inert. The classes do not nest, so a paste
+of several keys re-runs the union, and a per-category mapping is matched on
+the LONGEST `KEYS` prefix — a category re-round of `delta_min_log_bias`
+diffs as `…delta_min_log_bias.MEAT` and is shadow's, not the loop's. The
+backtest's exploration ledger reads `delta_min` too, but no pasted value
+comes from it, so it is not re-graded; `calibration_gate_band` is an input
+to the W sweep yet stays inert on purpose, or every band paste would reopen
+the oscillation the hysteresis exists for). Treating every digest change as staleness made
 `advance` re-run shadow after each tau paste and chase the fixed point for a
 day; and the rho paste tolerance must sit above the ~1e-3 step a
 `--check-only` turn takes while the loop contracts
@@ -1120,7 +1156,13 @@ default `--check-convergence` stays a dry run.
 prior/`r` now on disk, compares per cell and per schedule week in log space
 against `calibration_convergence_tol_log`, then restores the artifact (a
 dry run — committing while prior and dispersion lag it would create the
-inconsistency being tested for). The verdict lands in
+inconsistency being tested for; `convergence.method` names which of the
+two ran). A cell whose bisection pinned at `calibration_factor_search_bounds`
+carries `detail[cell].at_bound` (rule 3); thin cells are shrunk toward the
+parent by `calibration_shrinkage_units`, never "left at 1.0" — only a whole
+window under `calibration_min_anchor_rows` is. A failing `--check-convergence`
+stops `bootstrap.run`'s loop with its own message rather than iterating to
+`--max-turns` with a stall test that can never fire. The verdict lands in
 `calibration.json → convergence` (status row is WARN — chain health, not a
 launch gate).
 
@@ -1499,12 +1541,15 @@ python3 -m pipeline.shadow --input data/prepared.parquet --out reports/shadow.js
 python3 -m pipeline.tune              # what to change, on what evidence
 python3 -m pipeline.tune --apply      # paste MEASURED values, log decisions
 
-# daily production loop
-python3 -m pipeline.update             # monitor only, always safe
-python3 -m pipeline.update --apply     # human-gated bounded update (§5.11)
+# daily production loop -- advance --feed runs it in this order
+python3 -m pipeline.ingest_outcomes --feed <yesterday's parquet>
+python3 -m pipeline.update --calibrate-tau   # tau walks every closed day, no operator
 python3 -m pipeline.monitor
 python3 -m pipeline.assurance
+python3 -m pipeline.export_events
 python3 -m pipeline.status             # exits 1 on any FAIL
+python3 -m pipeline.update --apply     # human-gated bounded update (§5.11)
+python3 -m pipeline.update --resume-exploration   # human: lift a stop-condition suspension
 
 # leadership deck: twelve scenarios answered by dp.solve on this config
 python3 -m tools.scenario_deck --workers 0   # reports/scenarios.html (~2 min)

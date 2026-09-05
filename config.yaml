@@ -55,6 +55,8 @@ baseline_model:
   mix_decomposition_min_unit_rows: 30  # SET  anchor rows before a SKU x FC unit gets its own ratio
   calibration_window_sweep_weeks: [1, 2, 4, 8]  # SET  windows the rolling-origin sweep scores to choose W
   calibration_fit_trailing_weeks: 1  # MEASURED by the sweep; W, and calib must be >= 2W (design 6)
+  calibration_factor_search_bounds: [0.1, 10.0]  # SET  bisection bracket for one level factor; a solve pinned at either end is flagged at_bound in calibration.json detail
+  calibration_factor_bisection_steps: 20  # SET  halvings inside the bracket (~1e-5 resolution)
   calibration_factor_path: "artifacts/calibration.json"   # per-category level correction
 
 reference_discount:                    # SET  category anchors
@@ -66,6 +68,8 @@ dispersion:
   clamp_percentile: 0.90               # SET  clamp high converged r
   min_rows_per_group: 200              # SET  below this: fall back one level
   r_search_bounds: [0.05, 50.0]        # SET  MLE search range for r
+  r_bound_tolerance_rel: 0.01          # SET  an r within this of either search bound is a PINNED fit: flagged at_bound, excluded from the clamp percentile
+  working_elasticity_fallback: -1.0    # SET  standalone working constant for the residuals when no prior artifact exists yet -- NOT a prior
   rho_clip_max: 0.95                   # SET  ceiling on the fitted intra-episode correlation
   r_lookup_path: "artifacts/r_lookup.json"
   rho_path: "artifacts/rho.json"
@@ -77,6 +81,8 @@ tuning:                                # SET  gates pipeline.tune checks before 
   max_il_delta_pct_for_auto_rail: 0.005         # SET  auto-rail ceiling on the IL move
   calibration_band_sigma_multiple: 3            # SET  band = this many sigma of log f
   calibration_band_max_half_width: 0.10         # SET BY OWNER  ceiling; tune may only tighten
+  guardrail_inert_floor_multiple: 3             # SET  a stop threshold above this multiple of its noise floor is LIKELY INERT
+  bounded_step_consistent_band: [0.7, 1.4]      # SET  std-surprise band inside which the two learning rails are called CONSISTENT
 
 posterior:
   min_episodes_per_week_for_cell: 150  # SET  below this, fall back to the global cell
@@ -90,6 +96,7 @@ posterior:
     own_information_saturation: 2.0    # SET  log-lik units that count as informative
     stability_folds: 3                 # SET  disjoint train slices for fold_spread
     search_grid_size: 159              # SET  profile resolution
+    unconstrained_search_below: 1.0    # SET  how far below epsilon_min the unconstrained peak search extends (same step); a peak within one grid step of epsilon_min is a boundary solution
     path: "artifacts/prior.json"
 
 pricing:
@@ -143,6 +150,8 @@ assurance:                             # pipeline.assurance -- live-data checks
 
 monitoring:
   guardrail_noise_window_days: 28      # SET  trailing baseline for threshold calibration
+  guardrail_noise_min_extra_days: 7    # SET  scored days needed beyond the window before a noise floor is measured
+  guardrail_outlier_sigma_ratio: 2.0   # SET  raw sigma above this multiple of the robust (MAD) sigma = outlier-dominated; set the floor from the robust figure
   shadow_gate:                         # SET  the phase-1 exit gate (design 5.13)
     min_event_completeness: 0.99
     sample_episodes: 3000              # SET  0 = every episode
@@ -154,6 +163,6 @@ monitoring:
       scrap: 7                         # per metric, chosen from measured noise
       margin: 1
     persistence_days: 2                # SET  consecutive days before a stop fires
-    scrap_deterioration_pct: null      # MEASURED  3-sigma of the trailing noise; SHIPS NULL -- paste from YOUR reports/thresholds.json
-    margin_deterioration_pct: null     # MEASURED  3-sigma of the trailing noise; SHIPS NULL -- paste from YOUR reports/thresholds.json
+    scrap_deterioration_pct: null      # MEASURED  3-sigma of the trailing noise, pasted by tune --apply from YOUR reports/thresholds.json; ships null
+    margin_deterioration_pct: null     # MEASURED  3-sigma of the trailing noise, pasted by tune --apply from YOUR reports/thresholds.json; ships null
   alert_posterior_std_flat_days: 21    # SET  learning-loop health

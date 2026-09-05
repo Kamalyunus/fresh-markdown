@@ -87,9 +87,6 @@ HOUR_FACTOR = {
     15: 0.95, 16: 1.20, 17: 1.55, 18: 1.95, 19: 2.20,
 }
 
-EXCLUSION_START = dt.date(2026, 4, 25)
-EXCLUSION_END = dt.date(2026, 6, 3)
-
 # The fixture must cover the configured splits: --start defaults to
 # split.train_start and --days to what reaches split.test_end, so
 # `bootstrap.run --input <fixture>` runs end to end.
@@ -208,8 +205,6 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
             fc = rng.choice(FCS)
             start_hour = int(rng.integers(10, 14))
             n_hours = int(rng.integers(4, 20 - start_hour + 1))
-            if n_hours < 2:
-                continue
 
             inv = int(rng.integers(1, 32))
             window_start = len(records)   # for whole-window dirt injection
@@ -349,7 +344,11 @@ def main():
     table = pa.Table.from_pandas(df, schema=SCHEMA, preserve_index=False)
     pq.write_table(table, args.out)
 
-    excl = df[(df.date >= EXCLUSION_START) & (df.date <= EXCLUSION_END)]
+    # the exclusion window is config's (data.exclusion_window), never a copy
+    ew = (cfg.get("data") or {}).get("exclusion_window")
+    excl = (df[(df.date >= dt.date.fromisoformat(str(ew["start"])))
+               & (df.date <= dt.date.fromisoformat(str(ew["end"])))]
+            if ew else None)
     # The two convention signals, counted at the source. Both were silently
     # ABSENT from a committed fixture at some point, and each absence hid a
     # whole code path while every test passed -- the write-off sentinel for
@@ -367,7 +366,8 @@ def main():
     print(f"discount range    : {df.discount.min():.0f}-{df.discount.max():.0f} (percent)")
     print(f"final_price==0    : {(df.final_price == 0).mean():.1%} "
           f"(zero-sale rows: {(df.units_sold == 0).mean():.1%})")
-    print(f"in exclusion win  : {len(excl):,} rows")
+    print("in exclusion win  : "
+          + (f"{len(excl):,} rows" if excl is not None else "n/a (no config)"))
     print(f"write-off rows    : {sentinel:,} (ending==0 while stock remained "
           f"— MUST be > 0 or every episode reads unclosed)")
     print(f"shrink rows       : {shrink_rows:,} "

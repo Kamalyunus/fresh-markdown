@@ -43,9 +43,29 @@ def add_derived(d):
     return d
 
 
+def encode_features(d, features, categorical, levels):
+    """The ONE feature matrix: categoricals as codes over `levels` (unseen ->
+    -1), everything else numeric. Shared by training and inference so the two
+    cannot encode a column differently."""
+    X = pd.DataFrame(index=d.index)
+    for feat in features:
+        if feat in categorical:
+            values = d[feat].astype(str)
+            # an unseen level is masked to NaN first: same code (-1) as
+            # before, without the Categorical deprecation for out-of-category
+            # values that pandas will turn into an error
+            known = values.where(values.isin(levels[feat]))
+            X[feat] = pd.Categorical(known, categories=levels[feat]).codes
+        else:
+            X[feat] = pd.to_numeric(d[feat])
+    return X
+
+
 class BaselineModel:
     """Frozen mu_ref predictor. Loads model + schema + calibration artifacts."""
 
+    # class-level so an applier built without __init__ (the tests' __new__
+    # path) prices unfrozen with no gate; the instance sets both
     calibration_stops_at = None
     _freeze_from = None
 
@@ -92,26 +112,26 @@ class BaselineModel:
         """Per-row level factor: each row takes the factors in force for ITS
         week; unfitted weeks fall back to the frozen anchor, never forward."""
         keys = d[self.calibration_grain].astype(str)
+        anchor = keys.map(lambda key: self.calibration.get(key, 1.0)).to_numpy()
         if self.calibration_schedule is None:
             self._cal_rows_static += len(d)
-            return keys.map(lambda k: self.calibration.get(k, 1.0)).to_numpy()
+            return anchor
         dates = pd.to_datetime(d["date"])
-        weeks = episodes.week_key(dates)
-        frozen = (dates >= self._freeze_from).to_numpy() \
-            if getattr(self, "_freeze_from", None) is not None \
-            else np.zeros(len(d), bool)
-        out = np.ones(len(d))
-        for i, (wk, key) in enumerate(zip(weeks.to_numpy(), keys.to_numpy())):
-            if frozen[i]:
-                self._cal_rows_frozen += 1
-                out[i] = self.calibration.get(key, 1.0)
-            elif (table := self.calibration_schedule.get(wk)) is None:
-                self._cal_rows_fallback += 1
+        weeks = episodes.week_key(dates).to_numpy()
+        frozen = ((dates >= self._freeze_from).to_numpy()
+                  if self._freeze_from is not None else np.zeros(len(d), bool))
+        out = anchor.copy()                  # frozen rows keep the anchor
+        self._cal_rows_frozen += int(frozen.sum())
+        # one pass per distinct week, not per row: rows of a week share a table
+        for wk in np.unique(weeks[~frozen]):
+            rows = (weeks == wk) & ~frozen
+            table = self.calibration_schedule.get(wk)
+            if table is None:                # unfitted week: the anchor, above
+                self._cal_rows_fallback += int(rows.sum())
                 self._cal_fallback_weeks.add(str(wk))
-                out[i] = self.calibration.get(key, 1.0)
-            else:
-                self._cal_rows_scheduled += 1
-                out[i] = table.get(key, 1.0)
+                continue
+            self._cal_rows_scheduled += int(rows.sum())
+            out[rows] = keys[rows].map(lambda key: table.get(key, 1.0)).to_numpy()
         return out
 
     def calibration_coverage(self):
@@ -122,13 +142,31 @@ class BaselineModel:
         if self.calibration_schedule is None:
             return {"mode": "static", "rows": self._cal_rows_static,
                     "note": "no schedule in the artifact: one frozen factor "
-                            "set applied to every row"}
+                            "set applied to every row",
+                    "verdict": "OK -- static: one frozen factor set applied "
+                               "to every priced row (no schedule to fall "
+                               "behind)"}
         priced = (self._cal_rows_scheduled + self._cal_rows_fallback
                   + self._cal_rows_frozen)
         weeks = sorted(self.calibration_schedule)
         past_end = sorted(w for w in self._cal_fallback_weeks
                           if weeks and w > weeks[-1])
         share = self._cal_rows_fallback / max(priced, 1)
+        if past_end:
+            verdict = ("STALE FACTORS IN USE -- {} rows ({:.1%}) are in weeks "
+                       "PAST the end of the schedule and fell back to the "
+                       "frozen set. Re-run `train_baseline --fit-calibration`."
+                       .format(self._cal_rows_fallback, share))
+        elif self._freeze_from is not None:
+            verdict = ("OK -- {} rows frozen at the anchor from {} on purpose "
+                       "(the launch gate); every other priced row took its own "
+                       "week's factors".format(self._cal_rows_frozen,
+                                               self._freeze_from.date()))
+        elif not self._cal_rows_fallback:
+            verdict = "OK -- every priced row took its own week's factors"
+        else:
+            verdict = ("OK -- {} rows ({:.1%}) fell back before the schedule "
+                       "opens".format(self._cal_rows_fallback, share))
         return {
             "mode": "point_in_time",
             "schedule_covers": [weeks[0], weeks[-1]] if weeks else None,
@@ -143,21 +181,7 @@ class BaselineModel:
             "fallback_weeks": sorted(self._cal_fallback_weeks),
             "weeks_after_schedule_end": past_end,
             "gate_freezes_at": self.calibration_stops_at,
-            "verdict": (
-                "STALE FACTORS IN USE -- {} rows ({:.1%}) are in weeks PAST "
-                "the end of the schedule and fell back to the frozen set. "
-                "Re-run `train_baseline --fit-calibration`.".format(
-                    self._cal_rows_fallback, share)
-                if past_end else
-                "OK -- {} rows frozen at the anchor from {} on purpose (the "
-                "launch gate); every other priced row took its own week's "
-                "factors".format(self._cal_rows_frozen,
-                                 self._freeze_from.date())
-                if self._freeze_from is not None else
-                "OK -- every priced row took its own week's factors"
-                if not self._cal_rows_fallback else
-                "OK -- {} rows ({:.1%}) fell back before the schedule "
-                "opens".format(self._cal_rows_fallback, share)),
+            "verdict": verdict,
         }
 
     def _matrix(self, d):
@@ -167,14 +191,9 @@ class BaselineModel:
             raise KeyError(
                 f"frame is missing feature columns {missing} -- re-run "
                 "bootstrap.prepare_data")
-        X = pd.DataFrame(index=d.index)
-        for feat in self.schema["features"]:
-            if feat in self.schema["categorical"]:
-                cats = self.schema["category_levels"][feat]
-                X[feat] = pd.Categorical(d[feat].astype(str), categories=cats).codes
-            else:
-                X[feat] = pd.to_numeric(d[feat])
-        return X
+        return encode_features(d, self.schema["features"],
+                               self.schema["categorical"],
+                               self.schema["category_levels"])
 
     def predict_mu_ref(self, d, raw=False):
         """mu_ref(context); price features overwritten to d_ref. `raw=True`
@@ -196,13 +215,7 @@ def train(d, cfg):
     train_d = add_derived(population(splits["train"], cfg))
 
     levels = {c: sorted(train_d[c].astype(str).unique().tolist()) for c in CATEGORICAL}
-    X = pd.DataFrame(index=train_d.index)
-    for feat in FEATURES:
-        if feat in CATEGORICAL:
-            X[feat] = pd.Categorical(train_d[feat].astype(str),
-                                     categories=levels[feat]).codes
-        else:
-            X[feat] = pd.to_numeric(train_d[feat])
+    X = encode_features(train_d, FEATURES, CATEGORICAL, levels)
 
     booster = lgb.train(
         {
@@ -239,8 +252,15 @@ def _solve_level_factors(calib, model, k_shrink, min_anchor,
                          tier_step, max_k, r_lookup):
     """Factors for one fit window (shared by the anchor fit and every schedule
     week). Returns (factors, detail, global_factor), or None when the window
-    holds too few anchor rows -- the caller holds those weeks at 1.0."""
+    holds too few anchor rows -- the caller holds those weeks at 1.0. Cells
+    ABOVE that floor are shrunk toward their parent (category, then global)
+    by `k_shrink` pseudo-units; a cell whose bisection ran off the bracket
+    carries `at_bound` in its detail -- a bound is not a solve."""
     from bootstrap.fit_dispersion import lookup_r   # local: avoids a cycle
+
+    bm = model.cfg["baseline_model"]
+    f_lo, f_hi = (float(x) for x in bm["calibration_factor_search_bounds"])
+    halvings = int(bm["calibration_factor_bisection_steps"])
 
     calib["mu_ref_hat"] = model.predict_mu_ref(calib, raw=True)
     if r_lookup is not None:
@@ -248,12 +268,14 @@ def _solve_level_factors(calib, model, k_shrink, min_anchor,
                           for s, c in zip(calib.subcategory, calib.category)]
 
     def solve_factor(anchor):
-        # solved against the censored basis E[min(D,q)] -- the gate's quantity
+        """(factor, predicted at f=1, at_bound): solved against the censored
+        basis E[min(D,q)] -- the gate's quantity. `at_bound` names the bracket
+        end the solve was pinned to (None when the bisection converged)."""
         sold = float(anchor["units_sold"].sum())
         mu = anchor["mu_ref_hat"].to_numpy()
         if r_lookup is None:
             pred = float(mu.sum())
-            return (sold / pred if pred > 0 else 1.0), pred
+            return (sold / pred if pred > 0 else 1.0), pred, None
         r = anchor["r_val"].to_numpy()
         q = anchor["starting_inventory"].to_numpy()
 
@@ -263,19 +285,19 @@ def _solve_level_factors(calib, model, k_shrink, min_anchor,
 
         base = predicted(1.0)
         if base <= 0 or sold <= 0:
-            return 1.0, base
-        lo, hi = 0.1, 10.0
+            return 1.0, base, None
+        lo, hi = f_lo, f_hi
         if predicted(lo) > sold:
-            return lo, base
+            return lo, base, "lower"
         if predicted(hi) < sold:
-            return hi, base
-        for _ in range(20):        # monotone in f; 20 halvings ~ 1e-5
+            return hi, base, "upper"
+        for _ in range(halvings):        # monotone in f
             mid = (lo + hi) / 2
             if predicted(mid) < sold:
                 lo = mid
             else:
                 hi = mid
-        return (lo + hi) / 2, base
+        return (lo + hi) / 2, base, None
 
     def shrink(cell, parent, evidence):
         if evidence <= 0 or cell <= 0:
@@ -287,12 +309,12 @@ def _solve_level_factors(calib, model, k_shrink, min_anchor,
     if len(anchor_all) < min_anchor or anchor_all["mu_ref_hat"].sum() <= 0:
         return None
 
-    f_global, _ = solve_factor(anchor_all)
+    f_global, _, _ = solve_factor(anchor_all)
 
     def fit_level(groups, parent_of):
         out, det = {}, {}
         for key, g in groups:
-            raw_f, pred = solve_factor(g)
+            raw_f, pred, at_bound = solve_factor(g)
             evidence = float(g["units_sold"].sum())
             parent = parent_of(key, g)
             f = shrink(raw_f, parent, evidence)
@@ -306,6 +328,15 @@ def _solve_level_factors(calib, model, k_shrink, min_anchor,
                 "shrinkage_weight_on_self": round(
                     float(evidence / (evidence + k_shrink)), 3),
             }
+            if at_bound:
+                # the literal bracket end, not a solve: the sales this cell
+                # wants sit outside [f_lo, f_hi] x its prediction
+                det[str(key)]["at_bound"] = at_bound
+                det[str(key)]["at_bound_note"] = (
+                    f"raw_factor is the {at_bound} end of "
+                    f"calibration_factor_search_bounds {[f_lo, f_hi]}, not a "
+                    "solved value -- the bisection bracket does not contain "
+                    "the sold total. Investigate the cell before trusting it.")
         return out, det
 
     cat_factors, _ = fit_level(
@@ -318,23 +349,22 @@ def _solve_level_factors(calib, model, k_shrink, min_anchor,
 
 def fit_level_calibration(d, cfg):
     """Multiplicative level factors on ANCHOR ROWS only (elasticity ~1 there,
-    so slope error cannot leak in; thin cells stay 1.0). The anchor set is the
-    trailing W weeks ending at the gate window's start -- disjoint from what
-    the gate grades -- plus a weekly point-in-time schedule fit on the
-    trailing window ending strictly before each week."""
+    so slope error cannot leak in). Each cell is shrunk toward its parent
+    (category, then global) by `calibration_shrinkage_units` pseudo-units --
+    a thin cell follows its parent, it is not held at 1.0; only a WINDOW
+    with fewer than `calibration_min_anchor_rows` anchor rows is unfitted.
+    The anchor set is the trailing W weeks ending at the gate window's start
+    -- disjoint from what the gate grades -- plus a weekly point-in-time
+    schedule fit on the trailing window ending strictly before each week."""
 
     model = BaselineModel(cfg)
     split = cfg["data"]["split"]
     gate_start = pd.Timestamp(split["test_start"])   # gate window = test
     weeks_back = cfg["baseline_model"]["calibration_fit_trailing_weeks"]
     lo = gate_start - pd.Timedelta(weeks=weeks_back)
-    # SAME population and SAME cut as the weekly schedule below, which uses
-    # population(pre_launch(d, cfg)) and window_slice. A row-level date cut on
-    # the unfiltered frame put ineligible rows (final-hour restocks, unknown
-    # outcomes) into the anchor fit and truncated windows at the midnight seam
-    # (rules 14/15), so the frozen fallback and the by-week factors were
-    # solved on different rows -- and check_calibration_convergence then
-    # compares them cell by cell.
+    # SAME population and SAME cut as the weekly schedule below (rules 14/15):
+    # the frozen fallback and the by-week factors must be solved on the same
+    # rows, since check_calibration_convergence compares them cell by cell
     calib = episodes.window_slice(population(d, cfg),
                                   lo.strftime("%Y-%m-%d"),
                                   (gate_start - pd.Timedelta(days=1))
@@ -440,8 +470,13 @@ def fit_level_calibration(d, cfg):
                "fit_rows": int(len(calib)),
                "fit_in_sample_share": round(in_sample_share, 4),
                "split": split,
-               "basis": "anchor rows only; cells below "
-                        "calibration_min_anchor_rows left at 1.0"}
+               "basis": ("anchor rows only; every cell shrunk toward its "
+                         "parent (category, then global) by "
+                         "calibration_shrinkage_units; a window below "
+                         "calibration_min_anchor_rows is unfitted (held at "
+                         "the frozen anchor); a cell whose bisection pinned "
+                         "at calibration_factor_search_bounds carries "
+                         "at_bound in detail")}
     write_json(cfg["baseline_model"]["calibration_factor_path"],
                stamp(payload, cfg, model.version,
                      "bootstrap.train_baseline --fit-calibration"))
@@ -495,19 +530,13 @@ def check_calibration_convergence(d, cfg, commit=False):
         missing += m
 
     # digests of what the verdict was checked against, so `status` can flag
-    # a verdict whose chain has since moved
-    from common.provenance import file_digest
-    checked_against = {}
-    for name, path_key in (("prior", ("posterior", "prior", "path")),
-                           ("r_lookup", ("dispersion", "r_lookup_path")),
-                           ("rho", ("dispersion", "rho_path"))):
-        node = cfg
-        for k in path_key:
-            node = node.get(k) if isinstance(node, dict) else None
-            if node is None:
-                break
-        if isinstance(node, str) and os.path.exists(node):
-            checked_against[name] = file_digest(node)
+    # a verdict whose chain has since moved -- read through the one artifact
+    # walk in common.provenance
+    from common.provenance import collect
+    checked_against = {row["artifact"]: row["sha256"]
+                       for row in collect(cfg)
+                       if row["artifact"] in ("prior", "r_lookup", "rho")
+                       and row["present"]}
 
     # anchor rows behind the worst cell: a thin, shrinkage-dominated cell
     # reads identically to an unsettled loop unless the row count is shown
@@ -531,7 +560,9 @@ def check_calibration_convergence(d, cfg, commit=False):
         "cells_appeared_or_gone": missing,
         "converged": converged,
         "method": "re-solved with the prior and r_lookup now on disk; "
-                  "artifact restored (dry run)",
+                  + ("re-solve KEPT (--commit-convergence: this is the next "
+                     "turn's --fit-calibration)" if commit else
+                     "artifact restored (dry run)"),
         "verdict": (
             "CONVERGED -- one more iteration reproduces the factors within "
             "tolerance"
@@ -554,6 +585,41 @@ def check_calibration_convergence(d, cfg, commit=False):
     with open(path, "w") as f:
         json.dump(keep, f, indent=2)
     return block
+
+
+def _describe_calibration(art, factors, widest_n=12):
+    """The --fit-calibration console summary of a calibration artifact."""
+    detail = art["detail"]
+    lines = [f"grain: {art['grain']}  ({len(factors)} cells, global factor "
+             f"{art['global_factor']:.4f})",
+             f"fit window: {art['fit_window']} "
+             f"{art['fit_window_dates'][0]}..{art['fit_window_dates'][1]} "
+             f"({art['fit_rows']:,} rows, basis {art['fit_basis']})"]
+    if art["fit_in_sample_share"] > 0.5:
+        lines.append(f"WARNING: {art['fit_in_sample_share']:.0%} of the fit "
+                     "window is inside the training period -- the factor will "
+                     "understate what launch-adjacent weeks need.")
+    widest = sorted(factors.items(), key=lambda kv: -abs(kv[1] - 1.0))[:widest_n]
+    for key, factor in widest:
+        info = detail[key]
+        lines.append(f"  {key:26s} {factor:.4f}  (raw {info['raw_factor']:.4f} "
+                     f"-> parent {info['parent_factor']:.4f}, self-weight "
+                     f"{info['shrinkage_weight_on_self']:.2f}, "
+                     f"{info['anchor_rows']:,} rows"
+                     + (f", AT {info['at_bound'].upper()} BOUND"
+                        if info.get("at_bound") else "") + ")")
+    if len(factors) > len(widest):
+        lines.append(f"  ... {len(factors) - len(widest)} more cells nearer 1.0")
+    pinned = sorted(k for k, v in detail.items() if v.get("at_bound"))
+    if pinned:
+        lines.append(f"{len(pinned)} cell(s) pinned at "
+                     "calibration_factor_search_bounds -- a bound is not a "
+                     "solve: " + ", ".join(pinned))
+    below = [k for k, v in factors.items() if v < 1.0]
+    if below:
+        lines.append(f"{len(below)}/{len(factors)} cells below 1.0 (model "
+                     "over-predicts there) -- investigate (AGENTS rule 5)")
+    return "\n".join(lines)
 
 
 def main():
@@ -593,32 +659,9 @@ def main():
 
     if args.fit_calibration:
         factors = fit_level_calibration(d, cfg)
-        with open(cfg["baseline_model"]["calibration_factor_path"]) as f:
-            art = json.load(f)
-        detail = art["detail"]
-        print(f"grain: {art['grain']}  ({len(factors)} cells, global factor "
-              f"{art['global_factor']:.4f})")
-        print(f"fit window: {art['fit_window']} "
-              f"{art['fit_window_dates'][0]}..{art['fit_window_dates'][1]} "
-              f"({art['fit_rows']:,} rows, basis {art['fit_basis']})")
-        if art["fit_in_sample_share"] > 0.5:
-            print(f"WARNING: {art['fit_in_sample_share']:.0%} of the fit "
-                  "window is inside the training period -- the factor will "
-                  "understate what launch-adjacent weeks need.")
-        widest = sorted(factors.items(), key=lambda kv: -abs(kv[1] - 1.0))[:12]
-        for key, factor in widest:
-            info = detail[key]
-            print(f"  {key:26s} {factor:.4f}  (raw {info['raw_factor']:.4f} "
-                  f"-> parent {info['parent_factor']:.4f}, self-weight "
-                  f"{info['shrinkage_weight_on_self']:.2f}, "
-                  f"{info['anchor_rows']:,} rows)")
-        if len(factors) > len(widest):
-            print(f"  ... {len(factors) - len(widest)} more cells nearer 1.0")
-        below = [k for k, v in factors.items() if v < 1.0]
-        if below:
-            print(f"{len(below)}/{len(factors)} cells below 1.0 (model "
-                  "over-predicts there) -- investigate (AGENTS rule 5)")
-        print(f"wrote {cfg['baseline_model']['calibration_factor_path']}")
+        path = cfg["baseline_model"]["calibration_factor_path"]
+        print(_describe_calibration(read_json(path), factors))
+        print(f"wrote {path}")
         return
 
     schema = train(d, cfg)

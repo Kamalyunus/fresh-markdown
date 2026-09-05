@@ -1,10 +1,6 @@
 """pipeline.advance -- the order of operations as code. plan() is pure over
 probe()'s state, so every branch is exercised without a workspace."""
 
-import copy
-
-import pytest
-
 from pipeline import advance
 from pipeline import tune
 
@@ -194,9 +190,21 @@ def test_a_measured_paste_does_not_stale_the_report_that_derived_it(cfg):
     c = copy.deepcopy(cfg)
     c["exploration"]["tau_initial"] = 999.0
     c["dispersion"]["rho"] = 0.5
-    c["learning"]["information_increment"] = 0.9
     c["baseline_model"]["calibration_gate_band"] = [0.95, 1.05]
     assert advance.stale_reports(c, "b", reps) == {}
+    # the increment is graded by thresholds (configured vs I*): cheap re-derive
+    c = copy.deepcopy(cfg)
+    c["learning"]["information_increment"] = 0.9
+    assert set(advance.stale_reports(c, "b", reps)) == {"thresholds"}
+    # a category re-round of the per-category floor is shadow's, not the loop's
+    c = copy.deepcopy(cfg)
+    c["exploration"]["delta_min_log_bias"] = {"MEAT": 0.2, "_default": 0.1}
+    reps2 = {n: {"artifact_versions": {"baseline_model_version": "b"},
+                 "config": config_fingerprint(c, n)}
+             for n in ("backtest", "thresholds", "shadow")}
+    c2 = copy.deepcopy(c)
+    c2["exploration"]["delta_min_log_bias"]["MEAT"] = 0.21
+    assert set(advance.stale_reports(c2, "b", reps2)) == {"shadow"}
     # keys a report reads DO, and only the reports that read them
     c = copy.deepcopy(cfg)
     c["exploration"]["delta_min_log_bias"] = 0.2
@@ -231,3 +239,30 @@ def test_only_the_invalidated_report_is_re_run():
     assert steps[0]["args"][0] == "bootstrap.derive_thresholds"
     steps = advance.plan(_state(stale={"shadow": "shadow: exploration.delta_min_log_bias"}))
     assert steps[0]["args"][0] == "pipeline.shadow"
+
+
+def test_the_round_budget_counts_work_not_stops(monkeypatch, tmp_path):
+    """A legitimate STOP on the ninth plan was raised as "did not settle"
+    before the stop was journaled or the readiness report written."""
+    import sys
+    calls = {"n": 0}
+    stop = [advance._stop("owner", "SET BY OWNER values are null", ["x"])]
+    monkeypatch.setattr(advance, "load_config", lambda p: {})
+    monkeypatch.setattr(advance, "probe", lambda *a, **k: {})
+    monkeypatch.setattr(advance, "plan", lambda st: stop)
+    monkeypatch.setattr(advance, "render_plan", lambda s: "")
+    monkeypatch.setattr(advance, "execute", lambda *a: False)
+    monkeypatch.setattr(advance, "_write_readiness", lambda *a: calls.__setitem__("n", calls["n"] + 1))
+    monkeypatch.setattr(advance, "MAX_TUNE_ROUNDS", 0)   # budget exhausted at once
+    monkeypatch.setattr(sys, "argv", ["advance", "--reports", str(tmp_path)])
+    assert advance.main() == 0 and calls["n"] == 1
+
+
+def test_the_tau_paste_is_journaled_under_the_shadow_phase():
+    st = _state(tune={"findings": [], "blocked": False, "owner_decisions": [],
+                      "to_paste": [{"key": "exploration.tau_initial"}]})
+    assert advance.plan(st)[0]["phase"] == "shadow"
+    st = _state(tune={"findings": [], "blocked": False, "owner_decisions": [],
+                      "to_paste": [{"key": "exploration.tau_initial"},
+                                   {"key": "dispersion.rho"}]})
+    assert advance.plan(st)[0]["phase"] == "tune"

@@ -95,7 +95,7 @@ def _reports(root, **over):
             "calibration_regimes": {"frozen_anchor": 1.0002,
                                     "weekly_refit": 0.9762},
             "learning_yield_would_be": {"episodes_per_bounded_update": 741.0,
-                                        "calendar_floor_days_per_0.15_of_mean": 1},
+                                        "calendar_floor_days_per_step": 1},
             "window": {"date_min": "2026-08-10", "date_max": "2026-08-28",
                        "episodes": 111400},
         },

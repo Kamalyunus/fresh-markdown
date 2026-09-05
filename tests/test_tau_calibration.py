@@ -113,7 +113,7 @@ def test_tau_is_calibrated_on_the_same_numbers_the_stop_condition_uses(cfg, tmp_
 
     block = upd.tau_calibration(decisions, outcomes, posterior, cfg)
     learning = mon.learning_metrics(decisions, posterior, cfg, outcomes)
-    business = mon.business_metrics(decisions, outcomes, cfg)
+    business = mon.business_metrics(decisions, outcomes)
 
     day = block["through_date"]
     # SAME DAY on both sides: the controller prices the day just closed, and
@@ -353,6 +353,175 @@ def test_a_weekly_batch_is_walked_day_by_day_never_graded_as_one_day(cfg, tmp_pa
         lambda day, t: {r["day"]: r["spend"] for r in block["by_day"]}[day],
         {}, posterior.widest_std(), cfg)
     assert rows[0]["tau_after"] == rows[0]["tau"]        # zero budget holds
+
+
+def test_a_posterior_calibrated_past_the_store_is_reported_not_an_index_error(cfg, tmp_path):
+    """A store restored from an older copy (or the wrong directory) sits
+    BEHIND the posterior's `tau_calibrated_through`: there is no day to walk,
+    and the walk used to index an empty row list."""
+    store = _store(cfg, tmp_path, 4, cost_each=1.0)
+    posterior = _posterior(cfg, tmp_path, calibrated_through="2026-08-25")
+    block = upd.tau_calibration(store.load_decisions(), store.load_outcomes(),
+                                posterior, cfg)
+    assert not block["commit"]
+    assert "ahead of the store" in block["skipped"]
+    assert block["through_date"] == "2026-08-19"
+    assert block["tau_after"] == block["tau_before"]
+
+
+def _learning_store(cfg, tmp_path, n=40, cost_each=40.0, date="2026-08-19"):
+    """Three closed history days (the IL base), then `n` forced decisions on
+    `date` far from the reference on a shelf deep enough to be uncensored --
+    a batch that clears the information threshold once
+    `learning.information_increment` is set low."""
+    store = _store(cfg, tmp_path, n, cost_each=0.0, history_days=3)
+    base = len(store.load_decisions())
+    for i in range(base, base + n):
+        store.emit_decision(_decision(i, 0.45, cost_each, date))
+        store.emit_outcome(outcome_event(
+            outcome_id=f"O{i}", decision_id=f"D{i}", units_sold=1,
+            starting_inventory=9, ending_inventory=8, applied_price=P0 * 0.55,
+            finalized_at=f"{date}T18:00:00+00:00"))
+    return store
+
+
+def test_dry_run_and_apply_agree_on_tau_because_the_budget_is_sized_before_the_commit(cfg, tmp_path):
+    """The budget scales with the widest routed std. `--apply` commits the
+    cells first, so the walk used to price past days on the POST-update std
+    and disagreed with the dry run on the same store."""
+    # ref std 1.0 puts a 0.6 -> 0.45 std move inside the budget's linear
+    # range (neither at the floor nor capped at 1), so a mis-ordered walk
+    # would price a different budget
+    learn = dict(cfg, learning=dict(cfg["learning"], information_increment=1e-6),
+                 exploration=dict(cfg["exploration"], budget_scale_ref_std=1.0))
+    reports = {}
+    for mode in ("dry", "apply"):
+        root = tmp_path / mode
+        _learning_store(learn, root)
+        _posterior(learn, root)
+        reports[mode] = upd.run(learn, apply=(mode == "apply"),
+                                events_root=str(root / "events"),
+                                posterior_path=str(root / "posterior.json"))
+    applied = reports["apply"]
+    cell = applied["cells"]["vegetables"]
+    assert cell["update_triggered"] and applied["applied"], applied
+    assert cell["proposed_std"] < cell["std_before"], "the fixture must move the std"
+    tc = applied["tau_calibration"]
+    assert tc["commit"] and tc["tau_after"] != tc["tau_before"], tc
+    # the walk was sized on the std the days were priced under...
+    assert tc["widest_posterior_std"] == pytest.approx(cell["std_before"])
+    # ...so both modes report the same tau, budget for budget
+    assert tc == reports["dry"]["tau_calibration"]
+    # and the fixture would have told the two apart: the post-update std
+    # prices a different budget on the same days
+    lo, hi = learn["exploration"]["tau_adjust_clip"]
+    ratio = tc["tau_after"] / tc["tau_before"]
+    assert lo + 0.01 < ratio < hi - 0.01, "the walk must not sit on a clip bound"
+
+
+def test_the_bounded_step_holds_in_the_report_unrounded(cfg, tmp_path):
+    """`max_mean_step` is a safety bound checked on the REPORT: the proposed
+    mean must be exactly what bounded_step returns from the report's own
+    raw moments, never a re-rounded copy that can read past the cap."""
+    from pricing.posterior import bounded_step
+    learn = dict(cfg, learning=dict(cfg["learning"], information_increment=1e-6))
+    _learning_store(learn, tmp_path)
+    _posterior(learn, tmp_path)
+    rep = upd.run(learn, events_root=str(tmp_path / "events"),
+                  posterior_path=str(tmp_path / "posterior.json"))
+    c = rep["cells"]["vegetables"]
+    mean, std, _ = bounded_step(c["mean_before"], c["std_before"],
+                                c["raw_mean"], c["raw_std"], learn)
+    assert c["proposed_mean"] == mean and c["proposed_std"] == std
+    assert abs(c["proposed_mean"] - c["mean_before"]) <= learn["learning"]["max_mean_step"]
+
+
+# ------------------------------------------------------- exploration suspension
+def _price_once(cfg, posterior, store, tau, seed=0):
+    from inference.decide import decide
+    state = {"episode_id": "EP-S", "sku_id": "S", "fc": "F", "category": "vegetables",
+             "subcategory": "leafy", "date": "2026-08-20", "hour_of_day": 12,
+             "hours_remaining": 3, "q": 4, "original_price": P0, "cost": 4000.0,
+             "r": 0.919, "mu_ref_path": [0.8, 0.8, 0.8], "current_discount": None}
+    return decide(state, posterior, store, cfg, np.random.default_rng(seed),
+                  tau, "b")
+
+
+def test_a_fired_stop_suspends_exploration_until_a_human_resumes_it(cfg, tmp_path):
+    """Design 5.12: fire -> suspended -> decide never explores (exploitation
+    continues, tau_current None) -> --resume-exploration -> explores again.
+    Nothing resumes it automatically."""
+    store = _store(cfg, tmp_path, 4, cost_each=1.0)
+    posterior = _posterior(cfg, tmp_path)
+    tau = 1e9                                        # everything affordable
+    assert posterior.exploration_suspended() is None
+    assert _price_once(cfg, posterior, store, tau)["is_exploration"]
+
+    stop = {"fired": {"price_mismatch": True, "duplicate_or_unmatched": False,
+                      "scrap_deterioration_pct": "BLOCKED"},
+            "suspend_exploration": True}
+    rec = mon.apply_stop_conditions(stop, posterior, "2026-08-19")
+    assert rec == posterior.exploration_suspended()
+    assert rec["reasons"] == ["price_mismatch"] and rec["since"] == "2026-08-19"
+    # persisted in the same file, visible to a fresh reader
+    assert PosteriorStore(cfg, path=str(tmp_path / "posterior.json")) \
+        .exploration_suspended()["since"] == "2026-08-19"
+
+    for seed in range(5):
+        evt = _price_once(cfg, posterior, store, tau, seed)
+        assert not evt["is_exploration"]
+        assert evt["tau_current"] is None             # the budget was not in force
+        assert evt["applied_discount"] == evt["optimal_discount"]   # exploitation
+    assert store.quarantined_this_run == 0            # None is a legal value
+
+    # a stop that keeps firing keeps the FIRST since and adds the reason
+    again = mon.apply_stop_conditions(
+        {"fired": {"price_mismatch": True, "exploration_cost_vs_budget": True},
+         "suspend_exploration": True}, posterior, "2026-08-21")
+    assert again["since"] == "2026-08-19"
+    assert again["reasons"] == ["exploration_cost_vs_budget", "price_mismatch"]
+    # a stop that no longer fires does NOT resume
+    calm = mon.apply_stop_conditions(
+        {"fired": {"price_mismatch": False}, "suspend_exploration": False},
+        posterior, "2026-08-22")
+    assert calm is not None
+    assert not _price_once(cfg, posterior, store, tau, 7)["is_exploration"]
+
+    # the human gate clears it and reports what it cleared
+    rep = upd.run(cfg, resume_exploration=True,
+                  events_root=str(tmp_path / "events"),
+                  posterior_path=str(tmp_path / "posterior.json"))
+    assert rep["exploration_resumed"]["since"] == "2026-08-19"
+    assert rep["exploration_suspended"] is None
+    reloaded = PosteriorStore(cfg, path=str(tmp_path / "posterior.json"))
+    assert reloaded.exploration_suspended() is None
+    evt = _price_once(cfg, reloaded, store, tau)
+    assert evt["is_exploration"] and evt["tau_current"] == tau
+    # resuming twice is a no-op, not an error
+    assert upd.run(cfg, resume_exploration=True,
+                   events_root=str(tmp_path / "events"),
+                   posterior_path=str(tmp_path / "posterior.json"))[
+        "exploration_resumed"] is None
+
+
+def test_the_flat_std_alert_reads_only_cells_that_can_learn(cfg, tmp_path):
+    """An unrouted GLOBAL takes no outcome and never updates; listing it is
+    a permanent false alarm. Same routed-cells notion as the budget."""
+    floor = cfg["posterior"]["min_episodes_per_week_for_cell"]
+    posterior = PosteriorStore.initialise(
+        cfg, {"vegetables": {"mean": -1.0, "std": 0.6}}, {"vegetables": floor},
+        path=str(tmp_path / "posterior.json"))
+    stale = (pd.Timestamp.now("UTC") - pd.Timedelta(days=400)).isoformat()
+    for rec in posterior.state["cells"].values():
+        rec["updated_at"] = stale
+    alert = mon.learning_metrics([], posterior, cfg)["posterior_std_flat_alert"]
+    assert alert == ["vegetables"]
+    assert PosteriorStore.active_cells(posterior.state["cells"],
+                                       posterior.state["cell_of"]) == ["vegetables"]
+    # ...until GLOBAL has evidence of its own
+    posterior.state["cells"]["GLOBAL"]["n_obs"] = 3
+    assert mon.learning_metrics([], posterior, cfg)["posterior_std_flat_alert"] == \
+        ["GLOBAL", "vegetables"]
 
 
 def test_calibrate_tau_commits_tau_without_touching_the_cells(cfg, tmp_path):

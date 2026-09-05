@@ -80,9 +80,19 @@ def settle(cfg, max_turns):
              ["bootstrap.estimate_prior", "--input", PREPARED, "--fast"])
         step(f"loop turn {turn}: 5 dispersion",
              ["bootstrap.fit_dispersion", "--input", PREPARED])
-        step(f"loop turn {turn}: 5b convergence",
-             ["bootstrap.train_baseline", "--input", PREPARED,
-              "--check-convergence", "--commit-convergence"], fatal=False)
+        # non-fatal in step() so the message below can say what a failure
+        # HERE means; it still stops the loop -- with no verdict written, the
+        # stall test could never fire and the loop would run to --max-turns
+        rc = step(f"loop turn {turn}: 5b convergence",
+                  ["bootstrap.train_baseline", "--input", PREPARED,
+                   "--check-convergence", "--commit-convergence"], fatal=False)
+        if rc:
+            raise SystemExit(
+                f"\nloop turn {turn}: 5b convergence FAILED (exit {rc}) -- "
+                "stopping the loop. Without its verdict there is nothing to "
+                "judge convergence or a stall on, so another turn would only "
+                "run to --max-turns; fix the check (read its output above) "
+                "and re-run `bootstrap.run --check-only`.")
 
         block = convergence(cfg) or {}
         if block.get("converged"):

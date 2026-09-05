@@ -95,14 +95,10 @@ def deflation_deff(rows, model, cfg):
     epsilon step out of the dispersion chain (`fit_dispersion` owns the
     fitted rho). Returns (deff, rho, mean rows per cluster).
 
-    Clustered on SKU x FC, NOT on episode. These are ENTRY rows (rule 7), so
-    there is exactly one per episode and a within-episode ICC is 1.0 by
-    construction -- the old episode grouping made `sizes >= 3` empty, rho 0
-    and deff exactly 1.0 for every category, so design 5.6's deflation could
-    never engage and the pooled shrinkage ran on undeflated spans. The
+    Clustered on SKU x FC, NOT on episode: these are ENTRY rows (rule 7), one
+    per episode, so a within-episode ICC is 1.0 by construction. The
     correlation that does exist between entry rows is the same unit recurring
-    across days: the unit the pilot's outcomes recur on, and the one that
-    does not average away.
+    across days -- the unit the pilot's outcomes recur on.
     """
     resid = rows.units_sold.to_numpy() - model.predict_mu_ref(rows)
     unit = (rows.sku_id.astype(str) + "|" + rows.fc.astype(str)).to_numpy()
@@ -113,7 +109,7 @@ def deflation_deff(rows, model, cfg):
     rho = intraclass_correlation(sub.resid, sub.unit,
                                  cfg["dispersion"]["rho_clip_max"])
     m = float(sizes.mean()) if len(sizes) else 1.0
-    return max(1.0, design_effect(rho, m)), rho, m
+    return design_effect(rho, m), rho, m     # design_effect floors at 1.0
 
 
 def density(ll, deff):
@@ -147,7 +143,6 @@ def build_curves(d, cfg, model, grid, window):
     """Per-category (naive, controlled) curves and the deff used, on one split
     window. Shared by the fit and by the held-out scoring so the two cannot
     diverge in how they build rows."""
-    pc = cfg["posterior"]["prior"]
     frame = population(split_frames(d, cfg)[window], cfg)
     rows = scored_rows(frame)
     out = {}
@@ -178,17 +173,37 @@ def build_curves(d, cfg, model, grid, window):
     return out
 
 
+def extend_below(grid, margin):
+    """`grid` with points appended below its first value, at its own step,
+    down to (at least) `margin` below it."""
+    step = float(grid[1] - grid[0])
+    below = grid[0] - step * np.arange(1, int(np.ceil(margin / step)) + 1)
+    return np.concatenate([below[::-1], grid])
+
+
 def unconstrained_argmax(d, cfg, model, lo, hi, n):
-    """Each arm's unconstrained peak, searched PAST the policy bounds: a
+    """Each arm's unconstrained peak, searched PAST both policy bounds: a
     wrong-signed likelihood must be caught, not clipped and reported as
-    measured."""
-    wide = np.linspace(lo, max(1.0, hi), n)
+    measured, and one running off the lower bound is a boundary solution
+    (rule 3), not an estimate."""
+    margin = float(cfg["posterior"]["prior"]["unconstrained_search_below"])
+    # past the sign bound above, `unconstrained_search_below` past lo below
+    wide = extend_below(np.linspace(lo, max(1.0, hi), n), margin)
+    step = (hi - lo) / (n - 1)               # the fit grid's step
+    interior = wide > lo + step
     out = {}
     for cat, c in build_curves(d, cfg, model, wide, "train").items():
-        out[cat] = {
-            "naive": float(wide[int(np.argmax(c["naive"]))]),
-            "controlled": float(wide[int(np.argmax(c["controlled"]))]),
-        }
+        peaks, pinned = {}, []
+        for arm in ("naive", "controlled"):
+            ll = np.asarray(c[arm])
+            i = int(np.argmax(ll))
+            peaks[arm] = float(wide[i])
+            # pinned = the edge STRICTLY beats every interior point. A flat
+            # likelihood (no price variation) argmaxes at the first grid
+            # point too, and that is absence of information, not a run-off.
+            if not interior[i] and ll[i] > ll[interior].max():
+                pinned.append(arm)
+        out[cat] = {**peaks, "lower_pinned": pinned}
     return out
 
 
@@ -244,18 +259,28 @@ def estimate(d, cfg, model, fast=False):
     if not fit:
         raise SystemExit("no rows to profile epsilon on in the train window")
 
-    # sign decided BEFORE the pool is built: the pool excludes wrong-signed
-    # categories, or the fallback inherits the confound they were rejected for
-    signs = {}
+    # sign and boundary decided BEFORE the pool is built: the pool excludes
+    # wrong-signed and lower-boundary categories, or the fallback inherits
+    # the confound (or the run-off) they were rejected for
+    signs, boundary = {}, {}
     for cat in fit:
         u = unconstrained.get(cat, {})
         peak = max(u.get("naive", lo), u.get("controlled", lo))
         signs[cat] = (peak >= -step, peak)
+        # an arm whose likelihood is maximised at or below epsilon_min + one
+        # grid step ran off the support: a boundary solution, not an estimate
+        # (rule 3). epsilon_min MAY be widened when this fires; epsilon_max
+        # never (design 5.6).
+        pinned = sorted(u.get("lower_pinned", []))
+        boundary[cat] = ("lower", pinned) if pinned else (None, [])
+
+    def rejected(cat):
+        return signs[cat][0] or boundary[cat][0] is not None
 
     # pooled by SUMMING log-likelihoods across usable categories: one measured
     # likelihood, not an average of summaries -- the anti-fallback-constant
     usable = [c for cat, c in fit.items()
-              if not signs[cat][0] and c["log_ratio_sd"] > 1e-9]
+              if not rejected(cat) and c["log_ratio_sd"] > 1e-9]
     if usable:
         pooled_deff = float(np.mean([c["deff"] for c in usable]))
         pooled = mixture(
@@ -263,7 +288,8 @@ def estimate(d, cfg, model, fast=False):
             density(np.sum([c["controlled"] for c in usable], axis=0),
                     pooled_deff))
         pooled_basis = (f"{len(usable)} of {len(fit)} categories -- those with "
-                        "a right-signed likelihood and some price variation")
+                        "a right-signed, interior likelihood and some price "
+                        "variation")
     else:
         # nothing usable to pool: the uniform on the support is the measured
         # answer -- inventing a fallback constant is what this method removes
@@ -290,12 +316,13 @@ def estimate(d, cfg, model, fast=False):
                          np.ptp(c["controlled"]) / c["deff"]))
         w_own = float(min(1.0, span / sat)) if sat > 0 else 1.0
 
-        # wrong sign rejects (the only reject): the peak was searched PAST the
-        # bounds; the own density is discarded and the pooled one taken
+        # wrong sign and a lower-boundary peak both reject: the peak was
+        # searched PAST the bounds; the own density is discarded for the pool
         u = unconstrained.get(cat, {})
         wrong_sign, peak = signs[cat]
+        bound, pinned_arms = boundary[cat]
 
-        w = pooled if wrong_sign else mixture(own, pooled, w_own)
+        w = pooled if rejected(cat) else mixture(own, pooled, w_own)
         mean, std = moments(grid, w)
 
         # std is the WIDEST of three measured floors (density width, grid
@@ -315,7 +342,11 @@ def estimate(d, cfg, model, fast=False):
             "std_candidates": {k: round(float(v), 4)
                                for k, v in floor_reasons.items()},
             "wrong_sign": bool(wrong_sign),
-            "unconstrained_argmax": {k: round(v, 4) for k, v in u.items()},
+            # None, or "lower": an arm's unconstrained peak sits at or below
+            # epsilon_min + step (the sign bound above is `wrong_sign`)
+            "boundary": bound,
+            "unconstrained_argmax": {k: round(u[k], 4) for k in
+                                     ("naive", "controlled") if k in u},
             "own_mean": round(own_mean, 4), "own_std": round(own_std, 4),
             "own_information_weight": round(w_own, 4),
             "likelihood_span": round(span, 3),
@@ -341,6 +372,15 @@ def estimate(d, cfg, model, fast=False):
                 "price. Own density discarded for the pooled one; usual cause "
                 "is the legacy ramp, and only exogenous price variation fixes "
                 "it.")
+        if bound is not None:
+            per_category[cat]["boundary_note"] = (
+                f"{' and '.join(pinned_arms)} arm peak at or below "
+                f"epsilon_min {lo:+.2f} (+ one grid step): the likelihood ran "
+                "off the lower end of the support, so this is a boundary "
+                "solution, not an estimate (rule 3). Own density discarded "
+                "for the pooled one and the category left OUT of the pool. "
+                "Owner: consider widening posterior.epsilon_min -- the lower "
+                "bound may be widened when a fit pins there; epsilon_max never.")
         if c["log_ratio_sd"] < 1e-9:
             per_category[cat]["no_price_variation"] = (
                 "every scored row sits at one discount: epsilon is ABSENT "
@@ -352,7 +392,7 @@ def estimate(d, cfg, model, fast=False):
         "pooled_deff": round(pooled_deff, 3),
         "pooled_basis": pooled_basis,
         "pooled_categories": sorted(
-            c for c in fit if not signs[c][0] and fit[c]["log_ratio_sd"] > 1e-9),
+            c for c in fit if not rejected(c) and fit[c]["log_ratio_sd"] > 1e-9),
         "pooled_density": [round(float(x), 8) for x in pooled],
     }
 

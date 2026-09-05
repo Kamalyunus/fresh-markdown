@@ -5,10 +5,13 @@ logger never silently discards a malformed event: invalid events are
 quarantined with the validation failure attached and surfaced to monitoring.
 """
 
+import datetime
 import json
+import math
+import os
+import re
 
 import numpy as np
-import os
 
 DECISION_REQUIRED = [
     "decision_id", "episode_id", "is_entry", "sku_id", "fc", "category",
@@ -28,6 +31,12 @@ DECISION_REQUIRED = [
     "timestamp",
 ]
 
+# the decision's trading day: ingest matches feed rows on it and every
+# per-day series (tau walk, guardrail, spend) is keyed on it, so it must be
+# exactly one calendar date in one spelling
+ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
 def _json_scalar(v):
     """numpy scalars serialise as their native values; anything else raises --
     silent stringification corrupts the log the reproduction check replays."""
@@ -46,6 +55,36 @@ OUTCOME_REQUIRED = [
     "ending_inventory", "applied_price", "is_stockout", "execution_status",
     "finalized_at",
 ]
+
+
+def _is_finite_price(v):
+    """A real, finite number. bool is excluded (True is not a price of 1);
+    numpy numerics count -- pandas producers must not quarantine in bulk."""
+    if isinstance(v, (bool, np.bool_)):
+        return False
+    if not isinstance(v, (int, float, np.integer, np.floating)):
+        return False
+    return math.isfinite(v)
+
+
+def _iso_day(v):
+    """Exactly `YYYY-MM-DD`, and a real calendar date."""
+    if not isinstance(v, str) or not ISO_DAY.match(v):
+        return False
+    try:
+        datetime.date.fromisoformat(v)
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_decision(evt):
+    problems = []
+    if not _iso_day(evt.get("date")):
+        problems.append("date must be an ISO 'YYYY-MM-DD' string (the trading "
+                        f"day ingest and the daily series key on); got "
+                        f"{evt.get('date')!r}")
+    return problems
 
 
 def _validate_outcome(evt):
@@ -68,20 +107,22 @@ def _validate_outcome(evt):
                             "adjustment_reason documented (expected "
                             "'intraday_restock', 'episode_close_write_off' "
                             "or 'unexplained_shortfall')")
-    price = evt.get("applied_price")
-    if not isinstance(price, (int, float)) or price != price:
-        problems.append("applied_price must be finite")
+    if not _is_finite_price(evt.get("applied_price")):
+        problems.append("applied_price must be a finite number")
     return problems
 
 
 def _quarantine_key(evt):
     """Identity of a quarantined event, or None if it carries no id. Both
     kinds share one quarantine file, so the kind is part of the key --
-    otherwise an id collision silently swallows the second event."""
+    otherwise an id collision silently swallows the second event. An
+    unparseable line is keyed on its own text (`raw_line`)."""
     for kind in ("outcome", "decision"):
         ident = evt.get(f"{kind}_id")
         if ident is not None:
             return (kind, ident)
+    if evt.get("raw_line") is not None:
+        return ("raw", evt.get("stream"), evt["raw_line"])
     return None
 
 
@@ -91,28 +132,77 @@ class EventStore:
         os.makedirs(self.root, exist_ok=True)
         self.paths = {k: os.path.join(self.root, f"{k}.jsonl")
                       for k in ("decisions", "outcomes", "quarantine")}
+        # duplicates seen by THIS store: on emit, and -- because a foreign
+        # producer may write the JSONL directly -- while loading. Either way
+        # the same id twice is what the duplicate gate exists to catch.
         self.duplicate_counts = {"decision": 0, "outcome": 0}
         # quarantined by THIS run; load_quarantine returns the whole FILE
         # (every run ever). The shadow gate must read the per-run figure,
         # never cumulative state (docs/learnings.md).
         self.quarantined_this_run = 0
-        self._ids = {"decision": set(), "outcome": set()}
-        for kind, path in (("decision", self.paths["decisions"]),
-                           ("outcome", self.paths["outcomes"])):
-            if os.path.exists(path):
-                with open(path) as f:
-                    for line in f:
-                        self._ids[kind].add(json.loads(line)[f"{kind}_id"])
         # quarantine dedups too, by the same rule -- otherwise
         # quarantined_event_count grows on every re-run over the same store,
         # and the shadow gate reads it
         self._quarantined_ids = set()
-        if os.path.exists(self.paths["quarantine"]):
-            with open(self.paths["quarantine"]) as f:
-                for line in f:
-                    key = _quarantine_key(json.loads(line).get("event", {}))
-                    if key is not None:
-                        self._quarantined_ids.add(key)
+        for i, parsed, raw in self._lines(self.paths["quarantine"]):
+            if parsed is None:
+                continue                  # a torn quarantine line: skipped
+            key = _quarantine_key(parsed.get("event", {}))
+            if key is not None:
+                self._quarantined_ids.add(key)
+
+        self._ids = {"decision": set(), "outcome": set()}
+        for kind, path in (("decision", self.paths["decisions"]),
+                           ("outcome", self.paths["outcomes"])):
+            torn = []
+            for i, parsed, raw in self._lines(path):
+                if parsed is None:
+                    torn.append((i, raw))
+                    continue
+                ident = parsed.get(f"{kind}_id")
+                if ident in self._ids[kind]:
+                    self.duplicate_counts[kind] += 1
+                self._ids[kind].add(ident)
+            for i, raw in torn:
+                # a partial write (power loss mid-append) must not make the
+                # store unconstructable: the line is quarantined with the
+                # reason and the stream stays readable
+                self._quarantine(
+                    {"stream": f"{kind}s", "line_no": i, "raw_line": raw},
+                    [f"unparseable JSONL line {i} in {kind}s.jsonl (torn "
+                     "write?) -- skipped on load"])
+            self._terminate_last_line(path)
+
+    @staticmethod
+    def _lines(path):
+        """(line_no, parsed or None, raw) per non-empty line."""
+        if not os.path.exists(path):
+            return
+        with open(path) as f:
+            for i, line in enumerate(f, start=1):
+                raw = line.rstrip("\n")
+                if not raw.strip():
+                    continue
+                try:
+                    parsed = json.loads(raw)
+                    if not isinstance(parsed, dict):
+                        raise ValueError("not a JSON object")
+                except ValueError:
+                    parsed = None
+                yield i, parsed, raw
+
+    @staticmethod
+    def _terminate_last_line(path):
+        """A torn last line has no newline; the next append would glue a good
+        event onto it and lose both. Close the line first."""
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return
+        with open(path, "rb+") as f:
+            f.seek(-1, os.SEEK_END)
+            if f.read(1) != b"\n":
+                f.write(b"\n")
+                f.flush()
+                os.fsync(f.fileno())
 
     def _append(self, path, evt):
         with open(path, "a") as f:
@@ -134,8 +224,10 @@ class EventStore:
 
     def emit_decision(self, evt):
         missing = [f for f in DECISION_REQUIRED if f not in evt]
-        if missing:
-            self._quarantine(evt, [f"missing fields: {missing}"])
+        problems = ([f"missing fields: {missing}"] if missing
+                    else _validate_decision(evt))
+        if problems:
+            self._quarantine(evt, problems)
             return False
         if evt["decision_id"] in self._ids["decision"]:
             self.duplicate_counts["decision"] += 1
@@ -159,10 +251,9 @@ class EventStore:
         return True
 
     def _load(self, path):
-        if not os.path.exists(path):
-            return []
-        with open(path) as f:
-            return [json.loads(line) for line in f]
+        # unparseable lines were quarantined at construction; here they are
+        # skipped so the readable stream stays readable
+        return [parsed for _, parsed, _ in self._lines(path) if parsed is not None]
 
     def load_decisions(self):
         return self._load(self.paths["decisions"])

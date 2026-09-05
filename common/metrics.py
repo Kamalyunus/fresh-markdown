@@ -20,8 +20,7 @@ ECON_CARRY = ("category", "fc", "sku_id", "dp_eligible")
 def episode_economics(d):
     """THE episode-grain frame every IL, scrap and margin consumer reads:
     the guardrail noise floors, the live guardrail series and the business
-    metrics. Five hand-synced copies of this groupby existed, kept
-    equal by comments saying "definitions match exactly".
+    metrics.
 
     `d` is hourly in the prepared-frame vocabulary: episode_id, date,
     hour_of_day, starting_inventory, units_sold, ending_inventory,
@@ -61,12 +60,19 @@ def settled(ep):
 
 
 def daily_rates(ep):
-    """Scrap rate and realised-margin rate by OPENING day, ratio of sums --
+    """Scrap rate and realised-margin rate by CLOSE day, ratio of sums --
     the series the noise floors are measured on and the live guardrail
-    triggers on, from one function so the two cannot drift."""
-    day = ep.groupby("date").agg(opening=("opening", "sum"), scrap=("scrap", "sum"),
-                                 revenue=("revenue", "sum"),
-                                 margin=("margin", "sum")).sort_index()
+    triggers on, from one function so the two cannot drift.
+
+    Keyed on `close_day`, never the opening day: an episode's scrap is known
+    when it closes, so a close-day bucket is complete once its episodes are
+    settled. An opening-day bucket over settled episodes is not -- on the
+    newest days only the episodes that closed EARLY (sold out, low scrap)
+    have settled, which reads as an improvement exactly where the persistence
+    rule evaluates."""
+    day = ep.groupby("close_day").agg(opening=("opening", "sum"), scrap=("scrap", "sum"),
+                                      revenue=("revenue", "sum"),
+                                      margin=("margin", "sum")).sort_index()
     day["scrap_rate"] = day.scrap / day.opening
     day["margin_rate"] = day.margin / day.revenue.replace(0, np.nan)
     return day
@@ -91,8 +97,10 @@ def fidelity_decomposition(d, cfg, pred_col="predicted_units"):
 
     at_anchor = d[episodes.is_anchor_row(d, tier_step)]
 
-    # ratio by distance from the anchor, in tier-width bins
-    bins = np.arange(-0.20, 0.225, 0.05)
+    # ratio by distance from the anchor: bins two tiers wide, spanning eight
+    # tiers either side of it (the shipped tier_step gives -0.20..0.20 by 0.05)
+    width, half_span = 2 * tier_step, 8 * tier_step
+    bins = np.arange(-half_span, half_span + width / 2, width)
     d["gap_bin"] = pd.cut(d.gap, bins)
     by_gap = {str(k): ratio(g) for k, g in d.groupby("gap_bin", observed=True)}
 
@@ -108,7 +116,3 @@ def fidelity_decomposition(d, cfg, pred_col="predicted_units"):
             "anchor degrading with gap -> epsilon understated; do NOT recalibrate "
             "the level, widen the search bound and re-estimate."),
     }
-
-
-# ---------------------------------------------------------------------- reassess
-

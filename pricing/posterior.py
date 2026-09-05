@@ -1,18 +1,21 @@
 """pricing.posterior -- posterior read/write and the bounded-step projection.
 
-One record per cell (design section 5.9). The persisted posterior is a Normal
+One record per cell (design 5.9). The persisted posterior is a Normal
 summary, never a stored grid -- the grid exists only inside the update
 computation, which keeps storage trivial and makes the bounded step of
-section 13.4 well-defined.
+design 5.11 well-defined.
 
-Cell assignment (section 10.2) happens once at launch from phase-0 volumes:
+Cell assignment (design 5.9) happens once at launch from phase-0 volumes:
 categories at or above min_episodes_per_week_for_cell get their own cell,
 everything else reads and feeds the global cell. There is no fallback chain
 and no _default key -- the global cell always exists.
 
 The store file also carries processed_outcome_ids so that posterior revision
 and processed-ID commit are a single atomic write (tmp + os.replace), giving
-the exactly-once property of section 13.5.
+the exactly-once property of design 5.9. The same file carries the
+exploration-suspension record (design 5.12): a fired stop condition suspends
+forced exploration only, exploitation pricing continues, and only a human
+(`pipeline.update --resume-exploration`) clears it.
 """
 
 import json
@@ -25,7 +28,7 @@ GLOBAL_CELL = "GLOBAL"
 
 
 def bounded_step(mean_before, std_before, raw_mean, raw_std, cfg):
-    """Section 13.4: clip the mean step, floor the std shrink. Returns
+    """Design 5.11: clip the mean step, floor the std shrink. Returns
     (new_mean, new_std, clipped)."""
     lc = cfg["learning"]
     step = lc["max_mean_step"]
@@ -46,7 +49,7 @@ class PosteriorStore:
 
     @classmethod
     def initialise(cls, cfg, prior_by_category, episodes_per_week, path=None):
-        """Create posterior.json at launch from the section 9.5 prior and
+        """Create posterior.json at launch from the design 5.5 prior and
         phase-0 weekly episode volumes. Assignment does not move during the
         MVP window."""
         path = path or cfg["posterior"]["path"]
@@ -102,24 +105,22 @@ class PosteriorStore:
         return self.state["cell_of"].get(str(category), GLOBAL_CELL)
 
     @staticmethod
-    def widest_active_std(cells, cell_of):
-        """Widest std among cells a category actually ROUTES to.
-
-        GLOBAL is always created -- `cell_name` falls back to it for a
-        category the prior never saw -- but when every category clears
-        `min_episodes_per_week_for_cell` nothing routes there, so it receives
-        no outcome and never narrows. Taking the max over all cells then
-        pinned this at the launch std forever: the exploration budget never
-        scaled down as the learning cells converged (design 5.8's
-        `budget_scale_floor` was unreachable) and the flat-std alert listed
-        GLOBAL permanently.
-        """
+    def active_cells(cells, cell_of):
+        """The cells that can still learn: routed to by some category now, or
+        holding outcomes already (routing can move after a re-initialise).
+        An unrouted GLOBAL takes no outcome and never narrows, so every
+        per-cell reading -- the budget's widest std, the flat-std alert --
+        is taken over THIS set, never over every cell in the file."""
         routed = set(cell_of.values())
-        # routed now, OR has taken outcomes (routing can move after a
-        # re-initialise; a cell that learned something still has a std to
-        # budget for)
-        active = [r["std"] for c, r in cells.items()
-                  if c in routed or r.get("n_obs", 0) > 0]
+        return [c for c, r in cells.items()
+                if c in routed or r.get("n_obs", 0) > 0]
+
+    @staticmethod
+    def widest_active_std(cells, cell_of):
+        """Widest std among `active_cells` -- the cell with the most still to
+        learn, which the exploration budget is sized for (design 5.8)."""
+        active = [cells[c]["std"] for c in
+                  PosteriorStore.active_cells(cells, cell_of)]
         return max(active) if active else max(r["std"] for r in cells.values())
 
     def widest_std(self):
@@ -186,3 +187,40 @@ class PosteriorStore:
         self.state["tau_calibrated_through"] = str(through_date)
         self.state["tau_updated_at"] = pd.Timestamp.now("UTC").isoformat()
         self._atomic_write(self.path, self.state)
+
+    # exploration suspension (design 5.12): a fired stop condition stops
+    # FORCED exploration only -- decide() prices with no budget and records
+    # tau_current None -- while exploitation continues. Set by
+    # pipeline.monitor, cleared only by a human (update --resume-exploration).
+
+    def exploration_suspended(self):
+        """The suspension record {reasons, since, updated_at}, or None."""
+        return self.state.get("exploration_suspended")
+
+    def suspend_exploration(self, reasons, since):
+        """Suspend forced exploration for `reasons` (stop-condition names)
+        from `since` (the trading day that fired it). Idempotent: a second
+        call keeps the FIRST `since` and unions the reasons, so a stop that
+        keeps firing does not restart the clock. Same atomic write as the
+        cells. Returns the record."""
+        current = self.state.get("exploration_suspended")
+        merged = sorted(set(reasons) | set(current["reasons"] if current else ()))
+        if not merged:
+            raise ValueError("suspend_exploration needs at least one reason")
+        record = {"reasons": merged,
+                  "since": current["since"] if current else str(since)}
+        if current and current["reasons"] == merged \
+                and current["since"] == record["since"]:
+            return current                     # nothing changed, nothing written
+        record["updated_at"] = pd.Timestamp.now("UTC").isoformat()
+        self.state["exploration_suspended"] = record
+        self._atomic_write(self.path, self.state)
+        return record
+
+    def resume_exploration(self):
+        """Clear the suspension (the human gate). Returns the record cleared,
+        or None when exploration was not suspended."""
+        record = self.state.pop("exploration_suspended", None)
+        if record is not None:
+            self._atomic_write(self.path, self.state)
+        return record

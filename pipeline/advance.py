@@ -26,9 +26,9 @@ import pandas as pd
 
 from bootstrap.run import PREPARED, step
 from common import episodes, provenance
-from common.config import RUNTIME_REQUIRED, config_get, load_config
+from common.config import load_config
 from common.io import read_json, write_json
-from pipeline import status, tune, update
+from pipeline import status, tune
 
 RAW = "data/flc_raw.parquet"
 JOURNAL = "artifacts/advance_journal.json"
@@ -41,13 +41,15 @@ MAX_TUNE_ROUNDS = 4
 
 # ------------------------------------------------------------------ probe
 
+# a paste's phase in the journal: tau is shadow's value, everything else tune's
+PASTE_PHASE = {"exploration.tau_initial": "shadow"}
+
+
 def stale_reports(cfg, bundle, reports):
     """Reports produced against a bundle no longer on disk, or under a
     config whose MOVED KEYS they actually read (tune.stale_keys, the same
     routing status uses). A MEASURED paste that only writes back what a
-    report measured invalidates nothing: treating every digest change as
-    staleness re-ran shadow after every tau paste and chased the fixed
-    point for a day. Returns {name: why}."""
+    report measured invalidates nothing. Returns {name: why}."""
     out = {}
     for name, rep in reports.items():
         if not rep:
@@ -69,9 +71,7 @@ def stale_reports(cfg, bundle, reports):
 
 def probe(cfg, root="reports", feed=None, retrain=False):
     """Everything plan() decides on, read once from disk."""
-    reports = {n: read_json(os.path.join(root, f"{n}.json"))
-               for n in ("backtest", "thresholds", "shadow", "monitor",
-                         "assurance")}
+    reports = status.read_reports(root)
     seal = provenance.verify(cfg, provenance.load_seal(cfg))
     cal = read_json(cfg["baseline_model"]["calibration_factor_path"]) or {}
     sched = (cal.get("schedule") or {})
@@ -95,12 +95,11 @@ def probe(cfg, root="reports", feed=None, retrain=False):
         "retrain": retrain,
         "stale": stale_reports(cfg, seal.get("bundle"), reports),
         "have": {n for n, r in reports.items() if r},
-        "tune": tune.collect(cfg, root),
+        "tune": tune.collect(cfg, root, reports=reports),
         "posterior": os.path.exists(cfg["posterior"]["path"]),
         "shadow_gate": ((reports["shadow"] or {}).get("shadow_gate") or {}
                         ).get("verdict"),
-        "nulls": [".".join(p) for p in RUNTIME_REQUIRED
-                  if config_get(cfg, p) is None],
+        "nulls": status.runtime_nulls(cfg),
         "launched": launched,
         "schedule_scope": str(sched.get("scope") or ""),
         "schedule_end": max(sched["by_week"]) if sched.get("by_week") else None,
@@ -114,7 +113,7 @@ def probe(cfg, root="reports", feed=None, retrain=False):
         "extract_range": (cfg["data"]["split"]["train_start"],
                           (cfg["data"].get("holdout") or {}).get("end")
                           or cfg["data"]["split"]["test_end"]),
-        "status": status.collect(cfg, root),
+        "status": status.collect(cfg, root, reports=reports),
     }
 
 
@@ -170,9 +169,11 @@ def plan(st):
                       [f"{f['key']}: {f['current']} -- needs {f['recommended']}"
                        for f in blocks])]
     if rep["to_paste"]:
+        keys = [f["key"] for f in rep["to_paste"]]
+        phases = {PASTE_PHASE.get(k, "tune") for k in keys}
         steps.append({"kind": "paste", "label": "tune --apply",
-                      "phase": "tune", "reevaluate": True,
-                      "keys": [f["key"] for f in rep["to_paste"]]})
+                      "phase": phases.pop() if len(phases) == 1 else "tune",
+                      "reevaluate": True, "keys": keys})
         return steps
 
     # 4. posterior, once
@@ -369,7 +370,7 @@ def report(cfg, root="reports", journal=JOURNAL, decisions=DECISIONS):
             lines.append(f"| `{f['key']}` | {f.get('current')} | "
                          f"{'MEASURED' if f['class'] == tune.PASTE else 'SET BY OWNER'} | "
                          f"{f['status']} | {f.get('source', '')} |")
-    nulls = [".".join(p) for p in RUNTIME_REQUIRED if config_get(cfg, p) is None]
+    nulls = status.runtime_nulls(cfg)
     lines += ["", "Still null: " + (", ".join(f"`{n}`" for n in nulls) or "none"), ""]
 
     lines += ["## Status", "", "| check | verdict | detail |", "|---|---|---|"]
@@ -385,6 +386,13 @@ def report(cfg, root="reports", journal=JOURNAL, decisions=DECISIONS):
         lines.append("nothing recorded -- run `python3 -m pipeline.advance`")
     lines.append("")
     return "\n".join(lines)
+
+
+def _write_readiness(config_path, root):
+    text = report(load_config(config_path), root)
+    os.makedirs(root, exist_ok=True)
+    open(os.path.join(root, READINESS), "w").write(text)
+    return text
 
 
 def main():
@@ -405,11 +413,7 @@ def main():
     args = ap.parse_args()
 
     if args.report:
-        text = report(load_config(args.config), args.reports)
-        path = os.path.join(args.reports, READINESS)
-        os.makedirs(args.reports, exist_ok=True)
-        open(path, "w").write(text)
-        print(text)
+        print(_write_readiness(args.config, args.reports))
         return 0
 
     rounds, seen = 0, {}
@@ -434,15 +438,15 @@ def main():
                         "this invocation. Something re-invalidates it after each "
                         "run -- read the plan above (the stale reason names the "
                         "moved keys) and reports/launch_readiness.md")
-        if rounds > 2 * MAX_TUNE_ROUNDS:
+        # the round budget counts WORK, not plans: a legitimate stop on the
+        # ninth round must still be journaled and reported
+        if steps and steps[0]["kind"] != "stop" and rounds > 2 * MAX_TUNE_ROUNDS:
             raise SystemExit("advance did not settle -- a step keeps "
                              "invalidating another; read the plan above")
         if not execute(steps, args.config, args.reports):
             # every stop leaves the readiness report behind it
-            path = os.path.join(args.reports, READINESS)
-            os.makedirs(args.reports, exist_ok=True)
-            open(path, "w").write(report(load_config(args.config), args.reports))
-            print(f"\nreport      {path}")
+            _write_readiness(args.config, args.reports)
+            print(f"\nreport      {os.path.join(args.reports, READINESS)}")
             return 0
 
 

@@ -35,15 +35,27 @@ def _needs(report, name, missing, run_cmd="", key=None, predates=()):
     return None
 
 
-def _launch_blockers(cfg):
-    """Config values strict mode refuses to start without."""
-    missing = []
+def runtime_nulls(cfg):
+    """The RUNTIME_REQUIRED keys still null -- the one definition status,
+    advance and the readiness report share."""
+    out = []
     for path in RUNTIME_REQUIRED:
         try:
             if config_get(cfg, path) is None:
-                missing.append(".".join(path))
+                out.append(".".join(path))
         except KeyError:
-            missing.append(".".join(path))
+            out.append(".".join(path))
+    return out
+
+
+def read_reports(root):
+    return {n: read_json(os.path.join(root, f"{n}.json"))
+            for n in ("backtest", "thresholds", "shadow", "monitor", "assurance")}
+
+
+def _launch_blockers(cfg):
+    """Config values strict mode refuses to start without."""
+    missing = runtime_nulls(cfg)
     if missing:
         return _row("launch blockers", FAIL,
                     f"{len(missing)} config values still null: "
@@ -74,6 +86,10 @@ def _mirrors(cfg):
     """A stale paste mis-weights every posterior step, silently. The remedy
     is NOT automatically "re-paste": the check says the two disagree, not
     which is right -- read the bundle line first."""
+    if not os.path.exists(cfg["dispersion"]["rho_path"]):
+        # nothing to mirror yet is NOT a match
+        return _row("artifact mirrors", NONE, "no rho artifact on disk yet",
+                    "python3 -m pipeline.advance")
     drift = artifact_mirror_drift(cfg)
     if drift:
         return _row("artifact mirrors", FAIL, "; ".join(drift),
@@ -82,30 +98,23 @@ def _mirrors(cfg):
                 "config matches the frozen artifacts")
 
 
-def _config_vs_reports(cfg, root):
-    """MEASURED values pasted from a REPORT, checked against that report.
-
-    `artifact mirrors` covers the values pasted from a frozen artifact. These
-    come from backtest/shadow/thresholds instead, and nothing refused a stale
-    one: a number from someone else's run -- or from the repo's SYNTHETIC
-    fixture, which ships in config.yaml -- survived every check until somebody
-    happened to run `tune`. Values still null are launch blockers and are
-    reported there, not twice here.
-    """
+def _config_vs_reports(cfg, root, reports=None):
+    """MEASURED values pasted from a REPORT, checked against that report
+    (`artifact mirrors` covers the ones pasted from a frozen artifact). A
+    value nobody measured this run is unverified, never a match. Values
+    still null are launch blockers and are reported there, not twice here."""
     from pipeline import tune
 
     try:
-        rep = tune.collect(cfg, root)
+        rep = tune.collect(cfg, root, reports=reports)
     except Exception as exc:                                   # noqa: BLE001
         return _row("config mirrors reports", NONE,
                     f"could not evaluate: {type(exc).__name__}: {exc}",
                     "python3 -m pipeline.tune")
     blocks = [f for f in rep["findings"] if f["class"] == tune.BLOCK]
     if blocks:
-        # NAME them. "a BLOCK upstream" left an owner who had just broken an
-        # invariant staring at an all-green screen with one quiet "not run".
-        # A missing report is genuinely not-run; every other BLOCK is an
-        # invariant violated, and status must not report that as green.
+        # NAME them: a missing report is not-run; every other BLOCK is an
+        # invariant violated, never green
         missing_only = all(f["key"] == "reports present" for f in blocks)
         detail = "; ".join(f"{f['key']}: {f['current']} -- needs "
                            f"{f['recommended']}" for f in blocks)
@@ -113,6 +122,15 @@ def _config_vs_reports(cfg, root):
                     NONE if missing_only else FAIL, detail,
                     "python3 -m pipeline.tune  (it prints the full reason)")
     measured = {".".join(k) for k in tune.MEASURED_KEYS}
+    seen = {f["key"] for f in rep["findings"]}
+    unverified = sorted(k for k in measured if k not in seen
+                        and config_get(cfg, tuple(k.split("."))) is not None)
+    if unverified:
+        # a pasted value no report produced a finding for (older schema,
+        # missing block) is unverified, not a match
+        return _row("config mirrors reports", NONE,
+                    "no report measures: " + ", ".join(unverified),
+                    "re-run the report that derives it (pipeline.tune names it)")
     drift = [f for f in rep["findings"]
              if f["status"] == tune.ACT and f["key"] in measured
              and f["current"] is not None]
@@ -238,14 +256,9 @@ def _shadow(shadow):
 
 
 def _vintages(cfg, state, reports):
-    """Gate evidence is only evidence about the artifacts AND config it ran
-    under (hard rule 1): after a retrain, yesterday's backtest and shadow
-    grade a model no longer on disk; after a paste, they grade a config no
-    longer in force. Model mismatch is FAIL. A config that moved is WARN and
-    NAMES what moved -- every report now carries the fingerprint of the
-    config it read (`config.digest` + `config.snapshot`, by phase), so this
-    no longer depends on a human remembering to bump `meta.config_version`.
-    """
+    """A report is evidence about the artifacts AND config it ran under
+    (hard rule 1). Model mismatch is FAIL; a moved config key the report
+    reads is WARN and names what moved (design 5.14a)."""
     bundle = state["bundle"]
     if bundle is None:
         return _row("report vintages", NONE,
@@ -258,7 +271,8 @@ def _vintages(cfg, state, reports):
         if not rep:
             continue                # its own row already reads "not run"
         av = rep.get("artifact_versions") or {}
-        if "baseline_model_version" in av and av["baseline_model_version"] != bundle:
+        # None = written before any bundle existed: current, as advance reads it
+        if av.get("baseline_model_version") not in (None, bundle):
             stale.append(f"{name} ran against bundle "
                          f"{av['baseline_model_version']}")
             continue
@@ -362,10 +376,7 @@ def _stops(monitor):
                      "python3 -m pipeline.monitor"):
         return row
     # monitor.stop_conditions is {fired: {name: bool|status}, guardrails:
-    # {...}, suspend_exploration: bool} -- read THAT shape. Iterating the
-    # top level looking for v["fired"] found three container keys, counted
-    # them as "3 evaluated", never saw a per-condition flag, and left the
-    # owner-null WARN branch dead.
+    # {...}, suspend_exploration: bool} -- read THAT shape, not the top level
     sc = monitor.get("stop_conditions", {})
     flags = sc.get("fired") if isinstance(sc.get("fired"), dict) else {}
     fired = [k for k, v in flags.items() if v is True]
@@ -374,6 +385,13 @@ def _stops(monitor):
     if fired:
         return _row("stop conditions", FAIL, "fired: " + ", ".join(fired),
                     "monitor.safety, monitor.guardrails")
+    susp = monitor.get("exploration_suspended")
+    if susp:
+        return _row("stop conditions", WARN,
+                    f"exploration SUSPENDED since {susp.get('since')}: "
+                    + ", ".join(susp.get("reasons") or []) + " -- exploitation "
+                    "pricing continues; nothing explores until a human resumes",
+                    "python3 -m pipeline.update --resume-exploration")
     detail = f"{len(flags)} evaluated, none fired"
     if blocked:
         detail += f" · {len(blocked)} cannot fire (owner threshold null)"
@@ -397,21 +415,17 @@ def _assurance(rep):
     return _row("assurance", WARN if thin else PASS, detail)
 
 
-def collect(cfg, root="reports"):
-    """`root` is injectable so the tests can point at a fixture directory --
-    a status view that cannot itself be tested is not worth trusting."""
-    backtest = read_json(os.path.join(root, "backtest.json"))
-    shadow = read_json(os.path.join(root, "shadow.json"))
-    reports = {"backtest": backtest, "shadow": shadow,
-               "thresholds": read_json(os.path.join(root, "thresholds.json")),
-               "monitor": read_json(os.path.join(root, "monitor.json")),
-               "assurance": read_json(os.path.join(root, "assurance.json"))}
+def collect(cfg, root="reports", reports=None):
+    """`root` is injectable so the tests can point at a fixture directory;
+    `reports` lets advance hand over the JSON it already read."""
+    reports = reports or read_reports(root)
+    backtest, shadow = reports["backtest"], reports["shadow"]
     state = provenance.verify(cfg, provenance.load_seal(cfg))
     rows = [
         _launch_blockers(cfg),
         _bundle(state),
         _mirrors(cfg),
-        _config_vs_reports(cfg, root),
+        _config_vs_reports(cfg, root, reports),
         _vintages(cfg, state, reports),
         _calibration(cfg, backtest),
         _calibration_convergence(cfg),

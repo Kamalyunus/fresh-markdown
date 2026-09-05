@@ -17,7 +17,9 @@ All commands run from the repo root. `data/`, `reports/`, `artifacts/`,
 - **Owner** — tell your agent: *read `AGENTS.md`, then run `pipeline.advance`
   until `reports/launch_readiness.md` says it is waiting on
   `data.launch_date`.* It pulls the extract for the config's split and
-  hold-out dates, trains once, derives and pastes every MEASURED value,
+  hold-out dates (`download_flc` exits non-zero if a pull does not cover
+  `train_start` through the hold-out's end — the file is still written, the
+  chain does not proceed on it), trains once, derives and pastes every MEASURED value,
   runs shadow on the hold-out, and stops at each decision only you can
   make, printing the evidence. Read the section *What the owner decides*.
   For leadership, `python3 -m tools.scenario_deck --workers 0` writes
@@ -78,12 +80,14 @@ each decision.
    `information_rel` — and set the pair, then re-run shadow once. A
    smaller share forces less at the same depth; a larger multiple forces
    less but deeper.
-4. **The owner keys** (`advance` stops here): `scrap_deterioration_pct` and
-   `margin_deterioration_pct` at or above the floor `thresholds.json`
-   stamps (never on `TOO TIGHT`, `BLOCKED`, `LIKELY INERT` or
-   `insufficient history`); the two learning rails — `max_std_shrink` first (`information_increment`
-   derives from it), then `max_mean_step`, reading
-   `bounded_step_recommendation` and `backtest.step_sensitivity`.
+4. **The owner keys** (`advance` stops here): `max_std_shrink` first
+   (`information_increment` derives from it), then `max_mean_step` when
+   `backtest.step_sensitivity` says the re-price exceeds the auto-apply
+   gate (inside it, `tune` pastes it). The stop thresholds
+   `scrap_deterioration_pct` and `margin_deterioration_pct` are PASTED at
+   the 3σ trailing floor `thresholds.json` stamps; they come to you only
+   on `TOO TIGHT`, `BLOCKED`, `LIKELY INERT` or `insufficient history`,
+   and the answer there is the basis or the metric, never a number.
 5. **`data.launch_date`**, on launch day. It lets the weekly level re-fit
    schedule past `split.test_end`; never move `split.test_end` for this.
    `advance` then re-fits, re-seals, and `status` must be green.
@@ -145,7 +149,7 @@ in the caller.
 
 | Line | Response |
 | --- | --- |
-| stop condition fired (overspend >2×, mismatch, duplicates) | exploration suspends automatically; **exploitation pricing continues**. Investigate, don't restart blindly |
+| stop condition fired (overspend >2×, mismatch, duplicates, guardrail) | the monitor suspends exploration in the posterior state; `decide` stops drawing and **exploitation pricing continues**; `status` shows `exploration SUSPENDED since …`. Investigate, then a human resumes with `python3 -m pipeline.update --resume-exploration` — never restart blindly |
 | `config mirrors reports` FAIL | a MEASURED paste disagrees with the report that derives it, or the report could not measure it (NOT RUN). `python3 -m pipeline.tune` prints the reason; `advance` re-pastes what it can |
 | `guardrail floors` WARN | "insufficient history" — nobody measured the floor, so the stop was not checked. Not a pass: more closed-episode history, then re-run `derive_thresholds` |
 | `assurance · reproduction` FAIL | something moved under the solver (config edit, artifact swap, deploy, library). Diff the bundle first: `artifact bundle` line, then `artifact mirrors` |

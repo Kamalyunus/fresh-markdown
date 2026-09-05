@@ -55,8 +55,8 @@ def test_a_restocked_episode_lands_and_its_il_is_right(cfg, tmp_path):
     reasons = [o.get("adjustment_reason") for o in store.load_outcomes()]
     assert reasons == [None, "intraday_restock", "episode_close_write_off"]
 
-    il = mon.business_metrics(store.load_decisions(), store.load_outcomes(),
-                              cfg)["il_pct_aggregate"]
+    il = mon.business_metrics(store.load_decisions(),
+                              store.load_outcomes())["il_pct_aggregate"]
     # scrap is read off the LAST row's starting inventory, which already
     # carries the restock -- which is exactly why the monitor survives one
     assert il["il_absolute"] == pytest.approx(28000.0)

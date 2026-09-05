@@ -100,6 +100,32 @@ def build_query(start_date, end_date, exclude_start=None, exclude_end=None):
     """
 
 
+def required_range(cfg):
+    """The dates the config's windows need the extract to cover: from
+    data.split.train_start through the hold-out's end (or split.test_end when
+    no hold-out is configured) -- the range pipeline.advance passes."""
+    data = cfg["data"]
+    start = date.fromisoformat(str(data["split"]["train_start"]))
+    end = date.fromisoformat(str((data.get("holdout") or {}).get("end")
+                                 or data["split"]["test_end"]))
+    return start, end
+
+
+def coverage_gap(start, end, cfg):
+    """Why a pull over [start, end] cannot feed the configured windows, or
+    None when it covers them. The manual `--days` default is what this
+    guards: a range that stops short leaves a split empty and fit_dispersion
+    (or the prior's held-out scoring) fails later, about something else."""
+    need_start, need_end = required_range(cfg)
+    if start <= need_start and end >= need_end:
+        return None
+    return (f"the pull {start} -> {end} does not cover the range the config's "
+            f"windows need, {need_start} -> {need_end} (data.split.train_start "
+            "through data.holdout.end or split.test_end). Pass --start-date / "
+            "--end-date over that range, or run `python3 -m pipeline.advance`, "
+            "which sizes the pull from the config.")
+
+
 def summarise(df):
     """What to look at before spending an hour on the rest of the pipeline."""
     lines = [
@@ -141,8 +167,8 @@ def main():
     if start > end:
         raise SystemExit(f"empty range: {start} > {end}")
 
-    excl = {} if args.no_exclude \
-        else load_config(args.config)["data"]["exclusion_window"]
+    cfg = load_config(args.config)
+    excl = {} if args.no_exclude else cfg["data"]["exclusion_window"]
 
     query = build_query(start, end, excl.get("start"), excl.get("end"))
     print(f"== {SOURCE_TABLE}: {start} -> {end}"
@@ -167,7 +193,14 @@ def main():
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     df.to_parquet(args.out, index=False)
-    print(f"\nwrote {args.out}\nnext: python3 -m bootstrap.run --input {args.out}")
+    print(f"\nwrote {args.out}")
+
+    # the extract is on disk either way (it is still data); the exit code
+    # says whether the chain can run on it
+    gap = coverage_gap(start, end, cfg)
+    if gap:
+        raise SystemExit(f"EXTRACT TOO SHORT -- {gap}")
+    print(f"next: python3 -m bootstrap.run --input {args.out}")
 
 
 if __name__ == "__main__":

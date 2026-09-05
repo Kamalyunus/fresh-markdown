@@ -207,24 +207,28 @@ def test_apply_names_the_minimum_rerun_and_never_asks_for_a_retrain(
 
     # the fit window is the ONE paste that turns the loop -- and even it does
     # not retrain the baseline
-    assert tune.RERUN[("baseline_model", "calibration_fit_trailing_weeks")] \
-        == "calibration"
+    R = lambda *k: tune.KEYS[k]["rerun"]                       # noqa: E731
+    assert R("baseline_model", "calibration_fit_trailing_weeks") == "calibration"
     steps = tune.RERUN_STEPS["calibration"]
     assert "bootstrap.run --check-only" in steps, \
         "the loop is driven by the module, not hand-iterated"
     assert "WITHOUT retraining" in steps
 
-    # nothing that only production reads may claim to need a re-fit
-    for key in (("learning", "information_increment"),
-                ("learning", "max_mean_step"),
-                ("exploration", "tau_initial"),
-                ("dispersion", "rho")):
-        assert tune.RERUN.get(key, "none") == "none", key
+    # values only production reads never claim a re-fit
+    for key in (("exploration", "tau_initial"), ("dispersion", "rho")):
+        assert R(*key) == "none", key
     # a stop threshold re-derives its own verdict (cheap) -- never the loop
-    assert tune.RERUN[("monitoring", "stop_conditions",
-                       "scrap_deterioration_pct")] == "thresholds"
-    # and the forced-move floor re-runs shadow, whose spreads it changes
-    assert tune.RERUN[("exploration", "delta_min_log_bias")] == "shadow"
+    assert R("monitoring", "stop_conditions", "scrap_deterioration_pct") == "thresholds"
+    # the forced-move floor re-runs shadow, whose spreads it changes
+    assert R("exploration", "delta_min_log_bias") == "shadow"
+    # the rails: thresholds derives I* from the shrink; the step is read by
+    # bounded_step AND shadow's learning yield -- both, never the loop
+    assert R("learning", "max_std_shrink") == "thresholds"
+    assert R("learning", "max_mean_step") == "thresholds+shadow"
+    assert tune.rerun_classes(["learning.max_mean_step"]) == ["shadow", "thresholds"]
+    # the band is an input to the W sweep but stays "none" on purpose
+    # (hysteresis); the comment in KEYS says so
+    assert R("baseline_model", "calibration_gate_band") == "none"
     # the classes do not nest: pasted together, BOTH re-runs are named, and
     # each report is invalidated only by the keys it reads
     both = ["exploration.delta_min_log_bias",
@@ -234,6 +238,15 @@ def test_apply_names_the_minimum_rerun_and_never_asks_for_a_retrain(
     assert tune.stale_keys("thresholds", both) == both[1:]
     assert tune.stale_keys("backtest", both) == []
     assert tune.rerun_classes(["exploration.tau_initial"]) == ["none"]
+    # a per-category paste diffs one key per category: the LONGEST KEYS
+    # prefix routes it, so a re-rounded category re-runs shadow, never the loop
+    assert tune.rerun_for(["exploration.delta_min_log_bias.MEAT"]) == "shadow"
+    # keys a single report reads route to that report; runtime-only knobs
+    # are inert; an unclassified edit re-grades everything
+    assert tune.rerun_for(["exploration.budget_share_of_il"]) == "shadow"
+    assert tune.rerun_for(["monitoring.stop_conditions.persistence_days"]) == "thresholds"
+    assert tune.rerun_for(["exploration.tau_paste_tolerance_rel"]) == "none"
+    assert tune.rerun_for(["pricing.tier_step"]) == "calibration"
 
     # and the decision log records which re-run the run required
     log = json.load(open(res["log"]))["runs"][-1]

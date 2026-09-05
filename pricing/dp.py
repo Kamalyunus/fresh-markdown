@@ -9,13 +9,14 @@ or above cost. The chosen price becomes the next anchor.
     V(anchor, q, h)    = max over feasible p <= anchor of Q(anchor, q, h, p)
     V(anchor, q, 0)    = -cost * q
 
-The reward is absolute IL per section 3.1: no ratio transform, no outer loop.
+The reward is absolute IL per design 2.2: no ratio transform, no outer loop.
 mu(p) uses the posterior MEAN epsilon. State scale is small (tiers ~2-20,
 horizon under twelve hours, inventory under thirty), so evaluation is
 exhaustive.
 """
 
 import time
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -51,7 +52,7 @@ def deepening_threshold_epsilon(original_price, cost, d):
     true switch point above this value.
     """
     gamma = cost / original_price
-    return float("inf") if gamma - d <= 1e-9 else (1.0 - d) / (gamma - d)
+    return float("inf") if gamma - d <= TIER_EPS else (1.0 - d) / (gamma - d)
 
 
 def entry_action_set(tiers, d_ref, d_max, pcfg):
@@ -77,15 +78,13 @@ def entry_action_set(tiers, d_ref, d_max, pcfg):
     return sorted(allowed)
 
 
+@dataclass
 class DPResult:
-    def __init__(self, tiers, q_by_tier, v_star, solver_latency_s, tail_mass_max,
-                 d_ref=None):
-        self.tiers = tiers                    # discounts, ascending
-        self.q_by_tier = q_by_tier            # {tier_index: Q value} for allowed actions
-        self.d_ref = d_ref                    # the reference the forecast is quoted at
-        self.v_star = v_star
-        self.solver_latency_s = solver_latency_s
-        self.tail_mass_max = tail_mass_max
+    tiers: list                 # discounts, ascending
+    q_by_tier: dict             # {tier_index: Q value} for the actions allowed NOW
+    d_ref: float                # the reference discount the forecast is quoted at
+    solver_latency_s: float
+    tail_mass_max: float
 
     @property
     def optimal_index(self):
@@ -157,6 +156,4 @@ def solve(original_price, cost, q0, mu_ref_path, d_ref, epsilon, r, cfg,
             raise ValueError("no feasible tier at or below the current anchor price")
 
     q_by_tier = {j: float(Q_now[j, q0]) for j in allowed}
-    v_star = max(q_by_tier.values())
-    return DPResult(tiers, q_by_tier, v_star, time.monotonic() - t0, tail_max,
-                    d_ref=d_ref)
+    return DPResult(tiers, q_by_tier, d_ref, time.monotonic() - t0, tail_max)

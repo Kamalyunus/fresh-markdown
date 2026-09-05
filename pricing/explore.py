@@ -20,9 +20,13 @@ std.
 import math
 
 import numpy as np
-
-from pricing.dp import TIER_EPS
 import pandas as pd
+
+# float noise on a LOG price move (|log((1-d)/(1-d_ref))|). Same magnitude as
+# pricing.dp.TIER_EPS, but a log move is not a tier: the two comparisons are
+# kept apart so a change to the grid epsilon cannot silently move the
+# admissibility floor.
+LOG_EPS = 1e-9
 
 
 def delta_min(cfg, eps, category=None):
@@ -45,11 +49,17 @@ def delta_min(cfg, eps, category=None):
         # per category, `_default` for one the backtest never saw -- the
         # same key convention as reference_discount ('SIDE DISH' -> SIDE_DISH)
         key = str(category).replace(" ", "_") if category is not None else "_default"
+        if key not in bias and "_default" not in bias:
+            raise KeyError(
+                f"exploration.delta_min_log_bias has no entry for {key!r} and "
+                "no `_default`: a per-category floor mapping must name every "
+                "priced category or carry `_default` (pipeline.tune writes "
+                "both). A missing key is not 'no floor'.")
         bias = bias.get(key, bias.get("_default"))
     if not bias:
         return 0.0
     floor = abs(float(cfg["posterior"]["epsilon_max"]))       # the sign constraint
-    return (float(ec.get("delta_min_bias_multiple", 1.0)) * float(bias)
+    return (float(ec["delta_min_bias_multiple"]) * float(bias)
             / max(abs(float(eps)), floor))
 
 
@@ -66,20 +76,24 @@ def admissible(dp_result, delta_min=0.0):
     spent on."""
     star = dp_result.optimal_index
     d_ref = dp_result.d_ref
-    if delta_min > 0 and d_ref is None:
-        raise ValueError("delta_min needs the DP result's d_ref")
     return [j for j in dp_result.q_by_tier if j != star
             and (delta_min <= 0
-                 or log_move(d_ref, dp_result.tiers[j]) >= delta_min - TIER_EPS)]
+                 or log_move(d_ref, dp_result.tiers[j]) >= delta_min - LOG_EPS)]
+
+
+def tier_costs(dp_result):
+    """{tier index: Q(p_star) - Q(p)} over the actions allowed now -- the
+    expected IL each non-optimal action forgoes, in currency."""
+    q = dp_result.q_by_tier
+    q_star = q[dp_result.optimal_index]
+    return {j: q_star - q[j] for j in q}
 
 
 def affordable_set(dp_result, tau, delta_min=0.0):
     """Tier indices a perturbation may legally land on, and every tier's
     cost. Public: `pipeline.assurance` reconstructs this exact set to test
     that the draw was uniform."""
-    q = dp_result.q_by_tier
-    star = dp_result.optimal_index
-    costs = {j: q[star] - q[j] for j in q}
+    costs = tier_costs(dp_result)
     return [j for j in admissible(dp_result, delta_min) if costs[j] <= tau], costs
 
 
@@ -88,11 +102,10 @@ def spread_table(dp_result, delta_min=0.0):
     Q-spreads the ledger prices tau against, so a tau solved here funds the
     draws production will make; the moves let the ledger re-judge
     admissibility at a deeper floor (SpreadLedger.sweep)."""
-    _, costs = affordable_set(dp_result, 0.0, delta_min)
+    costs = tier_costs(dp_result)
     kept = admissible(dp_result, delta_min)
     return ([costs[j] for j in kept],
-            [log_move(dp_result.d_ref, dp_result.tiers[j]) for j in kept]
-            if dp_result.d_ref is not None else [0.0] * len(kept))
+            [log_move(dp_result.d_ref, dp_result.tiers[j]) for j in kept])
 
 
 def spread_costs(dp_result, delta_min=0.0):
@@ -256,16 +269,27 @@ class SpreadLedger:
         n_dec = len(self._lens)
         if not n_dec or daily_budget <= 0:
             return {"note": "no spreads or no budget -- nothing to sweep"}
+        if not share_in_force or share_in_force <= 0 \
+                or not multiple_in_force or multiple_in_force <= 0 \
+                or not n_decisions or n_decisions <= 0:
+            return {"note": ("nothing to sweep against: budget_share_of_il, "
+                             "delta_min_bias_multiple and the decision count "
+                             "must all be positive (got "
+                             f"{share_in_force!r}, {multiple_in_force!r}, "
+                             f"{n_decisions!r})")}
         floor_active = bool(len(self._dec_dmin)) and float(self._dec_dmin.max()) > 0
         move_sq = self._moves ** 2
 
+        def same(a, b):
+            return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12)
+
         def cell(share, mult):
-            if mult < multiple_in_force - 1e-9:
+            if mult < multiple_in_force and not same(mult, multiple_in_force):
                 return {"note": "below the multiple in force -- those tiers were "
                                 "never recorded; re-run shadow at that multiple"}
-            if floor_active and mult > multiple_in_force + 1e-9:
+            if floor_active and mult > multiple_in_force and not same(mult, multiple_in_force):
                 rel = mult / multiple_in_force
-                keep = self._moves >= rel * self._dec_dmin[self._dec_of] - TIER_EPS
+                keep = self._moves >= rel * self._dec_dmin[self._dec_of] - LOG_EPS
             else:
                 keep = None
             budget = daily_budget * share / share_in_force
@@ -296,8 +320,8 @@ class SpreadLedger:
         for (share, mult), c in grid.items():
             info = c.pop("_info", None)
             rows.append({"budget_share_of_il": share, "delta_min_bias_multiple": mult,
-                         "in_force": (abs(share - share_in_force) < 1e-12
-                                      and abs(mult - multiple_in_force) < 1e-9),
+                         "in_force": (same(share, share_in_force)
+                                      and same(mult, multiple_in_force)),
                          **c,
                          **({"information_rel": round(info / ref, 3)}
                             if info is not None and ref else {})})
@@ -335,21 +359,10 @@ class SpreadLedger:
 def tau_provenance_error(cfg, backtest, shadow=None):
     """Why the pasted `exploration.tau_initial` cannot be trusted, or None.
 
-    The trusted source is SHADOW's own derivation (anchored path over the
-    trailing pre-window week); the backtest derivation (exploit-only path)
-    is accepted only when no shadow derivation exists, with the old three
-    failure modes: none on disk; predating the entry-only scoping fix
-    (marker: no `spread_decisions`); a value that disagrees with it.
-    This is a PROVENANCE check -- did the paste come from the derivation --
-    not a precision requirement on tau. `tau_initial` seeds day one only
-    (`PosteriorStore.tau`); from the first calibration tau is production
-    state and `tau_next` moves it up to 25% a day, so a few percent at launch
-    is absorbed immediately. The tolerance is relative because tau is
-    currency and scales with the population's IL. The pastes this catches --
-    wrong run, wrong field, the pre-scoping-fix backtest -- are all off by
-    tens of percent or multiples, never by fractions of one.
-
-    `backtest`/`shadow` are the loaded reports, or None.
+    A PROVENANCE check, not a precision one: the paste must agree (within
+    `tau_paste_tolerance_rel`) with shadow's own derivation, or -- only when
+    no shadow derivation exists -- with a backtest derivation that carries
+    `spread_decisions`. `backtest`/`shadow` are the loaded reports, or None.
     """
     tau = cfg["exploration"]["tau_initial"]
     if tau is None:
@@ -408,13 +421,17 @@ def trailing_daily_il(il_by_day, day, cfg):
     return float(sum(il_by_day.get(k, 0.0) for k in days) / denom)
 
 
-def budget_today(trailing_il, posterior_std, cfg):
-    """budget_share_of_il x trailing daily IL, scaled down as the posterior
-    narrows, never below budget_scale_floor (design 5.8)."""
+def budget_scale(posterior_std, cfg):
+    """The budget's posterior-width factor: 1 at the reference std, shrinking
+    with the widest routed std, never below budget_scale_floor."""
     ec = cfg["exploration"]
-    scale = min(max(posterior_std / ec["budget_scale_ref_std"],
-                    ec["budget_scale_floor"]), 1.0)
-    return ec["budget_share_of_il"] * scale * trailing_il
+    return min(max(posterior_std / ec["budget_scale_ref_std"],
+                   ec["budget_scale_floor"]), 1.0)
+
+
+def budget_today(trailing_il, posterior_std, cfg):
+    """budget_share_of_il x trailing daily IL x budget_scale (design 5.8)."""
+    return cfg["exploration"]["budget_share_of_il"] * budget_scale(posterior_std, cfg) * trailing_il
 
 
 def walk_tau(tau, days, spend_for, il_by_day, widest_std, cfg):

@@ -397,7 +397,7 @@ def test_decision_loop_and_exactly_once_update(workspace):
 
     args = (safety_metrics(events, decisions, outcomes),
             learning_metrics(decisions, store, cfg, outcomes),
-            business_metrics(decisions, outcomes, cfg), guard)
+            business_metrics(decisions, outcomes), guard)
     # null thresholds report BLOCKED -- set HERE, not read from the shipped
     # config, so the assertion states its own precondition
     null_cfg = copy.deepcopy(cfg)
@@ -478,21 +478,15 @@ def test_duplicate_and_malformed_events_quarantined(workspace):
     assert len(events.load_quarantine()) == before + 1
 
 
-def test_shadow_phase_harness(workspace):
+@pytest.fixture(scope="module")
+def shadow_reports(workspace):
+    """pipeline.shadow, twice, for every shadow test in this module: the
+    --all SAMPLED run (the sampling and in-sample caveats need more episodes
+    than the hold-out holds, and its tau is the config paste) and the
+    hold-out run over EVERY episode with the tau0 floor within reach (its tau
+    is derived). Each test reads the report it needs; nothing re-runs."""
     _chdir(workspace)
     env = {**os.environ, "PYTHONPATH": ROOT}
-
-    # shadow needs the section 9.3 decision and a tau; supply them in config
-    with open("config.yaml") as f:
-        cfg_raw = yaml.safe_load(f)
-    # Paste tau the way an operator has to: from the backtest's own
-    # derivation. A hand-typed number is now refused -- see
-    # pricing.explore.tau_provenance_error.
-    with open("reports/backtest.json") as f:
-        derived = json.load(f)["tau_initial_derivation"]
-    cfg_raw["exploration"]["tau_initial"] = derived["tau_initial"]
-    with open("config.yaml", "w") as f:
-        f.write(yaml.safe_dump(cfg_raw))
 
     def run(*args):
         r = subprocess.run([sys.executable, *args], cwd=workspace, env=env,
@@ -500,15 +494,38 @@ def test_shadow_phase_harness(workspace):
         assert r.returncode == 0, r.stdout + r.stderr
         return r.stdout
 
+    # Paste tau the way an operator has to: from the backtest's own
+    # derivation. A hand-typed number is refused -- see
+    # pricing.explore.tau_provenance_error.
+    with open("config.yaml") as f:
+        cfg_raw = yaml.safe_load(f)
+    with open("reports/backtest.json") as f:
+        derived = json.load(f)["tau_initial_derivation"]
+    cfg_raw["exploration"]["tau_initial"] = derived["tau_initial"]
+    with open("config.yaml", "w") as f:
+        f.write(yaml.safe_dump(cfg_raw))
+    # the hold-out run must DERIVE its tau: the fixture's pre-window week is
+    # thin, so the floor is lowered to within reach
+    cfg_raw["exploration"]["tau0_derivation_min_decisions"] = 1
+    with open("config_tau0.yaml", "w") as f:
+        f.write(yaml.safe_dump(cfg_raw))
+
     run("-m", "bootstrap.init_posterior", "--force")
-    # --all here on purpose: this test exercises the harness and the SAMPLING
-    # caveat, which needs more episodes than the hold-out window holds. The
-    # hold-out default is covered by its own run below.
     run("-m", "pipeline.shadow", "--input", "data/prepared.parquet",
         "--out", "reports/shadow.json", "--all", "--max-episodes", "60")
-
+    run("-m", "pipeline.shadow", "--input", "data/prepared.parquet",
+        "--config", "config_tau0.yaml", "--out", "reports/shadow_holdout.json",
+        "--max-episodes", "0")
     with open("reports/shadow.json") as f:
-        report = json.load(f)
+        sampled_all = json.load(f)
+    with open("reports/shadow_holdout.json") as f:
+        holdout = json.load(f)
+    return {"derived": derived, "all": sampled_all, "holdout": holdout}
+
+
+def test_shadow_phase_harness(workspace, shadow_reports):
+    _chdir(workspace)
+    derived, report = shadow_reports["derived"], shadow_reports["all"]
     gate = report["shadow_gate"]
     # decisions logged, no prices applied: completeness 1:1, zero cost-floor
     assert gate["cost_floor_violations"]["value"] == 0
@@ -527,6 +544,11 @@ def test_shadow_phase_harness(workspace):
     assert w["basis"] == "full extract" and not w["out_of_sample"]
     assert "in_sample_caveat" in gate
     assert "cost-floor" in gate["in_sample_caveat"]   # names what still holds
+
+    # every window row is graded on the frozen anchor ON PURPOSE, and the
+    # coverage block says so instead of reading STALE by construction
+    cov = report["artifact_versions"]["calibration_coverage"]
+    assert cov["verdict"].startswith("OK"), cov["verdict"]
 
     # the budget check answers "is this tau affordable on the ANCHORED path",
     # which the backtest's derivation cannot: it solves on the exploit-only
@@ -574,6 +596,7 @@ def test_shadow_phase_harness(workspace):
     assert b["spread_decisions_per_episode"] > 1.0, \
         "spreads collected once per episode -- the entry-only scoping is back"
     assert b["tau"] == pytest.approx(derived["tau_initial"])   # not rewritten
+    assert "tau" not in report["exploration_would_be"], "tau is reported once"
 
     # the trace the single multiple cannot give: does the pilot survive day 1
     tr = b["tau_controller_trace"]
@@ -582,10 +605,8 @@ def test_shadow_phase_harness(workspace):
     assert tr["window_days"] == b["days"]
     assert tr["days_with_decisions"] <= tr["window_days"]
     assert tr["days_simulated"] + tr["days_truncated"] == tr["days_with_decisions"]
-    if tr["days_truncated"]:
-        assert "TRUNCATED" in tr["note"]
+    assert tr["days_truncated"] == max(tr["days_with_decisions"] - 60, 0)
     assert tr["tau_start"] == pytest.approx(b["tau"])
-    assert len(tr["clip"]) == 2
     assert tr["days_stop_condition_fires"] <= tr["days_simulated"]
     assert len(tr["by_day"]) == tr["days_simulated"]
     assert [r["day"] for r in tr["by_day"]] == sorted(r["day"] for r in tr["by_day"])
@@ -593,6 +614,11 @@ def test_shadow_phase_harness(workspace):
     row = next(r for r in tr["by_day"] if r["over_budget"] is not None)
     assert row["over_budget"] == pytest.approx(   # the field is rounded to 2dp
         row["spend"] / row["budget"], abs=0.01)
+    # the aggregate budget is the mean of the trace's own per-day budgets
+    # over the window's decision days (no day truncated here)
+    if not tr["days_truncated"]:
+        assert b["daily_budget"] == pytest.approx(
+            np.mean([r["budget"] for r in tr["by_day"]]), abs=0.1)
 
     # shadow outcomes are NOT learning evidence: update must consume nothing
     from common.config import load_config
@@ -603,51 +629,23 @@ def test_shadow_phase_harness(workspace):
     assert not report2["cells"]
 
 
-
-def test_shadow_defaults_to_the_holdout_window(workspace):
+def test_shadow_defaults_to_the_holdout_window(workspace, shadow_reports):
     """No flag, no window arguments -- it must land on the hold-out."""
     _chdir(workspace)
-    env = {**os.environ, "PYTHONPATH": ROOT}
-    r = subprocess.run(
-        [sys.executable, "-m", "pipeline.shadow", "--input",
-         "data/prepared.parquet", "--out", "reports/shadow_holdout.json",
-         "--max-episodes", "0"],
-        cwd=workspace, env=env, capture_output=True, text=True)
-    assert r.returncode == 0, r.stdout + r.stderr
-
-    with open("reports/shadow_holdout.json") as f:
-        report = json.load(f)
+    report = shadow_reports["holdout"]
     w, cfg = report["window"], yaml.safe_load(open("config.yaml"))
     assert w["basis"] == "holdout" and w["out_of_sample"]
     assert w["date_min"] >= cfg["data"]["holdout"]["start"]
     assert "in_sample_caveat" not in report["shadow_gate"]
     # and it really is a different, later population than the --all run
-    with open("reports/shadow.json") as f:
-        assert w["date_min"] > json.load(f)["window"]["date_min"]
+    assert w["date_min"] > shadow_reports["all"]["window"]["date_min"]
 
 
-def test_shadow_derives_tau0_when_the_week_is_thick_enough(workspace):
+def test_shadow_derives_tau0_when_the_week_is_thick_enough(workspace, shadow_reports):
     """With the floor within reach, the tau in force must be the DERIVED one
     -- the config paste is only the fallback -- and the derivation block must
     reconcile: implied spend at the derived tau sits at or under its target."""
-    _chdir(workspace)
-    env = {**os.environ, "PYTHONPATH": ROOT}
-    with open("config.yaml") as f:
-        cfg_raw = yaml.safe_load(f)
-    cfg_raw["exploration"]["tau0_derivation_min_decisions"] = 1
-    with open("config_tau0.yaml", "w") as f:
-        f.write(yaml.safe_dump(cfg_raw))
-    subprocess.run([sys.executable, "-m", "bootstrap.init_posterior",
-                    "--force"], cwd=workspace, env=env, check=True,
-                   capture_output=True)
-    r = subprocess.run(
-        [sys.executable, "-m", "pipeline.shadow", "--input",
-         "data/prepared.parquet", "--config", "config_tau0.yaml",
-         "--out", "reports/shadow_tau0.json", "--max-episodes", "0"],
-        cwd=workspace, env=env, capture_output=True, text=True)
-    assert r.returncode == 0, r.stdout + r.stderr
-    with open("reports/shadow_tau0.json") as f:
-        report = json.load(f)
+    report = shadow_reports["holdout"]
     td = report["tau_initial_derivation"]
     assert not td["fallback"]
     assert td["tau_initial"] > 0 and td["decisions"] >= 1
@@ -983,9 +981,12 @@ def test_a_row_scoped_drop_is_caught_rather_than_silently_re_segmenting(
     def holed(df):
         calls["n"] += 1
         out = real(df)
-        # on the LAST call -- the re-segmentation -- pretend a row went
-        # missing mid-window, so the ids come back different
-        return out.str.replace("T1", "T9", regex=False) if calls["n"] > 1 else out
+        # from the second call on, pretend a row went missing mid-window so
+        # the ids come back different -- and different from the PREVIOUS
+        # call's, so the re-segmentation check disagrees with the ids in
+        # force however many assignments the chain makes before it
+        return (out.str.replace("T1", f"T{8 + calls['n']}", regex=False)
+                if calls["n"] > 1 else out)
 
     monkeypatch.setattr(pdm, "assign_episode_ids", holed)
     cfg = yaml.safe_load(open("config.yaml"))

@@ -395,7 +395,7 @@ def extend_to_window(d, feature_cols=(), max_tail_hours=None):
     if not len(need):
         return d.sort_values(["episode_id", "date", "hour_of_day"])
 
-    if max_tail_hours is not None and len(need):
+    if max_tail_hours is not None:
         worst = float(need.hours_remaining.max())
         if worst > max_tail_hours:
             raise ValueError(

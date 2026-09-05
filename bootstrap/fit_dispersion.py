@@ -54,10 +54,9 @@ def _working_elasticity(cfg):
     """(per-category means, fallback) from the prior in force. Returns the
     fallback alone when no prior artifact exists yet, so the module still
     runs standalone; both are reported in r_lookup.json."""
-    pc = cfg["posterior"]["prior"]
     # standalone working constant -- NOT a prior; the prior has no constant
-    fallback = -1.0
-    path = pc["path"]
+    fallback = float(cfg["dispersion"]["working_elasticity_fallback"])
+    path = cfg["posterior"]["prior"]["path"]
     if not os.path.exists(path):
         return {}, fallback
     with open(path) as f:
@@ -66,26 +65,46 @@ def _working_elasticity(cfg):
              for c, v in prior.get("per_category", {}).items()}, fallback)
 
 
+def _residual_frame(frame, cfg, model, eps_by_cat, eps0):
+    """The rows a dispersion fit reads, with `mu_hat`, `censored` and `resid`
+    attached: stocked rows only (a row with no stock carries no demand
+    information and would be mis-scored as "demand >= 1" by the censored
+    likelihood), mu at each row's own category's working elasticity (`eps0`
+    only where none exists -- residuals formed at a constant measure the
+    wrong demand curve). ONE construction for the frozen fit and the drift
+    measurement, so the two cannot form residuals differently."""
+    f = frame[frame.starting_inventory >= 1].copy()
+    if not len(f):
+        return f
+    mu_ref = model.predict_mu_ref(f)
+    ratio = (1 - f.total_discount.to_numpy()) / (1 - f.d_ref.to_numpy())
+    eps_row = f.category.astype(str).map(eps_by_cat).fillna(eps0).to_numpy()
+    f["mu_hat"] = np.clip(mu_ref * ratio ** eps_row,
+                          cfg["pricing"]["demand_floor"], None)
+    f["censored"] = episodes.censored_hours(f)
+    f["resid"] = f.units_sold - f.mu_hat
+    return f
+
+
+def r_at_bound(r, cfg):
+    """An r within `r_bound_tolerance_rel` of either search bound is the
+    estimator FAILING, not a large (or small) r: the likelihood ran to the
+    edge of the support. The one test the frozen fit and drift_by_window
+    share."""
+    lo, hi = cfg["dispersion"]["r_search_bounds"]
+    tol = float(cfg["dispersion"]["r_bound_tolerance_rel"])
+    return bool(r >= hi * (1 - tol) or r <= lo * (1 + tol))
+
+
 def fit_dispersion(d, cfg):
     dc = cfg["dispersion"]
-    calib = population(split_frames(d, cfg)["calib"], cfg).copy()
-    # rows with no stock carry no demand information and would be mis-scored
-    # as "demand >= 1" by the censored likelihood
-    calib = calib[calib.starting_inventory >= 1]
+    model = BaselineModel(cfg)
+    # working elasticity per category from the prior in force
+    eps_by_cat, eps0 = _working_elasticity(cfg)
+    calib = _residual_frame(population(split_frames(d, cfg)["calib"], cfg),
+                            cfg, model, eps_by_cat, eps0)
     if not len(calib):
         raise RuntimeError("calibration window contains no rows")
-
-    model = BaselineModel(cfg)
-    # working elasticity per category from the prior in force -- residuals
-    # formed at a constant measure the wrong demand curve
-    eps_by_cat, eps0 = _working_elasticity(cfg)
-    mu_ref = model.predict_mu_ref(calib)
-    ratio = (1 - calib.total_discount.to_numpy()) / (1 - calib.d_ref.to_numpy())
-    # per row, from its own category's prior; `eps0` only where none exists
-    eps_calib = calib.category.astype(str).map(eps_by_cat).fillna(eps0).to_numpy()
-    calib["mu_hat"] = np.clip(mu_ref * ratio ** eps_calib,
-                              cfg["pricing"]["demand_floor"], None)
-    calib["censored"] = episodes.censored_hours(calib)
 
     bounds = dc["r_search_bounds"]
     min_rows = dc["min_rows_per_group"]
@@ -94,7 +113,7 @@ def fit_dispersion(d, cfg):
         return fit_r(g.units_sold.to_numpy(), g.mu_hat.to_numpy(),
                      g.censored.to_numpy(), bounds)
 
-    by_sub, by_cat, under = {}, {}, {}
+    by_sub, by_cat, under, pinned = {}, {}, {}, {}
     for level, store in (("subcategory", by_sub), ("category", by_cat)):
         for key, g in calib.groupby(level):
             if len(g) < min_rows:
@@ -103,19 +122,28 @@ def fit_dispersion(d, cfg):
             if not ok:
                 continue
             store[str(key)] = r
+            # a fit pinned at a search bound is stored (the fallback chain
+            # needs a value) but FLAGGED, and kept out of the clamp percentile
+            if r_at_bound(r, cfg):
+                pinned[f"{level}:{key}"] = round(r, 4)
             p = pearson_dispersion(g.units_sold.to_numpy(), g.mu_hat.to_numpy())
             if p < 1.0:
                 under[f"{level}:{key}"] = round(p, 4)
     r_global, _ = fit_group(calib)
+    global_at_bound = r_at_bound(r_global, cfg)
     pearson_global = pearson_dispersion(calib.units_sold.to_numpy(),
                                         calib.mu_hat.to_numpy())
 
     # Clamp high CONVERGED r (a thin group's MLE at the ceiling), preserve low
     # -- but EXEMPT groups with Pearson < 1: genuinely under-dispersed data no
-    # NB can represent, whose high r is a fact, not an artifact (owner,
-    # 2026-08-24; docs/learnings.md).
-    converged = list(by_sub.values()) + list(by_cat.values()) + [r_global]
-    cap = float(np.percentile(converged, dc["clamp_percentile"] * 100))
+    # NB can represent, whose high r is a fact, not an artifact.
+    # The percentile is taken over INTERIOR fits only: a pinned r is a failed
+    # fit, and letting it in drags the cap toward the bound it ran to.
+    converged = ([v for k, v in by_sub.items() if f"subcategory:{k}" not in pinned]
+                 + [v for k, v in by_cat.items() if f"category:{k}" not in pinned]
+                 + ([] if global_at_bound else [r_global]))
+    cap = (float(np.percentile(converged, dc["clamp_percentile"] * 100))
+           if converged else float(bounds[1]))
 
     def clamped(level, store):
         return {k: (v if f"{level}:{k}" in under else min(v, cap))
@@ -128,6 +156,16 @@ def fit_dispersion(d, cfg):
 
     r_lookup = {"subcategory": by_sub, "category": by_cat,
                 "global": r_global, "clamp_at": cap,
+                # fits pinned at r_search_bounds (rule 3): stored so the
+                # fallback chain resolves, flagged so nobody reads them as
+                # measurements, and excluded from the clamp percentile
+                "at_bound": dict(sorted(pinned.items())),
+                "global_at_bound": global_at_bound,
+                "at_bound_note": (
+                    "r within r_bound_tolerance_rel of r_search_bounds: the "
+                    "MLE ran to the edge of the support, so the value is the "
+                    "bound, not an estimate. Left OUT of the clamp percentile; "
+                    "read pearson (under_dispersed_groups) before reading r."),
                 # where the NB family does not fit (Pearson < 1): exempt from
                 # the clamp, and listed so the misfit stays visible
                 "under_dispersed_groups": dict(sorted(under.items())),
@@ -147,7 +185,8 @@ def fit_dispersion(d, cfg):
                 "working_elasticity": eps0,
                 "working_elasticity_basis": (
                     "per-category prior means" if eps_by_cat
-                    else "constant -1.0 (no prior artifact yet)"),
+                    else f"constant {eps0} (dispersion.working_elasticity_"
+                         "fallback; no prior artifact yet)"),
                 "working_elasticity_by_category": {
                     k: round(v, 4) for k, v in sorted(eps_by_cat.items())}}
 
@@ -156,8 +195,6 @@ def fit_dispersion(d, cfg):
     # deff deflates every posterior update. `m` is NOT frozen alongside it:
     # production measures forced hours per episode per batch, because that
     # number moves with the exploration rate by construction.
-    calib["resid"] = calib.units_sold - calib.mu_hat
-
     sizes = calib.groupby("episode_id")["resid"].size()
     min_hours = cfg["assurance"]["rho_min_hours_per_episode"]
     sub_d = calib[calib.episode_id.isin(sizes[sizes >= min_hours].index)]
@@ -188,17 +225,10 @@ def drift_by_window(d, cfg, freq="W"):
 
     # rule 16: drift_by_window sets the retrain cadence and baselines the
     # rho drift alert, both pre-launch readings -- the hold-out is shadow's
-    full = population(pre_launch(d, cfg), cfg).copy()
-    full = full[full.starting_inventory >= 1]
+    full = _residual_frame(population(pre_launch(d, cfg), cfg),
+                           cfg, model, eps_by_cat, eps0)
     if not len(full):
         return {"verdict": "NOT RUN -- no rows"}
-    mu_ref = model.predict_mu_ref(full)
-    ratio = (1 - full.total_discount.to_numpy()) / (1 - full.d_ref.to_numpy())
-    eps_row = full.category.astype(str).map(eps_by_cat).fillna(eps0).to_numpy()
-    full["mu_hat"] = np.clip(mu_ref * ratio ** eps_row,
-                             cfg["pricing"]["demand_floor"], None)
-    full["censored"] = episodes.censored_hours(full)
-    full["resid"] = full.units_sold - full.mu_hat
     full["_win"] = pd.to_datetime(full.date).dt.to_period(freq)
 
     by_window, thin = {}, []
@@ -213,13 +243,10 @@ def drift_by_window(d, cfg, freq="W"):
         # An r near the search bound is the estimator FAILING, not a large r:
         # under-dispersed data (Pearson < 1) cannot be expressed by any NB
         # (Var = mu + mu^2/r >= mu), so the MLE runs to the ceiling. Folding
-        # those into a spread reads a failed fit as drift -- the exact
-        # mistake this block exists to prevent someone making.
-        at_bound = bool(ok and (r >= bounds[1] * 0.99 or r <= bounds[0] * 1.01))
+        # those into a spread reads a failed fit as drift.
+        at_bound = bool(ok and r_at_bound(r, cfg))
         usable = bool(ok and pear >= 1.0 and not at_bound)
-        # the ONE rho estimator (ANOVA ICC); this block still ran the biased
-        # var(means)/var(all) after the frozen fit moved off it, so the drift
-        # baseline and the frozen value disagreed by ~(1-rho)/m
+        # the ONE rho estimator (ANOVA ICC), as the frozen fit
         sizes = g.groupby("episode_id")["resid"].size()
         sub = g[g.episode_id.isin(
             sizes[sizes >= cfg["assurance"]["rho_min_hours_per_episode"]].index)]

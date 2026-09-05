@@ -1,10 +1,10 @@
 # Review guide — what to review, how deeply, and why
 
-The part of the repo that can touch a live price is ~1,550 lines. This
+The part of the repo that can touch a live price is ~2,100 lines. This
 guide scopes a code review to risk, so the whole exercise is about two
 sittings.
 
-## Tier 1 — review line by line (~900 lines; prices real money, hourly)
+## Tier 1 — review line by line (~1,400 lines; prices real money, hourly)
 
 | File | What to verify |
 | --- | --- |
@@ -19,7 +19,7 @@ unauditable price?* The test files that pin these properties —
 `test_pricing.py`, `test_end_to_end.py` (decision path), `test_restock.py` —
 are worth reading as the specification.
 
-## Tier 2 — review the state mutations (~650 lines; the only writes in production)
+## Tier 2 — review the state mutations (~750 lines; the only writes in production)
 
 | File | What to verify |
 | --- | --- |
@@ -31,7 +31,7 @@ The review question: *can evidence be spent twice, or a belief move more
 than its bounds?* `test_tau_calibration.py` and the exactly-once tests in
 `test_end_to_end.py` are the pinned answers.
 
-## Tier 3 — skim; the gates and suite carry it (~8,800 lines, offline)
+## Tier 3 — skim; the gates and suite carry it (~9,100 lines, offline)
 
 `bootstrap/` (data preparation, model/prior/dispersion fits),
 `backtest/` and `pipeline/advance.py` (the phase order as code; its

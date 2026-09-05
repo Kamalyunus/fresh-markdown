@@ -1,0 +1,118 @@
+"""fit_dispersion: a pinned r is a failed fit, and the residual frame has one
+home."""
+
+import copy
+import inspect
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from bootstrap import fit_dispersion as fd
+
+
+def test_an_r_at_a_search_bound_is_recognised_by_the_configured_tolerance(cfg):
+    lo, hi = cfg["dispersion"]["r_search_bounds"]
+    tol = cfg["dispersion"]["r_bound_tolerance_rel"]
+    assert fd.r_at_bound(hi, cfg) and fd.r_at_bound(hi * (1 - tol / 2), cfg)
+    assert fd.r_at_bound(lo, cfg) and fd.r_at_bound(lo * (1 + tol / 2), cfg)
+    assert not fd.r_at_bound(hi * (1 - 2 * tol), cfg)
+    assert not fd.r_at_bound(lo * (1 + 2 * tol), cfg)
+    assert not fd.r_at_bound((lo + hi) / 2, cfg)
+    # the drift measurement uses the SAME test, not its own 0.99 / 1.01
+    src = inspect.getsource(fd.drift_by_window)
+    assert "r_at_bound(" in src and "0.99" not in src and "1.01" not in src
+
+
+class _FlatModel:
+    """mu_ref = 2.0 everywhere; enough to form residuals."""
+    @staticmethod
+    def predict_mu_ref(rows, raw=False):
+        return np.full(len(rows), 2.0)
+
+
+def _calib_frame(cfg, groups):
+    """`groups`: {subcategory: (category, rows)}; every row inside the calib
+    window, stocked, eligible, at the anchor."""
+    s = cfg["data"]["split"]
+    rng = np.random.default_rng(0)
+    rows = []
+    for sub, (cat, n) in groups.items():
+        for i in range(n):
+            rows.append(dict(
+                episode_id=f"{sub}-{i // 4}", date=s["calib_start"],
+                hour_of_day=10 + i % 4, sku_id=sub, fc="F", category=cat,
+                subcategory=sub, starting_inventory=10,
+                units_sold=int(rng.negative_binomial(1.0, 1.0 / 3.0)),
+                total_discount=0.25, d_ref=0.25,
+                episode_eligible=True, dp_eligible=True))
+    d = pd.DataFrame(rows)
+    d["ending_inventory"] = (d.starting_inventory - d.units_sold).clip(lower=0)
+    return d
+
+
+def test_a_pinned_r_is_flagged_and_kept_out_of_the_clamp_percentile(
+        cfg, monkeypatch):
+    """A group whose MLE ran to r_search_bounds used to be stored like any
+    other converged value AND to enter the clamp percentile -- so one failed
+    fit at the ceiling dragged the cap toward the ceiling for everyone."""
+    cfg = copy.deepcopy(cfg)
+    cfg["dispersion"]["min_rows_per_group"] = 8
+    lo, hi = cfg["dispersion"]["r_search_bounds"]
+    # group identity reaches fit_r only through the arrays, so fits are keyed
+    # on group size: S1 (8 rows) pins at the ceiling, the others are interior
+    groups = {"S1": ("C1", 8), "S2": ("C1", 16), "S3": ("C2", 32)}
+    by_size = {8: hi, 16: 2.0, 32: 3.0, 24: 4.0, 56: 2.5}   # C1=24, all=56
+    monkeypatch.setattr(fd, "fit_r", lambda k, mu, cen, b: (by_size[len(k)], True))
+    monkeypatch.setattr(fd, "BaselineModel", lambda c: _FlatModel())
+    monkeypatch.setattr(fd, "_working_elasticity", lambda c: ({}, -1.0))
+    # every group over-dispersed, so nothing is clamp-exempt on Pearson
+    monkeypatch.setattr(fd, "pearson_dispersion", lambda k, mu: 5.0)
+
+    r_lookup, rho_out = fd.fit_dispersion(_calib_frame(cfg, groups), cfg)
+
+    assert r_lookup["at_bound"] == {"subcategory:S1": hi}
+    assert r_lookup["global_at_bound"] is False
+    interior = [2.0, 3.0, 4.0, 3.0, 2.5]         # S2, S3, C1, C2, global
+    cap = float(np.percentile(interior, cfg["dispersion"]["clamp_percentile"] * 100))
+    assert r_lookup["clamp_at"] == pytest.approx(cap)
+    assert cap < hi / 2, "the pinned value must not pull the cap upward"
+    # the pinned group is still in the lookup (the fallback chain needs a
+    # value) -- clamped like any over-dispersed group, and flagged
+    assert r_lookup["subcategory"]["S1"] == pytest.approx(cap)
+    assert r_lookup["subcategory"]["S2"] == pytest.approx(2.0)
+    assert "at_bound_note" in r_lookup
+    assert rho_out["fit_window"] == "calib"
+
+
+def test_the_working_elasticity_fallback_is_a_config_key(cfg, tmp_path):
+    cfg = copy.deepcopy(cfg)
+    cfg["posterior"]["prior"]["path"] = str(tmp_path / "absent.json")
+    cfg["dispersion"]["working_elasticity_fallback"] = -1.7
+    by_cat, fallback = fd._working_elasticity(cfg)
+    assert by_cat == {} and fallback == -1.7
+    assert "-1.0" not in inspect.getsource(fd._working_elasticity)
+
+
+def test_the_residual_frame_has_one_home(cfg):
+    """The frozen fit and drift_by_window built mu_hat / censored / resid in
+    two hand-synced blocks; both now read `_residual_frame`."""
+    for fn in (fd.fit_dispersion, fd.drift_by_window):
+        src = inspect.getsource(fn)
+        assert "_residual_frame(" in src, fn.__name__
+        assert "ratio **" not in src, f"{fn.__name__} rebuilds mu_hat itself"
+
+    d = pd.DataFrame({
+        "episode_id": ["e"] * 3, "date": ["2026-07-01"] * 3,
+        "hour_of_day": [10, 11, 12], "category": ["A", "A", "B"],
+        "starting_inventory": [4, 0, 4], "units_sold": [1, 0, 4],
+        "ending_inventory": [3, 0, 0], "total_discount": [0.5, 0.5, 0.5],
+        "d_ref": [0.25, 0.25, 0.25]})
+    f = fd._residual_frame(d, cfg, _FlatModel(), {"A": -2.0}, -1.0)
+    # the zero-stock row is gone; A uses its own eps, B the fallback
+    assert list(f.index) == [0, 2]
+    ratio = 0.5 / 0.75
+    assert f.mu_hat.iloc[0] == pytest.approx(2.0 * ratio ** -2.0)
+    assert f.mu_hat.iloc[1] == pytest.approx(2.0 * ratio ** -1.0)
+    assert (f.resid == f.units_sold - f.mu_hat).all()
+    assert list(f.censored) == [False, True]

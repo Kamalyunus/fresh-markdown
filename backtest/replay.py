@@ -1,11 +1,13 @@
 """backtest -- offline replay through the production decision path (design.md 5.14).
 
-Jobs: baseline fidelity (9.3 gate), tau_initial derivation (12.3), DP sanity.
-Replay output is never evidence the policy works; the pilot's own outcomes are.
-Deterministic: transitions use E[min(D, q)] under the truncated NB. Fidelity
-and policy blocks are never summed; IL% uses the section 3.2 denominator.
+Jobs: the calibration diagnostic (9.2), the tau_initial cross-check (5.8,
+5.13), DP sanity. Replay output is never evidence the policy works; the
+pilot's own outcomes are. Deterministic: transitions use E[min(D, q)] under
+the truncated NB. Fidelity and policy blocks are never summed; IL% uses the
+section 2.3 denominator.
 """
 
+from contextlib import contextmanager
 
 import numpy as np
 import pandas as pd
@@ -22,22 +24,34 @@ from pricing.demand import (mu_at, expected_min_demand_inventory,
                             expected_min_demand_inventory_vec)
 
 
+# the per-hour columns extend_to_window regenerates on its synthetic tail;
+# everything else is episode-constant and carried
+_HOURLY = ("episode_id", "date", "hour_of_day", "hours_remaining",
+           "starting_inventory", "ending_inventory", "units_sold")
+
+
+def predict_frame(d, cfg, model, r_lookup):
+    """The frame both harnesses price on: extended to the full window BEFORE
+    predicting (an early sell-out must not shorten the DP horizon), in
+    episode/hour order, with `r` (dispersion lookup) and `mu_ref_hat`.
+    One home -- shadow's `_prepare_items` and the replay's
+    `_attach_predictions` each carried a copy of this."""
+    carry = [c for c in d.columns if c not in _HOURLY]
+    d = episodes.extend_to_window(d, carry, cfg["data"]["max_window_hours"]).copy()
+    d["r"] = [lookup_r(r_lookup, s, c) for s, c in zip(d.subcategory, d.category)]
+    d["mu_ref_hat"] = model.predict_mu_ref(d)
+    return d
+
+
 def _attach_predictions(d, cfg, model, prior, r_lookup):
     """Predicted units at ACTUAL historical prices: mu_ref scaled by the prior
-    elasticity, censored at starting inventory. The frame is first extended to
-    the full window so an early sell-out cannot shorten the DP's horizon."""
-    carry = [c for c in d.columns if c not in
-             ("episode_id", "date", "hour_of_day", "hours_remaining",
-              "starting_inventory", "ending_inventory", "units_sold")]
-    d = episodes.extend_to_window(d, carry, cfg["data"]["max_window_hours"])
-    d["r"] = [lookup_r(r_lookup, s, c) for s, c in zip(d.subcategory, d.category)]
+    elasticity, censored at starting inventory, over `predict_frame`."""
+    d = predict_frame(d, cfg, model, r_lookup)
     d["eps"] = d.category.map(
         lambda c: prior["per_category"][str(c)]["mean"]).astype(float)
-    mu_ref = model.predict_mu_ref(d)
     ratio = (1 - d.total_discount.to_numpy()) / (1 - d.d_ref.to_numpy())
-    mu = np.clip(mu_ref * ratio ** d.eps.to_numpy(),
+    mu = np.clip(d.mu_ref_hat.to_numpy() * ratio ** d.eps.to_numpy(),
                  cfg["pricing"]["demand_floor"], None)
-    d["mu_ref_hat"] = mu_ref
     d["mu_hat"] = mu
 
     d["predicted_units"] = expected_min_demand_inventory_vec(
@@ -201,14 +215,8 @@ def calibration_window_sweep(d, cfg):
         return out
 
     def paired_vs(window_ratios, base_ratios):
-        """Does calibration beat NO calibration on the SAME weeks?
-
-        The aggregate columns compare five numbers computed over 11-ish weeks
-        and the ranking then turns on a lexicographic tie-break -- a one-week
-        difference in `share_weeks_in_band` can decide it. Pairing removes the
-        between-week variance that dominates that comparison: on each week,
-        did the factors move the anchor ratio closer to 1?
-        """
+        """Week-paired sign test: did the factors move the anchor ratio
+        closer to 1 on the SAME weeks (design 9.2)?"""
         common = sorted(set(window_ratios) & set(base_ratios))
         if len(common) < 2:
             return None
@@ -273,12 +281,8 @@ def calibration_window_sweep(d, cfg):
             "The ranking still names one, but on this many weeks that choice "
             "is a tie-break, not a measurement. Read "
             "paired_vs_uncalibrated.sign_test_p before acting on it.")
-        result["note"] = (
-            "Rolling-origin: factors fit on the trailing window, applied to "
-            "the NEXT week. Shorter windows winning = the level is trending; "
-            "longer winning = the variation is noise. Every row is scored on "
-            "the same eval weeks, so the ranking reads the window and not the "
-            "sample.")
+        result["note"] = ("design 9.2 -- rolling-origin sweep, every row "
+                          "scored on the same eval weeks")
         if beats:
             result["verdict"] = (
                 "NO-FACTORS WINS -- `uncalibrated` beats every fit window on "
@@ -290,16 +294,32 @@ def calibration_window_sweep(d, cfg):
     return result
 
 
+@contextmanager
+def _coverage_preserved(model):
+    """A side reading (the weekly-refit mechanism) must not disturb the
+    calibration coverage counters or the freeze the gate pass set."""
+    saved = (model._cal_rows_scheduled, model._cal_rows_fallback,
+             model._cal_rows_frozen, model._cal_rows_static,
+             set(model._cal_fallback_weeks))
+    frozen_from = model._freeze_from
+    try:
+        yield
+    finally:
+        (model._cal_rows_scheduled, model._cal_rows_fallback,
+         model._cal_rows_frozen, model._cal_rows_static,
+         model._cal_fallback_weeks) = saved
+        model.freeze_calibration_from(frozen_from)
+
+
 def fidelity(d, cfg, model, prior, r_lookup):
-    """Section 17.3 fidelity block: how well the model reproduces observed
-    sales at actual historical prices. The gate reads the calib+test windows
-    -- the launch-adjacent regime the 9.3 level factors are fit on; the
-    all-history ratio is diagnostic only (dominated by in-sample rows)."""
+    """Design 5.14 fidelity block: how well the model reproduces observed
+    sales at actual historical prices. The gate reads the test window -- the
+    launch-adjacent regime the 9.2 level factors are fit on; the all-history
+    ratio is diagnostic only (dominated by in-sample rows)."""
     # THE GATE GRADES A FROZEN ARTIFACT: a factor fit inside the graded
     # window has read the rows it is graded on, so fidelity freezes at the
     # gate start; the weekly-refit mechanism reading sits beside it.
     split = cfg["data"]["split"]
-    gate_window = "test"
     gate_start = pd.Timestamp(split["test_start"])
     # predict over the FULL window (the DP plans over it); every ratio below
     # sees observed rows only -- synthetic rows would read as under-prediction
@@ -308,8 +328,7 @@ def fidelity(d, cfg, model, prior, r_lookup):
     d_full = _attach_predictions(d, cfg, model, prior, r_lookup)
     d = d_full[d_full.is_observed]
     splits = split_frames(d, cfg)
-    gate_d = (splits["test"] if gate_window == "test"
-              else pd.concat([splits["calib"], splits["test"]]))
+    gate_d, gate_window = splits["test"], "test"
     if not len(gate_d) or gate_d.predicted_units.sum() <= 0:
         gate_d, gate_window = d, "all (configured gate window empty)"
 
@@ -398,23 +417,15 @@ def fidelity(d, cfg, model, prior, r_lookup):
     block["calibration_frozen_at"] = str(gate_start.date())
 
     # mechanism reading: same gate window under the weekly schedule. NOT the
-    # gate; the spread to it is what weekly re-fitting is worth. Coverage
-    # counters belong to the gate pass, so save/restore them.
-    counters = (model._cal_rows_scheduled, model._cal_rows_fallback,
-                model._cal_rows_frozen, model._cal_rows_static,
-                set(model._cal_fallback_weeks))
-    model.freeze_calibration_from(None)
-    refit = _attach_predictions(d_in, cfg, model, prior, r_lookup)
-    refit = refit[refit.is_observed]
-    refit_splits = split_frames(refit, cfg)
-    refit_gate = (refit_splits["test"] if gate_window == "test"
-                  else pd.concat([refit_splits["calib"], refit_splits["test"]]))
-    refit_m10 = (fidelity_decomposition(refit_gate, cfg)
-                 if len(refit_gate) else {})
-    (model._cal_rows_scheduled, model._cal_rows_fallback,
-     model._cal_rows_frozen, model._cal_rows_static,
-     model._cal_fallback_weeks) = counters
-    model.freeze_calibration_from(gate_start)
+    # gate; the spread to it is what weekly re-fitting is worth.
+    with _coverage_preserved(model):
+        model.freeze_calibration_from(None)
+        refit = _attach_predictions(d_in, cfg, model, prior, r_lookup)
+        refit = refit[refit.is_observed]
+        refit_gate = (split_frames(refit, cfg)["test"]
+                      if gate_window == "test" else refit)
+        refit_m10 = (fidelity_decomposition(refit_gate, cfg)
+                     if len(refit_gate) else {})
     refit_anchor = refit_m10.get("level_bias_at_anchor")
     block["weekly_refit"] = {
         "level_bias_at_anchor": refit_anchor,
@@ -431,25 +442,25 @@ def fidelity(d, cfg, model, prior, r_lookup):
     return block, d_full
 
 
-def _episode_frame(g, unfinished=frozenset()):
+def _episode_frame(g):
+    """One episode of `_attach_predictions` output as arrays for the replay.
+    The frame is the dp_eligible population, so every episode CLOSED (a
+    prepare_data gate: outcome_unknown -> dp_ineligible) and its scrap is
+    known; policy_replay refuses anything else."""
     g = g.sort_values(["date", "hour_of_day"])
-    obs = g.is_observed.to_numpy() if "is_observed" in g else np.ones(len(g), bool)
+    obs = g.is_observed.to_numpy()
     # uncovered hours hold the last observed discount (legacy ramps to a cap
     # and holds); both arms must run the same horizon to stay like-for-like
     disc = pd.Series(g.total_discount.to_numpy()).where(
         pd.Series(obs)).ffill().to_numpy()
-    obs_rows = g[obs] if obs.any() else g
+    obs_rows = g[obs]
     # adjustment computed on OBSERVED rows only: the write-off exemption keys
     # on the LAST row, and the extended frame's last row is a synthetic tail
-    adj_obs = (episodes.hour_adjustment(obs_rows).to_numpy()
-               if obs.any() else np.zeros(0))
+    adj_obs = episodes.hour_adjustment(obs_rows).to_numpy()
     adjustment = np.zeros(len(g))
     adjustment[obs] = adj_obs
     return {
         "n_observed": int(obs.sum()),
-        # the listing ending IS the disposal; only an unclosed episode lacks
-        # an outcome (keying on hours_remaining <= 0 mischarged scrap)
-        "outcome_known": bool(g.episode_id.iloc[0] not in unfinished),
         "original_price": float(g.original_price.iloc[0]),
         "cost": float(g.cost.iloc[0]),
         "d_ref": float(g.d_ref.iloc[0]),
@@ -472,15 +483,14 @@ def _episode_frame(g, unfinished=frozenset()):
         "mu_ref_path": g.mu_ref_hat.to_numpy(),
         "r": float(g.r.iloc[0]),
         "eps": float(g.eps.iloc[0]),
-        # labels; tolerant of missing columns
-        "episode_id": str(g.episode_id.iloc[0]) if "episode_id" in g else "",
-        "sku_id": (int(g.sku_id.iloc[0]) if "sku_id" in g else None),
-        "fc": str(g.fc.iloc[0]) if "fc" in g else "",
-        "category": str(g.category.iloc[0]) if "category" in g else "",
+        "episode_id": str(g.episode_id.iloc[0]),
+        "sku_id": int(g.sku_id.iloc[0]),
+        "fc": str(g.fc.iloc[0]),
+        "category": str(g.category.iloc[0]),
     }
 
 
-def _simulate_arm(e, cfg, price_at, eps_world, spread_sink=None):
+def _simulate_arm(e, cfg, price_at, eps_world):
     """Forward-simulate one arm under the model's demand with deterministic
     E[min(D, q)] transitions -- the ONE loop behind the legacy-under-model
     arm, the DP arm and step_sensitivity's re-solved DP arm (three copies
@@ -555,74 +565,66 @@ def _replay_one(e, cfg):
     """One episode's replay: actual path, legacy-under-model arm, DP arm.
     Pure. Returns (row, [(date, q_spread_costs), ...]) or None."""
     pcfg = cfg["pricing"]
-    max_k = pcfg["negbin_max_k"]
     p0, cost = e["original_price"], e["cost"]
     tiers, _ = dp_mod.feasible_tiers(p0, cost, pcfg["tier_step"])
     if not tiers:
         return None
     spreads = []
 
-    # ---- actual path economics (observed world, legacy prices)
+    # ---- actual path economics (observed world, legacy prices); scrap =
+    # leftover at close + shrink (units paid for, no revenue)
     a_sold = e["actual_sold"]
     a_disc_cost = float(np.sum(p0 * e["actual_discounts"] * a_sold))
-    # scrap = leftover at close + shrink (units paid for, no revenue); an
-    # unfinished episode charges none, or the baseline would be overstated
-    a_scrap = (cost * (max(e["end_inv"], 0) + e["shrink"])
-               if e["outcome_known"] else 0.0)
-    a_denom = p0 * float(a_sold.sum())
+    a_left = max(e["end_inv"], 0)
+    a_scrap = cost * (a_left + e["shrink"])
+    supply = max(e["supply"], 1)
 
     # LEGACY path under the MODEL's demand and the DP path: the same
     # generator, so model bias hits both identically (like-for-like)
-    lg = _simulate_arm(e, cfg, lambda t, q_int, anchor: float(e["actual_discounts"][t]),
-                       e["eps"])
-    dp = _simulate_arm(e, cfg, _dp_price(e, cfg, e["eps"], spreads.append), e["eps"])
+    arms = {
+        "legacy_model": _simulate_arm(
+            e, cfg, lambda t, q_int, anchor: float(e["actual_discounts"][t]),
+            e["eps"]),
+        "dp": _simulate_arm(e, cfg, _dp_price(e, cfg, e["eps"], spreads.append),
+                            e["eps"]),
+    }
 
     # units emitted as their own fields, never derived downstream from
     # scrap_cost/cost; scrap = leftover + APPLIED shrink. Shrink is exogenous
     # but each simulated arm absorbs only what its own shelf still held --
-    # units it already sold cannot also shrink
-    a_left = max(e["end_inv"], 0) if e["outcome_known"] else 0
+    # units it already sold cannot also shrink. Per-arm identity: supply =
+    # sold + leftover + shrink holds by construction, so a nonzero residual
+    # is a real defect, not rounding
     row = {
-        "outcome_known": e["outcome_known"],
         "actual_sold_units": float(a_sold.sum()),
         "actual_leftover_units": float(a_left),
-        "actual_scrap_units": float(a_left + (e["shrink"]
-                                              if e["outcome_known"] else 0)),
-        "legacy_model_sold_units": float(lg["sold"]),
-        "legacy_model_leftover_units": float(lg["left"]),
-        "legacy_model_scrap_units": float(lg["left"] + lg["shrink"]),
-        "legacy_model_shrink_applied": float(lg["shrink"]),
-        "dp_sold_units": float(dp["sold"]),
-        "dp_leftover_units": float(dp["left"]),
-        "dp_scrap_units": float(dp["left"] + dp["shrink"]),
-        "dp_shrink_applied": float(dp["shrink"]),
-        # per-arm identity: supply = sold + leftover + shrink -- holds by
-        # construction, so a nonzero residual is a real defect, not rounding
+        "actual_scrap_units": float(a_left + e["shrink"]),
         "actual_supply_residual": float(
-            e["supply"] - a_sold.sum() - a_left
-            - (e["shrink"] if e["outcome_known"] else 0)),
-        "legacy_model_supply_residual": float(
-            e["supply"] - lg["sold"] - lg["left"] - lg["shrink"]),
-        "dp_supply_residual": float(
-            e["supply"] - dp["sold"] - dp["left"] - dp["shrink"]),
+            e["supply"] - a_sold.sum() - a_left - e["shrink"]),
         "actual_il": a_disc_cost + a_scrap,
         "actual_discount_cost": a_disc_cost, "actual_scrap_cost": a_scrap,
-        "actual_denom": a_denom,
-        "actual_cleared": float(a_sold.sum()) / max(e["supply"], 1),
+        "actual_denom": p0 * float(a_sold.sum()),
+        "actual_cleared": float(a_sold.sum()) / supply,
         "actual_mean_discount": float(np.average(
             e["actual_discounts"],
             weights=a_sold if a_sold.sum() else None)),
-        "legacy_model_il": lg["disc_cost"] + lg["scrap"],
-        "legacy_model_discount_cost": lg["disc_cost"],
-        "legacy_model_scrap_cost": lg["scrap"],
-        "legacy_model_denom": p0 * lg["sold"],
-        "legacy_model_cleared": lg["sold"] / max(e["supply"], 1),
-        "legacy_model_mean_discount": lg["mean_discount"],
-        "dp_il": dp["disc_cost"] + dp["scrap"],
-        "dp_discount_cost": dp["disc_cost"], "dp_scrap_cost": dp["scrap"],
-        "dp_denom": p0 * dp["sold"],
-        "dp_cleared": dp["sold"] / max(e["supply"], 1),
-        "dp_mean_discount": dp["mean_discount"],
+    }
+    for name, arm in arms.items():
+        row.update({
+            f"{name}_sold_units": float(arm["sold"]),
+            f"{name}_leftover_units": float(arm["left"]),
+            f"{name}_scrap_units": float(arm["left"] + arm["shrink"]),
+            f"{name}_shrink_applied": float(arm["shrink"]),
+            f"{name}_supply_residual": float(
+                e["supply"] - arm["sold"] - arm["left"] - arm["shrink"]),
+            f"{name}_il": arm["disc_cost"] + arm["scrap"],
+            f"{name}_discount_cost": arm["disc_cost"],
+            f"{name}_scrap_cost": arm["scrap"],
+            f"{name}_denom": p0 * arm["sold"],
+            f"{name}_cleared": arm["sold"] / supply,
+            f"{name}_mean_discount": arm["mean_discount"],
+        })
+    row.update({
         "date": e["date"],
         "eps": e["eps"],
         "deepening_threshold": dp_mod.deepening_threshold_epsilon(
@@ -633,7 +635,7 @@ def _replay_one(e, cfg):
         "end_inv": e["end_inv"], "hours": e["hours"],
         "n_observed": e["n_observed"], "r": e["r"],
         "original_price": p0, "cost": cost, "d_ref": e["d_ref"],
-    }
+    })
     return row, spreads
 
 
@@ -703,18 +705,23 @@ def step_sensitivity(frames, cfg, seed=0, sample=300):
 
 
 def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
-    """Section 17.3 policy block plus the q-spread distribution for
-    tau_initial; replays the same pricing.dp path production uses. Every
-    aggregate is over outcome_known episodes only."""
+    """Design 5.14 policy block plus the q-spread distribution for the tau
+    cross-check; replays the same pricing.dp path production uses. Takes
+    `_attach_predictions` output over the dp_eligible population."""
     rng = np.random.default_rng(seed)
-    pcfg = cfg["pricing"]
-    max_k = pcfg["negbin_max_k"]
 
-    # classify on OBSERVED rows only -- extension rows have no closure sentinel
-    obs = (d_pred[d_pred.is_observed] if "is_observed" in d_pred
-           else d_pred)
-    kind = episodes.classify(obs)
-    unfinished = frozenset(kind.index[kind == episodes.NOT_CLOSED])
+    # dp_eligible means CLOSED (prepare_data's outcome_unknown gate). An
+    # unclosed episode would truncate the actual arm while the simulated arms
+    # run the full horizon, flattering the DP by exactly the missing tail --
+    # refused loudly rather than aggregated. Classified on OBSERVED rows only:
+    # extension rows have no closure sentinel.
+    kind = episodes.classify(d_pred[d_pred.is_observed])
+    unclosed = int((kind == episodes.NOT_CLOSED).sum())
+    if unclosed:
+        raise ValueError(
+            f"policy_replay takes the dp_eligible population, but {unclosed} "
+            "episode(s) never closed -- apply "
+            "bootstrap.prepare_data.population(d, cfg, 'dp_eligible') first")
 
     eps_ids = d_pred.episode_id.unique()
     if len(eps_ids) > max_episodes:
@@ -723,7 +730,7 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
 
     frames = []
     for _, g in sub.groupby("episode_id"):
-        e = _episode_frame(g, unfinished)
+        e = _episode_frame(g)
         if e["q0"] > 0 and e["hours"] >= 1:
             frames.append(e)
 
@@ -738,19 +745,9 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
         for day, costs in spreads:
             ledger.add(day, costs)
 
-    ep_all = pd.DataFrame(rows)
-    if not len(ep_all):
-        raise RuntimeError("no episodes replayed")
-
-    # aggregates are over outcome_known episodes only (exclusions counted): an
-    # unclosed episode truncates the actual arm while the simulated arms run
-    # the full horizon, flattering the DP by exactly the missing tail
-    ep = ep_all[ep_all.outcome_known]
+    ep = pd.DataFrame(rows)
     if not len(ep):
-        raise RuntimeError(
-            "no episode in this sample has a known outcome -- every aggregate "
-            "would compare a truncated actual arm against two full-horizon "
-            "simulated ones")
+        raise RuntimeError("no episodes replayed")
 
     def money(col):
         return round(float(ep[col].sum()), 1)
@@ -758,10 +755,6 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
     lg_il, dp_il = float(ep.legacy_model_il.sum()), float(ep.dp_il.sum())
     block = {
         "episodes_replayed": int(len(ep)),
-        "episodes_excluded_unclosed": int(len(ep_all) - len(ep)),
-        "share_outcome_known": round(float(ep_all.outcome_known.mean()), 4),
-        "basis_note": ("figures are over KNOWN-outcome episodes only: an "
-                       "unfinished one flatters the DP by its missing tail."),
         "actual_il": money("actual_il"),
         "actual_discount_cost": money("actual_discount_cost"),
         "actual_scrap_cost": money("actual_scrap_cost"),
@@ -820,43 +813,38 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
 
 
 def derive_tau_initial(ledger, ep, cfg, launch_std):
-    """Section 12.3: tau_initial is the currency amount (never a rate) whose
-    implied daily exploration spend matches budget_share_of_il of daily
-    markdown IL. Reports 1.00x by construction -- evidence a tau EXISTS, not
-    that it is right. A CROSS-CHECK on the exploit-only path: the launch
-    paste comes from shadow's own anchored-path derivation (design 5.13)."""
+    """The tau whose implied daily exploration spend matches
+    budget_share_of_il of daily markdown IL (design 5.8), solved on the
+    exploit-only replay path -- a CROSS-CHECK; the launch paste is shadow's
+    anchored-path derivation (5.13). Reports 1.00x by construction: evidence
+    a tau EXISTS, not that it is right (AGENTS rule 17)."""
     if not ledger.decisions:
         return None
-    # the launch constant solves against the window's MEAN daily IL;
-    # production budgets on the trailing basis and tau_next walks tau with it
+    # ONE day count on both sides: the budget is the mean IL over the days
+    # that traded and the spend is divided by the same days (the ledger's
+    # trading-day notion) -- a calendar span would cross the pre-launch
+    # frame's exclusion gap and understate spend per day
     daily_il = pd.DataFrame(ep).groupby("date")["actual_il"].sum()
-    # production's own budget rule at the launch posterior width -- the
-    # bare share ignored the std scale and disagreed with day one whenever
-    # the launch prior is narrower than budget_scale_ref_std
-    budget_per_day = float(explore.budget_today(daily_il.mean(), launch_std, cfg))
-    n_days = episodes.calendar_days(pd.DataFrame(ep).date)
+    n_days = int(len(daily_il))
+    # production's own budget rule at the launch posterior width
+    budget_per_day = float(explore.budget_today(
+        daily_il.sum() / n_days, launch_std, cfg))
     tau = ledger.solve_tau(budget_per_day, n_days=n_days)
     if tau is None:
         return None
     return {"tau_initial": round(tau, 2),
-            "unit": "currency (expected IL given up, per section 12.3)",
+            "unit": "currency: expected IL given up (design 5.8)",
             # solved on policy_replay's SAMPLE (--policy-episodes), not the
             # window: the daily IL and spend are both sample-scaled, so the
             # ratio holds but the currency amount is the sample's
             "episodes_in_sample": int(len(ep)),
+            "days": n_days,
             "implied_daily_spend": round(
                 ledger.implied_daily_spend(tau, n_days), 1),
             "daily_budget": round(budget_per_day, 1),
             "budget_scale_std": round(float(launch_std), 4),
-            "budget_basis": ("explore.budget_today at the widest launch prior "
-                             "std on the window's mean daily IL; production "
-                             "budgets on the trailing budget_il_window_days "
-                             "mean"),
             "cost_distribution_quantile": round(ledger.quantile_of(tau), 4),
             "spread_decisions": ledger.decisions,
-            "basis": ("every decision hour on the exploit-only replay path. "
-                      "Entry-only collection understated the funded decision "
-                      "count ~8x; see pricing.explore.SpreadLedger."),
-            "validate_on": ("pipeline.shadow --holdout reports "
-                            "tau_recommended and tau_controller_trace on a "
-                            "window no artifact was fit on.")}
+            "note": ("design 5.14 -- exploit-only path, every decision hour; "
+                     "the launch value is shadow's tau_initial_derivation "
+                     "(5.13)")}

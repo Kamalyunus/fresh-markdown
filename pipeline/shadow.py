@@ -21,8 +21,9 @@ from common.io import read_json, write_json
 from common.parallel import map_episodes
 from common.provenance import config_fingerprint
 from common.episodes import adjustment_reason
+from backtest.replay import predict_frame
+from bootstrap.prepare_data import population
 from bootstrap.train_baseline import BaselineModel
-from bootstrap.fit_dispersion import lookup_r
 from events.store import EventStore
 from pricing import dp as dp_mod
 from pricing import explore
@@ -35,8 +36,6 @@ SHADOW_STATUS = "shadow_not_applied"
 # Default window: the hold-out is the only span no frozen artifact was fit
 # on, so honesty is the default rather than a flag someone must remember.
 HOLDOUT_BASIS = "holdout"
-
-
 
 
 def _require_shadow_config(cfg, backtest_path="reports/backtest.json",
@@ -58,11 +57,15 @@ def _require_shadow_config(cfg, backtest_path="reports/backtest.json",
                           + prefix + stale)
 
 
-
 def pre_window_il_history(d, cfg, before):
-    """Realised legacy IL by close day for episodes that CLOSED in the
-    budget_il_window_days before the window -- the day-one budget base."""
+    """Realised legacy IL by close day for DP-ELIGIBLE episodes that CLOSED
+    in the budget_il_window_days before the window -- the day-one budget
+    base. Same population as everything it is scaled against (derive_tau0's
+    sample fraction, run_shadow's seed_scale)."""
     if before is None or d.empty:
+        return {}
+    d = population(d, cfg, "dp_eligible")
+    if d.empty:
         return {}
     start = pd.Timestamp(str(before))
     window = int(cfg["exploration"]["budget_il_window_days"])
@@ -78,8 +81,16 @@ def pre_window_il_history(d, cfg, before):
 # post-processing), so the unit of work is one episode and all parallelise
 EP_COLS = ("hour_of_day", "sku_id", "fc", "category", "subcategory",
            "starting_inventory", "ending_inventory", "units_sold",
-           "total_discount", "original_price", "cost", "r_val",
+           "total_discount", "original_price", "cost", "r",
            "mu_ref_hat", "date", "is_observed")
+
+# per-episode scalars _shadow_one returns and the parent sums -- one list,
+# so a new term cannot be produced without being folded in
+SCALARS = ("cost_floor_violations", "n_forced", "empty_affordable",
+           "would_be_cost", "raw_information",
+           # info is quadratic in the log price move, linear in demand
+           "abs_log_ratio", "forced_mu", "forced_discount_gap",
+           "rec_disc", "leg_disc", "differs")
 
 
 def weekly_refit_schedule(d_full, cfg, model, r_lookup, start, end):
@@ -88,7 +99,6 @@ def weekly_refit_schedule(d_full, cfg, model, r_lookup, start, end):
     hold-out rows (rule 16); at week k it reads only weeks < k.
     Returns ({week_start: {cell: factor}}, coverage)."""
     from bootstrap.train_baseline import _solve_level_factors
-    from bootstrap.prepare_data import population
 
     bm = cfg["baseline_model"]
     weeks_back = bm["calibration_fit_trailing_weeks"]
@@ -122,20 +132,38 @@ def weekly_refit_schedule(d_full, cfg, model, r_lookup, start, end):
 
 
 def _prepare_items(d, cfg, model, r_lookup):
-    """Extend to the full window BEFORE predicting (early sell-out must not
-    shorten the DP horizon), then pack per-episode arrays for _shadow_one."""
-    carry = [c for c in d.columns if c not in
-             ("episode_id", "date", "hour_of_day", "hours_remaining",
-              "starting_inventory", "ending_inventory", "units_sold")]
-    d = episodes.extend_to_window(d, carry, cfg["data"]["max_window_hours"])
-    d = d.sort_values(["episode_id", "date", "hour_of_day"]).copy()
-    d["mu_ref_hat"] = model.predict_mu_ref(d)
-    d["r_val"] = [lookup_r(r_lookup, s, c)
-                  for s, c in zip(d.subcategory, d.category)]
+    """Pack per-episode arrays for _shadow_one over `predict_frame` (the one
+    extend/lookup/predict path, shared with the backtest)."""
+    d = predict_frame(d, cfg, model, r_lookup)
     groups = list(d.groupby("episode_id", sort=False))
     items = [dict({c: g[c].to_numpy() for c in EP_COLS}, episode_id=eid)
              for eid, g in groups]
     return d, groups, items
+
+
+def _ctx(cfg, tau, model, posterior, seed, categories):
+    """The read-only context every episode worker gets."""
+    return {"cfg": cfg, "tau": tau, "model_version": model.version,
+            "seed": seed, "cal_grain": model.calibration_grain,
+            "cells": {str(c): posterior.get(c) for c in categories}}
+
+
+def _fill_ledger(items, ctx, workers, ledger):
+    """Run _shadow_one over `items`, adding every decision's Q-spreads to
+    `ledger`; yields each episode's result for the caller to fold."""
+    for out in map_episodes(_shadow_one, items, ctx, workers):
+        for day, costs, moves, dmin in out["spreads"]:
+            ledger.add(day, costs, moves, dmin)
+        yield out
+
+
+def _mean_daily_budget(days, il_by_day, widest_std, cfg):
+    """Mean of production's per-day budget over `days` -- the window's
+    DECISION days, never the pre-window seed days (the first of those has
+    no trailing history and would read as a zero budget)."""
+    return float(np.mean([explore.budget_today(
+        explore.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
+        for day in days]))
 
 
 def derive_tau0(d_full, cfg, start, model, posterior, r_lookup, il_history,
@@ -143,7 +171,6 @@ def derive_tau0(d_full, cfg, start, model, posterior, r_lookup, il_history,
     """Launch tau derived on THIS run's anchored path over the trailing
     pre-window week (same span as the day-one budget base). tau_initial is
     None when the week is too thin; the caller falls back to the paste."""
-    from bootstrap.prepare_data import population
     window = int(cfg["exploration"]["budget_il_window_days"])
     floor = int(cfg["exploration"]["tau0_derivation_min_decisions"])
     start_ts = pd.Timestamp(str(start))
@@ -180,22 +207,21 @@ def derive_tau0(d_full, cfg, start, model, posterior, r_lookup, il_history,
 
     pre_ids = pre.episode_id.unique()
     n_pop = len(pre_ids)
+    # the span the spend is divided by: the POPULATION's, unextended (a
+    # sample can shrink it; extend_to_window's synthetic tail can add a day)
+    n_days = episodes.calendar_days(pre.date)
     # decoupled from the window's sample draw, same reproducibility contract
     rng = np.random.default_rng([int(seed), 1])
     if max_episodes and n_pop > max_episodes:
         keep = rng.choice(pre_ids, max_episodes, replace=False)
         pre = pre[pre.episode_id.isin(keep)]
-    n_days = episodes.calendar_days(pre.date)
     _, groups, items = _prepare_items(pre, cfg, model, r_lookup)
     # tau None: nothing explores, and the ledger does not care -- spreads are
     # recorded before the draw, independent of the tau in force
-    ctx = {"cfg": cfg, "tau": None, "model_version": model.version,
-           "seed": seed, "cal_grain": model.calibration_grain,
-           "cells": {str(c): posterior.get(c) for c in pre.category.unique()}}
+    ctx = _ctx(cfg, None, model, posterior, seed, pre.category.unique())
     ledger = explore.SpreadLedger()
-    for out in map_episodes(_shadow_one, items, ctx, workers):
-        for day, costs, moves, dmin in out["spreads"]:
-            ledger.add(day, costs, moves, dmin)
+    for _ in _fill_ledger(items, ctx, workers, ledger):
+        pass
 
     block.update(decisions=ledger.decisions, episodes=len(groups),
                  episodes_population=int(n_pop),
@@ -218,12 +244,7 @@ def derive_tau0(d_full, cfg, start, model, posterior, r_lookup, il_history,
         budget_target=round(budget * frac, 1),
         implied_daily_spend=round(ledger.implied_daily_spend(tau0, n_days), 1),
         q_spread_distribution=ledger.distribution(),
-        note=("derived on this run's own anchored path over the week the "
-              "day-one budget reads, so the backtest's exploit-vs-anchored "
-              "mismatch does not apply and the day-one controller trace is "
-              "an out-of-sample test of it. For the pilot, paste this into "
-              "exploration.tau_initial; tau_provenance_error accepts this "
-              "block as the source."))
+        note="design 5.13 -- paste into exploration.tau_initial")
     return block
 
 
@@ -253,25 +274,26 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
                      "budget": r["budget"],
                      "over_budget": round(over, 2) if over is not None else None,
                      "stop_condition_fires": fired})
+    # three distinct day counts -- calendar span, days with decisions, days
+    # walked -- none interchangeable, especially on a sample; the per-day
+    # episode rates both divide by the calendar span
+    span = int(window_days) if window_days else len(ledger.days)
     return {
         "tau_start": round(float(tau0), 2),
         "tau_end": round(tau, 2),
         "by_day": rows,
-        # three distinct day counts -- calendar span, days with decisions,
-        # days walked -- none interchangeable, especially on a sample
-        "window_days": int(window_days) if window_days else len(ledger.days),
+        "window_days": span,
         "days_with_decisions": len(ledger.days),
         "days_simulated": len(rows),
         "days_truncated": max(len(ledger.days) - len(rows), 0),
         "days_stop_condition_fires": suspend_days,
         "first_day_within_budget": first_within,
-        "clip": cfg["exploration"]["tau_adjust_clip"],
         # the ONE figure a sample degrades: this series divides the sample
         # across the window's days (everything else reads rates or is invariant)
         "episodes_per_day_sampled": round(
-            sampled_episodes / max(len(rows), 1), 1) if sampled_episodes else None,
+            sampled_episodes / max(span, 1), 1) if sampled_episodes else None,
         "episodes_per_day_population": round(
-            population_episodes / max(window_days or len(rows), 1), 1)
+            population_episodes / max(span, 1), 1)
             if population_episodes else None,
         "verdict": (
             "no days simulated" if not rows else
@@ -282,21 +304,8 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
             f"survives launch; {suspend_days} of {len(rows)} days would fire "
             "the stop condition" if suspend_days else
             "survives launch; the stop condition never fires"),
-        "note": ("Expected spend at the tau in force each day, so this is the "
-                 "path a pilot launched at tau_start would have walked. Run "
-                 "it again with tau_initial set to tau_recommended to confirm "
-                 "the launch value clears day 1."
-                 + (" ON A SAMPLE the day-to-day movement mixes real "
-                    "volatility with sampling noise, and the controller will "
-                    "look jumpier than it is; the pooled "
-                    "exploration_budget_would_be.spend_over_budget is "
-                    "sample-invariant and is the figure to quote. Raise "
-                    "--max-episodes if reading this series closely."
-                    if sampled_episodes and population_episodes
-                    and sampled_episodes < population_episodes else "")
-                 + (f" TRUNCATED: {len(ledger.days) - len(rows)} later days "
-                    f"not walked (cap {max_days})."
-                    if len(rows) < len(ledger.days) else "")),
+        "note": ("design 5.13 -- expected spend at the tau in force; on a "
+                 "sample quote the pooled spend_over_budget, not by_day"),
     }
 
 
@@ -324,6 +333,11 @@ class _FrozenCells:
     def get(self, category):
         return self._by_category[str(category)]
 
+    def exploration_suspended(self):
+        # a rehearsal never suspends: the report is what the tau in force
+        # WOULD buy, which a production suspension record must not zero
+        return None
+
 
 def _episode_seed(seed, episode_id):
     """A generator per episode, seeded from its id: draws are reproducible
@@ -341,14 +355,10 @@ def _shadow_one(ep, ctx):
     rng = _episode_seed(ctx["seed"], ep["episode_id"])
     n = len(ep["hour_of_day"])
 
-    out = {
-        "events": [], "rejected": {}, "spreads": [],
-        "cost_floor_violations": 0, "n_forced": 0, "empty_affordable": 0,
+    out = {k: 0 for k in SCALARS}
+    out.update({
+        "events": [], "rejected": {}, "spreads": [], "latencies": [],
         "episode_id": ep["episode_id"],
-        "would_be_cost": 0.0, "raw_information": 0.0,
-        # info is quadratic in the log price move, linear in demand
-        "abs_log_ratio": 0.0, "forced_mu": 0.0, "forced_discount_gap": 0.0,
-        "rec_disc": 0.0, "leg_disc": 0.0, "differs": 0, "latencies": [],
         # date/cell ride along so the drift ratio can be re-read under a
         # weekly re-fit (a factor swap is an exact rescale of mu)
         "drift": {"mu": [], "r": [], "q": [], "sold": [], "date": [],
@@ -357,7 +367,7 @@ def _shadow_one(ep, ctx):
         # budget base is metrics.episode_economics -- the same IL the
         # guardrail floors and il_pct measure, not a third approximation
         "hours": [],
-    }
+    })
     anchor = None
 
     for t in range(n):
@@ -392,7 +402,7 @@ def _shadow_one(ep, ctx):
             "hour_of_day": int(ep["hour_of_day"][t]),
             "hours_remaining": n - t, "q": q,
             "original_price": float(ep["original_price"][t]),
-            "cost": float(ep["cost"][t]), "r": float(ep["r_val"][t]),
+            "cost": float(ep["cost"][t]), "r": float(ep["r"][t]),
             "mu_ref_path": list(ep["mu_ref_hat"][t:]),
             "current_discount": anchor,
         }
@@ -455,7 +465,7 @@ def _shadow_one(ep, ctx):
         ratio = (1 - legacy_d) / (1 - evt["reference_discount"])
         out["drift"]["mu"].append(max(ep["mu_ref_hat"][t] * ratio ** eps,
                                       cfg["pricing"]["demand_floor"]))
-        out["drift"]["r"].append(float(ep["r_val"][t]))
+        out["drift"]["r"].append(float(ep["r"][t]))
         out["drift"]["q"].append(q)
         out["drift"]["sold"].append(sold)
         out["drift"]["date"].append(str(ep["date"][t]))
@@ -470,7 +480,6 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
                prior_il_by_day=None, pre_window_frame=None, window_start=None,
                window_basis=HOLDOUT_BASIS, workers=None):
     # precondition, inside run_shadow so a programmatic caller cannot skip it
-    from bootstrap.prepare_data import population
     d = population(d, cfg, "dp_eligible")
     if d.empty:
         raise RuntimeError("no DP-eligible episodes in this window")
@@ -502,61 +511,58 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         tau = float(cfg["exploration"]["tau_initial"])
         tau_source = "config paste (exploration.tau_initial)"
 
+    # FROZEN ANCHOR for every window row: the "launch and never re-calibrate"
+    # regime the drift ratio grades, stated rather than assumed. On the
+    # hold-out every row is past the schedule anyway; on a window that
+    # overlaps the schedule (--all, an explicit range) the rows would
+    # otherwise carry their own week's factors and the weekly_refit rescale
+    # (anchor -> re-fit) would be wrong for them. Deliberate, so
+    # calibration_coverage reads it as the gate's freeze, not stale factors.
+    model.freeze_calibration_from(
+        window_start if window_start is not None else d.date.min())
+
     # SAMPLE FIRST: the gate reads rates a uniform episode sample estimates,
     # and sampling after the predict step costs a full run for sample evidence
-    population = d.episode_id.unique()
-    sampled = bool(max_episodes) and len(population) > max_episodes
+    population_ids = d.episode_id.unique()
+    n_population = len(population_ids)
+    # the span every "per day" figure divides by: the WINDOW's, on the
+    # unsampled, unextended frame (a sample can shrink it; extend_to_window's
+    # synthetic tail can add a day). Both sides -- spend and budget -- cover
+    # the same episodes over the same days.
+    n_days = episodes.calendar_days(d.date)
+    sampled = bool(max_episodes) and n_population > max_episodes
     if sampled:
-        keep = rng.choice(population, max_episodes, replace=False)
+        keep = rng.choice(population_ids, max_episodes, replace=False)
         d = d[d.episode_id.isin(keep)]
 
     d, groups, items = _prepare_items(d, cfg, model, r_lookup)
 
     rejected = {}
-    n_dec = n_out = cost_floor_violations = differs = 0
-    rec_disc = leg_disc = would_be_cost = 0.0
-    n_forced = empty_affordable = 0
-    raw_information = 0.0
-    abs_log_ratio = forced_mu = forced_discount_gap = 0.0
+    n_dec = n_out = 0
+    tot = {k: 0 for k in SCALARS}
     # one entry per FORCED hour, so deff is measured at the clustering this
     # run actually produced rather than a frozen calib-window paste
     forced_episode_ids = []
-    # markdown IL on the SAME episodes/window as the spend, so budget and
-    # spend share a population; accumulated as scalars, not rows
     # Q-spreads for every decision on THIS path, so tau is re-derived on the
     # population that will actually run (not the replay's entry-only one)
     ledger = explore.SpreadLedger()
-    # one FINAL row per episode (source ending_inventory, not simulated) so
-    # scrap is classified by common.episodes.classify_last, not a copy of it
+    # every observed hour, so markdown IL is measured on the SAME episodes
+    # and window as the spend (metrics.episode_economics, the one home)
     hours = []
     latencies = []
     drift = {"mu": [], "r": [], "q": [], "sold": [], "date": [],
              "cell": []}
 
-    ctx = {"cfg": cfg, "tau": tau, "model_version": model.version,
-           "seed": seed, "cal_grain": model.calibration_grain,
-           "cells": {str(c): posterior.get(c) for c in d.category.unique()}}
-
-    for out in map_episodes(_shadow_one, items, ctx, workers):
+    ctx = _ctx(cfg, tau, model, posterior, seed, d.category.unique())
+    for out in _fill_ledger(items, ctx, workers, ledger):
         for reason, k in out["rejected"].items():
             rejected[reason] = rejected.get(reason, 0) + k
-        cost_floor_violations += out["cost_floor_violations"]
-        n_forced += out["n_forced"]
-        empty_affordable += out["empty_affordable"]
-        would_be_cost += out["would_be_cost"]
-        raw_information += out["raw_information"]
+        for k in SCALARS:
+            tot[k] += out[k]
         forced_episode_ids.extend([out["episode_id"]] * out["n_forced"])
-        abs_log_ratio += out["abs_log_ratio"]
-        forced_mu += out["forced_mu"]
-        forced_discount_gap += out["forced_discount_gap"]
-        rec_disc += out["rec_disc"]
-        leg_disc += out["leg_disc"]
-        differs += out["differs"]
         latencies.extend(out["latencies"])
         for key in drift:
             drift[key].extend(out["drift"][key])
-        for day, costs, moves, dmin in out["spreads"]:
-            ledger.add(day, costs, moves, dmin)
         hours.extend(out["hours"])
         # the parent commits through the real store, in episode order, so
         # dedup and quarantine (which the gate measures) run where they ran
@@ -569,6 +575,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
 
     if n_dec == 0:
         raise RuntimeError("no decisions produced -- empty input or all states rejected")
+    n_forced, would_be_cost = tot["n_forced"], tot["would_be_cost"]
 
     # censored basis: sales cannot exceed inventory, so the drift ratio
     # compares realised sales against E[min(D, q)] -- never raw mu
@@ -585,7 +592,9 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     drift_ratio = _ratio(mu_arr)
 
     # second reading: same rows under a WEEKLY RE-FIT (frozen vs weekly is
-    # what re-calibration is worth); a factor swap is an exact mu rescale
+    # what re-calibration is worth); a factor swap is an exact mu rescale,
+    # and every row carries the ANCHOR factor (frozen above), so the scale
+    # is re-fit / anchor for every row
     refit_ratio, refit_cov, refit_applied = None, [], 0
     refit = {}
     if pre_window_frame is not None and drift["date"]:
@@ -613,25 +622,23 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     # the step cap and daily human gate keep a calendar floor regardless
     shadow_deff = deff_from_episodes(cfg["dispersion"]["rho"],
                                      forced_episode_ids)
-    eff_information = raw_information / shadow_deff
+    eff_information = tot["raw_information"] / shadow_deff
     inc = cfg["learning"]["information_increment"]
     n_ep = len(groups)
     # Would-be spend vs budget on SHADOW'S OWN basis: the backtest bisection
     # solves on the exploit-only path, but shadow's anchored path has
     # different affordable sets, so the same tau buys different exploration.
-    # Both sides here cover the same episodes over the same days.
-    n_days = episodes.calendar_days(d.date)
-    # SCRAP = leftover + shrink on settled episodes (episodes.scrap_units);
-    # an unsettled one contributes nothing until it closes, which is what
-    # makes the trailing budget base knowable at the start of each day
-    econ, excluded = metrics.settled(metrics.episode_economics(pd.DataFrame(hours)))
+    # SCRAP = leftover + shrink (episodes.scrap_units); dp_eligible episodes
+    # are closed with a known cost, so `settled` excludes nothing here -- it
+    # is called because it is the one home, not because it filters
+    econ, _ = metrics.settled(metrics.episode_economics(pd.DataFrame(hours)))
     il_discount = float(econ.discount_cost.sum())
     il_scrap = float((econ.cost * econ.scrap).sum())
-    il_unknown_scrap = excluded["episodes_excluded_not_closed"]
     markdown_il = il_discount + il_scrap
     # pre-window IL seed, SCALED TO THE SAMPLE (it is measured on the full
-    # frame; unscaled it inflates the first days' budgets by 1/fraction)
-    seed_scale = len(groups) / max(len(population), 1)
+    # dp_eligible frame; unscaled it inflates the first days' budgets by
+    # 1/fraction)
+    seed_scale = len(groups) / max(n_population, 1)
     il_by_day = {day: amount * seed_scale
                  for day, amount in (prior_il_by_day or {}).items()}
     for day, amount in econ.groupby("close_day").il.sum().items():
@@ -641,17 +648,18 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     # down as the posterior narrows (constant here, but the same quantity
     # the stop condition is evaluated against)
     widest_std = posterior.widest_std()
-    # aggregate gate grades mean spend against the MEAN daily budget on the
-    # same trailing basis as the controller trace, so the two cannot disagree
-    daily_budgets = [explore.budget_today(
-        explore.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
-        for day in sorted(il_by_day)]
-    daily_budget = (float(np.mean(daily_budgets)) if daily_budgets
-                    else explore.budget_today(markdown_il / max(n_days, 1),
-                                              widest_std, cfg))
+    # aggregate gate grades mean spend against the MEAN daily budget over the
+    # window's DECISION days on the same trailing basis as the controller
+    # trace, so the two cannot disagree
+    daily_budget = (_mean_daily_budget(ledger.days, il_by_day, widest_std, cfg)
+                    if ledger.days else
+                    explore.budget_today(markdown_il / max(n_days, 1),
+                                         widest_std, cfg))
     implied_daily_spend = would_be_cost / n_days
     over = (implied_daily_spend / daily_budget) if daily_budget > 0 else None
     stop_at = cfg["monitoring"]["stop_conditions"]["exploration_cost_vs_budget"]
+    ec = cfg["exploration"]
+    share, mult = float(ec["budget_share_of_il"]), float(ec["delta_min_bias_multiple"])
 
     # re-derive tau on THIS path: same bisection as the replay, but on the
     # decisions that actually happen (the replay solved on entry only)
@@ -666,21 +674,18 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         # the seed is population-scale and everything it is compared against
         # is sample-scale; this is the factor that reconciles them
         "trailing_basis_seed_scale": round(seed_scale, 6),
-        "budget_basis": (f"mean of per-day budgets on the trailing "
-                         f"{cfg['exploration']['budget_il_window_days']}-day "
-                         "realised-IL base (explore.trailing_daily_il) -- the "
-                         "budget production would apply, not a whole-window "
-                         "average"),
+        "budget_basis": (f"mean over the window's decision days of the "
+                         f"per-day budget on the trailing "
+                         f"{ec['budget_il_window_days']}-day realised-IL base "
+                         "(explore.trailing_daily_il) -- the budget production "
+                         "would apply, not a whole-window average"),
         "spend_over_budget": round(over, 2) if over is not None else None,
         "stop_condition_multiple": stop_at,
         "markdown_il_total": round(markdown_il, 1),
         "markdown_il_discount": round(il_discount, 1),
         "markdown_il_scrap": round(il_scrap, 1),
-        "episodes_unknown_scrap_excluded": il_unknown_scrap,
-        "budget_share_of_il": cfg["exploration"]["budget_share_of_il"],
-        "budget_scale_applied": round(min(max(
-            widest_std / cfg["exploration"]["budget_scale_ref_std"],
-            cfg["exploration"]["budget_scale_floor"]), 1.0), 4),
+        "budget_share_of_il": share,
+        "budget_scale_applied": round(explore.budget_scale(widest_std, cfg), 4),
         "tau": tau,
         "tau_source": tau_source,
         "tau_recommended": round(tau_rec, 2) if tau_rec else None,
@@ -701,20 +706,14 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             f"OVER BUDGET -- {over:.2f}x; the tau controller shrinks tau at the "
             "operator gate, capped at halving per day" if over > 1 else
             f"within budget -- {over:.2f}x"),
-        "note": (("tau derived on this run's own pre-window week; "
-                  "tau_recommended is the same bisection pooled over the "
-                  "whole window -- a cross-check, not a correction.")
-                 if tau_deriv is not None and not tau_deriv["fallback"] else
-                 ("tau came from the config paste (pre-window week missing or "
-                  "too thin); read tau_recommended and tau_controller_trace "
-                  "before trusting the launch value.")),
+        "note": ("design 5.13 -- tau_recommended is the same bisection pooled "
+                 "over the window: a cross-check on the tau in force, not a "
+                 "correction"),
     }
     budget_check["tau_controller_trace"] = _controller_trace(
         ledger, il_by_day, tau, widest_std, cfg, window_days=n_days,
-        sampled_episodes=n_ep, population_episodes=len(population))
+        sampled_episodes=n_ep, population_episodes=n_population)
     # what a smaller budget or a deeper floor would buy, from this ledger
-    ec = cfg["exploration"]
-    share, mult = float(ec["budget_share_of_il"]), float(ec["delta_min_bias_multiple"])
     budget_sweep = ledger.sweep(
         daily_budget, n_days, n_dec, share, mult,
         shares=sorted({round(share * f, 6) for f in (0.25, 0.5, 0.75, 1.0, 1.5)}),
@@ -723,7 +722,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     per_episode = eff_information / n_ep if n_ep else 0.0
     step = cfg["learning"]["max_mean_step"]
     cadence = int(cfg["learning"]["update_cadence_days"])
-    per_day_pop = len(population) / max(n_days, 1)
+    per_day_pop = n_population / max(n_days, 1)
     learning_yield = {
         "effective_information_total": round(eff_information, 2),
         "effective_information_per_episode": round(per_episode, 5),
@@ -733,9 +732,10 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             if per_episode > 0 else None,
         "max_mean_step": step,
         # one bounded update per learning.update_cadence_days: the calendar
-        # floor on learning, and how much evidence each period brings
+        # floor on learning (each step moves the mean at most max_mean_step),
+        # and how much evidence each period brings
         "update_cadence_days": cadence,
-        "calendar_floor_days_per_0.15_of_mean": cadence,
+        "calendar_floor_days_per_step": cadence,
         "bounded_updates_worth_per_period": round(
             per_episode * per_day_pop * cadence / inc, 2)
             if per_episode > 0 and per_day_pop else None,
@@ -744,19 +744,15 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         # the log ratio) -- the terms below tell them apart
         "forced_decisions": n_forced,
         "information_per_forced_decision": round(
-            raw_information / n_forced, 6) if n_forced else None,
+            tot["raw_information"] / n_forced, 6) if n_forced else None,
         "mean_abs_log_price_ratio_forced": round(
-            abs_log_ratio / n_forced, 4) if n_forced else None,
+            tot["abs_log_ratio"] / n_forced, 4) if n_forced else None,
         "mean_discount_gap_from_reference_forced_pp": round(
-            100 * forced_discount_gap / n_forced, 2) if n_forced else None,
+            100 * tot["forced_discount_gap"] / n_forced, 2) if n_forced else None,
         "mean_mu_on_forced_hours": round(
-            forced_mu / n_forced, 3) if n_forced else None,
-        "note": ("Would-be evidence (no price applied). Calendar floor: one "
-                 f"bounded update/day, each moving the mean at most {step}. "
-                 "Per-decision info is mu*L^2*r/(r+mu), QUADRATIC in the log "
-                 "price move: a small mean_discount_gap is the usual cause of "
-                 "a poor yield, and tau is its lever (tau buys the cheapest "
-                 "-- least informative -- tiers first)."),
+            tot["forced_mu"] / n_forced, 3) if n_forced else None,
+        "note": ("design 5.13 -- would-be evidence; info per decision is "
+                 "mu*L^2*r/(r+mu), quadratic in the log price move"),
     }
 
     # outcomes accepted per decision emitted; the gap is quarantine + dupes.
@@ -770,15 +766,15 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             "threshold": sg["min_event_completeness"],
             "pass": completeness >= sg["min_event_completeness"]},
         "cost_floor_violations": {
-            "value": cost_floor_violations,
+            "value": tot["cost_floor_violations"],
             "threshold": 0,
-            "pass": cost_floor_violations == 0},
+            "pass": tot["cost_floor_violations"] == 0},
     }
     if sampled:
         # a zero COUNT is only zero over what was sampled; say so rather
         # than letting "0 violations" read as a proof over the window
         gate["sampling_caveat"] = (
-            f"gate measured on {len(groups):,} of {len(population):,} episodes "
+            f"gate measured on {len(groups):,} of {n_population:,} episodes "
             f"(seed {seed}): rates are sample estimates, and the zero "
             "cost-floor count is zero OVER THE SAMPLE, not a proof over the "
             "window (cost-floor safety is structural and unit-tested).")
@@ -791,7 +787,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             "in-sample rows. The completeness, matched-rate and cost-floor "
             "checks test plumbing, not fit, and are unaffected. Re-run "
             "without --all for the launch record.")
-    gate["verdict"] = ("PASS -- proceed to exploit-only pilot (section 19)"
+    gate["verdict"] = ("PASS -- proceed to exploit-only pilot (design 9.4, 10)"
                        if all(g["pass"] for g in gate.values()
                               if isinstance(g, dict))
                        else "FAIL -- do not apply prices")
@@ -803,13 +799,14 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             "posterior_versions": {c: r["version"]
                                    for c, r in posterior.state["cells"].items()},
             "config_version": cfg["meta"]["config_version"],
-            # did every priced row get its OWN week's level factors, or did
-            # some fall back to the frozen set? Silent by construction
+            # every window row is frozen at the anchor ON PURPOSE (above), so
+            # this reads OK; STALE here means a pre-window row ran past the
+            # schedule's end
             "calibration_coverage": model.calibration_coverage(),
         },
         "window": {"date_min": str(d.date.min()), "date_max": str(d.date.max()),
                    "episodes": len(groups),
-                   "population_episodes": int(len(population)),
+                   "population_episodes": int(n_population),
                    "basis": window_basis,
                    "out_of_sample": window_basis == HOLDOUT_BASIS,
                    "sampled": sampled,
@@ -825,8 +822,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         "exploration_would_be": {
             "forced_rate": round(n_forced / n_dec, 4),
             "would_be_cost_total": round(would_be_cost, 1),
-            "affordable_set_empty_rate": round(empty_affordable / n_dec, 4),
-            "tau": tau,
+            "affordable_set_empty_rate": round(tot["empty_affordable"] / n_dec, 4),
             "note": "no price was applied; costs are the expected IL the "
                     "recommendations would have spent",
         },
@@ -837,9 +833,9 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         "tau_initial_derivation": tau_deriv,
         "learning_yield_would_be": learning_yield,
         "recommendation_vs_legacy": {
-            "mean_recommended_discount": round(rec_disc / n_dec, 4),
-            "mean_legacy_discount": round(leg_disc / n_dec, 4),
-            "share_hours_differing": round(differs / n_dec, 4),
+            "mean_recommended_discount": round(tot["rec_disc"] / n_dec, 4),
+            "mean_legacy_discount": round(tot["leg_disc"] / n_dec, 4),
+            "share_hours_differing": round(tot["differs"] / n_dec, 4),
         },
         "realised_vs_predicted_sold_ratio_at_legacy_price": round(drift_ratio, 4)
             if drift_ratio else None,
@@ -861,17 +857,98 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             # question then cannot be answered -- say so where tune reads
             "refit_error": next((c["error"] for c in refit_cov
                                  if "error" in c), None),
-            "note": ("Same rows, legacy price, censored basis -- only the "
-                     "level factor differs. Both ~1.0 = level held; only "
-                     "frozen off = the anchor went stale (weekly re-fit earns "
-                     "its keep); both off = drift faster than weekly."),
+            "basis": ("every window row priced on the frozen anchor factors; "
+                      "weekly_refit rescales the same rows to each week's "
+                      "re-fit"),
+            "note": "design 9.2 -- same rows, legacy price, censored basis",
         },
         "solver_latency_p95_s": round(float(np.percentile(latencies, 95)), 4),
-        "note": ("Shadow outcomes carry execution_status="
-                 f"'{SHADOW_STATUS}' and are ineligible for pipeline.update: "
-                 "the recommended price was never in force. The drift ratio is "
-                 "the production continuation of the section 9.3 gate."),
+        "note": (f"Shadow outcomes carry execution_status='{SHADOW_STATUS}' "
+                 "and are ineligible for pipeline.update; the drift ratio is "
+                 "the production continuation of the design 9.2 calibration "
+                 "diagnostic."),
     }
+
+
+def _summary(report):
+    """The console summary as (label, text) rows; None text drops the row."""
+    g, w = report["shadow_gate"], report["window"]
+    rv = report["recommendation_vs_legacy"]
+    cr = report.get("calibration_regimes") or {}
+    ly = report["learning_yield_would_be"]
+    td = report.get("tau_initial_derivation")
+    bc = report["exploration_budget_would_be"]
+
+    def verdict(row):
+        return "PASS" if row["pass"] else "FAIL"
+
+    return [
+        ("window", f"{w['basis']} · {w['date_min']} -> {w['date_max']}"
+                   + ("" if w["out_of_sample"] else "  [PARTLY IN-SAMPLE]")),
+        ("episodes", f"{w['episodes']:,} of {w['population_episodes']:,}"
+                     + (f" (sample, seed {w['sample_seed']})"
+                        if w["sampled"] else "")),
+        ("decisions", f"{report['decision_count']:,} "
+                      f"({report['state_rejected_count']} states rejected)"),
+        ("event completeness", f"{g['event_completeness']['value']:.4f} "
+                               f"-> {verdict(g['event_completeness'])}"),
+        ("cost-floor viol.", f"{g['cost_floor_violations']['value']} "
+                             f"-> {verdict(g['cost_floor_violations'])}"),
+        ("mean discount", f"recommended {rv['mean_recommended_discount']:.3f} "
+                          f"vs legacy {rv['mean_legacy_discount']:.3f} "
+                          f"(differs {rv['share_hours_differing']:.1%} of hours)"),
+        ("drift ratio",
+         f"{report['realised_vs_predicted_sold_ratio_at_legacy_price']}"),
+        ("calibration",
+         f"frozen {cr['frozen_anchor']} | weekly re-fit {cr['weekly_refit']} "
+         f"| spread {cr['spread']} ({cr['weeks_refit']} weeks re-fit)"
+         if cr.get("weekly_refit") is not None else
+         "frozen anchor only -- no week could be re-fit on this window"
+         if cr else None),
+        ("would-be learning",
+         f"{ly['bounded_updates_supported']} bounded updates from this window "
+         f"({ly['episodes_per_bounded_update']} episodes per update); "
+         f"calendar floor is 1 update per {ly['update_cadence_days']} day(s)"),
+        ("  evidence per hour",
+         f"{ly['forced_decisions']:,} forced decisions x "
+         f"{ly['information_per_forced_decision']} info each · mean move "
+         f"{ly['mean_discount_gap_from_reference_forced_pp']}pp from "
+         "reference (info is QUADRATIC in this)"
+         if ly["forced_decisions"] else None),
+        ("tau launch",
+         f"{td['tau_initial']:,.2f} derived on the pre-window week "
+         f"[{td['week'][0]} .. {td['week'][1]}] ({td['decisions']:,} decisions)"
+         if td and td.get("tau_initial") is not None else
+         f"config paste in force -- {td['note']}" if td else None),
+        ("exploration budget",
+         f"spend {bc['implied_daily_spend']:,.0f}/day vs budget "
+         f"{bc['daily_budget']:,.0f}/day over {bc['days']} days"),
+        ("", bc["verdict"]),
+        ("tau",
+         f"in force {bc['tau']:,.2f} -> recommended {bc['tau_recommended']:,.2f} "
+         f"({bc['tau_recommended_ratio']:.2f}x) on {bc['spread_decisions']:,} "
+         f"decisions ({bc['spread_decisions_per_episode']}/episode)"
+         if bc["tau_recommended"] else None),
+        ("tau controller", bc["tau_controller_trace"]["verdict"]),
+    ]
+
+
+def _print_summary(report, out_path):
+    for label, text in _summary(report):
+        if text is not None:
+            print(f"{label:<19}: {text}" if label else f"{'':<19}  {text}")
+    sw = report.get("exploration_budget_sweep") or {}
+    rows = [r for r in sw.get("rows", []) if "forced_rate" in r]
+    if rows:
+        print("budget sweep       : share  x_dmin   forced   spend/day   move   info")
+        for r in rows:
+            print(f"                     {r['budget_share_of_il']:<6g} "
+                  f"{r['delta_min_bias_multiple']:<7g} "
+                  f"{r['forced_rate']:>6.1%}  {r['implied_daily_spend']:>10,.0f}   "
+                  f"{r['mean_log_move_forced'] or 0:.3f}  {r.get('information_rel', 1):.2f}"
+                  + ("  <- in force" if r["in_force"] else ""))
+    print(report["shadow_gate"]["verdict"])
+    print(f"wrote {out_path}")
 
 
 def main():
@@ -942,75 +1019,7 @@ def main():
                         pre_window_frame=full, window_start=start)
 
     write_json(args.out, report)
-
-    g = report["shadow_gate"]
-    w = report["window"]
-    print(f"window             : {w['basis']} · {w['date_min']} -> "
-          f"{w['date_max']}"
-          + ("" if w["out_of_sample"] else "  [PARTLY IN-SAMPLE]"))
-    print(f"episodes           : {w['episodes']:,} of "
-          f"{w['population_episodes']:,}"
-          + (f" (sample, seed {w['sample_seed']})" if w["sampled"] else ""))
-    print(f"decisions          : {report['decision_count']:,} "
-          f"({report['state_rejected_count']} states rejected)")
-    print(f"event completeness : {g['event_completeness']['value']:.4f} "
-          f"-> {'PASS' if g['event_completeness']['pass'] else 'FAIL'}")
-    print(f"cost-floor viol.   : {g['cost_floor_violations']['value']} "
-          f"-> {'PASS' if g['cost_floor_violations']['pass'] else 'FAIL'}")
-    rv = report["recommendation_vs_legacy"]
-    print(f"mean discount      : recommended {rv['mean_recommended_discount']:.3f} "
-          f"vs legacy {rv['mean_legacy_discount']:.3f} "
-          f"(differs {rv['share_hours_differing']:.1%} of hours)")
-    print(f"drift ratio        : "
-          f"{report['realised_vs_predicted_sold_ratio_at_legacy_price']}")
-    cr = report.get("calibration_regimes") or {}
-    if cr.get("weekly_refit") is not None:
-        print(f"calibration      : frozen {cr['frozen_anchor']} | "
-              f"weekly re-fit {cr['weekly_refit']} | spread {cr['spread']} "
-              f"({cr['weeks_refit']} weeks re-fit)")
-    elif cr:
-        print("calibration      : frozen anchor only -- no week could be "
-              "re-fit on this window")
-    ly = report["learning_yield_would_be"]
-    print(f"would-be learning  : {ly['bounded_updates_supported']} bounded "
-          f"updates from this window "
-          f"({ly['episodes_per_bounded_update']} episodes per update); "
-          f"calendar floor is 1 update/day")
-    if ly["forced_decisions"]:
-        print(f"  evidence per hour: {ly['forced_decisions']:,} forced "
-              f"decisions x {ly['information_per_forced_decision']} info each"
-              f" · mean move {ly['mean_discount_gap_from_reference_forced_pp']}"
-              f"pp from reference (info is QUADRATIC in this)")
-    td = report.get("tau_initial_derivation")
-    if td and td.get("tau_initial") is not None:
-        print(f"tau launch         : {td['tau_initial']:,.2f} derived on the "
-              f"pre-window week [{td['week'][0]} .. {td['week'][1]}] "
-              f"({td['decisions']:,} decisions)")
-    elif td:
-        print(f"tau launch         : config paste in force -- {td['note']}")
-    bc = report["exploration_budget_would_be"]
-    print(f"exploration budget : spend {bc['implied_daily_spend']:,.0f}/day vs "
-          f"budget {bc['daily_budget']:,.0f}/day over {bc['days']} days")
-    print(f"                     {bc['verdict']}")
-    if bc["tau_recommended"]:
-        print(f"tau                : in force {bc['tau']:,.2f} -> recommended "
-              f"{bc['tau_recommended']:,.2f} "
-              f"({bc['tau_recommended_ratio']:.2f}x) on "
-              f"{bc['spread_decisions']:,} decisions "
-              f"({bc['spread_decisions_per_episode']}/episode)")
-    print(f"tau controller     : {bc['tau_controller_trace']['verdict']}")
-    sw = report.get("exploration_budget_sweep") or {}
-    if sw.get("rows"):
-        print("budget sweep       : share  x_dmin   forced   spend/day   move   info")
-        for r in sw["rows"]:
-            if "forced_rate" not in r:
-                continue
-            print(f"                     {r['budget_share_of_il']:<6g} {r['delta_min_bias_multiple']:<7g} "
-                  f"{r['forced_rate']:>6.1%}  {r['implied_daily_spend']:>10,.0f}   "
-                  f"{r['mean_log_move_forced'] or 0:.3f}  {r.get('information_rel', 1):.2f}"
-                  + ("  <- in force" if r["in_force"] else ""))
-    print(g["verdict"])
-    print(f"wrote {args.out}")
+    _print_summary(report, args.out)
 
 
 if __name__ == "__main__":

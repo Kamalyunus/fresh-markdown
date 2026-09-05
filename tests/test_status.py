@@ -477,3 +477,33 @@ def test_a_null_launch_date_is_a_launch_blocker(cfg):
     assert row["verdict"] == status.FAIL and "data.launch_date" in row["detail"]
     live["data"]["launch_date"] = "2026-09-01"
     assert "data.launch_date" not in status._launch_blockers(live)["detail"]
+
+
+def test_a_missing_artifact_is_not_a_matching_mirror(cfg, tmp_path):
+    c = dict(cfg, dispersion=dict(cfg["dispersion"], rho_path=str(tmp_path / "none.json")))
+    assert status._mirrors(c)["verdict"] == status.NONE
+
+
+def test_a_measured_key_no_report_measures_is_unverified_not_green(cfg, tmp_path, reports_dir):
+    """An older thresholds schema with no information_increment block used
+    to read PASS: no finding, no drift, 'every MEASURED value matches'."""
+    import json as _json
+    th = _json.loads((reports_dir / "thresholds.json").read_text())
+    th.pop("information_increment_recommendation", None)
+    (reports_dir / "thresholds.json").write_text(_json.dumps(th))
+    c = _cfg_with(cfg, tmp_path)
+    row = status._config_vs_reports(c, str(reports_dir))
+    assert row["verdict"] == status.NONE
+    assert "information_increment" in row["detail"]
+
+
+def test_a_suspended_exploration_reads_warn_with_the_resume_command(cfg, tmp_path):
+    _write(tmp_path, "monitor", {
+        "stop_conditions": {"fired": {"exploration_cost_vs_budget": False},
+                            "guardrails": {}, "suspend_exploration": False},
+        "exploration_suspended": {"since": "2026-09-02",
+                                  "reasons": ["exploration_cost_vs_budget"]}})
+    row = [r for r in status.collect(cfg, str(tmp_path))["checks"]
+           if r["check"] == "stop conditions"][0]
+    assert row["verdict"] == status.WARN
+    assert "SUSPENDED" in row["detail"] and "--resume-exploration" in row["where"]

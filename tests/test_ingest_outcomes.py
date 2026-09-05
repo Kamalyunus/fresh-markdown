@@ -81,6 +81,30 @@ def test_a_decision_with_no_feed_row_is_counted_never_invented():
     assert rep["unmatched_decision_ids"] == ["D2"]
 
 
+def test_the_completeness_gap_is_measured_inside_the_feeds_date_range_only():
+    """From day two the store holds yesterday's (already ingested) decisions
+    and, late in the day, tomorrow's not-yet-due ones. Neither is missing
+    from TODAY's feed; counting them read as a daily completeness gap."""
+    decisions = [_dec(1, date="2026-08-18"),            # ingested yesterday
+                 _dec(2, date="2026-08-19"),            # today, in the feed
+                 _dec(3, date="2026-08-19", hour=23),   # today, feed row absent
+                 _dec(4, date="2026-08-20")]            # not yet due
+    outs, rep = build_outcomes(
+        decisions, _feed([{"date": "2026-08-19", "start": 3, "sold": 1, "end": 2}]))
+    assert [o["decision_id"] for o in outs] == ["D2"]
+    assert rep["feed_date_range"] == ["2026-08-19", "2026-08-19"]
+    assert rep["decisions_without_feed_row"] == 1
+    assert rep["unmatched_decision_ids"] == ["D3"]
+    assert rep["decisions_outside_feed_range"] == 2
+
+    # a feed whose date column is datetime, not text, keys the same days
+    feed = _feed([{"date": "2026-08-19", "start": 3, "sold": 1, "end": 2}])
+    feed["date"] = pd.to_datetime(feed["date"])
+    outs, rep = build_outcomes(decisions, feed)
+    assert [o["decision_id"] for o in outs] == ["D2"]
+    assert rep["decisions_without_feed_row"] == 1
+
+
 def test_duplicate_feed_hours_match_nothing():
     """Two states for one hour is unresolvable -- same rule as prepare_data's
     duplicate_hour_rows_dropped, so the decision lands in the unmatched
@@ -204,7 +228,7 @@ def test_business_metrics_counts_shrink_like_the_guardrail_and_il_pct_do():
             "units_sold": sold, "ending_inventory": end,
             "applied_price": 800.0})
 
-    b = business_metrics(decisions, outcomes, cfg)
+    b = business_metrics(decisions, outcomes)
     g = guardrail_series(decisions, outcomes, cfg)
     # leftover 1 + shrink 2 = 3 units of scrap, on both sides
     assert b["waste_units"] == 3
@@ -316,6 +340,52 @@ def test_the_guardrail_series_is_keyed_on_the_trading_day():
     assert list(g["daily_scrap_rate"]) == ["2026-08-19"]
 
 
+def test_daily_rates_are_keyed_on_the_close_day_not_the_opening_day():
+    """Bucketed by OPENING day over settled episodes, the newest days hold
+    only the episodes that closed early (sold out: low scrap) -- the
+    long-running ones are still open -- so the series read as improving
+    exactly where the persistence rule evaluates. A close-day bucket is
+    complete once its episodes settle."""
+    from common import metrics
+    from conftest import episode_frame
+
+    # two episodes open on the 19th: one sells out that day, one runs into
+    # the 20th and writes off two units there
+    d = episode_frame(
+        episode_id=["quick", "quick", "slow", "slow", "slow"],
+        date=["2026-08-19", "2026-08-19", "2026-08-19", "2026-08-19", "2026-08-20"],
+        hour_of_day=[20, 21, 20, 21, 1],
+        starting_inventory=[2, 1, 4, 3, 2],
+        units_sold=[1, 1, 1, 1, 0],
+        ending_inventory=[1, 0, 3, 2, 0],
+        original_price=1000.0, offered_price=800.0, cost=100.0)
+    ep, _ = metrics.settled(metrics.episode_economics(d))
+    day = metrics.daily_rates(ep)
+    assert list(day.index) == ["2026-08-19", "2026-08-20"]
+    # the 19th carries only the sold-out episode; the slow one lands where
+    # its scrap became known
+    assert day.loc["2026-08-19", "scrap"] == 0 and day.loc["2026-08-19", "opening"] == 2
+    assert day.loc["2026-08-20", "scrap"] == 2 and day.loc["2026-08-20", "opening"] == 4
+    assert day.loc["2026-08-20", "scrap_rate"] == pytest.approx(0.5)
+    # the monitor's series is the same one, on the same key
+    from common.config import load_config
+    from pipeline.monitor import guardrail_series
+    decisions, outcomes = [], []
+    for i, row in d.iterrows():
+        decisions.append({"decision_id": f"d{i}", "episode_id": row.episode_id,
+                          "sku_id": "s", "fc": "f", "category": "VEG",
+                          "date": row.date, "hour_of_day": int(row.hour_of_day),
+                          "cost": row.cost, "original_price": row.original_price})
+        outcomes.append({"decision_id": f"d{i}",
+                         "starting_inventory": int(row.starting_inventory),
+                         "units_sold": int(row.units_sold),
+                         "ending_inventory": int(row.ending_inventory),
+                         "applied_price": row.offered_price})
+    g = guardrail_series(decisions, outcomes, load_config())
+    assert g["day_key"] == "close_day"
+    assert g["daily_scrap_rate"] == {"2026-08-19": 0.0, "2026-08-20": 0.5}
+
+
 def test_price_mismatch_is_a_rate_over_compared_pairs():
     """Dividing by every outcome let unmatched outcomes dilute the rate
     below the stop threshold."""
@@ -323,6 +393,7 @@ def test_price_mismatch_is_a_rate_over_compared_pairs():
 
     class _Store:
         duplicate_counts = {"decision": 0, "outcome": 0}
+
         def load_quarantine(self):
             return []
 

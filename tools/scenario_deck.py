@@ -14,7 +14,6 @@ On the repo's fixture every number is a fixture number (AGENTS rule 19).
 import argparse
 import html
 import json
-import math
 import os
 
 import numpy as np
@@ -23,7 +22,6 @@ from common.config import load_config, reference_discount
 from common.io import read_json
 from common.parallel import map_episodes
 from pricing import dp as dp_mod
-from pricing import explore
 from pricing.demand import expected_min_demand_inventory, mu_at
 
 P0 = 10_000.0          # list price; every currency figure scales with it
@@ -92,11 +90,19 @@ def simulate(cache, cfg, d_ref, r, gamma, mu, eps_belief, q0, hours,
                       "sold": round(q0 + (restock_units if restock_at is not None else 0) - left, 2)}}
 
 
-def legacy_ramp(d_ref, hours):
-    """An illustrative fixed schedule: shallow, reference, deep by thirds."""
+def legacy_ramp(d_ref, hours, d_max):
+    """An illustrative fixed schedule: shallow, reference, deep by thirds --
+    capped at d_max like every fixed schedule (`capped`), so the comparison
+    arm never prices below cost either."""
     third = max(hours // 3, 1)
-    return [max(d_ref - 0.15, 0.0)] * third + [d_ref] * third \
-        + [min(d_ref + 0.15, 0.6)] * (hours - 2 * third)
+    return capped([max(d_ref - 0.15, 0.0)] * third + [d_ref] * third
+                  + [d_ref + 0.15] * (hours - 2 * third), d_max)
+
+
+def capped(schedule, d_max):
+    """A fixed schedule may not price below cost: no discount past d_max
+    (dp.feasible_tiers), whatever the ramp would have done at high COGS."""
+    return [min(float(d), float(d_max)) for d in schedule]
 
 
 def one_state(item, cfg):
@@ -105,7 +111,7 @@ def one_state(item, cfg):
     cache = {}
     res = _solve(cache, (gamma, mu, eps, q, h, None), cfg, d_ref, r)
     star = res.optimal_index
-    tiers_all, d_max = dp_mod.feasible_tiers(P0, P0 * gamma, cfg["pricing"]["tier_step"])
+    _, d_max = dp_mod.feasible_tiers(P0, P0 * gamma, cfg["pricing"]["tier_step"])
     q_by = {int(j): round(float(v), 1) for j, v in res.q_by_tier.items()}
     out = {
         "key": [gamma, mu, eps_name, q, h],
@@ -121,9 +127,9 @@ def one_state(item, cfg):
             "dp_restock": simulate(cache, cfg, d_ref, r, gamma, mu, eps, q, h,
                                    restock_at=max(h // 2, 1), restock_units=max(q // 2, 1)),
             "flat_reference": simulate(cache, cfg, d_ref, r, gamma, mu, eps, q, h,
-                                       fixed=[d_ref] * h),
+                                       fixed=capped([d_ref] * h, d_max)),
             "legacy_ramp": simulate(cache, cfg, d_ref, r, gamma, mu, eps, q, h,
-                                    fixed=legacy_ramp(d_ref, h)),
+                                    fixed=legacy_ramp(d_ref, h, d_max)),
         },
     }
     return out
@@ -195,8 +201,8 @@ SCENARIOS = [
      "ask": "The states it will not price, the prices it will never emit, the day it stops itself.",
      "read": "Designed failure modes: a state with a missing cost or no stock is REJECTED, "
              "not priced best-effort; no tier below cost or above the anchor exists in the "
-             "action set; exploration suspends when spend passes the stop multiple while "
-             "exploitation pricing continues."},
+             "action set; exploration suspends the day spend passes the stop multiple "
+             "of the budget, while exploitation pricing continues."},
 ]
 
 
@@ -298,8 +304,8 @@ function curve(st){const W=520,H=230,L=46,B=34;const tiers=st.tiers;const q=st.q
   if(Math.abs(d-st.d_ref)<1e-9)s+=`<line x1="${x(j)}" y1="14" x2="${x(j)}" y2="${H-B}" stroke="#0b6e4f" stroke-dasharray="3 3" opacity=".5"/><text x="${x(j)}" y="11" font-size="10" text-anchor="${j>tiers.length*0.85?'end':j<tiers.length*0.15?'start':'middle'}" fill="#0b6e4f">reference</text>`});
  s+=`<text x="${W-10}" y="${H-2}" font-size="10" text-anchor="end" fill="#888">discount tier → expected inventory loss (won)</text></svg>`;
  return s+`<div style="font-size:12px;color:var(--mute);margin-top:6px">● chosen &nbsp;<span style="color:#5b8def">●</span> allowed at entry &nbsp;<span style="color:#e6a700">●</span> affordable at τ &nbsp;<span style="color:#c9c4b6">●</span> excluded by δ_min &nbsp; <span style="background:#eee;padding:0 6px">grey</span> below cost — not in the action set</div>`}
-function pathChart(st){const W=520,H=210,L=40,B=28;
- let key='dp';if(cur.sc==='shock')key=cur.world==='half'?'dp_world_half':cur.world==='double'?'dp_world_double':'dp';if(cur.sc==='restock')key='dp_restock';
+function systemKey(){if(cur.sc==='restock')return 'dp_restock';if(cur.sc==='shock')return cur.world==='half'?'dp_world_half':cur.world==='double'?'dp_world_double':'dp';return 'dp'}
+function pathChart(st){const W=520,H=210,L=40,B=28;const key=systemKey();
  const series=[[key,cur.sc==='restock'?'system (+restock)':'system','#0b6e4f'],['flat_reference','flat at reference','#999'],['legacy_ramp','legacy ramp','#b3261e']];
  const qmax=Math.max(...series.map(([k])=>Math.max(...st.paths[k].path.map(p=>p.q))))*1.1||1;const n=cur.h;
  const x=t=>L+(W-L-10)*t/Math.max(n-1,1),y=v=>H-B-(H-B-14)*v/qmax;
@@ -309,7 +315,7 @@ function pathChart(st){const W=520,H=210,L=40,B=28;
   if(k===key)p.forEach(r=>{if(r.d!=null&&(r.h%Math.ceil(n/6)===0||r.h===n-1))s+=`<text x="${x(r.h)}" y="${y(r.q)-8}" font-size="10" text-anchor="middle" fill="${col}">${Math.round(r.d*100)}%</text>`})}
  s+=`<text x="${W-10}" y="${H-2}" font-size="10" text-anchor="end" fill="#888">hours → units on the shelf (labels: discount in force)</text></svg>`;
  return s+`<div style="font-size:12px;color:var(--mute);margin-top:6px"><span style="color:#0b6e4f">━</span> system &nbsp;<span style="color:#999">━</span> flat at reference &nbsp;<span style="color:#b3261e">━</span> legacy ramp</div>`}
-function score(st){let key='dp';if(cur.sc==='shock')key=cur.world==='half'?'dp_world_half':cur.world==='double'?'dp_world_double':'dp';if(cur.sc==='restock')key='dp_restock';
+function score(st){const key=systemKey();
  const rows=[[key,'system'],['flat_reference','flat at reference'],['legacy_ramp','legacy ramp']];
  return `<table class="score"><tr><th>policy</th><th>sold</th><th>leftover</th><th>scrap cost</th><th>discount cost</th><th>inventory loss</th></tr>`+rows.map(([k,l])=>{const s=st.paths[k].score;return `<tr class="${k===key?'dp':''}"><td>${l}</td><td>${s.sold}</td><td>${s.leftover}</td><td>${fmt(s.scrap_cost)}</td><td>${fmt(s.discount_cost)}</td><td>${fmt(s.il)}</td></tr>`}).join('')+`</table>`}
 function explore(st){const q=st.q_by_tier,star=st.star,dmin=deltaMin();const rows=Object.keys(q).map(Number).filter(j=>j!==star).map(j=>{const d=st.tiers[j];const cost=q[star]-q[j];const inad=dmin>0&&logMove(st.d_ref,d)<dmin;return {d,cost,inad,aff:!inad&&cost<=cur.tau}});
@@ -318,7 +324,7 @@ function refuses(){return `<ul class="never">
 <li><b>Refused, not priced best-effort.</b> A state with no cost, a cost above list, no stock, or a forecast path that disagrees with the hours left raises <code>StateRejected</code>. The caller holds the current price and alerts on the rate.</li>
 <li><b>Never below cost.</b> The action set is built from tiers that keep price ≥ cost (grey on the curve is not "not chosen" — it does not exist as an option).</li>
 <li><b>Never a higher price within an episode.</b> Under an anchor the action set holds only tiers at or deeper than the price in force; exploration draws from that set.</li>
-<li><b>Stops itself.</b> When realised exploration spend exceeds ${D.config.stop_multiple}× the day's budget for ${D.config.persistence_days} consecutive days, or a scrap/margin guardrail breaches, exploration suspends while exploitation pricing continues. τ moves at most ${(100*(D.config.tau_adjust_clip[1]-1)).toFixed(0)}% up or ${(100*(1-D.config.tau_adjust_clip[0])).toFixed(0)}% down per day.</li></ul>`}
+<li><b>Stops itself.</b> The day realised exploration spend exceeds ${D.config.stop_multiple}× that day's budget, exploration suspends — a single day is enough. The scrap and margin guardrails fire after ${D.config.persistence_days} consecutive days over their threshold (they sit just above the measured noise floor, so one day is noise). Either way exploitation pricing continues. τ moves at most ${(100*(D.config.tau_adjust_clip[1]-1)).toFixed(0)}% up or ${(100*(1-D.config.tau_adjust_clip[0])).toFixed(0)}% down per day.</li></ul>`}
 function render(){nav();const sc=D.scenarios.find(s=>s.id===cur.sc);const st=state();const m=document.getElementById('main');
  const taus=[0,500,1000,2000,4000,8000];if(!taus.includes(cur.tau))cur.tau=0;
  m.innerHTML=`<h2>${sc.title}<span class="pill">${D.beliefs[cur.belief]<0?'ε = '+D.beliefs[cur.belief]:''}</span></h2><p class="ask">${sc.ask}</p>
@@ -337,7 +343,7 @@ function render(){nav();const sc=D.scenarios.find(s=>s.id===cur.sc);const st=sta
  ${cur.sc==='explore'||cur.tau>0?`<div class="card" style="margin-top:16px"><h3>Exploration — the alternatives and what each costs</h3>${explore(st)}</div>`:''}
  ${cur.sc==='refuses'?`<div class="card" style="margin-top:16px"><h3>What it refuses — by construction</h3>${refuses()}</div>`:''}
  <div class="read"><b>How to read it.</b> ${sc.read}</div>
- <p class="foot">Every point is a solve of <code>pricing.dp.solve</code> — the code that prices the shelf — on this machine's config; sliders snap to the precomputed grid. Legacy ramp is an illustrative schedule (reference −15pp, reference, reference +15pp by thirds). The demand forecast is a slider; nothing here is a prediction about a real SKU. Like-for-like comparisons share one demand model; the pilot's own outcomes are the evidence.</p>`}
+ <p class="foot">Every point is a solve of <code>pricing.dp.solve</code> — the code that prices the shelf — on this machine's config; sliders snap to the precomputed grid. Legacy ramp is an illustrative schedule (reference −15pp, reference, reference +15pp by thirds, never past the cost floor). The demand forecast is a slider; nothing here is a prediction about a real SKU. Like-for-like comparisons share one demand model; the pilot's own outcomes are the evidence.</p>`}
 render();
 </script></body></html>
 """
