@@ -226,7 +226,7 @@ report beats a silent removal upstream.
 
 | Step | Drops |
 | --- | --- |
-| `null_key_rows_dropped` | any row with a null sku_id, fc, date or hour — it belongs to no episode and collapsed into one NaN episode id (integrity; row-scoped by construction); and the WHOLE clock-contiguous run holding a null window counter — the counter the ids derive from: kept, the null opened a one-row "episode" that closed on its own zero and read DP-eligible; dropped alone, it left a fragment opening mid-window (rule 15) |
+| `null_key_rows_dropped` | any row with a null sku_id, fc, date or hour — it belongs to no episode and collapsed into one NaN episode id (integrity; row-scoped by construction); and the WHOLE source window holding a null window counter — the counter the ids derive from: kept, the null opened a one-row "episode" that closed on its own zero and read DP-eligible; dropped alone, it left a fragment opening mid-window (rule 15). The window is read with the ids' own signals — the clock advancing an hour, or skipping hours the counter ran down by exactly (a feed gap: the far fragment goes too); an upward counter reset between two non-null rows opens a new window, so a back-to-back neighbour stays. A gap with the null beside it cannot be read across: the far side survives as a fragment, counted (`null_counter_rows`, `null_counter_windows_dropped`, `null_counter_gap_fragments_kept` in the stage detail) |
 | `duplicate_hour_rows_dropped` | both copies of any repeated (SKU, FC, hour) — no principled way to choose, and they collide two runs into one episode id |
 | `gap_split_windows_dropped` | **every fragment** of a source window a missing hour split in two — the second fragment opens mid-window and its first row would read as an ENTRY row in the elasticity fit. Detected from the counter falling in step with the clock |
 | `exclusion_window_removed` | any episode with any hour in the known bad-data window (scope, not integrity) |
@@ -635,10 +635,15 @@ the only way a τ cut below the smallest spread recovers. A base that does
 not yet reach back a whole `budget_il_window_days` — the first mornings
 after launch, when a handful of early closers is all the IL there is — is
 an absence of signal like a zero budget: the controller holds τ (the row
-says `held`) and the overspend stop takes no reading
-(`explore.budget_base_ready`, the one rule both read). The owner's
-rehearsal showed why: a budget priced from day two's closers was tiny, the
-stop fired on day three and exploration stayed suspended for the run.
+says `held`, `update` lists `held_days`) and the overspend stop takes no
+reading (`explore.budget_held`, the one composite both read; the mean
+divides by the same span readiness judges — back to the earliest close,
+capped at the window — so a no-close day at the window's leading edge
+cannot inflate it). The owner's rehearsal showed why: a budget priced from
+day two's closers was tiny, the stop fired on day three and exploration
+stayed suspended for the run. Shadow's aggregate `daily_budget` and its
+day-one tau derivation read the same rule: a held day is no budget in
+force, and a seed that does not reach back a whole window derives no tau.
 `evaluate.shadow`'s
 controller trace walks the same arithmetic, so "would the pilot survive its
 first week" grades the controller production actually runs — literally:
@@ -797,12 +802,17 @@ mismatch rates, quarantine, latency). A posterior std flat for 21 days
 alerts directly; `affordable_set_empty_rate` is the leading indicator of a
 non-explorable catalogue; `realised_vs_predicted_sold_ratio` is the daily
 continuation of the calibration diagnostic. Stop conditions (an
-event-quality breach — duplicates, unmatched outcomes, price mismatches
-on the pushes engineering did NOT report failed (a reported failure is
-the old price by definition, counted apart as `push_failures_reported`),
-measured over the trailing `event_quality_window_days` so one incident
-does not re-fire a resumed stop until history dilutes it — realised spend
-> 2× the day's budget, scrap/margin deterioration — the last three over
+event-quality breach — unmatched outcomes and price mismatches on the
+pushes engineering did NOT report failed (a reported failure is the old
+price by definition, counted apart as `push_failures_reported`), measured
+over the trailing `event_quality_window_days` so one incident does not
+re-fire a resumed stop until history dilutes it, plus duplicates counted
+all-time over the window's denominator — a repeated line has no trading
+day, and a producer re-appending one is broken, not an incident that ages
+out — realised spend > 2× the day's budget (no reading on a zero-budget
+day or while the IL base is shorter than `budget_il_window_days`, the
+first mornings after launch — `explore.budget_base_ready`, §5.8; a day
+without a reading breaks the streak), scrap/margin deterioration — the last three over
 `persistence_days` consecutive priced days, because one day over is a
 thin-IL day or two
 expensive draws and the τ controller halves τ on it the next morning; the
@@ -1253,7 +1263,9 @@ factor fitted on its own week or later, and the harnesses grade the
 mechanism production runs. The schedule lives in
 `calibration.json → schedule.by_week`; `factors` is the fallback for weeks
 before the first trailing window closes, and an unfitted week holds the
-fallback rather than borrowing a later week's. Both harnesses read it
+fallback rather than borrowing a later week's (`weeks_unfitted_held_at_1`;
+the week the schedule COVERS is `train_baseline.schedule_reaches`,
+§5.11). Both harnesses read it
 through `BaselineModel.predict_mu_ref` alone.
 `schedule.weeks_on_partial_window` names weeks fitted on less history than
 the label claims (extract start, post-exclusion-gap); they are flagged, not
@@ -1509,16 +1521,20 @@ table against the file):
 | — | `faults` | `[]` | `name[:arg]` list: `missing:p`, `duplicate:p`, `mismatch:p`, `push_fail:p`, `discount_rounding`, `demand_shock:DAY:FACTOR` (`pilot_world.FAULTS`) |
 | `paths` | `config` | `config.yaml` | the production config rehearsed, unchanged |
 | `paths` | `input`, `raw` | `data/prepared.parquet`, `data/flc_raw.parquet` | templates and the feature service's history; the extract Lane C extends |
-| `paths` | `sim_dir`, `out` | `sim/pilot`, `reports/pilot_sim.json` | the workspace (git-ignored) and the report | The world's level at the reference price is the
+| `paths` | `sim_dir`, `out` | `sim/pilot`, `reports/pilot_sim.json` | the workspace (git-ignored) and the report |
+
+The world's level at the reference price is the
 frozen model as sealed (production calibration, frozen at the start), its
 price response an **assumed** elasticity per category (`--epsilon-true`),
 its noise NB at the agent's own `r`, with a log-normal shock every hour of
 an episode shares (`--episode-shock-sd`, the reason `deff` exists) and an
 optional level drift. Episodes are templates sampled from the hold-out's
-DP-eligible population, re-dated onto simulated days; each runs once under
-the pilot and once under its own legacy path the day after the first run
-closes (never while its SKU × FC is still open, or the feed would hold two
-states for one hour), so the IL read is like-for-like. Every hour with stock goes through the real
+DP-eligible population, re-dated onto simulated days; each fresh pick's
+twin runs under the other arm the day after the first run closes (never
+while its SKU × FC is still open, or the feed would hold two states for
+one hour; on a small pool a template is re-picked), so the IL read is
+like-for-like over the templates settled under both arms (`economics.paired`,
+with `unpaired_templates` counted). Every hour with stock goes through the real
 `engine.decide` against a real posterior and event store; the shelf gets
 the price (or the fault: `missing`, `duplicate`, `mismatch`, `push_fail`,
 `discount_rounding`, `demand_shock`); the world writes the feed row the
@@ -1534,10 +1550,15 @@ do the same way.
 `reports/pilot_sim.json` grades a fixed list (`EXPECTATIONS`): every hour
 priced and none rejected, prices never rising within an episode or below
 cost, outcome completeness, the event-quality gates, the posterior moving
-toward `epsilon_true` and narrowing, tau walking to its budget, stops
-firing only under the fault that causes them (and firing under it), the
+toward `epsilon_true` and narrowing, tau walking to its budget (graded on
+the last seven days the controller moved; mornings held for want of a
+full IL base, §5.8, are listed as `days_held` and fewer than seven walked
+reads NOT MEASURED), stops firing only under the fault that causes them
+(and firing under it), the
 assurance checks, the schedule covering every priced week, `--apply` on
-cadence, and the agent's level tracking the world's: per week, the mean
+cadence, and the agent's level tracking the world's (`level_tracking`,
+per ISO week: `mean_log_ratio`, `mean_forced_log_move`,
+`implied_elasticity_bias`): per week, the mean
 log ratio of the agent's `mu_ref` (its own weekly re-fit) to the world's
 over the pilot's hours must sit inside the calibration gate band, and the
 elasticity bias it implies — level error over the mean forced log move —
@@ -1551,16 +1572,17 @@ scale teach nothing, and a bias scale pasted from another extract
 admits moves the re-fit's noise swamps. A fault turns its expectation around: with `mismatch` injected
 the gate MUST fail and the stop MUST fire. `correlation` is reported, not
 graded — the world's within-episode shock is a knob, not a claim about the
-shop — and `dispersion` is excused under a gate fault: it bins by
-predicted `mu`, so a belief that `--apply` was never allowed to correct
-reads as a shape problem. A guardrail test needs the run to outlast the trailing window plus
+shop — and `dispersion` is excused under a gate or completeness fault
+(it bins by predicted `mu`, so a belief that `--apply` was never allowed
+to correct reads as a shape problem) and when the world's marginal was
+moved (`r_scale`, `episode_shock_sd`). A guardrail test needs the run to outlast the trailing window plus
 smoothing plus persistence, and the shock by smoothing plus persistence
 (`demand_shock:30:0.5 --days 45`); shorter runs read NOT MEASURED there,
 as does a shock the scrap series saw but that stays under the owner's
 floor — the reach of that world, reported with the reading. Every number is the
 simulated world's (rule 19): a PASS says the machinery does what it claims
 on a shop with that elasticity, never that the shop has it. Its first runs
-found two defects the unit tests could not: the `--apply` gate and
+found defects the unit tests could not: the `--apply` gate and
 `advance` read a week the re-fit deliberately held at the anchor (too few
 anchor rows) as a missed cron, refusing every `--apply` of that week —
 `train_baseline.schedule_reaches` is now the one reading; the
@@ -1866,6 +1888,8 @@ python3 -m ops.init_posterior
 python3 -m evaluate.shadow --input data/prepared.parquet --out reports/shadow.json
 #   --max-episodes 0 sweeps everything (final pre-launch record);
 #   --workers N (0 = every core but one); byte-identical serial or parallel
+python3 -m evaluate.pilot_sim [--days N] [--fault name:arg] [--workers N]
+#   the weeks AFTER launch vs a simulated shop, per pilot_sim.yaml (§11.3)
 
 # tuning loop
 python3 -m ops.tune              # what to change, on what evidence

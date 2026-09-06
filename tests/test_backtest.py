@@ -433,10 +433,10 @@ def test_step_sensitivity_prices_the_cap_on_real_episodes(cfg):
     # cost ratio 0.4, d_ref 0.25 -> deepening bar (1-d)/(gamma-d) ~ 5, so
     # |eps| = 1.0 sits far below it and a step of learning.max_mean_step
     # (well under 1) stays deep inside the insensitive region
-    assert cfg["learning"]["max_mean_step"] < 1.0
+    cfg["learning"]["max_mean_step"] = 0.5            # set here, not read shipped
+    cfg["tuning"]["step_sensitivity_episodes"] = 4
     frames = [episode(f"e{i}", -1.0) for i in range(4)]
     replays = [_replay_one(e, cfg) for e in frames]
-    assert cfg["tuning"]["step_sensitivity_episodes"] >= len(frames)
     out = step_sensitivity([(e, r[2]) for e, r in zip(frames, replays)], cfg)
 
     assert out["episodes_swept"] == 4

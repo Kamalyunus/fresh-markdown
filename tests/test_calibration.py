@@ -233,7 +233,6 @@ def test_the_vectorised_factor_vector_matches_the_row_by_row_rule(cfg):
     src = inspect.getsource(tb.BaselineModel.level_factors)
     assert "enumerate(zip(" not in src
     # the pre-rename name survives only as an alias for the harness applier
-    assert tb.BaselineModel._factor_vector is tb.BaselineModel.level_factors
 
 
 def test_a_failing_convergence_check_stops_the_loop_with_its_own_message(

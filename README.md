@@ -91,6 +91,7 @@ Everything a repo-local run prints is a FIXTURE number (AGENTS rule 19).
 ```bash
 python3 -m evaluate.pilot_sim                           # the weeks AFTER launch, per pilot_sim.yaml
 python3 -m evaluate.pilot_sim --days 10 --fault mismatch:0.05   # one run's overrides
+python3 -m evaluate.pilot_sim --workers 1                       # serial; the same answer
 ```
 
 The simulator (design §11.3) prices every hour through the real engine

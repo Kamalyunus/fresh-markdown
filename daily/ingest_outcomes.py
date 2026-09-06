@@ -48,23 +48,49 @@ def _key(sku, fc, date, hour):
     """The (sku, fc, day, hour) a feed row and a decision meet on. Raises on
     a value that names no hour or no item -- the caller decides whether that
     costs one row or one decision, never the batch."""
-    return (_ident(sku), _ident(fc), _day(date), int(hour))
+    h = float(hour)
+    if not np.isfinite(h) or h != int(h):
+        raise ValueError(f"not an hour: {hour!r}")
+    return (_ident(sku), _ident(fc), _day(date), int(h))
 
 
 def load_failures(path):
     """{key: reason} from the failures input -- a parquet/CSV table or
-    JSONL -- or {} when no file is given."""
+    JSONL, in the contract's names or the feed's (skuseq, hour) -- or {}
+    when no file is given. One unkeyable row (a NaN id, a blank line)
+    costs that row, never the batch: it is counted in
+    `push_failures_unkeyable` on the returned dict's `.unkeyable`."""
+    out = _Failures()
     if not path:
-        return {}
+        return out
     if path.endswith(".parquet"):
-        rows = pd.read_parquet(path).to_dict("records")
+        rows = pd.read_parquet(path).rename(columns=SOURCE_TO_CANONICAL).to_dict("records")
     elif path.endswith(".csv"):
-        rows = pd.read_csv(path).to_dict("records")
+        rows = pd.read_csv(path).rename(columns=SOURCE_TO_CANONICAL).to_dict("records")
     else:
+        rows = []
         with open(path) as f:
-            rows = [json.loads(line) for line in f]
-    return {_key(r["sku_id"], r["fc"], r["date"], r["hour_of_day"]):
-            (r.get("reason") or "unspecified") for r in rows}
+            for line in f:
+                if line.strip():
+                    try:
+                        rows.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        out.unkeyable += 1
+        rows = [{SOURCE_TO_CANONICAL.get(k, k): v for k, v in r.items()}
+                for r in rows if isinstance(r, dict)]
+    for r in rows:
+        try:
+            k = _key(r["sku_id"], r["fc"], r["date"], r["hour_of_day"])
+        except (KeyError, TypeError, ValueError):
+            out.unkeyable += 1
+            continue
+        out[k] = r.get("reason") or "unspecified"
+    return out
+
+
+class _Failures(dict):
+    """{key: reason} plus the rows that named no hour."""
+    unkeyable = 0
 
 
 def build_outcomes(decisions, feed, failures=None):
@@ -81,7 +107,10 @@ def build_outcomes(decisions, feed, failures=None):
     feed = feed.rename(columns=SOURCE_TO_CANONICAL)
     if len(feed):
         # one spelling of the day, whatever dtype the feed carries
-        feed = feed.assign(date=pd.to_datetime(feed["date"]).dt.strftime("%Y-%m-%d"))
+        # one unparseable date is one unkeyable row (NaT -> NaN -> counted
+        # below), never a batch-wide raise
+        feed = feed.assign(date=pd.to_datetime(feed["date"], errors="coerce")
+                           .dt.strftime("%Y-%m-%d"))
     rows, unusable = {}, []
     dup_feed = 0
     for i, r in enumerate(feed.itertuples()):
@@ -107,7 +136,12 @@ def build_outcomes(decisions, feed, failures=None):
     outside, failed_keys = 0, set()
     for dec in decisions:
         day = decision_day(dec)
-        if feed_range is None or not (feed_range[0] <= day <= feed_range[1]):
+        if feed_range is None:
+            # an EMPTY feed is a whole day of gaps, not a day outside it:
+            # every decision is missing its outcome (contract 07)
+            unmatched.append(dec["decision_id"])
+            continue
+        if not (feed_range[0] <= day <= feed_range[1]):
             outside += 1         # not this feed's business: no gap, no match
             continue
         # one unusable row costs its own decision, never the day's batch: it
@@ -187,6 +221,9 @@ def build_outcomes(decisions, feed, failures=None):
         # differently, an hour with no decision or no feed row. Counted --
         # a failure that lands nowhere is an integration miss, not silence
         "push_failures_unmatched": len(set(failures) - failed_keys),
+        # failures rows that named no hour (a NaN id, a blank line)
+        "push_failures_unkeyable": int(getattr(failures, "unkeyable", 0)),
+        "feed_empty": feed_range is None,
     }
     return outcomes, report
 

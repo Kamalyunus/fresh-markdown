@@ -222,7 +222,9 @@ def test_the_report_pairs_the_events_once_and_reads_one_episode_frame(cfg, tmp_p
     for i in range(4):
         store.emit_decision(decision_event(decision_id=f"D{i}", episode_id=f"EP{i}",
                                            sku_id=f"S{i}"))
+        # closed by the write-off sentinel (stock left, ending zero, named)
         store.emit_outcome(outcome_event(outcome_id=f"O{i}", decision_id=f"D{i}",
+                                         ending_inventory=0,
                                          adjustment_reason="episode_close_write_off"))
     posterior = PosteriorStore.initialise(
         cfg, {"vegetables": {"mean": -1.0, "std": 0.6}}, {"vegetables": 500},

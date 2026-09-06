@@ -38,7 +38,8 @@ def _outcome(i, sold, date="2026-08-19"):
     still running."""
     return outcome_event(
         outcome_id=f"O{i}", decision_id=f"D{i}", units_sold=sold,
-        is_stockout=sold >= 2, adjustment_reason="episode_close_write_off",
+        ending_inventory=0, is_stockout=sold >= 2,
+        adjustment_reason="episode_close_write_off",
         finalized_at=f"{date}T18:00:00+00:00")
 
 
@@ -346,7 +347,7 @@ def test_a_weekly_batch_is_walked_day_by_day_never_graded_as_one_day(cfg, tmp_pa
     assert block["commit"] and block["through_date"] == "2026-08-19"
     # day one has no trailing IL (zero budget: held), then three halvings
     lo = cfg["exploration"]["tau_adjust_clip"][0]
-    walked = [r for r in block["by_day"] if r["budget"] > 0]
+    walked = [r for r in block["by_day"] if not r["held"]]
     assert block["days_walked"] == 4 and len(walked) == 3, block["by_day"]
     assert block["tau_after"] == pytest.approx(block["tau_before"] * lo ** 3, rel=1e-3)
     # and the walk is the shared one, step for step
@@ -784,7 +785,10 @@ def test_a_reported_push_failure_is_not_a_price_mismatch(cfg):
                  {"decision_id": "D9", "applied_price": 90.0,
                   "execution_status": "ok"}]               # silent: a mismatch
     counts = quality_counts(decisions, outcomes, cfg)
-    assert counts["compared_pair_count"] == 10
+    # the reported failure is counted apart and NOT compared: the rate is
+    # over the nine pushes actually judged, the window's denominator keeps it
+    assert counts["compared_pair_count"] == 9
     assert counts["push_failures_reported"] == 1
     assert counts["price_mismatch_count"] == 1
-    assert quality_rates(counts)["price_mismatch_rate"] == 0.1
+    assert counts["outcomes_in_window"] == 10
+    assert quality_rates(counts)["price_mismatch_rate"] == pytest.approx(1 / 9)

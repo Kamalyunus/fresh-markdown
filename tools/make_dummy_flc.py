@@ -17,7 +17,8 @@ a zero means the fixture stopped exercising it.
 
 Dirt is injected at the defect's real scope: row properties per row, a
 negative flc_window across whole windows (a single bad value would read as a
-window boundary).
+window boundary), a null flc_window on single rows (the chain drops the
+run around it).
 """
 
 import argparse
@@ -285,7 +286,6 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
         df.loc[b, "subcategory"] = None                   # null subcategory
         df.loc[c, "normal_asp"] = 0.0                     # zero base price
         df.loc[e, "units_sold"] = df.loc[e, "inventory"].astype(int) + 3  # multi-lot
-        df.loc[g, "flc_window"] = np.nan                  # null window counter
 
         # NEGATIVE WINDOW -- injected on WHOLE WINDOWS, from the first hour
         # (a single mid-window bad value reads as a window boundary to
@@ -298,6 +298,12 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
                 s, t = windows[w]
                 entry = -float(rng.integers(1, 40))       # enters below zero
                 df.loc[s:t - 1, "flc_window"] = entry - np.arange(t - s)
+        # NULL COUNTER, one row: the chain drops the whole clock run it sits
+        # in (prepare_data.null_counter_windows). Injected LAST so the
+        # whole-window rewrite above cannot overwrite it, and never inside a
+        # negative window (that dirt's countdown must stay intact)
+        g = [i for i in g if df.at[i, "flc_window"] >= 0]
+        df.loc[g, "flc_window"] = np.nan
 
     df = df.sort_values(["skuseq", "fc", "date", "hour"]).reset_index(drop=True)
     return df, master
@@ -375,6 +381,9 @@ def main():
           f"(0 < ending < starting-sold, {shrink_rows/max(len(df),1):.2%})")
     print(f"negative-window   : {int((df.flc_window < 0).sum()):,} rows "
           f"(whole windows entering below zero, never a single row)")
+    print(f"null-counter rows : {int(df.flc_window.isna().sum()):,} "
+          "(each drops its whole clock run at null_key_rows_dropped -- MUST be "
+          "> 0 or that path is unexercised)")
     print(f"median d_max      : {(1 - df.cogs_wo_vat/df.normal_asp.replace(0,np.nan)).median():.3f}")
     print(f"corr(discount,hour) within episode: {corr_within(df):.3f}")
     print(f"wrote             : {args.out}")

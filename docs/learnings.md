@@ -2,7 +2,7 @@
 
 The working code carries only the current design; superseded designs live
 here so an agent does not re-propose them. One entry each: was → learned →
-now. Dates are owner sign-off, 2026-08.
+now. Dates are owner sign-off.
 
 ## Elasticity prior
 
@@ -489,7 +489,7 @@ now. Dates are owner sign-off, 2026-08.
   - the uniformity check mapped the applied tier's rank to `(rank +
     0.5) / n`, so a two-tier set only ever landed on 0.25 and 0.75 and an
     honest uniform chooser FAILed once small sets dominated (p = 0 on
-    578 draws). Rank plus a jitter from the decision id is exactly U(0, 1)
+    578 draws, on the fixture run). Rank plus a jitter from the decision id is exactly U(0, 1)
     at every set size.
   - a push engineering REPORTED as failed was counted as a price
     mismatch, so a fifth of pushes failing — every one reported — refused
@@ -529,6 +529,38 @@ now. Dates are owner sign-off, 2026-08.
   `delta_min` until few action sets hold an admissible tier, exploration
   starves with no stop fired, and tau climbs by the clip every zero-spend
   day — `exploration_never_starves` grades it.
+
+- **The fourth review (2026-09-06), after the simulator.** Five readers
+  over the simulator, the controller/stop/assurance changes, the chain,
+  the docs and the tests. What they found, structural throughout:
+  - the budget's two readers disagreed on the denominator: the mean IL
+    divided by the days since the first close INSIDE the window, readiness
+    judged the earliest close anywhere, so a no-close day at the window's
+    leading edge inflated the budget by window/span; one span now
+    (`explore.budget_held`, the composite the controller, the stop, shadow's
+    mean budget and its day-one derivation all read);
+  - a reported push failure was counted in the pairs "compared", diluting
+    the silent-mismatch rate by the failure rate; the rate is over the
+    pushes judged, the window's denominator keeps the reported ones;
+  - a week whose trailing window was EMPTY (data start, a gap) was in
+    neither `by_week` nor the held list, so the gate read it as a missed
+    cron by the other branch; `calibration_coverage` still read `by_week`
+    alone and called a held trailing week STALE while the gate passed it;
+  - the null-counter run was clock-only: a feed gap the counter ran down
+    across left its far fragment, and a back-to-back window fell with its
+    neighbour; the run now reads the ids' own signals and counts windows;
+  - a refreshed extract after launch moved the split manifest alone and
+    stopped `advance` on a red bundle row with no step to absorb it; the
+    weekly re-fit + re-seal now does. `event_quality_window_days` routed to
+    `calibration` and turned the loop on a paste; inert now;
+  - an id-less line the store admitted crashed every consumer that indexes
+    by id; an empty feed graded as a day with no gaps; one bad failures
+    row aborted the batch; three copies of "one week past the latest data
+    week" (`episodes.week_after` now);
+  - the simulator graded the agent's level against the undrifted world (a
+    tracking re-fit FAILED under drift), printed the implied elasticity
+    bias with the wrong sign, held every feed row of the run in memory,
+    and read a template's economics as paired when its twin never ran.
 
 ## The lesson under all of it
 

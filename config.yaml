@@ -117,7 +117,7 @@ exploration:
   tau0_derivation_min_decisions: 500   # SET  floor for shadow's launch-tau
   tau_adjust_clip: [0.5, 1.25]         # SET  max daily multiplicative change in tau
   tau_spend_guard: 1.0                 # SET  divide-by-zero guard on realised cost, currency
-  budget_il_window_days: 7             # SET  the IL base for a day's budget
+  budget_il_window_days: 7             # SET  the IL base for a day's budget; until the base reaches back this far after launch the controller holds tau and the overspend stop takes no reading (explore.budget_base_ready)
   budget_scale_ref_std: 0.40           # SET  budget scales with std / this
   budget_scale_floor: 0.25             # SET  never below 25% of budget
   min_feasible_tiers: 2                # SET  below this: non-explorable
@@ -163,13 +163,13 @@ monitoring:
     sample_episodes: 3000              # SET  0 = every episode
   stop_conditions:
     duplicate_or_unmatched_rate: 0.01  # SET
-    price_mismatch_rate: 0.01          # SET
+    price_mismatch_rate: 0.01          # SET  reported push failures are counted apart, never as a mismatch
     exploration_cost_vs_budget: 2.0    # SET
     deterioration_smoothing_days:      # SET  days averaged BEFORE comparing
       scrap: 7                         # per metric; both 7 (owner, 2026-09-06) -- the margin floor re-derives on the next advance
       margin: 7
     persistence_days: 2                # SET  consecutive days before a stop fires
-    event_quality_window_days: 14      # SET  trailing days the duplicate/unmatched and price-mismatch rates are measured over; all-time rates re-fired a resumed stop until history diluted one incident
+    event_quality_window_days: 14      # SET  trailing days the unmatched and price-mismatch rates are measured over (duplicates count all-time, over the window's denominator); all-time rates re-fired a resumed stop until history diluted one incident
     scrap_deterioration_pct: 0.3217    # MEASURED  3-sigma of the trailing noise, pasted by tune --apply from reports/thresholds.json (owner, 2026-09-06)
     margin_deterioration_pct: 0.0614   # MEASURED  3-sigma of the trailing noise, pasted by tune --apply from reports/thresholds.json (owner, 2026-09-06)
   alert_posterior_std_flat_days: 21    # SET  learning-loop health

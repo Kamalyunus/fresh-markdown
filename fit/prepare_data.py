@@ -183,24 +183,43 @@ def null_key_rows(df):
 
 
 def null_counter_windows(df):
-    """Mask of every row of a clock-contiguous run (same sku x fc, hours one
-    apart) that holds a null `hours_remaining`, and a count of such runs.
-    The counter is the field the ids derive from: a null one made
-    assign_episode_ids open a NEW episode on that row (NaN != -1), so one
-    bad hour became a one-row "episode" that closed on its own zero and
-    read DP-eligible -- found on the owner's extract by the pilot
-    simulator, whose templates then carried a NaN window length. The row
-    itself can be placed (its key is whole), so the drop is the WHOLE run
-    it sits in (rule 15): a row-scoped drop would leave a fragment opening
-    mid-window that no later stage can tell from a real entry."""
+    """Mask of every row of the source WINDOW that holds a null
+    `hours_remaining`, and the number of such windows. The counter is the
+    field the ids derive from: a null one made assign_episode_ids open a
+    NEW episode on that row (NaN != -1), so one bad hour became a one-row
+    "episode" that closed on its own zero and read DP-eligible -- found on
+    the owner's extract by the pilot simulator, whose templates then
+    carried a NaN window length. The row itself can be placed (its key is
+    whole), so the drop is the WHOLE window it sits in (rule 15): a
+    row-scoped drop left a fragment opening mid-window that no later stage
+    could tell from a real entry.
+
+    The window is read with assign_episode_ids' and gap_split_windows'
+    own signals, since the null row breaks neither cleanly: rows of one
+    sku x fc stay in one window while the clock advances an hour (a
+    duplicate hour, too), or skips hours the counter ran down by exactly
+    (a feed gap -- the fragment beyond it must go too); a counter that
+    resets upward between two non-null rows opens a NEW window, so a
+    back-to-back neighbour is kept. A gap whose counter is unreadable on
+    either side is a break: the far side survives as a fragment nothing
+    later can see -- bounded to a null adjacent to a gap, and counted in
+    `null_counter_gap_fragments_kept`."""
     if not df.hours_remaining.isna().any():
-        return pd.Series(False, index=df.index), 0
+        return pd.Series(False, index=df.index), {"windows": 0,
+                                                   "gap_fragments_kept": 0}
     ts = pd.to_datetime(df.date) + pd.to_timedelta(df.hour_of_day, unit="h")
     grp = [df.sku_id, df.fc]
     dt_h = ts.groupby(grp).diff().dt.total_seconds() / 3600.0
-    run = dt_h.ne(1.0).fillna(True).cumsum()          # a new run per clock break
-    bad_runs = set(run[df.hours_remaining.isna()])
-    return run.isin(bad_runs), len(bad_runs)
+    hr = df.hours_remaining
+    hr_drop = -hr.groupby(grp).diff()                 # NaN beside a null
+    same_window = ((dt_h <= 1.0) | ((dt_h > 1.0) & (dt_h == hr_drop))) \
+        & ~(hr_drop < 0)                              # an upward reset opens one
+    window = (~same_window.fillna(False) | dt_h.isna()).cumsum()
+    bad = set(window[hr.isna()])
+    mask = window.isin(bad)
+    # a gap this window could not be read across (a null on either side)
+    unread = (dt_h > 1.0) & hr_drop.isna() & mask.groupby(grp).shift().fillna(False)
+    return mask, {"windows": len(bad), "gap_fragments_kept": int(unread.sum())}
 
 
 def recover_negative_windows(d, cap):
@@ -238,6 +257,8 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     df = df.sort_values(list(EPISODE_KEY))
     # the `raw` row counts rows, episodes and COGS on ONE basis: the frame as
     # read, duplicates included (their ids collide -- that is the defect)
+    # and null counters included (each opens up to two phantom ids, gone
+    # with their window at the next stage)
     df["episode_id"] = assign_episode_ids(df)
     wf = []
     prev_ids = {"ids": set()}
@@ -266,13 +287,14 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     # would otherwise read every null-keyed hour as a duplicate of the rest
     null_key, null_by_col = null_key_rows(df)
     df = df[~null_key]
-    null_counter, null_runs = null_counter_windows(df)
+    null_counter, null_detail = null_counter_windows(df)
     df = df[~null_counter]
     step(df, "null_key_rows_dropped", {
         "rows_dropped": int(null_key.sum() + null_counter.sum()),
         "nulls_by_column": null_by_col,
         "null_counter_rows": int(null_counter.sum()),
-        "null_counter_windows_dropped": int(null_runs),
+        "null_counter_windows_dropped": int(null_detail["windows"]),
+        "null_counter_gap_fragments_kept": int(null_detail["gap_fragments_kept"]),
         "note": ("a row with no sku_id, fc, date or hour belongs to no "
                  "episode; kept, it collapsed into one NaN episode id "
                  "(INTEGRITY: drop, rule 14; row-scoped by construction -- "

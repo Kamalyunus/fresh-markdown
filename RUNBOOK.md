@@ -62,7 +62,7 @@ process changed (before, after, why, source), the config in force, status,
 and what is waited on. Its stops, in order: a moved training input
 (`--retrain` is yours) · a tune BLOCK · a MEASURED value a report could not
 derive · a failed shadow gate · the owner keys · `data.launch_date` · a
-stale extract · a red `status` · and, daily, **`daily.update --apply`**,
+stale extract (after launch, a refreshed extract moves the split manifest alone; the next `advance` absorbs it with the weekly re-fit and re-seal, not a red stop) · a red `status` · and, daily, **`daily.update --apply`**,
 which stays a human's. A step that fails, a plan that loops or a round
 budget that runs out are stops too: journaled, reported, exit 1.
 
@@ -139,11 +139,13 @@ per cell per day; each cell triggers on its own batch. Before approving:
 | `bound_clipped` | occasional | most updates clip — step cap or increment mis-sized; escalate |
 | `batch_oldest_outcome_age_days` | near the expected cadence | growing without a trigger — the loop is stalling; check volumes and tau |
 | event-quality gates | green (the command refuses on red) | never work around a refusal |
-| `calibration_schedule_current` | green | red means the weekly re-fit was missed — `--apply` refuses, because learning from prices set on stale factors banks evidence about a model that is not the one running |
+| `calibration_schedule_current` | green | red means the weekly re-fit was missed — `--apply` refuses, because learning from prices set on stale factors banks evidence about a model that is not the one running. A week the re-fit ran and HELD at the anchor (too few anchor rows) is green with `held_at_anchor: true`: production prices on the anchor factors that week — read it, it is not a refusal |
 
 `tau` needs no approval: `advance --feed` walks it one clipped step per
-closed day (`update --calibrate-tau`); a second run on the same day is a
-no-op, and a missed day is graded, not skipped.
+closed day (`update --calibrate-tau`) once the trailing IL base spans
+`budget_il_window_days` — the first week after launch holds it, and the
+walk rows say `held`; a second run on the same day is a no-op, and a
+missed day is graded, not skipped.
 
 ---
 
@@ -166,7 +168,9 @@ contract:
 - reporting **failed price pushes** — one row per failed hour, as a table
   (parquet/CSV) or JSONL (`sku_id`, `fc`, `date`, `hour_of_day`, `reason`);
   no row means the push succeeded; keys are normalised on read (a datetime
-  `date`, an id read back as a float);
+  `date`, an id read back as a float); a reported failure is counted apart
+  (`push_failures_reported`), never as a price mismatch — the mismatch gate
+  catches only the pushes you did not report;
 - holding ONE `PosteriorStore` per process is fine, but **reload it once
   per decision batch** (`store.reload()`): the monitor writes a suspension
   and `--apply` writes updates into the same file from another process, and
@@ -197,7 +201,7 @@ in the caller.
 
 | Line | Response |
 | --- | --- |
-| stop condition fired (overspend >2× on `persistence_days` consecutive days, mismatch, duplicates, guardrail) | the monitor suspends exploration in the posterior state; `decide` stops drawing and **exploitation pricing continues**; `status` shows `exploration SUSPENDED since …`. Investigate, then a human resumes with `python3 -m daily.update --resume-exploration` — never restart blindly. A resumed pilot is not re-suspended by the days it spent suspended (they read as zero spend); a fresh fire is a fresh two-day streak. The posterior file is production state from the first walked τ: `advance` never re-initialises it after launch |
+| stop condition fired (overspend >2× on `persistence_days` consecutive days — no reading while the IL base is shorter than `budget_il_window_days`, the first week after launch, `explore.budget_base_ready` — mismatch, duplicates, guardrail) | the monitor suspends exploration in the posterior state; `decide` stops drawing and **exploitation pricing continues**; `status` shows `exploration SUSPENDED since …`. Investigate, then a human resumes with `python3 -m daily.update --resume-exploration` — never restart blindly. A resumed pilot is not re-suspended by the days it spent suspended (they read as zero spend); a fresh fire is a fresh two-day streak. The posterior file is production state from the first walked τ: `advance` never re-initialises it after launch |
 | `config mirrors reports` FAIL | a MEASURED paste disagrees with the report that derives it, or the report could not measure it (NOT RUN). `python3 -m ops.tune` prints the reason; `advance` re-pastes what it can |
 | `guardrail floors` WARN | "insufficient history" — nobody measured the floor, so the stop was not checked. Not a pass: more closed-episode history, then re-run `derive_thresholds` |
 | `assurance · reproduction` FAIL | something moved under the solver (config edit, artifact swap, deploy, library). Diff the bundle first: `artifact bundle` line, then `artifact mirrors`, then the live `artifacts/` against the latest `artifacts/history/<bundle>/<sealed_at>/` snapshot (every seal leaves one, with the config and posterior of the moment; its `MANIFEST.json` names the reason — `bootstrap`, `check-only`, `retrain`, `weekly-refit`, `config`, `libraries` — the config and library versions in force, and every copy was re-hashed against the seal when written). The failing decisions name their own `config_digest` |

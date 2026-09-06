@@ -23,3 +23,19 @@ def test_the_fixture_generator_covers_the_configured_splits():
     # and it must still run standalone, with no config to read
     fallback_start, fallback_days = span_covering_splits({})
     assert fallback_days > 0 and fallback_start.year == 2026
+
+
+def test_the_generator_injects_a_null_counter_outside_negative_windows():
+    """The null-counter dirt exercises prepare_data's whole-run drop; it
+    lands on single rows, never inside a negative window (that dirt's
+    countdown must stay intact) and never on the clean fixture."""
+    from tools.make_dummy_flc import generate
+
+    df, _ = generate(n_skus=60, n_days=60, policy="randomized", seed=5, dirty_frac=0.02)
+    nulls = df[df.flc_window.isna()]
+    assert len(nulls) > 0
+    neg_windows = set(map(tuple, df[df.flc_window < 0][["skuseq", "fc", "date"]]
+                          .drop_duplicates().itertuples(index=False)))
+    assert not any((r.skuseq, r.fc, r.date) in neg_windows for r in nulls.itertuples())
+    clean, _ = generate(n_skus=20, n_days=20, policy="randomized", seed=5, dirty_frac=0.0)
+    assert not clean.flc_window.isna().any()

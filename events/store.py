@@ -261,14 +261,19 @@ class EventStore:
 
     def _load(self, path, id_field=None):
         """The readable stream: torn lines were quarantined at construction
-        and are skipped; a repeated id (a foreign producer's re-append) is
-        COUNTED in duplicate_counts and loaded ONCE, first occurrence -- the
-        learner must never consume the same outcome twice."""
+        and are skipped, as is a line carrying no id at all (not an event);
+        a repeated id (a foreign producer's re-append) is COUNTED in
+        duplicate_counts and loaded ONCE, first occurrence -- the learner
+        must never consume the same outcome twice."""
         out, seen = [], set()
         for _, parsed, _ in self._lines(path):
             if parsed is None:
                 continue
             ident = parsed.get(id_field) if id_field else None
+            if id_field and ident is None:
+                # a foreign line with no id: not an event -- the matcher and
+                # the export index every event by its id and once died on it
+                continue
             if ident is not None:
                 if ident in seen:
                     continue

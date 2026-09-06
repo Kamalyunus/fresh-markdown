@@ -58,8 +58,8 @@ def test_since_cuts_both_tables_on_the_trading_day(tmp_path):
 
     store = EventStore(load_config(), root=str(tmp_path / "events"))
 
-    def outcome(**over):                      # reconciling (2 - 1 = 1): admitted
-        return outcome_event(ending_inventory=1, **over)
+    def outcome(**over):                      # conftest's reconciles: admitted
+        return outcome_event(**over)
 
     assert store.emit_decision(decision_event(
         decision_id="D-late", date="2026-08-18", hour_of_day=23,
@@ -95,8 +95,7 @@ def test_an_orphan_outcome_with_no_finalized_at_is_skipped_and_counted(tmp_path)
 
     store = EventStore(load_config(), root=str(tmp_path / "events"))
     assert store.emit_decision(decision_event(decision_id="D1", date="2026-08-19"))
-    assert store.emit_outcome(outcome_event(outcome_id="O1", decision_id="D1",
-                                            ending_inventory=1))
+    assert store.emit_outcome(outcome_event(outcome_id="O1", decision_id="D1"))
     # the store requires finalized_at, so the undated orphan is a foreign
     # line; since_filter is what meets it
     decisions, outcomes = store.load_decisions(), store.load_outcomes()

@@ -19,8 +19,6 @@ def test_calibration_factors_never_see_their_own_week_or_later(cfg):
     import json
     import os
 
-    import pandas as pd
-
     path = cfg["baseline_model"]["calibration_factor_path"]
     if not os.path.exists(path):
         pytest.skip("no calibration artifact on disk")
@@ -32,16 +30,10 @@ def test_calibration_factors_never_see_their_own_week_or_later(cfg):
 
     weeks = sorted(sched["by_week"])
     assert weeks, "a rolling schedule with no fitted weeks is not a schedule"
-    n = int(sched["trailing_weeks"])
-    for w in weeks:
-        start = pd.Timestamp(w)
-        # the window is [start - n weeks, start): its LAST instant is strictly
-        # before the week the factors are applied to
-        window_end = start - pd.Timedelta(seconds=1)
-        assert window_end < start
-        assert (start - (start - pd.Timedelta(weeks=n))).days == 7 * n
-    # (the applier's own-week selection and frozen fallback are exercised
-    # in test_a_level_shift_does_not_leak_into_its_own_weeks_factor)
+    assert int(sched["trailing_weeks"]) >= 1
+    # the window [start - n weeks, start) ends strictly before the week the
+    # factors apply to: exercised on real rows in
+    # test_a_level_shift_does_not_leak_into_its_own_weeks_factor
 
 
 def test_both_harnesses_get_point_in_time_factors_without_their_own_code():
@@ -65,7 +57,7 @@ def test_both_harnesses_get_point_in_time_factors_without_their_own_code():
         # fits locally -- rule 16 keeps that table out of the artifact --
         # and reads BOTH regimes' factors through `level_factors`, the one
         # selection; that is using the applier, not re-implementing it.)
-        for banned in ("_factor_vector", "calibration_factor_path"):
+        for banned in ("calibration_factor_path",):
             assert banned not in src, (
                 f"{name} reaches into the calibration schedule itself -- "
                 "factor selection belongs to BaselineModel alone")
@@ -112,7 +104,7 @@ def test_a_level_shift_does_not_leak_into_its_own_weeks_factor(tmp_path, cfg):
                  "2026-07-08",   # the week before
                  "2026-06-29"],  # no fitted week -> the frozen fallback
     })
-    f = model._factor_vector(rows)
+    f = model.level_factors(rows)
 
     assert f[0] == pytest.approx(quiet), \
         "the jump leaked into the factor applied during its own week"
@@ -145,7 +137,7 @@ def test_running_past_the_calibration_schedule_is_reported_not_silent():
                          "date": ["2026-07-08",     # inside the schedule
                                   "2026-07-20",     # PAST its end
                                   "2026-07-27"]})   # past its end
-    f = model._factor_vector(rows)
+    f = model.level_factors(rows)
     assert f[0] == pytest.approx(1.10)
     assert f[1] == pytest.approx(1.33) and f[2] == pytest.approx(1.33)
 
@@ -248,12 +240,12 @@ def test_the_gate_freezes_calibration_even_though_the_schedule_runs_past_it(cfg)
                           "category": ["A", "A"]})
 
     m.freeze_calibration_from(None)
-    assert list(m._factor_vector(frame)) == [5.0, 9.0], \
+    assert list(m.level_factors(frame)) == [5.0, 9.0], \
         "unfrozen, every row takes its own week -- production's mechanism"
 
     m._reset_calibration_counters()
     m.freeze_calibration_from(gate_start)
-    assert list(m._factor_vector(frame)) == [2.0, 2.0], \
+    assert list(m.level_factors(frame)) == [2.0, 2.0], \
         "frozen at the gate, every graded row takes the anchor"
     assert m._cal_rows_frozen == 2 and m._cal_rows_fallback == 0, \
         "a deliberate freeze must not be counted as a fallback gap"

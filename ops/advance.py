@@ -109,8 +109,10 @@ def probe(cfg, root="reports", feed=None, retrain=False):
     expected_end = None
     if os.path.exists(PREPARED):
         last = episodes.week_key(pd.read_parquet(PREPARED, columns=["date"]).date).max()
-        expected_end = (episodes.week_start(last)
-                        + pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+        expected_end = episodes.week_after(last)
+    # a refreshed extract after launch moves the split manifest alone; the
+    # weekly re-fit + re-seal is the step that absorbs it (not a red stop)
+    manifest_moved = any("split_manifest" in p for p in seal.get("problems") or [])
     return {
         "raw": os.path.exists(RAW),
         "prepared": os.path.exists(PREPARED),
@@ -136,6 +138,7 @@ def probe(cfg, root="reports", feed=None, retrain=False):
         # at the anchor as too thin (one reading with update's gate)
         "schedule_end": schedule_reaches(sched),
         "expected_schedule_end": expected_end,
+        "manifest_moved": manifest_moved,
         "this_week": this_week,
         "events": os.path.isdir(events_dir) and bool(os.listdir(events_dir)),
         "feed": feed,
@@ -304,7 +307,8 @@ def plan(st):
                       ["set it on launch day; the weekly re-fit then schedules "
                        "through the latest data (never move split.test_end)"])]
     behind = (not st["schedule_scope"].startswith("production")
-              or (st["schedule_end"] or "") < (st["expected_schedule_end"] or ""))
+              or (st["schedule_end"] or "") < (st["expected_schedule_end"] or "")
+              or st.get("manifest_moved", False))
     if behind:
         steps.append(_run("weekly level re-fit",
                           ["fit.train_baseline", "--input", PREPARED,
@@ -312,7 +316,11 @@ def plan(st):
         steps.append(_run("re-seal", ["ops.seal", "--reason", "weekly-refit"], phase="launch",
                           reevaluate=True))
         return steps
-    if (st["schedule_end"] or "") < st["this_week"]:
+    if not st["schedule_end"]:
+        return [_stop("launch", "the calibration artifact carries an empty "
+                      "schedule", ["python3 -m fit.train_baseline --input "
+                                   f"{PREPARED} --fit-calibration, then ops.seal"])]
+    if st["schedule_end"] < st["this_week"]:
         return [_stop("launch", "the extract is stale: no re-fit can reach the "
                       "week being priced",
                       [f"schedule ends {st['schedule_end']}, this week is "

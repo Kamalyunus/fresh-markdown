@@ -67,6 +67,7 @@ class BaselineModel:
     # class-level so an applier built without __init__ (the tests' __new__
     # path) prices unfrozen with no gate; the instance sets both
     calibration_stops_at = None
+    calibration_reaches = None
     _freeze_from = None
 
     def __init__(self, cfg):
@@ -89,6 +90,8 @@ class BaselineModel:
             if sched and sched.get("by_week"):
                 self.calibration_schedule = sched["by_week"]
                 self.calibration_stops_at = sched.get("gate_freezes_at")
+                # the week the schedule COVERS (fitted or held), for coverage
+                self.calibration_reaches = schedule_reaches(sched)
         self._reset_calibration_counters()
         self.version = self.schema["model_version"]
 
@@ -137,9 +140,6 @@ class BaselineModel:
             out[rows] = keys[rows].map(lambda key: table.get(key, 1.0)).to_numpy()
         return out
 
-    # the pre-rename name: tests/conftest.py's applier still calls it
-    _factor_vector = level_factors
-
     def calibration_coverage(self):
         """Which priced rows got a point-in-time factor. Three anchor cases,
         never conflated: DELIBERATE (freeze_calibration_from -- the gate),
@@ -154,9 +154,11 @@ class BaselineModel:
                                "behind)"}
         priced = (self._cal_rows_scheduled + self._cal_rows_fallback
                   + self._cal_rows_frozen)
-        weeks = sorted(self.calibration_schedule)
-        past_end = sorted(w for w in self._cal_fallback_weeks
-                          if weeks and w > weeks[-1])
+        # past the end = past the last week the schedule COVERS, held
+        # weeks included (schedule_reaches, the gate's reading); a trailing
+        # held week once read here as STALE while the gate called it covered
+        end = self.calibration_reaches or max(self.calibration_schedule)
+        past_end = sorted(w for w in self._cal_fallback_weeks if w > end)
         share = self._cal_rows_fallback / max(priced, 1)
         if past_end:
             verdict = ("STALE FACTORS IN USE -- {} rows ({:.1%}) are in weeks "
@@ -175,7 +177,7 @@ class BaselineModel:
                        "opens".format(self._cal_rows_fallback, share))
         return {
             "mode": "point_in_time",
-            "schedule_covers": [weeks[0], weeks[-1]] if weeks else None,
+            "schedule_covers": [min(self.calibration_schedule), end],
             "rows_priced": priced,
             "rows_on_schedule": self._cal_rows_scheduled,
             "rows_on_fallback": self._cal_rows_fallback,
@@ -460,8 +462,7 @@ def fit_level_calibration(d, cfg):
     scope = population(d if launched else pre_launch(d, cfg), cfg).copy()
     weeks = sorted(episodes.week_key(scope.date).unique())
     if launched and weeks:
-        weeks.append((episodes.week_start(weeks[-1]) + pd.Timedelta(days=7))
-                     .strftime("%Y-%m-%d"))
+        weeks.append(episodes.week_after(weeks[-1]))
     by_week, coverage, pinned_by_week = {}, [], {}
     opened = episodes.opening_dates(scope)     # once, not once per week
     attach_fit_basis(scope, model, r_lookup)   # once: the windows are slices
@@ -469,6 +470,11 @@ def fit_level_calibration(d, cfg):
         window, weeks_seen = episodes.trailing_weeks_window(
             scope, w, weeks_back, opened=opened)
         if not len(window):
+            # an EMPTY trailing window (data start, a gap) holds the anchor
+            # exactly as a thin one does, and must be recorded the same way
+            # or schedule_reaches never reaches it: the gate then read it
+            # as a missed cron and advance re-fit it every morning
+            coverage.append({"week": w, "fitted": False})
             continue
         f = _solve_level_factors(window, model, k_shrink, min_anchor,
                                  tier_step, max_k, r_lookup, predicted=True)

@@ -84,7 +84,7 @@ def outcome_event(**over):
     """An outcome event that reconciles on its own; keywords override."""
     evt = {
         "event": "outcome", "outcome_id": "O0", "decision_id": "D0",
-        "units_sold": 1, "starting_inventory": 2, "ending_inventory": 0,
+        "units_sold": 1, "starting_inventory": 2, "ending_inventory": 1,
         "applied_price": P0 * 0.7, "is_stockout": False,
         "execution_status": "ok", "finalized_at": "2026-08-19T18:00:00+00:00",
     }
@@ -227,7 +227,7 @@ class _Applier(BaselineModel):
 
     def predict_mu_ref(self, d, raw=False):
         mu = np.full(len(d), float(self.base_mu))
-        return mu if raw else mu * self._factor_vector(d)
+        return mu if raw else mu * self.level_factors(d)
 
 
 def _hours(eid, day, n, q0=6, sold=1, disc=0.30, tail=0, hour0=9, dp=True,
@@ -264,7 +264,12 @@ def _harness_cfg(cfg, tmp_path):
     cfg["dispersion"] = dict(cfg["dispersion"], r_lookup_path=str(r_path))
     cfg["posterior"] = dict(cfg["posterior"], path=str(tmp_path / "posterior.json"))
     cfg["events"] = dict(cfg["events"], shadow_store_dir=str(tmp_path / "shadow_events"))
-    cfg["exploration"] = dict(cfg["exploration"], tau0_derivation_min_decisions=1)
+    cfg["exploration"] = dict(cfg["exploration"], tau0_derivation_min_decisions=1,
+                              delta_min_log_bias=None,   # no floor: the shipped map is the owner's
+                              # the harness frame's seed closes on six days
+                              # before the window; the base must span the
+                              # window or day one is held (budget_held)
+                              budget_il_window_days=6)
     PosteriorStore.initialise(cfg, {"FRUIT": {"mean": -1.2, "std": 0.5}},
                               {"FRUIT": 1000}, path=cfg["posterior"]["path"])
     return cfg

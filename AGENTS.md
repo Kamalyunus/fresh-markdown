@@ -105,7 +105,8 @@ And the standing prohibitions:
 - Never hand-edit `artifacts/posterior.json` (production learning state).
 - Never re-derive logic that has one home. The homes, and what each
   replaced (a second copy of any of these is a review failure):
-  - population filter — `fit.prepare_data.population`
+  - population filter — `fit.prepare_data.population`; the null-counter
+    run drop — `null_counter_windows` (the whole clock run, rule 15)
   - episode-scoped cuts — `common.episodes.window_slice`,
     `trailing_weeks_window` (both factor-fit schedules), `week_key`,
     `opening_dates` (the episode's date key: folds, drift windows, the
@@ -138,7 +139,11 @@ And the standing prohibitions:
     `fit.train_baseline.schedule_reaches` (the `--apply` gate and
     `advance`'s re-fit trigger)
   - spread accounting — `engine.explore.SpreadLedger`; the tau controller
-    walk — `engine.explore.walk_tau` (production and shadow's trace);
+    walk — `engine.explore.walk_tau` (production and shadow's trace) and
+    whether a day's budget is signal — `budget_held` (the controller's
+    hold, the overspend stop's no-reading, shadow's mean budget, §5.8);
+    the week after a data week — `common.episodes.week_after` (the
+    schedule's appended week, advance's re-fit trigger, the simulator);
     the backtest's forward simulation — `evaluate.backtest._simulate_arm`
     (+ `_dp_price`)
   - rho — `common.config.intraclass_correlation`; `m` per batch —
@@ -235,17 +240,15 @@ python3 -m evaluate.shadow --input data/prepared.parquet --out reports/shadow.js
 ```
 
 `ops.bootstrap_loop` is the whole bootstrap: it runs 1 and 3, then **iterates
-3b–5b until the fixed point CONVERGES**, then 6, 6b, 11 and `status`. It
-exits non-zero if the loop never settles. The `status` it ends on is
-ADVISORY at that point — `tau_initial` is null and shadow has not run, so
-red rows there are the next steps, not a broken bundle; `status` gates the
-pilot (RUNBOOK), never the bootstrap.
+3b–5b until the fixed point CONVERGES**, then 6, 6b, 11 and `status`; it
+exits non-zero if the loop never settles. Its closing `status` is ADVISORY
+(`tau_initial` null, shadow not run): red rows are the next steps, not a
+broken bundle; `status` gates the pilot (RUNBOOK), never the bootstrap.
 
 **Why this is not optional.** Steps 3b–5 are one TURN of a fixed-point
-iteration: the factor solve consumes `r`, while `r`, `rho` and the prior are
-fitted against *calibrated* `mu_ref`. One pass of the list is one turn —
-artifacts that disagree and a `--check-convergence` that says NOT CONVERGED
-(the owner measures 8–9 turns on production, the fixture 3–4 — rule 19).
+iteration (the factor solve consumes `r`; `r`, `rho` and the prior are fitted
+against *calibrated* `mu_ref`): one pass leaves artifacts that disagree and
+a NOT CONVERGED check (owner: 8–9 turns on production; fixture 3–4 — rule 19).
 Re-running the list restarts at 3 and RETRAINS THE BASELINE (rule 1).
 
 After a **config paste**, settle without retraining:
@@ -255,15 +258,11 @@ python3 -m ops.bootstrap_loop --check-only   # settle on the artifacts on disk, 
 ```
 
 `--max-turns` (default 20) is a runaway guard, not a budget — the STALL test
-stops a loop that has gone three turns without a new best, long before the
-cap. Raise it only if the trajectory printed at exit is still contracting.
-
-Two details worth knowing when reading its output: on the first turn there is
-no `r_lookup` yet, so 3b uses the raw-mu basis and the second turn gets the
-censored one (early turns are expected to move a lot); and the loop runs
-`estimate_prior --fast`, which drops `fold_spread` — that only widens the std
-FLOOR while factors follow the prior MEAN, so it cannot move the fixed point.
-The artifact still gets a FULL prior once the loop settles. (§9.2)
+stops a loop three turns without a new best. Reading its output: turn one
+has no `r_lookup` (raw-mu basis; early turns move a lot), and the loop's
+`estimate_prior --fast` drops `fold_spread`, which only widens the std
+FLOOR and cannot move the fixed point; the settled artifact gets a FULL
+prior. (§9.2)
 
 ### The steps it runs — for debugging ONE step, not for driving the pipeline
 
@@ -352,11 +351,11 @@ fixture re-derives fixture values — read them, never commit them
   `bootstrap_loop`, `tune`, `status`, `init_posterior`, `seal`), `tools/`
   is out of review scope. A new module goes where its reader is.
 - Run modules as `python3 -m package.module` from the repo root.
-- `--workers N` (`0` = all cores but one) parallelises backtest and shadow;
-  reports are byte-identical serial or parallel — results return in
-  submission order and only the parent touches the event store.
-- Each episode draws from its own RNG seeded by episode id — draws are
-  order-independent by design.
+- `--workers N` (`0` = all cores but one) parallelises backtest, shadow and
+  `pilot_sim` (each hour's batch); reports are byte-identical serial or
+  parallel — results return in submission order and only the parent
+  touches the event store. Each episode draws from its own RNG seeded by
+  episode id (the simulator: episode and hour) — order-independent.
 - Tests: shared builders live in `tests/conftest.py` (`cfg`,
   `decision_event`/`outcome_event`, `episode_frame`, `_reports`,
   `reports_dir`, `synth_flc` — the synthetic extract, generated once per

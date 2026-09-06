@@ -341,6 +341,17 @@ def test_the_controller_holds_tau_until_the_il_base_spans_its_window(cfg):
     assert not budget_base_ready({}, "2026-09-02", cfg)
     assert not budget_base_ready(il, "2026-09-03", cfg)       # 2 days back
     assert budget_base_ready(il, "2026-09-04", cfg)           # 3 days back
+    # a hole INSIDE a full window is a zero-IL day, not a shorter base:
+    # ready, and the mean divides by the whole window
+    from engine.explore import trailing_daily_il
+    holed = {"2026-09-01": 900.0, "2026-09-03": 300.0}
+    assert budget_base_ready(holed, "2026-09-04", cfg)
+    assert trailing_daily_il(holed, "2026-09-04", cfg) == pytest.approx(400.0)
+    # and a base that starts INSIDE the window divides by its own span,
+    # the span readiness judges -- never by the days that happened to close
+    short = {"2026-09-03": 300.0}
+    assert not budget_base_ready(short, "2026-09-04", cfg)
+    assert trailing_daily_il(short, "2026-09-04", cfg) == pytest.approx(300.0)
     tau, rows = walk_tau(100.0, ["2026-09-02", "2026-09-03", "2026-09-04"],
                          lambda day, t: 1e6, il, 1.0, cfg)     # wildly over budget
     assert [r["held"] for r in rows] == [

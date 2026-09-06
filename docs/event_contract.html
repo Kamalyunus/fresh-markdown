@@ -733,7 +733,7 @@
   <h2><span class="num">04</span>What the agent logs per decision</h2>
   <div class="prose">
     <p>
-      Thirty-seven required fields, all written by the agent. Listed here so you can
+      Thirty-nine required fields, all written by the agent. Listed here so you can
       size storage and know what you can query later — not because you produce any of it. Three more
       diagnostic fields (<code>event</code>, <code>solver_latency_s</code>,
       <code>nb_tail_mass_max</code>) are written but not required.
@@ -813,7 +813,10 @@
       <code>reason</code>. No row means the push succeeded. A failed-push row that matches no
       decision is counted (<code>push_failures_unmatched</code> in the ingest report) rather than
       dropped silently — a non-zero count means your table and the agent's decisions disagree on
-      the hour key.
+      the hour key; a row naming no hour at all (a null id, a blank line) costs itself, counted as
+      <code>push_failures_unkeyable</code>, never the batch. The table may use the feed's own column
+      names (<code>skuseq</code>, <code>hour</code>). An empty feed is a whole day of gaps
+      (<code>feed_empty</code>), never a day outside the feed.
     </p>
   </div>
 
@@ -1085,7 +1088,7 @@
 //         adjustment_reason is needed.</span>
 {
   "event": "outcome",
-  "outcome_id": "OC-88213-4471-17",
+  "outcome_id": "feed-d7557c60-5fad-4336-84ac-06775172f3e5",
   "decision_id": "d7557c60-5fad-4336-84ac-06775172f3e5",
   "units_sold": 1,
   "starting_inventory": 3,
@@ -1101,7 +1104,7 @@
 //         that says demand was low at ₩5,500.</span>
 {
   "event": "outcome",
-  "outcome_id": "OC-88213-4471-18",
+  "outcome_id": "feed-<the 18:00 decision_id>",
   "decision_id": "faf79b6c-fde0-4f0f-8e19-9c274a0d4d43",
   "units_sold": <mark>0</mark>,
   "starting_inventory": 2,
@@ -1117,7 +1120,7 @@
 //         adjustment_reason this event is quarantined and never lands.</span>
 {
   "event": "outcome",
-  "outcome_id": "OC-88213-4471-20",
+  "outcome_id": "feed-<the 20:00 decision_id>",
   "decision_id": "d4ab8f32-9533-4896-afe4-976d63d0e68b",
   "units_sold": 1,
   "starting_inventory": 2,
@@ -1163,7 +1166,7 @@
       </thead>
       <tbody>
         <tr><td class="f">event completeness</td><td class="t n">≥ 99%</td><td>Outcomes landing per decision. A priced hour missing from the feed, or a feed hour the ingester cannot interpret, shows up here first.</td></tr>
-        <tr><td class="f">duplicate or unmatched</td><td class="t n">≤ 1%</td><td>Repeated ids plus outcomes with no matching decision, over the finalized outcomes of the trailing <code>event_quality_window_days</code> (14) of trading days — every rate in this table is read on that window, so one incident stops re-firing a lifted stop once history dilutes it.</td></tr>
+        <tr><td class="f">duplicate or unmatched</td><td class="t n">≤ 1%</td><td>Outcomes with no matching decision over the finalized outcomes of the trailing <code>event_quality_window_days</code> (14) of trading days, plus repeated ids counted all-time (a duplicate line has no trading day; a producer that re-appends one is broken, not an incident that ages out). The mismatch rate reads the same window, so one incident stops re-firing a lifted stop once history dilutes it.</td></tr>
         <tr><td class="f">price mismatch</td><td class="t n">≤ 1%</td><td>Outcomes whose offered price (from the feed) differs from the decision's by more than <code>1e-6</code>. This is the "did the agent's price actually go live" check — it catches silent push failures your failures table missed; a failure you reported shows the old price by definition and is counted apart (<code>push_failures_reported</code>), never as a mismatch.</td></tr>
         <tr><td class="f">missing stockout field</td><td class="t n">exactly 0</td><td>Any outcome at all without <code>is_stockout</code>.</td></tr>
       </tbody>

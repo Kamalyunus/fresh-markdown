@@ -161,9 +161,9 @@ def overspend_series(learning, business, cfg):
     for day in learning.get("priced_days") or sorted(spend_by_day):
         budget = explore.budget_today(
             explore.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
-        # the controller's own rule (explore.budget_base_ready): a base
-        # shorter than its window is no signal -- no reading, no streak
-        if budget > 0 and explore.budget_base_ready(il_by_day, day, cfg):
+        # the controller's own rule (explore.budget_held): a zero budget or
+        # a base shorter than its window is no signal -- no reading, no streak
+        if explore.budget_held(il_by_day, day, budget, cfg) is None:
             by_day[day] = round(float(spend_by_day.get(day, 0.0)) / budget, 4)
     return {"basis": "spend / budget_today", "by_day": by_day,
             "latest": by_day.get(last)}

@@ -1,9 +1,12 @@
+import os
 """config.yaml as shipped: the hold-out sits after every fitting window,
 the owner's launch tau is a positive paste that shadow re-derives, strict
 mode refuses a null MEASURED key, and a paste left over from a previous
 retrain is detected."""
 
 import pytest
+
+from conftest import ROOT
 import yaml
 
 from common.config import load_config
@@ -37,7 +40,7 @@ def test_config_strict_refuses_null_measured(tmp_path):
     has only `launch_date` null, which is gone on launch day."""
     from common.config import ConfigError
 
-    with open("config.yaml") as f:
+    with open(os.path.join(ROOT, "config.yaml")) as f:
         cfg = yaml.safe_load(f)
     cfg["data"]["launch_date"] = "2026-09-07"
     cfg["dispersion"]["rho"] = None
@@ -53,7 +56,7 @@ def test_config_detects_stale_paste_from_frozen_artifact(tmp_path):
     import json
     from common.config import artifact_mirror_drift
 
-    with open("config.yaml") as f:
+    with open(os.path.join(ROOT, "config.yaml")) as f:
         cfg = yaml.safe_load(f)
     rho_path = tmp_path / "rho.json"
     cfg["dispersion"]["rho_path"] = str(rho_path)

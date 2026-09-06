@@ -6,6 +6,8 @@ import inspect
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from fit.prepare_data import (DP_INELIGIBLE, load_and_filter, population,
@@ -874,7 +876,6 @@ def test_the_ref_rate_window_is_the_thirty_prior_days(cfg):
     out = add_ref_rate_features(pd.DataFrame(rows), cfg)
     rate = out.set_index("episode_id").sku_ref_sales_rate_30d
     W = cfg["baseline_model"]["ref_rate_window_days"]
-    assert W == 30
     # day W still sees day 0 (W prior days); day W+1 no longer does
     assert rate[f"1|F|{W}"] == pytest.approx(1.0 / W)
     assert rate[f"1|F|{W + 1}"] == 0.0
@@ -923,8 +924,15 @@ def test_a_row_with_no_episode_key_is_dropped_and_counted(cfg, synth_flc, tmp_pa
     assert not any((r.sku_id, r.fc, str(r.date), r.hour_of_day) in keys
                    for r in d.itertuples())
     assert EPISODE_KEY == ("sku_id", "fc", "date", "hour_of_day")
-    # the clean extract loses nothing to this stage
-    _, clean = load_and_filter(synth_flc, cfg)
+    # an extract with NO dirt loses nothing to this stage (the shared
+    # fixture carries the generator's dirt, null counters included)
+    from tools import make_dummy_flc as gen
+    start, days = gen.span_covering_splits(cfg)
+    spotless, _ = gen.generate(40, days, "randomized", 3, dirty_frac=0.0, start=start)
+    spotless_path = tmp_path / "spotless.parquet"
+    pq.write_table(pa.Table.from_pandas(spotless, schema=gen.SCHEMA,
+                                        preserve_index=False), str(spotless_path))
+    _, clean = load_and_filter(str(spotless_path), cfg)
     assert clean[1][1] == clean[0][1] and clean[1][4]["rows_dropped"] == 0
     mask, by_col = null_key_rows(pd.DataFrame({"sku_id": [1, None], "fc": ["F", "F"],
                                                "date": ["d", "d"], "hour_of_day": [1, 1]}))
@@ -951,7 +959,39 @@ def test_a_null_counter_drops_its_whole_window_not_a_fragment():
         "date": ["2026-08-01"] * 6,
         "hour_of_day": [9, 10, 11, 14, 15, 16],       # a break between 11 and 14
         "hours_remaining": [2.0, np.nan, 0.0, 2.0, 1.0, 0.0]})
-    mask, runs = null_counter_windows(df)
-    assert list(mask) == [True, True, True, False, False, False] and runs == 1
-    clean, runs = null_counter_windows(df.assign(hours_remaining=[2.0, 1, 0, 2, 1, 0]))
-    assert not clean.any() and runs == 0
+    mask, detail = null_counter_windows(df)
+    assert list(mask) == [True, True, True, False, False, False]
+    assert detail == {"windows": 1, "gap_fragments_kept": 0}
+    clean, detail = null_counter_windows(df.assign(hours_remaining=[2.0, 1, 0, 2, 1, 0]))
+    assert not clean.any() and detail["windows"] == 0
+
+    # back-to-back windows with NO clock gap: the counter resets upward
+    # between two non-null rows, so the neighbour is its own window and
+    # survives (the contract: two windows back to back are two episodes)
+    b2b = pd.DataFrame({
+        "sku_id": [7] * 6, "fc": ["F"] * 6, "date": ["2026-08-01"] * 6,
+        "hour_of_day": [9, 10, 11, 12, 13, 14],
+        "hours_remaining": [2.0, np.nan, 0.0, 2.0, 1.0, 0.0]})
+    mask, detail = null_counter_windows(b2b)
+    assert list(mask) == [True, True, True, False, False, False]
+    assert detail["windows"] == 1
+    # two nulls in two chained windows count as two windows
+    mask, detail = null_counter_windows(
+        b2b.assign(hours_remaining=[2.0, np.nan, 0.0, 2.0, np.nan, 0.0]))
+    assert mask.all() and detail["windows"] == 2
+
+    # a feed gap the counter ran down across is ONE window: the far
+    # fragment goes with it (gap_split_windows could no longer see the gap
+    # once the near side was dropped)
+    gap = pd.DataFrame({
+        "sku_id": [7] * 6, "fc": ["F"] * 6, "date": ["2026-08-01"] * 6,
+        "hour_of_day": [9, 10, 11, 14, 15, 16],
+        "hours_remaining": [7.0, np.nan, 5.0, 2.0, 1.0, 0.0]})
+    mask, detail = null_counter_windows(gap)
+    assert mask.all() and detail == {"windows": 1, "gap_fragments_kept": 0}
+    # a gap with the null right beside it cannot be read: the far side
+    # survives as a fragment, and the detail says so
+    beside = gap.assign(hours_remaining=[7.0, 6.0, np.nan, 2.0, 1.0, 0.0])
+    mask, detail = null_counter_windows(beside)
+    assert list(mask) == [True, True, True, False, False, False]
+    assert detail["gap_fragments_kept"] == 1

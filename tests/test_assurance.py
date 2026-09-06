@@ -571,6 +571,8 @@ def test_uniformity_pools_small_affordable_sets_without_bias(cfg):
     out = assurance.exploration_uniformity(decs, cfg)
     assert out["exploration_draws"] >= cfg["assurance"]["uniformity_min_draws"], out
     assert out["verdict"] == "PASS", out
-    # and the jitter is a property of the id, not of the run
-    assert assurance._jitter("abc") == assurance._jitter("abc")
+    # and the jitter is a property of the id, not of the run or the
+    # process (blake2b, not hash()): pinned, and distinct ids differ
+    assert assurance._jitter("abc") == pytest.approx(0.84660, abs=1e-4)
+    assert assurance._jitter("abc") != assurance._jitter("abd")
     assert 0 <= assurance._jitter("abc") < 1

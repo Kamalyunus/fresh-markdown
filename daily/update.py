@@ -265,6 +265,9 @@ def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None,
         # the walk says which steps sat on a clip bound; never inferred
         # from the rounded taus
         "clipped": any(r["clipped"] for r in rows),
+        # days the controller did not act on (no base, or one shorter than
+        # its window -- explore.budget_held); the printed line names them
+        "held_days": [r["day"] for r in rows if r.get("held")],
     })
     return block
 
@@ -451,11 +454,14 @@ def main():
     if tc.get("skipped"):
         print(f"tau: {tc['tau_before']} unchanged -- {tc['skipped']}")
     else:
+        last = tc["by_day"][-1]
         print(f"tau: {tc['tau_before']} -> {tc['tau_after']}  "
               f"({tc['days_walked']} day(s) walked through {tc['through_date']}; "
-              f"last day spent {tc['realised_exploration_cost']} of "
-              f"{tc['budget']})"
-              + ("  [CLIP BOUND]" if tc.get("clipped") else ""))
+              + (f"last day HELD -- {last['held']}" if last.get("held") else
+                 f"last day spent {tc['realised_exploration_cost']} of "
+                 f"{tc['budget']}") + ")"
+              + ("  [CLIP BOUND]" if tc.get("clipped") else "")
+              + (f"  [{len(tc['held_days'])} day(s) held]" if tc["held_days"] else ""))
 
     if "refused" in report:
         print("REFUSED:", report["refused"])

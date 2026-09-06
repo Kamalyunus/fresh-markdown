@@ -439,6 +439,7 @@ def test_the_aggregate_budget_is_the_mean_over_the_windows_decision_days(
     the window decided on, the same days the controller trace walks."""
     from evaluate.shadow import _mean_daily_budget
 
+    cfg["exploration"]["budget_il_window_days"] = 7           # set, not read shipped
     seed = {f"2026-08-0{d}": 700.0 for d in range(3, 10)}     # 7 seed days
     decision_days = ["2026-08-10", "2026-08-11"]
     il = dict(seed, **{"2026-08-10": 900.0})
@@ -446,8 +447,12 @@ def test_the_aggregate_budget_is_the_mean_over_the_windows_decision_days(
         explore_mod.trailing_daily_il(il, day, cfg), 1.0, cfg)
         for day in decision_days])
     assert _mean_daily_budget(decision_days, il, 1.0, cfg) == pytest.approx(want)
-    # the bug, reproduced: the seed days drag the mean down (08-03 budgets 0)
-    assert _mean_daily_budget(sorted(il), il, 1.0, cfg) < want
+    # the bug, reproduced: the seed days drag the mean down -- they are HELD
+    # now (no base yet), so the mean over live days alone is the same figure,
+    # and a range of held days only reads None
+    assert _mean_daily_budget(sorted(il) + ["2026-08-11"], il, 1.0, cfg) \
+        == pytest.approx(want)
+    assert _mean_daily_budget(sorted(seed)[:3], il, 1.0, cfg) is None
 
     # and the report agrees with its own trace, day for day
     cfg = _harness_cfg(cfg, tmp_path)

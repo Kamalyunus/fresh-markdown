@@ -45,6 +45,13 @@ def delta_min(cfg, eps, category=None):
     a tier far from p* but at d_ref costs money and teaches nothing, which
     is why the floor is on the reference distance. 0 while the bias scale
     is null (nothing pasted yet).
+
+    The floor grows as |eps| shrinks: a belief stepping toward zero can
+    inflate it past every feasible tier, and then nothing is forced, no
+    outcome arrives to move the belief back, and tau climbs by the clip
+    every zero-spend day. The only floor is |epsilon_max|; the monitor's
+    affordable_set_empty_rate and the simulator's exploration_never_starves
+    are where it shows (design 11.3).
     """
     ec = cfg["exploration"]
     bias = ec.get("delta_min_log_bias")
@@ -443,13 +450,20 @@ def trailing_daily_il(il_by_day, day, cfg):
     d0 = pd.Timestamp(str(day))
     days = [(d0 - pd.Timedelta(days=k)).strftime("%Y-%m-%d")
             for k in range(1, window + 1)]
-    known = [k for k in days if k in il_by_day]
-    if not known:
+    if not il_by_day or not any(k in il_by_day for k in days):
         return 0.0
-    # zero-IL calendar days inside the known span count as zero, so the mean
-    # is over the window, not over the days that happened to carry IL
-    span = (d0 - pd.Timestamp(min(known))).days      # <= window by construction
-    return float(sum(il_by_day.get(k, 0.0) for k in days) / max(span, 1))
+    # zero-IL calendar days count as zero over the SAME span
+    # budget_base_ready judges -- back to the earliest close known, capped
+    # at the window; a no-close day at the window's leading edge once fell
+    # out of the denominator and inflated the budget by window/span
+    return float(sum(il_by_day.get(k, 0.0) for k in days)
+                 / max(_base_span(il_by_day, d0, window), 1))
+
+
+def _base_span(il_by_day, d0, window):
+    """Days the IL base covers before `d0`, capped at the window."""
+    earliest = pd.Timestamp(min(str(k) for k in il_by_day))
+    return min(window, (d0 - earliest).days)
 
 
 def budget_base_ready(il_by_day, day, cfg):
@@ -459,13 +473,24 @@ def budget_base_ready(il_by_day, day, cfg):
     owner's rehearsal the overspend stop fired on day three and suspended
     exploration for the rest of the run. Until the base spans its window
     the budget is an absence of signal (like a zero one): the controller
-    holds tau and the stop takes no reading. The ONE rule both read."""
+    holds tau and the stop takes no reading. The ONE rule both read, and
+    the span trailing_daily_il divides by."""
     if not il_by_day:
         return False
     window = int(cfg["exploration"]["budget_il_window_days"])
-    d0 = pd.Timestamp(str(day))
-    earliest = pd.Timestamp(min(str(k) for k in il_by_day))
-    return (d0 - earliest).days >= window
+    return _base_span(il_by_day, pd.Timestamp(str(day)), window) >= window
+
+
+def budget_held(il_by_day, day, budget, cfg):
+    """Why a day's budget is no signal, or None: no trailing IL at all
+    (a zero budget), or a base shorter than its window. The controller
+    (walk_tau) holds tau on such a day and the monitor's overspend series
+    takes no reading -- one composite, read by both."""
+    if budget <= 0:
+        return "no trailing IL"
+    if not budget_base_ready(il_by_day, day, cfg):
+        return "IL base shorter than budget_il_window_days"
+    return None
 
 
 def budget_scale(posterior_std, cfg):
@@ -496,9 +521,7 @@ def walk_tau(tau, days, spend_for, il_by_day, widest_std, cfg):
         budget = budget_today(trailing_daily_il(il_by_day, day, cfg),
                               widest_std, cfg)
         spend = float(spend_for(day, tau))
-        held = ("no trailing IL" if budget <= 0 else
-                None if budget_base_ready(il_by_day, day, cfg) else
-                "IL base shorter than budget_il_window_days")
+        held = budget_held(il_by_day, day, budget, cfg)
         after, clipped = (tau, False) if held else tau_next(tau, budget, spend, cfg)
         rows.append({"day": str(day), "tau": round(float(tau), 2),
                      "spend": round(spend, 1), "budget": round(budget, 1),

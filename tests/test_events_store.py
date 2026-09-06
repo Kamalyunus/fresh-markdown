@@ -15,9 +15,9 @@ def _store(cfg, tmp_path):
 
 
 def _outcome(**over):
-    """A RECONCILING outcome (2 - 1 = 1), so only the field under test can
-    quarantine it."""
-    return outcome_event(**{"ending_inventory": 1, **over})
+    """conftest's outcome reconciles (2 - 1 = 1), so only the field under
+    test can quarantine it."""
+    return outcome_event(**over)
 
 
 # ------------------------------------------------------------------ duplicates
@@ -181,7 +181,8 @@ def test_id_less_foreign_lines_are_not_duplicates_of_each_other(cfg, tmp_path):
         f.write(json.dumps({"note": "another"}) + "\n")
     store = EventStore(cfg, root=str(root))
     assert store.duplicate_counts == {"decision": 0, "outcome": 0}
-    assert [d.get("decision_id") for d in store.load_decisions()] == ["D1", None, None]
+    # ... and are not loaded either: every consumer indexes by the id
+    assert [d.get("decision_id") for d in store.load_decisions()] == ["D1"]
     # a real repeat is still one
     with open(root / "decisions.jsonl", "a") as f:
         f.write(json.dumps(decision_event(decision_id="D1")) + "\n")

@@ -42,6 +42,14 @@ def week_key(dates):
             .dt.strftime("%Y-%m-%d"))
 
 
+def week_after(week):
+    """The Monday after the ISO week keyed `week` ("YYYY-MM-DD") -- the one
+    reading of "one week past the latest data's week" that the schedule's
+    appended week, advance's re-fit trigger and the simulator's Lane C all
+    take (three copies once disagreed by construction)."""
+    return (week_start(week) + pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+
+
 def opening_dates(d):
     """The date each row's episode OPENED on, as "YYYY-MM-DD" per row -- the
     key every episode-scoped cut assigns by. A caller slicing one frame many

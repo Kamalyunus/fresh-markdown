@@ -173,10 +173,16 @@ def _fill_ledger(items, ctx, workers, ledger):
 def _mean_daily_budget(days, il_by_day, widest_std, cfg):
     """Mean of production's per-day budget over `days` -- the window's
     DECISION days, never the pre-window seed days (the first of those has
-    no trailing history and would read as a zero budget)."""
-    return float(np.mean([explore.budget_today(
-        explore.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
-        for day in days]))
+    no trailing history and would read as a zero budget) -- and only the
+    days the controller reads (explore.budget_held is None); a held day
+    has no budget in force. None when every day is held."""
+    live = []
+    for day in days:
+        budget = explore.budget_today(
+            explore.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
+        if explore.budget_held(il_by_day, day, budget, cfg) is None:
+            live.append(budget)
+    return float(np.mean(live)) if live else None
 
 
 def derive_tau0(d_full, cfg, start, model, posterior, r_lookup, il_history,
@@ -213,9 +219,13 @@ def derive_tau0(d_full, cfg, start, model, posterior, r_lookup, il_history,
         explore.trailing_daily_il(il_history, start_ts.strftime("%Y-%m-%d"),
                                   cfg), widest_std, cfg)
     block["day_one_budget"] = round(budget, 1)
-    if budget <= 0:
-        block["note"] = ("no realised IL in the trailing window -- a zero "
-                         "budget cannot price a tau")
+    held = explore.budget_held(il_history, start_ts.strftime("%Y-%m-%d"),
+                               budget, cfg)
+    if held:
+        block["note"] = (f"day one is held ({held}): production's controller "
+                         "would not read this budget, and neither can a tau "
+                         "be derived from it -- the seed needs closes back "
+                         "to budget_il_window_days before the window")
         return block
 
     pre_ids = pre.episode_id.unique()
@@ -301,7 +311,7 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
         if over is not None and over <= 1.0 and first_within is None:
             first_within = rank + 1
         rows.append({"day": r["day"], "tau": r["tau"], "spend": r["spend"],
-                     "budget": r["budget"],
+                     "budget": r["budget"], "held": r.get("held"),
                      "over_budget": round(over, 2) if over is not None else None,
                      "days_over": streak,
                      "stop_condition_fires": fired})
