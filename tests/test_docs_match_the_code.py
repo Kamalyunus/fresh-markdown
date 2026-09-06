@@ -146,7 +146,7 @@ def test_every_sim_config_key_is_in_the_design_table():
     with open(os.path.join(ROOT, "docs", "design.md")) as f:
         design = f.read()
     table = design[design.index("### 11.3"):design.index("## 12.")]
-    keys = [k for section in ("run", "world", "paths") for k in sim[section]] + ["faults"]
+    keys = [k for section in ("run", "world", "paths", "grading") for k in sim[section]] + ["faults"]
     missing = [k for k in keys if f"`{k}`" not in table]
     assert not missing, missing
     # and the loader's own key list is the file's

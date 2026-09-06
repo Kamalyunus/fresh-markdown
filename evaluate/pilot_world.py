@@ -32,7 +32,9 @@ from tools.make_dummy_flc import SCHEMA as FEED_SCHEMA
 
 # every fault the simulator can inject, its argument, and where it lands
 FAULTS = {
-    "missing": "share of feed rows that never arrive (a completeness gap)",
+    "missing": "share of feed rows that never arrive (a completeness gap; the "
+               "feature service's history still holds the hour -- the agent's "
+               "two data paths diverge, as they would in production)",
     "duplicate": "share of feed hours that arrive twice (two states for one hour)",
     "mismatch": "share of priced hours whose shelf price is not the returned "
                 "one, with NO failure row (a silent push failure)",
@@ -126,7 +128,10 @@ def ref_rate_features(history, openings, cfg):
             "starting_inventory", "units_sold", "total_discount"]
     stub = openings.assign(units_sold=0, total_discount=np.nan)[cols]
     frame = pd.concat([history[cols], stub], ignore_index=True)
-    frame["d_ref"] = frame.category.map(lambda c: reference_discount(cfg, c))
+    # one lookup per category, mapped over the column (a per-row lambda
+    # was a config read per history row, every morning)
+    d_ref = {c: reference_discount(cfg, c) for c in frame.category.unique()}
+    frame["d_ref"] = frame.category.map(d_ref)
     feats = add_ref_rate_features(frame, cfg)
     mine = feats[feats.episode_id.isin(set(stub.episode_id))]
     return {r.episode_id: (float(r.sku_ref_sales_rate_30d),
@@ -204,17 +209,26 @@ class World:
             out[i].append(float(m))
         return out
 
+    def level_multiplier(self, day_index):
+        """What the world's level at the reference price is, relative to
+        the frozen model's prediction, on simulation day `day_index`: the
+        drift and the `demand_shock` fault -- the systematic part the
+        agent's weekly re-fit is supposed to track. The per-episode shock
+        is noise (mean one) and is NOT in it."""
+        mult = self.drift ** day_index
+        shock = self.faults.get("demand_shock")
+        if shock and day_index >= shock[0]:
+            mult *= shock[1]
+        return float(mult)
+
     def demand(self, template, mu_ref, shelf_discount, day_index, episode_shock=1.0):
         """One hour's demand draw at the SHELF price: the world's level,
         the assumed elasticity, the episode's shock, drift and the shock
-        fault, NB noise."""
+        fault (level_multiplier), NB noise."""
         d_ref = reference_discount(self.cfg, template["category"])
         ratio = (1 - shelf_discount) / (1 - d_ref)
         mu = mu_ref * ratio ** self.epsilon_true[template["category"]]
-        mu *= episode_shock * self.drift ** day_index
-        shock = self.faults.get("demand_shock")
-        if shock and day_index >= shock[0]:
-            mu *= shock[1]
+        mu *= episode_shock * self.level_multiplier(day_index)
         mu = max(float(mu), self.cfg["pricing"]["demand_floor"])
         r = self.r_of(template)
         return int(self.rng.negative_binomial(r, r / (r + mu))), mu

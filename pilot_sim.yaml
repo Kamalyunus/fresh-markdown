@@ -4,16 +4,19 @@
 # tuning surface and the simulator rehearses it AS IT STANDS -- nothing here
 # is read by the engine, the daily lane or any fit. What lives here is the
 # WORLD the rehearsal runs against (assumed elasticity, noise, shocks, faults)
-# and the shape of the run. Every command-line flag of the same name
-# overrides its key here for one run.
+# and the shape of the run. Every command-line flag overrides its key here
+# for one run (`--level-drift` is `level_drift_per_day`; `--fault ...`,
+# repeated, replaces `faults`).
 #
 # Every number a run prints is the simulated world's (AGENTS rule 19).
 
 run:
-  days: 21                       # simulated days after launch
+  days: 21                       # simulated days after launch; the first budget_il_window_days hold tau
+                                 # (design 5.8) and tau_walks_on_spend needs grading.tau_week_days walked past that
   launch_date: null              # null: the day after the extract's last day
-  episodes_per_day: 5000         # a day's total, split across the two arms (each template runs once
-                                 # under the pilot, once under legacy); the template pool caps it
+  episodes_per_day: 5000         # a day's total, split across the two arms (each fresh pick's twin runs
+                                 # under the other arm the day after it closes; a small pool re-picks
+                                 # a template); the template pool caps it
   workers: 0                     # processes pricing each hour's batch: 0 = every core but one, 1 = serial
   seed: 0                        # the world's and the agent's draws
   templates_from: null           # opening date templates are sampled from; null: the hold-out start
@@ -28,6 +31,15 @@ world:
 # faults, injected where the defect would arise (evaluate.pilot_world.FAULTS):
 #   missing:p  duplicate:p  mismatch:p  push_fail:p  discount_rounding  demand_shock:DAY:FACTOR
 faults: []
+
+# how the run is graded and driven -- the simulator's own tolerances, never
+# the system's (those are config.yaml's and are rehearsed as they stand)
+grading:
+  spend_over_budget_band: [0.5, 1.25]  # tau_walks_on_spend: the last week's spend / budget must sit here
+  tau_week_days: 7               # walked (non-held) days the tau expectation is graded over, and needs
+  starve_days: 3                 # consecutive days with a budget in force and nothing forced = starved
+  lane_hour: 6                   # the hour the daily lane runs each morning, after yesterday closed
+  feature_history_margin_days: 14  # days beyond ref_rate_window_days the feature service's history keeps
 
 paths:
   config: config.yaml            # the production config rehearsed, unchanged

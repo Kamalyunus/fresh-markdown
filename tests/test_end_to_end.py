@@ -616,10 +616,11 @@ def test_shadow_phase_harness(workspace, shadow_reports):
     assert row["over_budget"] == pytest.approx(   # the field is rounded to 2dp
         row["spend"] / row["budget"], abs=0.01)
     # the aggregate budget is the mean of the trace's own per-day budgets
-    # over the window's decision days (no day truncated here)
+    # over the window's decision days the controller READ (a held day --
+    # no base yet -- has no budget in force; no day truncated here)
     if not tr["days_truncated"]:
         assert b["daily_budget"] == pytest.approx(
-            np.mean([r["budget"] for r in tr["by_day"]]), abs=0.1)
+            np.mean([r["budget"] for r in tr["by_day"] if not r.get("held")]), abs=0.1)
 
     # shadow outcomes are NOT learning evidence: update must consume nothing
     from common.config import load_config
@@ -657,8 +658,10 @@ def test_shadow_derives_tau0_when_the_week_is_thick_enough(workspace, shadow_rep
     assert b["tau_source"].startswith("derived")
 
 
-def test_parallel_and_serial_produce_the_same_reports(workspace):
-    """The only claim parallelism is allowed to make: it is faster."""
+def test_parallel_and_serial_produce_the_same_reports(workspace, shadow_reports):
+    """The only claim parallelism is allowed to make: it is faster.
+    `shadow_reports` writes config_tau0.yaml (the fixture's own derived
+    tau); without it this test ran on whatever an earlier test left."""
     _chdir(workspace)
     env = {**os.environ, "PYTHONPATH": ROOT}
 
@@ -684,7 +687,7 @@ def test_parallel_and_serial_produce_the_same_reports(workspace):
 
     for out, extra in (("reports/sh_s.json", []),
                        ("reports/sh_p.json", ["--workers", "3"])):
-        run("-m", "evaluate.shadow", "--input", "data/prepared.parquet",
+        run("-m", "evaluate.shadow", "--config", "config_tau0.yaml", "--input", "data/prepared.parquet",
             "--out", out, "--all", "--max-episodes", "80", *extra)
     # solver latency is wall-clock, not a result
     compare("reports/sh_s.json", "reports/sh_p.json", ("solver_latency_p95_s",))
@@ -1175,10 +1178,15 @@ def test_the_pilot_simulator_walks_past_launch_date(workspace, tmp_path):
     rep = json.load(open(out))
 
     assert rep["engine"]["decisions"] > 0 and rep["engine"]["rejected_total"] == 0
+    assert rep["engine"]["quarantined"] == 0
     assert rep["engine"]["violations"] == {"price_rose_within_episode": 0, "below_cost": 0}
     day = rep["days"][0]
     assert day["ingest"]["outcomes_built"] > 0 and day["ingest"]["emitted"] > 0
-    assert day["ingest"]["push_failures_applied"] >= 0
+    # a fifth of pushes fail and every one is REPORTED: applied by ingest,
+    # none left unmatched, and never read as a silent price mismatch
+    assert day["ingest"]["push_failures_applied"] > 0
+    assert day["ingest"]["push_failures_unmatched"] == 0
+    assert all(d["gates"]["price_mismatch_rate"] for d in rep["days"])
     # the walk commits once an episode has closed; a day with none says so
     assert day["tau"]["committed"] or day["tau"]["skipped"]
     assert rep["days"][-1]["tau"]["committed"], rep["days"][-1]["tau"]
@@ -1186,9 +1194,10 @@ def test_the_pilot_simulator_walks_past_launch_date(workspace, tmp_path):
     assert day["assurance"]["reproduction"] in ("PASS", "INSUFFICIENT")
     assert "apply" in day and day["apply"]["calibration_schedule_current"]
     assert {x["name"] for x in rep["expectations"]} == {n for n, _ in pilot_sim.EXPECTATIONS}
-    assert {"pilot", "legacy"} <= set(rep["economics"])
+    assert {"pilot", "legacy", "paired"} <= set(rep["economics"])
+    assert rep["level_tracking"]
     # the world's truth and the store agree on what was priced
-    assert rep["engine"]["pilot_hours"] >= rep["engine"]["decisions"]
+    assert rep["engine"]["pilot_hours"] == rep["engine"]["decisions"]
 
     # every write went under sim_dir; production is byte-identical
     assert {p: file_digest(p) for p in frozen} == frozen
@@ -1198,3 +1207,20 @@ def test_the_pilot_simulator_walks_past_launch_date(workspace, tmp_path):
     assert os.path.exists(os.path.join(sim_dir, "posterior.json"))
     assert os.path.exists(os.path.join(sim_dir, "bundle.json"))
     assert len(os.listdir(os.path.join(sim_dir, "history"))) == 1      # one bundle
+    assert not os.path.exists(os.path.join(sim_dir, "prepared_sim.parquet"))
+
+    # serial and parallel price identically: one day each way, the same
+    # sequence of applied discounts in the two decision logs
+    def applied(workers):
+        d = str(tmp_path / f"sim-w{workers}")
+        assert pilot_sim.main([
+            "--sim-config", os.path.join(ROOT, "pilot_sim.yaml"),
+            "--config", "sim_config.yaml", "--input", "data/prepared.parquet",
+            "--raw", "data/flc.parquet", "--days", "1", "--episodes-per-day", "8",
+            "--workers", str(workers), "--sim-dir", d,
+            "--out", str(tmp_path / f"pilot_sim-w{workers}.json")]) == 0
+        with open(os.path.join(d, "events_store", "decisions.jsonl")) as f:
+            return [json.loads(line)["applied_discount"] for line in f if line.strip()]
+
+    serial, parallel = applied(1), applied(2)
+    assert serial and serial == parallel

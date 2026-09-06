@@ -52,8 +52,8 @@ statement and the incident that created the rule.
    cross-episode variation, never within-episode. (§5.6)
 8. **`config.yaml` is the single source of every tunable** — no numeric
    literals for tunables in code; a tunable without a config key is a review
-   failure. The pilot simulator's world and run live in `pilot_sim.yaml`,
-   never here: nothing the system reads. (§5.1, §11.3)
+   failure. The pilot simulator's world, run and grading live in
+   `pilot_sim.yaml`, never here: nothing the system reads. (§5.1, §11.3)
 9. **IL% is always a ratio of sums, with its denominator and absolute IL
    alongside** — per-episode IL% is undefined and must never be averaged.
    (§2.3)
@@ -333,7 +333,7 @@ fixture re-derives fixture values — read them, never commit them
 | backtest, replay, tau derivation | §5.14, §9; rule 17 |
 | "does the agent move after entry?" | §5.7 `intra_episode_moves` (steps on the DP arm's own path, by cost band) — NOT `pct_dp_deepened`, which compares episode means with legacy; shadow re-anchors on legacy's price and cannot measure it |
 | shadow phase | §5.13 (holdout default, sampling caveats, tau₀ derivation) |
-| the weeks after launch, before launch (`evaluate.pilot_sim`: real engine + daily lane vs a simulated shop; its world, run and faults in `pilot_sim.yaml`, key table in §11.3) | §11.3 |
+| the weeks after launch, before launch (`evaluate.pilot_sim`: real engine + daily lane vs a simulated shop; its world, run, faults and grading in `pilot_sim.yaml`, key table in §11.3) | §11.3 |
 | posterior, update, operator gate | §5.9, §5.11 |
 | monitoring, guardrails, stop conditions, the pilot read | §5.12, §11, §12 |
 | events, integration, quarantine | `docs/event_contract.html`; `events/store.py` |

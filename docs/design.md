@@ -1509,7 +1509,7 @@ table against the file):
 | --- | --- | --- | --- |
 | `run` | `days` | 21 | simulated days after launch; a guardrail test needs the trailing window + smoothing + persistence past the shock day |
 | `run` | `launch_date` | null | the `data.launch_date` the sim config carries; null = the day after the extract's last day |
-| `run` | `episodes_per_day` | 5000 | the day's total, split across the two arms — each template runs once under the pilot and once under its legacy path; the template pool and the open SKU × FC keys cap it (`episodes_opened_per_day_mean` says what ran) |
+| `run` | `episodes_per_day` | 5000 | the day's total, split across the two arms — each fresh pick's twin runs under the other arm the day after it closes (on a small pool a template is re-picked); the template pool and the open SKU × FC keys cap it (`episodes_opened_per_day_mean` says what ran) |
 | `run` | `workers` | 0 | processes pricing each hour's batch of decisions (0 = every core but one, 1 = serial); every decision draws from a generator seeded by its episode and hour, so the answer is the same either way |
 | `run` | `seed` | 0 | the world's draws and the agent's, so a run reproduces |
 | `run` | `templates_from` | null | opening date the templates are sampled from; null = the hold-out start |
@@ -1522,6 +1522,11 @@ table against the file):
 | `paths` | `config` | `config.yaml` | the production config rehearsed, unchanged |
 | `paths` | `input`, `raw` | `data/prepared.parquet`, `data/flc_raw.parquet` | templates and the feature service's history; the extract Lane C extends |
 | `paths` | `sim_dir`, `out` | `sim/pilot`, `reports/pilot_sim.json` | the workspace (git-ignored) and the report |
+| `grading` | `spend_over_budget_band` | [0.5, 1.25] | the band the last week's spend / budget ratio must sit in for `tau_walks_on_spend` |
+| `grading` | `tau_week_days` | 7 | walked (non-held) days the tau expectation is graded over, and needs |
+| `grading` | `starve_days` | 3 | consecutive days with a budget in force and nothing forced that read as starved |
+| `grading` | `lane_hour` | 6 | the hour the daily lane runs each simulated morning |
+| `grading` | `feature_history_margin_days` | 14 | days beyond `ref_rate_window_days` the feature service's history keeps |
 
 The world's level at the reference price is the
 frozen model as sealed (production calibration, frozen at the start), its
@@ -1551,18 +1556,22 @@ do the same way.
 priced and none rejected, prices never rising within an episode or below
 cost, outcome completeness, the event-quality gates, the posterior moving
 toward `epsilon_true` and narrowing, tau walking to its budget (graded on
-the last seven days the controller moved; mornings held for want of a
-full IL base, §5.8, are listed as `days_held` and fewer than seven walked
-reads NOT MEASURED), stops firing only under the fault that causes them
+the last `grading.tau_week_days` days the controller moved, against
+`grading.spend_over_budget_band` — the clip bounds the daily step, not
+the ratio; mornings held for want of a full IL base, §5.8, are listed as
+`days_held` and fewer walked days than that reads NOT MEASURED), stops
+firing only under the fault that causes them
 (and firing under it), the
 assurance checks, the schedule covering every priced week, `--apply` on
 cadence, and the agent's level tracking the world's (`level_tracking`,
 per ISO week: `mean_log_ratio`, `mean_forced_log_move`,
 `implied_elasticity_bias`): per week, the mean
 log ratio of the agent's `mu_ref` (its own weekly re-fit) to the world's
-over the pilot's hours must sit inside the calibration gate band, and the
-elasticity bias it implies — level error over the mean forced log move —
-inside the posterior's std, because the elasticity learner carries no
+(`mu_ref_world`: the frozen prediction times the world's drift and any
+`demand_shock` level) over the pilot's hours must sit inside the
+calibration gate band, and the elasticity bias it implies — minus the
+level error over the mean forced log move, which is signed (negative =
+deeper than the reference) — inside the posterior's std, because the elasticity learner carries no
 level term and reads a level error as elasticity, magnified by the small
 moves it identifies from: on the fixture an 8% level error from a thin
 week's re-fit, inside the band, implied a bias of half a unit of
@@ -1570,9 +1579,13 @@ elasticity and the posterior followed it away from the truth it had
 reached. The lever is `delta_min` (§5.8): moves below the level-error
 scale teach nothing, and a bias scale pasted from another extract
 admits moves the re-fit's noise swamps. A fault turns its expectation around: with `mismatch` injected
-the gate MUST fail and the stop MUST fire. `correlation` is reported, not
+the gate MUST fail and the stop MUST fire. The event gates are graded per
+gate, and a gate is expected to fail only when its fault's injected rate
+exceeds that gate's threshold (`EVENT_GATE_FAULTS`); `duplicate` and
+`missing` are read by `outcome_completeness`, not by a rate gate.
+`correlation` is reported, not
 graded — the world's within-episode shock is a knob, not a claim about the
-shop — and `dispersion` is excused under a gate or completeness fault
+shop — and `dispersion` is excused while any event gate is expected to fail
 (it bins by predicted `mu`, so a belief that `--apply` was never allowed
 to correct reads as a shape problem) and when the world's marginal was
 moved (`r_scale`, `episode_shock_sd`). A guardrail test needs the run to outlast the trailing window plus

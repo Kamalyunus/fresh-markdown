@@ -13,9 +13,9 @@ own functions -- ingest, tau walk, monitor, assurance, export, status,
 --apply on the cadence -- plus Lane C's weekly re-fit and re-seal, in a
 workspace that never touches a production artifact. Demand comes from
 evaluate.pilot_world: the frozen model's level, an ASSUMED elasticity, NB
-noise. Each template runs once under the pilot and once under the legacy
-ramp (the day after its first run closes), so the economics read
-like-for-like.
+noise. Each fresh pick's twin runs under the other arm the day after it
+closes (on a small pool a template is re-picked), so the economics read
+like-for-like: per arm, and paired over the templates settled under both.
 
 The report grades a fixed list of expectations (`EXPECTATIONS`) and reads
 the posterior against the truth it was learning. Every number is about the
@@ -23,8 +23,8 @@ WORLD it simulated (rule 19): a PASS says the machinery does what it claims
 on a shop with that elasticity, never that the shop has it.
 
 Settings live in pilot_sim.yaml at the repo root (the world, the run, the
-faults, the paths) -- apart from config.yaml on purpose, which the sim
-rehearses unchanged; every flag overrides its key for one run.
+faults, the grading, the paths) -- apart from config.yaml on purpose, which
+the sim rehearses unchanged; every flag overrides its key for one run.
 Run: python3 -m evaluate.pilot_sim [--days 21] [--epsilon-true -1.2]
         [--fault mismatch:0.03 --fault demand_shock:30:0.5 ...]
 """
@@ -50,7 +50,6 @@ from daily import assurance, export_events, monitor
 from daily import ingest_outcomes as ingest
 from daily import update
 from engine import dp as dp_mod
-from engine import explore
 from engine.decide import StateRejected, decide
 from engine.posterior import PosteriorStore
 from events.store import EventStore
@@ -63,26 +62,40 @@ from fit.train_baseline import BaselineModel, fit_level_calibration, schedule_re
 from ops import seal as seal_mod
 from ops import status
 
-LANE_HOUR = 6                      # the daily cron's hour, after yesterday closed
-
 # what a healthy run shows, each graded in `grade()`; the fault that turns
 # an expectation around is named so a fault run reads PASS when it fires
 EXPECTATIONS = (
-    ("hourly_engine", "every hour with stock is priced; no state rejected"),
+    ("hourly_engine", "every hour with stock is priced and stored; no state rejected, no event quarantined"),
     ("price_monotone_within_episode", "no applied price rises within an episode"),
     ("never_below_cost", "no applied price under cost"),
-    ("outcome_completeness", "outcomes land for >= shadow_gate.min_event_completeness of decisions (fault: missing)"),
-    ("event_quality_gates", "duplicate/unmatched and price-mismatch gates pass every day (faults: duplicate, mismatch, discount_rounding)"),
+    ("outcome_completeness", "outcomes land for >= shadow_gate.min_event_completeness of decisions (faults: missing, duplicate -- a duplicated hour matches neither row)"),
+    ("event_quality_gates", "each event-quality gate passes every day unless a fault's rate exceeds its threshold (price_mismatch_rate: mismatch, discount_rounding; duplicate_or_unmatched_rate: no sim fault reaches it)"),
     ("learning_moves_toward_truth", "every cell that updated ends closer to epsilon_true than it launched"),
     ("posterior_narrows", "every cell that updated ends with a smaller std"),
-    ("tau_walks_on_spend", "tau moved and the last week's spend sits within the clip band of its budget"),
+    ("tau_walks_on_spend", "tau moved and the last week's spend sits within grading.spend_over_budget_band of its budget"),
     ("stops_only_on_faults", "no stop condition fires without the fault that causes it; with it, the stop fires"),
-    ("exploration_never_starves", "no three consecutive days with a budget in force and nothing forced (an empty affordable set is exploration off without a stop)"),
+    ("exploration_never_starves", "no grading.starve_days consecutive days with a budget in force and nothing forced (an empty affordable set is exploration off without a stop)"),
     ("agent_level_tracks_world", "every week's mean log(agent mu_ref / world mu_ref) over the pilot's hours sits inside the calibration gate band AND the elasticity bias it implies (level error / mean forced move) inside the posterior's std (the learner has no level term and reads a level error as elasticity)"),
     ("assurance_holds", "reproduction and exploration never FAIL; dispersion never FAILs with the world's marginal untouched (correlation is reported: the world's rho is a knob)"),
     ("lane_c_keeps_the_schedule_current", "the weekly re-fit reaches every week priced, so --apply is never refused on calibration_schedule_current"),
     ("apply_ran_on_cadence", "--apply ran every learning.update_cadence_days and was refused only under a fault"),
 )
+
+# the ops.status rows that matter for a RUNNING pilot; the others (the
+# shadow gate, report vintages, the tune mirrors) grade the launch, which
+# the sim workspace is past
+STATUS_ROWS = ("launch blockers", "artifact bundle", "artifact mirrors",
+               "stop conditions", "assurance")
+
+# the event-quality gates by name and the sim faults whose RATE reaches
+# each: a mismatch lands on the compared pair; the rounding fault moves
+# every tier off the grid. `missing` and `duplicate` drop the hour's
+# OUTCOME (ingest matches neither row of a duplicated hour), which is a
+# completeness gap -- the unmatched/duplicate gate counts outcomes without
+# a decision and duplicate ids, which no sim fault produces
+EVENT_GATE_FAULTS = {"duplicate_or_unmatched_rate": (),
+                     "price_mismatch_rate": ("mismatch",)}
+COMPLETENESS_FAULTS = ("missing", "duplicate")
 
 
 # --------------------------------------------------------------- workspace
@@ -151,11 +164,13 @@ def _write_feed(rows, path):
 
 # ------------------------------------------------------------ the worker
 
-# the hourly truth, columnar (a dict per hour was the memory at 5k a day)
-TRUTH_COLS = ("episode_id", "arm", "date", "hour_of_day", "starting_inventory",
-              "units_sold", "ending_inventory", "original_price", "offered_price",
-              "cost", "category", "fc", "sku_id", "dp_eligible", "shelf_discount",
-              "mu_true", "mu_ref_world", "mu_ref_agent")
+# the hourly truth, columnar (a dict per hour was the memory at 5k a day):
+# buffered as tuples through the day, a DataFrame per day from then on
+TRUTH_COLS = ("episode_id", "template_id", "arm", "date", "hour_of_day",
+              "starting_inventory", "units_sold", "ending_inventory",
+              "original_price", "offered_price", "cost", "category", "fc",
+              "sku_id", "dp_eligible", "shelf_discount", "mu_true",
+              "mu_ref_world", "mu_ref_agent")
 HIST_COLS = ("episode_id", "sku_id", "fc", "category", "date", "hour_of_day",
              "starting_inventory", "units_sold", "total_discount")
 
@@ -208,13 +223,17 @@ def _price_chunk(args):
 
 class PilotSim:
     def __init__(self, cfg, world, sim_dir, config_path, days, episodes_per_day,
-                 seed=0, lane_hour=LANE_HOUR, raw_path=None, prepared=None,
-                 workers=None):
+                 sim_settings, seed=0, raw_path=None, prepared=None, workers=None):
         self.cfg, self.world, self.sim_dir = cfg, world, sim_dir
-        self.config_path, self.lane_hour = config_path, lane_hour
+        self.config_path = config_path
+        # the simulator's own knobs (pilot_sim.yaml `grading`), never the
+        # system's: the lane's hour, the history margin, the grading bands
+        self.grading = {k: sim_settings[k] for k in SIM_KEYS["grading"]}
+        self.lane_hour = int(self.grading["lane_hour"])
         self.raw_path = raw_path
-        self.dates = [(pd.Timestamp(cfg["data"]["launch_date"]) + pd.Timedelta(days=k))
-                      .strftime("%Y-%m-%d") for k in range(days)]
+        launch = pd.Timestamp(cfg["data"]["launch_date"])
+        self.dates = [(launch + pd.Timedelta(days=k)).strftime("%Y-%m-%d")
+                      for k in range(days)]
         # `episodes_per_day` is the day's total, split across the two arms
         self.per_day = max(int(episodes_per_day) // 2, 1)
         self.workers = resolve_workers(workers)
@@ -228,19 +247,30 @@ class PilotSim:
         self.digest = provenance.config_fingerprint(cfg)["digest"]
         self.tier_step = cfg["pricing"]["tier_step"]
         # the feature service's history: the prepared extract plus every
-        # simulated hour, in the prepared vocabulary
-        hist = prepared.copy()
+        # simulated hour, in the prepared vocabulary. The features read a
+        # trailing window, so a prepared row older than launch minus that
+        # window (plus the margin) can never be read: sliced ONCE here
+        self.history_days = (int(cfg["baseline_model"]["ref_rate_window_days"])
+                             + int(self.grading["feature_history_margin_days"]))
+        hist = prepared[list(HIST_COLS)].copy()
         hist["date"] = hist.date.astype(str)
-        self.history = hist[["episode_id", "sku_id", "fc", "category", "date",
-                             "hour_of_day", "starting_inventory", "units_sold",
-                             "total_discount"]]
-        self.sim_history = []
+        since = (launch - pd.Timedelta(days=self.history_days)).strftime("%Y-%m-%d")
+        self.history = hist[hist.date >= since].reset_index(drop=True)
+        # the day's hours as tuples, a DataFrame per day once it closes
+        # (the run's whole truth as flat tuples was the memory at 5k a day)
+        self._truth_rows, self._hist_rows = [], []
+        self.truth_frames, self.sim_frames = {}, {}       # date -> DataFrame
         self.open, self.pending, self.busy = [], {}, set()
         self.twins_due = {}                  # date -> [(arm, template)]
+        self._twin_of = {}                   # (arm, template_id, date) -> twin arm
+        self.shock_by_template = {}          # the per-episode shock, shared by twins
+        # the feed rows not yet written to sim_dir/feed (the lane writes a
+        # day and drops it; Lane C reads the written days back from disk)
         self.feed_by_day, self.failures_by_day = {}, {}
-        self.truth = []
+        self.feed_written = []               # dates whose parquet is on disk
         self.days = []
         self.rejected = {}
+        self.quarantined = 0
         self.launch_cells = copy.deepcopy(self.posterior.state["cells"])
         self.launch_tau = self.posterior.tau(cfg)
         self.violations = {"price_rose_within_episode": 0, "below_cost": 0}
@@ -259,6 +289,7 @@ class PilotSim:
                         self.days.append(self.daily_lane(k))
                     self._open_due(k, date, hour)
                     self._tick(k, date, hour)
+                self._close_day(date)
                 print(f"  day {k + 1}/{len(self.dates)} {date}: "
                       f"{self.opened_by_day.get(date, 0)} episodes opened, "
                       f"{len(self.open)} open", flush=True)
@@ -266,6 +297,20 @@ class PilotSim:
             if self.pool is not None:
                 self.pool.shutdown()
         return self.report()
+
+    def _close_day(self, date):
+        """The day's hours, buffered as tuples, become its frames."""
+        self.truth_frames[date] = pd.DataFrame(self._truth_rows, columns=TRUTH_COLS)
+        self.sim_frames[date] = pd.DataFrame(self._hist_rows, columns=HIST_COLS)
+        self._truth_rows, self._hist_rows = [], []
+
+    def truth(self):
+        """Every simulated hour so far, one frame (concatenated once)."""
+        frames = list(self.truth_frames.values())
+        if self._truth_rows:
+            frames.append(pd.DataFrame(self._truth_rows, columns=TRUTH_COLS))
+        return (pd.concat(frames, ignore_index=True) if frames
+                else pd.DataFrame(columns=TRUTH_COLS))
 
     def _tick(self, k, date, hour):
         """One hour: every open pilot episode due now is priced in one batch
@@ -302,12 +347,13 @@ class PilotSim:
         return out
 
     def _sample_day(self, k, date):
-        """Each arm opens `per_day` episodes a day: the twins due (a
-        template runs under the OTHER arm the day after its first run
-        closes -- never while its sku x fc is still open, or the feed would
-        hold two states for one hour) plus fresh templates to fill up. Every
-        fresh pick gets a twin, so each template runs once under each
-        policy on the same world."""
+        """Each arm opens `per_day` episodes a day: the twins due (a fresh
+        pick's twin runs under the OTHER arm the day after it closes --
+        never while its sku x fc is still open, or the feed would hold two
+        states for one hour; a busy twin waits a day) plus fresh templates
+        to fill up. Every fresh pick gets a twin; on a small pool a template
+        is re-picked, so the paired economics are computed over the
+        templates settled under both arms, never assumed."""
         pilot, legacy = [], []
         for arm, t in self.twins_due.pop(date, []):
             if (t["sku_id"], t["fc"]) in self.busy:          # still open: tomorrow
@@ -332,32 +378,29 @@ class PilotSim:
             need[arm] -= 1
             (pilot if arm == "pilot" else legacy).append(t)
             self.busy.add(key)
-            t_twin = "legacy" if arm == "pilot" else "pilot"
-            self._twin_of = getattr(self, "_twin_of", {})
-            self._twin_of[(arm, t["template_id"], date)] = t_twin
+            self._twin_of[(arm, t["template_id"], date)] = \
+                "legacy" if arm == "pilot" else "pilot"
         openings = []
         for arm, temps in (("pilot", pilot), ("legacy", legacy)):
             for t in temps:
                 eid = f"sim|{arm}|{t['sku_id']}|{t['fc']}|{date}T{t['opening_hour']:02d}"
+                # the episode's shock is drawn at its first opening and
+                # shared by its twin: the pair sees the same world
+                if t["template_id"] not in self.shock_by_template:
+                    self.shock_by_template[t["template_id"]] = self.world.episode_shock()
                 openings.append({"arm": arm, "episode_id": eid, "template": t,
                                  "grid": hour_grid(date, t["opening_hour"], t["n_hours"]),
                                  "t": 0, "q": t["q0"], "anchor": None, "day": k,
-                                 "shock": self.world.episode_shock(),
+                                 "shock": self.shock_by_template[t["template_id"]],
                                  "twin": self._twin_of.pop((arm, t["template_id"], date), None)})
         # the two demand-rate features, point-in-time, by the one home
         stub = pd.DataFrame([{
             "episode_id": o["episode_id"], "sku_id": o["template"]["sku_id"],
             "fc": o["template"]["fc"], "category": o["template"]["category"],
             "date": date, "hour_of_day": o["template"]["opening_hour"],
-            "starting_inventory": o["q"]} for o in openings])
-        hist = self.history
-        if self.sim_history:
-            hist = pd.concat([hist, pd.DataFrame(self.sim_history, columns=HIST_COLS)],
-                             ignore_index=True)
-        since = (pd.Timestamp(date) - pd.Timedelta(
-            days=self.cfg["baseline_model"]["ref_rate_window_days"] + 14)
-        ).strftime("%Y-%m-%d")
-        feats = ref_rate_features(hist[hist.date >= since], stub, self.cfg)
+            "starting_inventory": o["q"]} for o in openings],
+            columns=list(HIST_COLS[:7]))
+        feats = ref_rate_features(self._feature_history(date), stub, self.cfg)
         for o in openings:
             o["features"] = feats[o["episode_id"]]
         # one prediction per model for the whole day's openings
@@ -369,6 +412,16 @@ class PilotSim:
         self.pending[date] = openings
         self.opened_by_day[date] = len(openings)
 
+    def _feature_history(self, date):
+        """The feature service's history as of `date`: the prepared rows and
+        the simulated days inside the trailing window the features read --
+        only those frames are concatenated."""
+        since = (pd.Timestamp(date) - pd.Timedelta(days=self.history_days)
+                 ).strftime("%Y-%m-%d")
+        frames = [self.history[self.history.date >= since]]
+        frames += [f for d, f in self.sim_frames.items() if d >= since and len(f)]
+        return pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+
     def _schedule_twin(self, arm, template, after_date):
         day = (pd.Timestamp(after_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
         self.twins_due.setdefault(day, []).append((arm, template))
@@ -378,6 +431,8 @@ class PilotSim:
             if o["template"]["opening_hour"] == hour:
                 self.pending[date].remove(o)
                 self.open.append(o)
+        if date in self.pending and not self.pending[date]:
+            del self.pending[date]
 
     # ------------------------------------------------------------ hours
 
@@ -403,7 +458,10 @@ class PilotSim:
         applied = None
         if res["evt"] is not None:
             evt = res["evt"]
-            self.store.emit_decision(evt)
+            # the store validates on emit: a refused event is quarantined,
+            # and an hour priced but never stored is graded (hourly_engine)
+            if not self.store.emit_decision(evt):
+                self.quarantined += 1
             applied = float(evt["applied_discount"])
             if ep["anchor"] is not None and applied < ep["anchor"] - dp_mod.TIER_EPS:
                 self.violations["price_rose_within_episode"] += 1
@@ -458,14 +516,17 @@ class PilotSim:
             if self.world.draw_fault("duplicate"):
                 self.feed_by_day[date].append(dict(row))
         # TRUTH_COLS order; the two levels at the reference -- the world's
-        # and the agent's (its own re-fit factors) -- are the level error
-        # the elasticity learner, which has no level term, absorbs
-        self.truth.append((
-            ep["episode_id"], ep["arm"], date, hour, q, sold, ending,
-            tpl["original_price"], tpl["original_price"] * (1 - shelf), tpl["cost"],
-            tpl["category"], tpl["fc"], tpl["sku_id"], True, shelf, mu,
-            ep["mu_world"][t], ep["mu_agent"][t] if ep["arm"] == "pilot" else None))
-        self.sim_history.append((                    # HIST_COLS order
+        # (the frozen prediction times the day's drift and shock fault,
+        # World.level_multiplier: what the re-fit should track) and the
+        # agent's (its own re-fit factors) -- are the level error the
+        # elasticity learner, which has no level term, absorbs
+        self._truth_rows.append((
+            ep["episode_id"], tpl["template_id"], ep["arm"], date, hour, q, sold,
+            ending, tpl["original_price"], tpl["original_price"] * (1 - shelf),
+            tpl["cost"], tpl["category"], tpl["fc"], tpl["sku_id"], True, shelf, mu,
+            ep["mu_world"][t] * self.world.level_multiplier(k),
+            ep["mu_agent"][t] if ep["arm"] == "pilot" else None))
+        self._hist_rows.append((                     # HIST_COLS order
             ep["episode_id"], tpl["sku_id"], tpl["fc"], tpl["category"], date, hour,
             q, sold, shelf))
         ep["q"], ep["anchor"], ep["t"] = left, shelf, t + 1
@@ -483,24 +544,31 @@ class PilotSim:
         cfg, today, yesterday = self.cfg, self.dates[k], self.dates[k - 1]
         lane = {"day": k, "date": yesterday, "lane_c": None}
         # Lane C on ops.advance's own rule: the schedule must reach one week
-        # past the latest data's week (the week being priced); the first
-        # morning always re-fits, since the sealed schedule is pre-launch
+        # past the latest data's week (episodes.week_after of the max date
+        # Lane C would prepare -- the feed's, today's early hours included);
+        # the first morning always re-fits, since the sealed schedule is
+        # pre-launch
         cal = read_json(cfg["baseline_model"]["calibration_factor_path"]) or {}
         reaches = schedule_reaches(cal.get("schedule") or {}) or ""
-        expected = (episodes.week_start(yesterday)
-                    + pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+        latest = max(self.feed_written + list(self.feed_by_day), default=yesterday)
+        expected = episodes.week_after(latest)
         if reaches < expected or not self.lane_c_runs:
             lane["lane_c"] = self.lane_c(k)
         lane["calibration_current"] = update.calibration_current(cfg, today)
 
+        # yesterday's feed goes to disk and out of memory: from here Lane C
+        # reads the day back from its parquet
         feed_path = os.path.join(self.sim_dir, "feed", f"{yesterday}.parquet")
-        feed = _write_feed(self.feed_by_day.get(yesterday, []), feed_path)
-        failures = None
-        if self.failures_by_day.get(yesterday):
+        feed = _write_feed(self.feed_by_day.pop(yesterday, []), feed_path)
+        self.feed_written.append(yesterday)
+        failures, failed = None, self.failures_by_day.pop(yesterday, None)
+        if failed:
             failures = os.path.join(self.sim_dir, "feed", f"{yesterday}-failures.jsonl")
             with open(failures, "w") as f:
-                for r in self.failures_by_day[yesterday]:
+                for r in failed:
                     f.write(json.dumps(r) + "\n")
+        # ONE store for the morning: ingest emits through it, the monitor,
+        # assurance and the export read it (update.run builds its own)
         store = EventStore(cfg)
         outcomes, rep = ingest.build_outcomes(store.load_decisions(), feed,
                                               ingest.load_failures(failures))
@@ -517,12 +585,14 @@ class PilotSim:
         walk = update.run(cfg, calibrate_tau=True)
         tc = walk["tau_calibration"]
         lane["gates"] = {n: g["pass"] for n, g in walk["event_quality_gates"].items()}
+        # every row the controller walked this morning (engine.explore
+        # .walk_tau: day, spend, budget, tau, tau_after, clipped, held)
         lane["tau"] = {"before": tc["tau_before"], "after": tc["tau_after"],
                        "committed": walk.get("tau_committed", False),
                        "skipped": tc.get("skipped"),
-                       "last_day": (tc["by_day"][-1] if tc.get("by_day") else None)}
+                       "walked": list(tc.get("by_day") or [])}
 
-        mon = monitor.build_report(EventStore(cfg), PosteriorStore(cfg), cfg)
+        mon = monitor.build_report(store, PosteriorStore(cfg), cfg)
         write_json(os.path.join(self.sim_dir, "reports", "monitor.json"), mon)
         lane["stops"] = {n: v for n, v in mon["stop_conditions"]["fired"].items()}
         lane["guardrails"] = {n: {"latest": g.get("latest"),
@@ -537,7 +607,6 @@ class PilotSim:
                              "realised_exploration_cost", "tau_current",
                              "posterior_std_flat_alert")}
 
-        store = EventStore(cfg)
         ass = assurance.run(store.load_decisions(), store.load_outcomes(), cfg)
         write_json(os.path.join(self.sim_dir, "reports", "assurance.json"), ass)
         lane["assurance"] = {n: ass[n]["verdict"] for n in
@@ -549,8 +618,13 @@ class PilotSim:
             "uniformity_max_bin_deviation": ass["exploration"].get("max_bin_deviation")}
 
         export_events.export(store, os.path.join(self.sim_dir, "exports"), since=yesterday)
+        # status runs whole, as the lane does; recorded are the rows that
+        # matter for a RUNNING pilot (the pre-launch rows -- the shadow
+        # gate, report vintages -- read the sim workspace as stale)
         st = status.collect(cfg, os.path.join(self.sim_dir, "reports"))
-        lane["status_failing"] = st["failing"]
+        lane["status_failing"] = [
+            {"check": r["check"], "verdict": r["verdict"], "detail": r["detail"]}
+            for r in st["checks"] if r["check"] in STATUS_ROWS and r["verdict"] != "PASS"]
 
         cadence = int(cfg["learning"]["update_cadence_days"])
         if k % cadence == 0:
@@ -575,22 +649,19 @@ class PilotSim:
         """The weekly cron: the extract refreshed with every simulated hour
         so far (as the source would report it, faults included), prepared,
         the level factors re-fit to the week being priced, the bundle
-        re-sealed, the agent's model re-read."""
+        re-sealed, the agent's model re-read -- and every open pilot
+        episode re-priced on it from its next hour, as production would."""
         cfg = self.cfg
-        rows = [r for rows in self.feed_by_day.values() for r in rows]
-        raw = pd.read_parquet(self.raw_path)[[f.name for f in FEED_SCHEMA]]
-        full = pd.concat([raw, World.feed_frame(rows)], ignore_index=True) if rows else raw
         raw_sim = os.path.join(self.sim_dir, "raw_sim.parquet")
-        pq.write_table(pa.Table.from_pandas(full, schema=FEED_SCHEMA,
-                                            preserve_index=False), raw_sim)
+        self._write_raw_sim(raw_sim)
         d, wf = prepare_data.load_and_filter(raw_sim, cfg)
-        d.to_parquet(os.path.join(self.sim_dir, "prepared_sim.parquet"), index=False)
         prepare_data.write_manifest(cfg["data"]["split_manifest_path"], cfg, wf)
         fit_level_calibration(d, cfg)
         cal = read_json(cfg["baseline_model"]["calibration_factor_path"])
         sched = cal["schedule"]
         bundle = _seal(cfg, self.config_path, "weekly-refit")
         self.model = BaselineModel(cfg)
+        self._repredict_open_pilot()
         run = {"day": k, "date": self.dates[k], "bundle": bundle,
                "schedule_end": schedule_reaches(sched),
                "last_fitted_week": max(sched["by_week"]) if sched["by_week"] else None,
@@ -600,30 +671,62 @@ class PilotSim:
         self.lane_c_runs.append(run)
         return run
 
+    def _write_raw_sim(self, path):
+        """The raw extract plus every feed row so far, in the source schema,
+        streamed: the raw file's row groups are copied batch by batch, the
+        written feed days appended from their parquets, the days not yet
+        written from memory -- the raw extract never enters pandas here."""
+        names = [f.name for f in FEED_SCHEMA]
+        with pq.ParquetWriter(path, FEED_SCHEMA) as writer:
+            for src in [self.raw_path] + [
+                    os.path.join(self.sim_dir, "feed", f"{d}.parquet")
+                    for d in sorted(self.feed_written)]:
+                for batch in pq.ParquetFile(src).iter_batches(columns=names):
+                    writer.write_table(pa.Table.from_batches([batch])
+                                       .select(names).cast(FEED_SCHEMA))
+            rows = [r for d in sorted(self.feed_by_day) for r in self.feed_by_day[d]]
+            if rows:
+                writer.write_table(pa.Table.from_pandas(
+                    World.feed_frame(rows), schema=FEED_SCHEMA, preserve_index=False))
+
+    def _repredict_open_pilot(self):
+        """After a re-fit the hours still to come price on the new factors:
+        `mu_agent` from each open pilot episode's next hour on (and every
+        hour of the day's pilot openings not yet open) is predicted again
+        with the model now in force -- the grid from t onward."""
+        eps = [ep for ep in self.open if ep["arm"] == "pilot"]
+        eps += [o for opened in self.pending.values() for o in opened
+                if o["arm"] == "pilot"]
+        stubs = [{"template": ep["template"], "grid": ep["grid"][ep["t"]:],
+                  "features": ep["features"]} for ep in eps]
+        for ep, path in zip(eps, self.world.mu_ref_paths(stubs, model=self.model)):
+            ep["mu_agent"] = list(ep["mu_agent"][:ep["t"]]) + list(path)
+
     # ----------------------------------------------------------- report
 
-    def economics(self):
+    def economics(self, truth=None):
         """Both arms through the one episode frame (metrics.episode_economics
-        over metrics.settled), like-for-like: same templates, same world."""
-        df = pd.DataFrame(self.truth, columns=TRUTH_COLS)
-        out = {}
+        over metrics.settled): per arm over everything settled, and PAIRED
+        over the templates settled under both arms (a twin postponed past
+        the run's end, or a template re-picked, leaves the arms' template
+        sets unequal -- `unpaired_templates` counts them)."""
+        df = self.truth() if truth is None else truth
+        settled = {}
         for arm, g in df.groupby("arm"):
             ep, excluded = metrics.settled(metrics.episode_economics(g))
-            den = float(ep.denom.sum())
-            units = float(ep.units_sold.sum() + ep.scrap.sum())
-            out[arm] = {
-                "episodes": int(len(ep)), "hours": int(len(g)),
-                "il_absolute": round(float(ep.il.sum()), 1),
-                "il_pct": round(float(ep.il.sum() / den), 6) if den > 0 else None,
-                "il_pct_denominator": round(den, 1),
-                "scrap_units": int(ep.scrap.sum()),
-                "scrap_rate": round(float(ep.scrap.sum() / ep.supply.sum()), 4)
-                if ep.supply.sum() > 0 else None,
-                "sell_through": round(float(ep.units_sold.sum() / units), 4) if units else None,
-                "margin": round(float(ep.margin.sum()), 1),
-                "mean_discount": round(float(g.shelf_discount.mean()), 4),
-                "excluded": excluded,
-            }
+            settled[arm] = (g, ep, excluded)
+        out = {arm: _arm_economics(g, ep, excluded)
+               for arm, (g, ep, excluded) in settled.items()}
+        template_of = df.drop_duplicates("episode_id").set_index("episode_id").template_id
+        by_arm = {arm: set(template_of.reindex(ep.index)) for arm, (_, ep, _) in settled.items()}
+        both = set.intersection(*by_arm.values()) if len(by_arm) == 2 else set()
+        paired = {"templates": len(both),
+                  "unpaired_templates": len(set.union(*by_arm.values()) - both)
+                  if by_arm else 0}
+        for arm, (g, ep, _) in settled.items():
+            mine = ep[template_of.reindex(ep.index).isin(both).to_numpy()]
+            paired[arm] = _arm_economics(g, mine, {})
+        out["paired"] = paired
         return out
 
     def learning(self):
@@ -633,41 +736,54 @@ class PilotSim:
         out = {}
         for c, rec in cells.items():
             members = [cat for cat, cell in cell_of.items() if cell == c] or list(truth)
-            eps = float(np.mean([truth[m] for m in members if m in truth]))
+            known = [truth[m] for m in members if m in truth]
+            # a cell none of whose categories the world simulates has no
+            # truth to grade against: reported, never averaged over nothing
+            eps = float(np.mean(known)) if known else None
             launch = self.launch_cells[c]
-            out[c] = {"members": members, "epsilon_true": round(eps, 4),
+            out[c] = {"members": members,
+                      "epsilon_true": round(eps, 4) if eps is not None else None,
                       "launch_mean": launch["mean"], "launch_std": launch["std"],
                       "mean": rec["mean"], "std": rec["std"], "n_obs": rec["n_obs"],
                       "version": rec["version"],
-                      "abs_error_at_launch": round(abs(launch["mean"] - eps), 4),
-                      "abs_error_now": round(abs(rec["mean"] - eps), 4),
+                      "abs_error_at_launch": (round(abs(launch["mean"] - eps), 4)
+                                              if eps is not None else None),
+                      "abs_error_now": (round(abs(rec["mean"] - eps), 4)
+                                        if eps is not None else None),
                       "accumulated_information": round(rec["accumulated_information"], 3)}
         return out
 
-    def level_tracking(self):
+    def level_tracking(self, decisions, truth=None):
         """Per ISO week, the mean log ratio of the agent's mu_ref to the
         world's over the pilot's priced hours: 0 when the weekly re-fit
         reproduces the world's level, off by the re-fit's error otherwise.
         The elasticity learner reads every outcome against the agent's
         mu_ref and carries no level term, so a level error this size is
         read as elasticity -- the diagnostic that tells a learning FAIL
-        from a re-fit artefact."""
-        df = pd.DataFrame(self.truth, columns=TRUTH_COLS)
+        from a re-fit artefact. `decisions` is the store's list, loaded
+        once by the caller."""
+        df = self.truth() if truth is None else truth
         df = df[df.arm == "pilot"]
         if df.empty:
             return {}
-        df["log_ratio"] = np.log(df.mu_ref_agent / df.mu_ref_world)
-        df["week"] = episodes.week_key(df.date)
+        df = df.assign(log_ratio=np.log(df.mu_ref_agent.astype(float)
+                                        / df.mu_ref_world.astype(float)),
+                       week=episodes.week_key(df.date))
         # the lever the learner identifies elasticity with: the forced
-        # moves' log price ratio. A level error of e read against moves of
-        # mean L is an elasticity error of about e / L -- small moves make
-        # the learner hypersensitive to the level
-        forced = pd.DataFrame([{"week": episodes.week_key(pd.Series([d["date"]]))[0],
-                                "move": explore.log_move(d["reference_discount"],
-                                                         d["applied_discount"])}
-                               for d in self.store.load_decisions()
-                               if d["is_exploration"]])
-        moves = forced.groupby("week").move.mean() if len(forced) else pd.Series(dtype=float)
+        # moves' SIGNED log price ratio, log((1 - applied) / (1 - reference))
+        # -- negative for a deeper move. A level error of e read against
+        # moves of mean L is an elasticity error of about -e / L (e > 0
+        # and L < 0 bias the belief toward zero); small moves make the
+        # learner hypersensitive to the level
+        forced = pd.DataFrame([(d["date"], d["reference_discount"], d["applied_discount"])
+                               for d in decisions if d["is_exploration"]],
+                              columns=["date", "reference_discount", "applied_discount"])
+        if len(forced):
+            forced["move"] = np.log((1.0 - forced.applied_discount.astype(float))
+                                    / (1.0 - forced.reference_discount.astype(float)))
+            moves = forced.groupby(episodes.week_key(forced.date)).move.mean()
+        else:
+            moves = pd.Series(dtype=float)
         out = {}
         for wk, g in df.groupby("week"):
             e = float(g.log_ratio.mean())
@@ -683,7 +799,8 @@ class PilotSim:
         return out
 
     def report(self):
-        decisions = self.store.load_decisions()
+        decisions = self.store.load_decisions()             # once, for every reader
+        truth = self.truth()
         n_dec = len(decisions)
         forced = sum(1 for d in decisions if d["is_exploration"])
         rep = {
@@ -706,18 +823,40 @@ class PilotSim:
                 "forced_share": round(forced / n_dec, 4) if n_dec else None,
                 "rejected": self.rejected,
                 "rejected_total": int(sum(self.rejected.values())),
+                "quarantined": int(self.quarantined),
                 "violations": self.violations,
-                "pilot_hours": int(sum(1 for r in self.truth if r[1] == "pilot")),
+                "pilot_hours": int((truth.arm == "pilot").sum()),
                 "tau_at_launch": self.launch_tau, "tau_now": self.posterior.tau(self.cfg),
             },
             "learning": self.learning(),
-            "economics": self.economics(),
+            "economics": self.economics(truth),
             "lane_c": self.lane_c_runs,
-            "level_tracking": self.level_tracking(),
+            "level_tracking": self.level_tracking(decisions, truth),
             "days": self.days,
         }
-        rep["expectations"] = grade(rep, self.cfg)
+        rep["expectations"] = grade(rep, self.cfg, self.grading)
         return rep
+
+
+def _arm_economics(hours, ep, excluded):
+    """One arm's figures from its hourly frame and its SETTLED episode
+    frame; the mean discount is over the settled episodes' hours only."""
+    den = float(ep.denom.sum())
+    units = float(ep.units_sold.sum() + ep.scrap.sum())
+    mine = hours[hours.episode_id.isin(ep.index)]
+    return {
+        "episodes": int(len(ep)), "hours": int(len(mine)),
+        "il_absolute": round(float(ep.il.sum()), 1),
+        "il_pct": round(float(ep.il.sum() / den), 6) if den > 0 else None,
+        "il_pct_denominator": round(den, 1),
+        "scrap_units": int(ep.scrap.sum()),
+        "scrap_rate": round(float(ep.scrap.sum() / ep.supply.sum()), 4)
+        if ep.supply.sum() > 0 else None,
+        "sell_through": round(float(ep.units_sold.sum() / units), 4) if units else None,
+        "margin": round(float(ep.margin.sum()), 1),
+        "mean_discount": round(float(mine.shelf_discount.mean()), 4) if len(mine) else None,
+        "excluded": excluded,
+    }
 
 
 # ------------------------------------------------------------------ grading
@@ -728,20 +867,49 @@ def _verdict(ok, measured=True):
     return "PASS" if ok else "FAIL"
 
 
-def grade(rep, cfg):
+def _fault_rate(faults, *names):
+    """The summed rate of the named faults in force (a rate-less fault --
+    `discount_rounding`, `demand_shock` -- contributes nothing here)."""
+    return sum(float(faults[n]) for n in names
+               if n in faults and isinstance(faults[n], (int, float))
+               and not isinstance(faults[n], bool))
+
+
+def expected_gate_failures(faults, cfg):
+    """{gate name: should it fail}: an event-quality gate is expected to
+    fail only when the rate of the faults that reach it exceeds ITS
+    threshold (`EVENT_GATE_FAULTS`); `discount_rounding` always moves the
+    price-mismatch gate (every tier off the grid)."""
+    sc = cfg["monitoring"]["stop_conditions"]
+    out = {name: _fault_rate(faults, *fs) > sc[name]
+           for name, fs in EVENT_GATE_FAULTS.items()}
+    out["price_mismatch_rate"] |= bool(faults.get("discount_rounding"))
+    return out
+
+
+def grade(rep, cfg, sim_settings):
     """EXPECTATIONS against the run. A fault that is present turns its
-    expectation around: the gate/stop it targets must fire."""
+    expectation around: the gate/stop it targets must fire. `cfg` is the
+    system's config (its thresholds are what the lane compared against);
+    `sim_settings` carries the simulator's own grading knobs
+    (pilot_sim.yaml `grading`)."""
     faults = rep["world"]["faults"]
     days = rep["days"]
     eng = rep["engine"]
+    gr = sim_settings
     out = []
 
     def add(name, ok, observed, measured=True):
         out.append({"name": name, "expected": dict(EXPECTATIONS)[name],
                     "verdict": _verdict(ok, measured), "observed": observed})
 
-    add("hourly_engine", eng["decisions"] > 0 and eng["rejected_total"] == 0,
-        {"decisions": eng["decisions"], "rejected": eng["rejected"]})
+    # every pilot hour is a decision, a rejection or a quarantined event
+    quarantined = int(eng.get("quarantined", 0))
+    accounted = eng["decisions"] + eng["rejected_total"] + quarantined
+    add("hourly_engine", eng["decisions"] > 0 and eng["rejected_total"] == 0
+        and quarantined == 0 and eng["pilot_hours"] == accounted,
+        {"decisions": eng["decisions"], "rejected": eng["rejected"],
+         "quarantined": quarantined, "pilot_hours": eng["pilot_hours"]})
     add("price_monotone_within_episode", eng["violations"]["price_rose_within_episode"] == 0,
         eng["violations"])
     add("never_below_cost", eng["violations"]["below_cost"] == 0, eng["violations"])
@@ -752,20 +920,33 @@ def grade(rep, cfg):
     gaps = sum(i["decisions_without_feed_row"] for i in ing)
     completeness = built / (built + gaps) if built + gaps else None
     floor = cfg["monitoring"]["shadow_gate"]["min_event_completeness"]
-    expect_gap = "missing" in faults
+    # a missing row and a duplicated hour (ingest matches neither state)
+    # both cost the decision its outcome: a gap is expected once their
+    # summed rate exceeds what the floor admits
+    gap_rate = _fault_rate(faults, *COMPLETENESS_FAULTS)
+    expect_gap = gap_rate > 1 - floor
     ok = completeness is not None and ((completeness >= floor) != expect_gap)
     add("outcome_completeness", ok,
         {"completeness": round(completeness, 4) if completeness is not None else None,
-         "floor": floor, "fault_expects_a_gap": expect_gap, "decisions_due": due},
+         "floor": floor, "fault_expects_a_gap": expect_gap,
+         "fault_gap_rate": round(gap_rate, 4), "decisions_due": due},
         measured=completeness is not None)
 
-    gate_fail_days = [d["date"] for d in days if not all(d["gates"].values())]
-    expect_fail = any(f in faults for f in ("duplicate", "mismatch", "discount_rounding"))
-    add("event_quality_gates", bool(gate_fail_days) == expect_fail,
-        {"days_a_gate_failed": gate_fail_days, "fault_expects_a_failure": expect_fail},
+    # per gate, by name: the calibration gate is graded by
+    # lane_c_keeps_the_schedule_current, not here
+    expect_by_gate = expected_gate_failures(faults, cfg)
+    failed_by_gate = {name: [d["date"] for d in days if d["gates"].get(name) is False]
+                      for name in expect_by_gate}
+    gates_off = [name for name, exp in expect_by_gate.items()
+                 if bool(failed_by_gate[name]) != exp]
+    expect_fail = any(expect_by_gate.values())
+    add("event_quality_gates", not gates_off,
+        {"days_a_gate_failed": failed_by_gate, "fault_expects_a_failure": expect_by_gate,
+         "gates_off_expectation": gates_off},
         measured=bool(days))
 
-    learned = {c: r for c, r in rep["learning"].items() if r["version"] > 0}
+    learned = {c: r for c, r in rep["learning"].items()
+               if r["version"] > 0 and r["epsilon_true"] is not None}
     add("learning_moves_toward_truth",
         all(r["abs_error_now"] < r["abs_error_at_launch"] for r in learned.values()),
         {c: {"launch": r["abs_error_at_launch"], "now": r["abs_error_now"]}
@@ -782,9 +963,10 @@ def grade(rep, cfg):
     tol = max(abs(np.log(band[0])), abs(np.log(band[1])))
     level = rep.get("level_tracking") or {}
     std_by_week = {}
-    for d in days:
-        wk = episodes.week_key(pd.Series([d["date"]]))[0]
-        std_by_week[wk] = max(r["std"] for r in d["posterior"].values())
+    if days:
+        weeks = episodes.week_key(pd.Series([d["date"] for d in days]))
+        for d, wk in zip(days, weeks):
+            std_by_week[wk] = max(r["std"] for r in d["posterior"].values())
     off = {}
     for wk, v in level.items():
         bias, std = v.get("implied_elasticity_bias"), std_by_week.get(wk)
@@ -801,14 +983,20 @@ def grade(rep, cfg):
 
     # the controller moves tau by at most the clip per day, so a launch tau
     # far from this world's budget needs a week or more to arrive: graded
-    # on the last seven walked days, and only once there are seven
-    walked = [d["tau"]["last_day"] for d in days
-              if d["tau"].get("last_day") and d["tau"].get("committed")]
-    lo, hi = cfg["exploration"]["tau_adjust_clip"]
-    # held days (no base yet) are not walks: the week graded is the last
-    # seven days the controller actually moved on
+    # on the last `tau_week_days` days the controller actually MOVED on
+    # (held days -- no base yet -- are not walks), once there are that
+    # many, against the sim's own spend-over-budget band (the clip bounds
+    # the daily step, not the ratio)
+    walked = {}
+    for d in days:
+        if d["tau"].get("committed"):
+            for w in d["tau"].get("walked") or []:
+                walked[w["day"]] = w                  # a day walked once
+    walked = [walked[day] for day in sorted(walked)]
     live = [w for w in walked if not w.get("held")]
-    week = live[-7:]
+    week_days = int(gr["tau_week_days"])
+    lo, hi = gr["spend_over_budget_band"]
+    week = live[-week_days:]
     ratios = [w["spend"] / w["budget"] for w in week if w["budget"] > 0]
     ratio = float(np.mean(ratios)) if ratios else None
     moved = eng["tau_now"] != eng["tau_at_launch"]
@@ -817,19 +1005,24 @@ def grade(rep, cfg):
     add("tau_walks_on_spend", moved and ratio is not None and lo <= ratio <= hi,
         {"tau_at_launch": eng["tau_at_launch"], "tau_now": eng["tau_now"],
          "last_week_spend_over_budget": round(ratio, 3) if ratio is not None else None,
-         "band": [lo, hi], "days_walked": len(live), "days_held": held,
-         "days_exploration_suspended": suspended},
-        measured=len(live) >= 7)
+         "band": [lo, hi], "week_days": week_days, "days_walked": len(live),
+         "days_held": held, "days_exploration_suspended": suspended},
+        measured=len(live) >= week_days)
 
     fired = {}
     for d in days:
         for name, v in d["stops"].items():
             if v is True:
                 fired.setdefault(name, []).append(d["date"])
-    causes = {"duplicate_or_unmatched": ("duplicate", "missing"),
-              "price_mismatch": ("mismatch", "discount_rounding"),
-              "scrap_deterioration_pct": ("demand_shock",),
-              "margin_deterioration_pct": ("demand_shock",)}
+    # the stop behind each event gate fires on the gate's own rate: the
+    # same per-gate expectation
+    stop_of_gate = {"duplicate_or_unmatched_rate": "duplicate_or_unmatched",
+                    "price_mismatch_rate": "price_mismatch"}
+    causes = {stop_of_gate[g]: EVENT_GATE_FAULTS[g] + (("discount_rounding",)
+                                                       if g == "price_mismatch_rate" else ())
+              for g in stop_of_gate}
+    causes.update({"scrap_deterioration_pct": ("demand_shock",),
+                   "margin_deterioration_pct": ("demand_shock",)})
     unexpected = [n for n in fired if not any(f in faults for f in causes.get(n, ()))]
     # the guardrail compares against its own trailing window, smoothed,
     # over persistence_days: a shock can only be seen once the run is
@@ -840,10 +1033,11 @@ def grade(rep, cfg):
     guardrail_ready = (shock_day is not None
                        and len(days) >= mc["guardrail_noise_window_days"] + settle
                        and len(days) >= shock_day + settle + 1)
-    expected_missing = [n for n, fs in causes.items()
-                        if any(f in faults for f in fs) and n not in fired
-                        and (n in ("duplicate_or_unmatched", "price_mismatch")
-                             or (n == "scrap_deterioration_pct" and guardrail_ready))]
+    expected_missing = [stop_of_gate[g] for g, exp in expect_by_gate.items()
+                        if exp and stop_of_gate[g] not in fired]
+    if "demand_shock" in faults and guardrail_ready \
+            and "scrap_deterioration_pct" not in fired:
+        expected_missing.append("scrap_deterioration_pct")
     # a shock the series SAW (the scrap deviation moved worse) that still
     # sits under the owner's floor is this world's reach, not a silent
     # stop: reported with the reading, not graded
@@ -863,6 +1057,7 @@ def grade(rep, cfg):
 
     # forced per day from the monitor's cumulative count; a day with a tau
     # in force (not suspended) and no forced decision is exploration off
+    starve_days = int(gr["starve_days"])
     starved, streak, worst = [], 0, 0
     prev = 0
     for d in days:
@@ -870,10 +1065,10 @@ def grade(rep, cfg):
         prev = d["learning"]["forced_decision_count"]
         streak = streak + 1 if forced_today == 0 and not d["suspended"] else 0
         worst = max(worst, streak)
-        if streak >= 3:
+        if streak >= starve_days:
             starved.append(d["date"])
     add("exploration_never_starves", not starved,
-        {"days_starved": starved, "longest_streak": worst,
+        {"days_starved": starved, "longest_streak": worst, "starve_days": starve_days,
          "affordable_set_empty_rate_latest": days[-1]["learning"]
          ["affordable_set_empty_rate"] if days else None}, measured=bool(days))
 
@@ -886,10 +1081,11 @@ def grade(rep, cfg):
     # fitted without one: dispersion is then a reading of the knob too
     # ... and the check bins by PREDICTED mu, so while a gate fault keeps
     # --apply refused the belief never converges and a wrong elasticity
-    # reads as a shape problem: dispersion is excused under a gate fault
+    # reads as a shape problem: dispersion is excused while any event
+    # gate is expected to fail
     marginal_moved = (rep["world"]["r_scale"] != 1.0
                       or rep["world"].get("episode_shock_sd", 0) > 0
-                      or expect_fail or "missing" in faults)
+                      or expect_fail)
     bad = [n for n, vs in verdicts.items() if "FAIL" in vs and n != "correlation"
            and not (n == "dispersion" and marginal_moved)]
     rho = [d["assurance_detail"]["rho_live"] for d in days
@@ -911,7 +1107,7 @@ def grade(rep, cfg):
     cadence = int(cfg["learning"]["update_cadence_days"])
     expected_applies = sum(1 for d in days if d["day"] % cadence == 0)
     refused = [d["date"] for d in days if d.get("apply", {}).get("refused")]
-    fault_refusal = expect_fail or "missing" in faults
+    fault_refusal = expect_fail
     add("apply_ran_on_cadence", len(applies) == expected_applies
         and (not refused or fault_refusal),
         {"applies": len(applies), "expected": expected_applies, "refused_on": refused,
@@ -930,16 +1126,25 @@ def _print(rep, out_path):
           f"asked ({w['episodes_opened_per_day_mean']} opened, both arms) from "
           f"{w['templates']} templates, {w['workers']} worker(s)")
     print(f"engine: {e['decisions']:,} decisions, {e['forced']:,} forced "
-          f"({e['forced_share']}), {e['rejected_total']} rejected; "
-          f"tau {e['tau_at_launch']} -> {e['tau_now']}")
+          f"({e['forced_share']}), {e['rejected_total']} rejected, "
+          f"{e['quarantined']} quarantined; tau {e['tau_at_launch']} -> {e['tau_now']}")
     for c, r in rep["learning"].items():
-        print(f"  [{c}] eps_true {r['epsilon_true']:+.3f}  mean {r['launch_mean']:+.3f} -> "
+        eps = (f"{r['epsilon_true']:+.3f}" if r["epsilon_true"] is not None
+               else "n/a (no simulated member)")
+        print(f"  [{c}] eps_true {eps}  mean {r['launch_mean']:+.3f} -> "
               f"{r['mean']:+.3f}  std {r['launch_std']:.3f} -> {r['std']:.3f}  "
               f"(v{r['version']}, {r['n_obs']} outcomes)")
-    for arm, x in rep["economics"].items():
-        print(f"  {arm:7s} IL {x['il_absolute']:>12,.0f}  IL% {x['il_pct']}  "
+    econ = rep["economics"]
+    arms = [(arm, econ[arm]) for arm in ("pilot", "legacy") if arm in econ]
+    paired = econ.get("paired") or {}
+    arms += [(f"{arm} (paired)", paired[arm]) for arm in ("pilot", "legacy") if arm in paired]
+    for arm, x in arms:
+        print(f"  {arm:16s} IL {x['il_absolute']:>12,.0f}  IL% {x['il_pct']}  "
               f"scrap_rate {x['scrap_rate']}  sell-through {x['sell_through']}  "
-              f"mean discount {x['mean_discount']}")
+              f"mean discount {x['mean_discount']}  ({x['episodes']} episodes)")
+    if paired:
+        print(f"  paired over {paired.get('templates')} templates settled under both "
+              f"arms ({paired.get('unpaired_templates')} unpaired)")
     for x in rep["expectations"]:
         print(f"  {x['verdict']:<12} {x['name']}")
     print(f"wrote {out_path}")
@@ -953,6 +1158,10 @@ SIM_KEYS = {
             "workers"),
     "world": ("epsilon_true", "epsilon_true_map", "r_scale", "episode_shock_sd",
               "level_drift_per_day"),
+    # the simulator's own grading and driving knobs (no flag: they shape
+    # how a run is read, not what it rehearses)
+    "grading": ("spend_over_budget_band", "tau_week_days", "starve_days",
+                "lane_hour", "feature_history_margin_days"),
     "paths": ("config", "input", "raw", "sim_dir", "out"),
 }
 
@@ -993,7 +1202,8 @@ def main(argv=None):
     ap.add_argument("--raw", default=None, help="the raw extract Lane C extends")
     ap.add_argument("--days", type=int, default=None)
     ap.add_argument("--launch-date", default=None)
-    ap.add_argument("--episodes-per-day", type=int, default=None, help="per arm")
+    ap.add_argument("--episodes-per-day", type=int, default=None,
+                    help="the day's total, split across the two arms")
     ap.add_argument("--epsilon-true", type=float, default=None)
     ap.add_argument("--epsilon-true-map", default=None, help="JSON {category: epsilon}")
     ap.add_argument("--r-scale", type=float, default=None)
@@ -1017,8 +1227,14 @@ def main(argv=None):
 def run_from_settings(st):
     cfg = load_config(st["config"])
     prepared = pd.read_parquet(st["input"])
-    launch = st["launch_date"] or (pd.Timestamp(prepared.date.astype(str).max())
+    last = prepared.date.astype(str).max()
+    launch = st["launch_date"] or (pd.Timestamp(last)
                                    + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    if str(launch) <= last:
+        # the feature service's history is the extract: a launch inside it
+        # would read real rows dated after launch as the trailing history
+        raise SystemExit(f"launch_date {launch} is on or before the extract's "
+                         f"last date {last}; simulate from the day after it")
     eps = st["epsilon_true_map"] if st["epsilon_true_map"] else st["epsilon_true"]
     world = World(cfg, prepared, eps, seed=st["seed"], opened_from=st["templates_from"],
                   r_scale=st["r_scale"], level_drift_per_day=st["level_drift_per_day"],
@@ -1030,7 +1246,7 @@ def run_from_settings(st):
         yaml.safe_dump({k: v for k, v in st.items() if not k.startswith("_")}, f,
                        sort_keys=False)
     sim = PilotSim(cfg_sim, world, st["sim_dir"], config_path, int(st["days"]),
-                   st["episodes_per_day"], seed=st["seed"], raw_path=st["raw"],
+                   st["episodes_per_day"], st, seed=st["seed"], raw_path=st["raw"],
                    prepared=prepared, workers=st["workers"])
     rep = sim.run()
     rep["sim_config"] = {k: v for k, v in st.items() if not k.startswith("_")}
