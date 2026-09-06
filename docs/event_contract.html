@@ -465,7 +465,7 @@
 
   <div class="ataglance">
     <div><b>12</b><span>fields you send to request a price</span></div>
-    <div><b>37</b><span>fields the agent logs per decision</span></div>
+    <div><b>39</b><span>fields the agent logs per decision</span></div>
     <div><b>0</b><span>outcome fields you produce — built from the hourly feed</span></div>
     <div><b>1:1</b><span>outcomes per decision, hourly, exactly once</span></div>
   </div>
@@ -570,7 +570,7 @@
         <tr><th>You (engineering) own</th><th>The agent owns</th></tr>
       </thead>
       <tbody>
-        <tr><td>The production table: its grain (one row per SKU × FC × hour), its keys, and <strong>what every column means</strong> — including the conventions in §01, which the agent inferred from your data and you are asked to confirm or correct</td><td>The decision: forecast, DP, exploration, and the 37-field decision event</td></tr>
+        <tr><td>The production table: its grain (one row per SKU × FC × hour), its keys, and <strong>what every column means</strong> — including the conventions in §01, which the agent inferred from your data and you are asked to confirm or correct</td><td>The decision: forecast, DP, exploration, and the 39-field decision event</td></tr>
         <tr><td><code>episode_id</code>: what counts as one clearance window (§03) — you know whether a listing was extended or relisted; the agent cannot</td><td>Every derivation on top of your conventions: outcome construction, the restock / write-off / shrink classification, stockout and censoring, scrap accounting, decision matching, all ids except <code>episode_id</code></td></tr>
         <tr><td>Applying the returned price, and knowing whether the push succeeded (the failures table)</td><td>Learning, monitoring, guardrails, and the audit trail</td></tr>
         <tr><td>The daily landing of the table: a row for every priced hour, zero-sale hours included</td><td>Fixing its own code when you correct a convention in §01</td></tr>
@@ -587,7 +587,7 @@
     <div>
       <span class="step">Agent</span>
       <b>Decision event</b>
-      <span class="d">36 fields. The price it chose, everything it chose from, and every input it used — enough to re-solve the decision later.</span>
+      <span class="d">39 fields. The price it chose, everything it chose from, and every input it used — enough to re-solve the decision later.</span>
     </div>
     <div>
       <span class="step">You</span>
@@ -635,7 +635,7 @@
       price back. That is how a drifted model artifact or a bad config deploy is caught in
       production — but it only works if the event carries the full demand forecast
       (<code>mu_ref_path</code>) and the price already in force (<code>anchor_discount</code>),
-      not just this hour's summary. None of those 37 fields is yours to produce.
+      not just this hour's summary. None of those 39 fields is yours to produce.
     </p>
   </div>
 </section>
@@ -741,7 +741,7 @@
 
   <div class="tscroll">
     <table>
-      <caption>Grouped by what the field is for. All 37 are mandatory — an event missing any one of them is quarantined, not written. Examples are the same 17:00 entry decision.</caption>
+      <caption>Grouped by what the field is for. All 39 are mandatory — an event missing any one of them is quarantined, not written. Examples are the same 17:00 entry decision.</caption>
       <thead>
         <tr><th>Field</th><th>Example</th><th>Purpose</th></tr>
       </thead>
@@ -893,7 +893,7 @@
   <h3>The entry decision, in full</h3>
   <div class="prose">
     <p>
-      All 39 fields the agent writes — the 36 required plus <code>event</code>,
+      All 42 fields the agent writes — the 39 required plus <code>event</code>,
       <code>solver_latency_s</code> and <code>nb_tail_mass_max</code>. This is the widest payload
       in the contract, and none of it is yours to produce.
     </p>
@@ -910,6 +910,7 @@
   "fc": "FC-04",
   "category": "vegetables",
   "subcategory": "leafy_greens",
+  "date": "2026-08-19",
   "hour_of_day": 17,
   "hours_remaining": 4,
   "q_remaining": 3,
@@ -928,6 +929,7 @@
   "exploration_cost": 2385.0286259173663,
   "affordable_set_size": 3,
   "tau_current": 3202.33,
+  "delta_min": 0.1459,
   "epsilon_posterior_mean": -1.0,
   "epsilon_posterior_std": 0.6,
   "reference_discount": 0.3,

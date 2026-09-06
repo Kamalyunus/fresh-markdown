@@ -263,8 +263,13 @@ def test_apply_names_the_minimum_rerun_and_never_asks_for_a_retrain(
     # keys only one report reads never turn the loop
     assert tune.rerun_for(["exploration.delta_min_bias_multiple"]) == "shadow"
     assert tune.rerun_for(["monitoring.guardrail_outlier_sigma_ratio"]) == "thresholds"
-    assert tune.rerun_for(["posterior.cold_start_shift_std"]) == "backtest"
+    # the launch belief moves the backtest's DP arm AND the posterior file
+    # shadow prices from: both re-run, the loop does not turn
+    assert tune.rerun_for(["posterior.cold_start_shift_std"]) == "backtest+shadow"
+    assert tune.rerun_classes(["posterior.cold_start_shift_std"]) == ["backtest", "shadow"]
     assert tune.INVALIDATES["backtest"] == {"backtest"}
+    assert tune.rerun_for(["reference_discount.MEAT"]) == "retrain"
+    assert tune.rerun_for(["posterior.min_episodes_per_week_for_cell"]) == "shadow"
     assert set(tune.RERUN_ORDER) == set(tune.RERUN_STEPS) == set(tune.INVALIDATES)
 
     # and the decision log records which re-run the run required

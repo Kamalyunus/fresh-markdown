@@ -20,9 +20,10 @@ statement and the incident that created the rule.
    factor** — re-run `fit_dispersion` onward and re-paste `rho`. (§5.6)
 1b. **Drive the chain with `python3 -m ops.advance`, never by hand-running
    the step list** — it calls `ops.bootstrap_loop` (which iterates steps 3b–5b to
-   the fixed point, 8–9 turns on production data), settles every paste with
-   `--check-only`, and retrains only when the model is absent or `--retrain`
-   is given. Re-running the step list to settle calibration retrains the
+   the fixed point, 8–9 turns on production data), re-runs after a paste
+   only what read it (a W paste turns the loop with `--check-only`; the
+   rest re-derive a report or nothing), and retrains only when the model is
+   absent or `--retrain` is given. Re-running the step list to settle calibration retrains the
    baseline (rule 1). (§9.2, Appendix A)
 2. **`posterior.epsilon_max` (−0.05) is a sign constraint, never a bound to
    widen** — positive elasticity must remain unrepresentable. (§5.6)
@@ -311,7 +312,7 @@ are specified in §5.2 and §12a.
 ## MEASURED pastes and launch blockers
 
 `load_config(strict=True)` refuses while any RUNTIME_REQUIRED value is null.
-**`config.yaml` ships the OWNER's production readings** (their `ops.advance` run of 2026-09-06: `rho` 0.6364, `information_increment` 0.237, `tau_initial` 348.93, the 17-category `delta_min_log_bias` map, scrap/margin stops 0.3217/0.0614) **and their postures** (`max_std_shrink` 0.10 — conservative launch; `max_mean_step` 0.796, pasted inside its gate; both guardrail series smoothed over 7 days; `cold_start_shift_std` 0.5) as the defaults — the table in design §12 is the record; a local run on the
+**`config.yaml` ships the OWNER's production readings** (their `ops.advance` run of 2026-09-06: `rho` 0.6364, `information_increment` 0.237, `tau_initial` 348.93, the 16-category + `_default` `delta_min_log_bias` map, scrap/margin stops 0.3217/0.0614) **and their postures** (`max_std_shrink` 0.10 — conservative launch; `max_mean_step` 0.796, pasted inside its gate; both guardrail series smoothed over 7 days; `cold_start_shift_std` 0.5) as the defaults — the table in design §12 is the record; a local run on the
 fixture re-derives fixture values — read them, never commit them
 (`git checkout config.yaml` afterwards). Every paste has one source and one checker:
 

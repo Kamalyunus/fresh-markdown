@@ -52,9 +52,12 @@ nothing; a key only the backtest reads re-runs the backtest alone); it
 never invents a value. Every stop writes
 `reports/launch_readiness.md` — what ran per phase, every config value the
 process changed (before, after, why, source), the config in force, status,
-and what is waited on. Its stops, in order: a tune BLOCK · a failed shadow
-gate · the owner keys · `data.launch_date` · a stale extract · a red
-`status` · and, daily, **`daily.update --apply`**, which stays a human's.
+and what is waited on. Its stops, in order: a moved training input
+(`--retrain` is yours) · a tune BLOCK · a MEASURED value a report could not
+derive · a failed shadow gate · the owner keys · `data.launch_date` · a
+stale extract · a red `status` · and, daily, **`daily.update --apply`**,
+which stays a human's. A step that fails, a plan that loops or a round
+budget that runs out are stops too: journaled, reported, exit 1.
 
 ---
 
@@ -187,6 +190,7 @@ in the caller.
 | `guardrail floors` WARN | "insufficient history" — nobody measured the floor, so the stop was not checked. Not a pass: more closed-episode history, then re-run `derive_thresholds` |
 | `assurance · reproduction` FAIL | something moved under the solver (config edit, artifact swap, deploy, library). Diff the bundle first: `artifact bundle` line, then `artifact mirrors`, then the live `artifacts/` against the latest `artifacts/history/<bundle>/<sealed_at>/` snapshot (every seal leaves one, with the config and posterior of the moment; its `MANIFEST.json` names the reason — `bootstrap`, `check-only`, `retrain`, `weekly-refit`, `config`, `libraries` — the config and library versions in force, and every copy was re-hashed against the seal when written). The failing decisions name their own `config_digest` |
 | `artifact bundle` FAIL — `config moved` / `libraries moved since sealing` | the seal covers the environment too. A config edit or a library upgrade changed what the next hour is priced with; nothing prices on it until it is sealed. If the change was deliberate: `python3 -m ops.seal --reason config|libraries` (`advance` does it once nothing is left to paste) — the snapshot it leaves is the record. If it was not, the `MANIFEST.json` of the latest snapshot holds the config and versions that were in force |
+| `boundary solutions` WARN | a fit is pinned at a search bound (rule 3): a prior category pooled off `epsilon_min`, a level factor at a bracket end (`calibration.json → pinned_cells`, the GLOBAL parent), an `r` at the search bound. Not an estimate — investigate the cell; widening `epsilon_min` or the bracket is a config decision, never a paste |
 | `artifact mirrors` FAIL | config paste and its source disagree (rho). Read the **bundle** line before re-pasting — the stale side is not always config |
 | `report vintages` FAIL | a report was produced against a model no longer on disk — its gate rows grade a ghost. `advance` re-runs it; do not launch on it |
 | `calibration_coverage` says `STALE FACTORS IN USE` | the weekly re-fit was missed: rows were priced on frozen factors. `advance` re-fits and re-seals; re-run the report |

@@ -51,12 +51,22 @@ def stale_reports(cfg, bundle, reports):
     routing status uses). A MEASURED paste that only writes back what a
     report measured invalidates nothing. Returns {name: why}."""
     out = {}
+    posterior_path = cfg["posterior"]["path"]
+    posterior_now = (provenance.file_digest(posterior_path)
+                     if os.path.exists(posterior_path) else None)
     for name, rep in reports.items():
         if not rep:
             continue
         av = rep.get("artifact_versions") or {}
         if bundle and av.get("baseline_model_version") not in (None, bundle):
             out[name] = f"ran against bundle {av['baseline_model_version']}"
+            continue
+        # shadow prices from the posterior FILE: a re-init (the launch belief
+        # or the prior moved) or a rho paste after a retrain leaves it
+        # grading a belief no longer on disk, and no config key says so
+        if name == "shadow" and av.get("posterior_digest") \
+                and av["posterior_digest"] != posterior_now:
+            out[name] = "ran against a posterior no longer on disk"
             continue
         fp = rep.get("config") or {}
         if not fp.get("snapshot"):
@@ -188,8 +198,9 @@ def plan(st):
                           "disk was fit under another", [why,
                           "python3 -m ops.advance --retrain   (a NEW bundle; "
                           "nothing from before is comparable)"])]
-        if why.startswith("backtest:"):
-            # only the backtest reads it: no artifact moved, no loop to turn
+        if why.split(":")[0] in ("backtest", "backtest+shadow"):
+            # only the backtest (and shadow, at step 5) reads it: no
+            # artifact moved, no loop to turn
             steps.append(_run(f"re-run backtest ({why})",
                               ["evaluate.backtest", "--input", PREPARED,
                                "--workers", "0", "--out", "reports/backtest.json"],
@@ -204,33 +215,45 @@ def plan(st):
                           ["evaluate.derive_thresholds", "--input", PREPARED],
                           phase="tune", reevaluate=True))
         return steps
-    # a shadow graded on a bundle no longer on disk (a retrain) is re-run
-    # HERE: left until step 5, tune's "reports agree on one model" invariant
-    # blocks on it first and the chain has no exit. A config-stale shadow
-    # waits for step 5 -- the posterior it prices with may be about to move.
-    if str(st["stale"].get("shadow", "")).startswith("ran against bundle"):
-        return [_shadow_step(st)]
+    # A shadow graded on a bundle (or a posterior) no longer on disk waits
+    # for step 5, AFTER the pastes and the posterior re-init it must price
+    # with -- re-run here it stood on the pre-retrain rho and belief. Until
+    # then tune's one-model invariant and its tau derivation (both read the
+    # stale shadow) are set aside, never a BLOCK and never a paste.
+    shadow_ghost = str(st["stale"].get("shadow", "")).startswith("ran against")
+    ignore = {"reports agree on one model", "reports match the artifacts",
+              "reports present"} if shadow_ghost else {"reports present"}
 
     # 3. tune: paste what the reports measured, settle, repeat
     rep = st["tune"]
-    blocks = [f for f in rep["findings"] if f["class"] == tune.BLOCK]
-    if blocks and not all(f["key"] == "reports present" for f in blocks):
+    blocks = [f for f in rep["findings"]
+              if f["class"] == tune.BLOCK and f["key"] not in ignore]
+    if blocks:
         return [_stop("tune", "tune is BLOCKED -- an invariant is violated",
                       [f"{f['key']}: {f['current']} -- needs {f['recommended']}"
                        for f in blocks])]
-    if rep["to_paste"]:
-        keys = [f["key"] for f in rep["to_paste"]]
+    pasteable = [f for f in rep["to_paste"] if f.get("recommended", 0) is not None
+                 and not (shadow_ghost and f["key"] == "exploration.tau_initial")]
+    if pasteable:
+        keys = [f["key"] for f in pasteable]
         phases = {PASTE_PHASE.get(k, "tune") for k in keys}
         steps.append({"kind": "paste", "label": "tune --apply",
                       "phase": phases.pop() if len(phases) == 1 else "tune",
                       "reevaluate": True, "keys": keys})
         return steps
+    # a PASTE the report could not measure (NOT RUN) carries no value:
+    # --apply would skip it and the plan would repeat to the round budget
+    unmeasured = [f for f in rep["to_paste"] if f.get("recommended", 0) is None]
+    if unmeasured:
+        return [_stop("tune", "a MEASURED value could not be derived",
+                      [f"{f['key']}: {f['evidence']}  [{f['source']}]"
+                       for f in unmeasured])]
     # 3b. the seal covers config, code and libraries: once nothing is left
     #     to paste, a moved one is re-sealed under its own reason so the
     #     audit trail records every environment the bundle ran in
     if st.get("environment_drift"):
         what = st["environment_drift"][0].split(" moved")[0]
-        reason = "config" if what == "config" else "libraries"
+        reason = "libraries" if what == "libraries" else "config"
         steps.append(_run(f"re-seal ({'; '.join(st['environment_drift'])})",
                           ["ops.seal", "--reason", reason],
                           phase="tune", reevaluate=True))
@@ -507,6 +530,7 @@ def main():
         rounds += 1
         # the same expensive step a third time in one invocation is a loop,
         # not progress: stop and name it rather than run shadow for a day
+        looping = None
         for s in steps:
             # a seal is cheap and follows every paste round; only the
             # expensive steps count toward the loop guard
@@ -514,17 +538,20 @@ def main():
                 mod = s["args"][0]
                 seen[mod] = seen.get(mod, 0) + 1
                 if seen[mod] > 2:
-                    raise SystemExit(
-                        f"advance is looping: {mod} would run a third time in "
-                        "this invocation. Something re-invalidates it after each "
-                        "run -- read the plan above (the stale reason names the "
-                        "moved keys) and reports/launch_readiness.md")
+                    looping = (f"advance is looping: {mod} would run a third "
+                               "time in this invocation. Something re-invalidates "
+                               "it after each run -- the stale reason names the "
+                               "moved keys")
         # the round budget counts WORK, not plans: a legitimate stop on the
         # ninth round must still be journaled and reported
         if steps and steps[0]["kind"] != "stop" and rounds > 2 * MAX_TUNE_ROUNDS:
-            raise SystemExit("advance did not settle -- a step keeps "
-                             "invalidating another; read the plan above")
+            looping = "advance did not settle -- a step keeps invalidating another"
+        if looping:
+            # a guard trip is a STOP like any other: journaled, reported, exit 1
+            steps = [_stop(current_phase(steps), looping,
+                           [render_plan(steps).strip()])]
         again, failed = execute(steps, args.config, args.reports)
+        failed = failed or bool(looping)
         if not again:
             # every stop leaves the readiness report behind it, a failed
             # step's included -- and that one exits non-zero

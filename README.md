@@ -30,7 +30,7 @@ One package per responsibility; each maps to one REVIEW_GUIDE tier and one
 
 ```bash
 pip install -r requirements.txt
-python3 -m fit.download_flc --days 120      # step 0: data/flc_raw.parquet
+python3 -m fit.download_flc --start-date <train_start> --end-date <holdout end>   # step 0 (ops.advance sizes it from config)
 python3 -m ops.bootstrap_loop --input data/flc_raw.parquet
 python3 -m ops.init_posterior
 python3 -m evaluate.shadow --input data/prepared.parquet --out reports/shadow.json

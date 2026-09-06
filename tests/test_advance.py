@@ -245,7 +245,7 @@ def test_only_the_invalidated_report_is_re_run():
     steps = advance.plan(_state(stale={"shadow": "shadow: exploration.delta_min_log_bias"}))
     assert steps[0]["args"][0] == "evaluate.shadow"
     # a key only the backtest reads re-runs the backtest, not the loop
-    steps = advance.plan(_state(stale={"backtest": "backtest: posterior.cold_start_shift_std"}))
+    steps = advance.plan(_state(stale={"backtest": "backtest+shadow: posterior.cold_start_shift_std"}))
     assert steps[0]["args"][:2] == ["evaluate.backtest", "--input"]
     steps = advance.plan(_state(stale={"backtest": "calibration: pricing.tier_step"}))
     assert steps[0]["args"] == ["ops.bootstrap_loop", "--check-only"]
@@ -372,19 +372,65 @@ def test_an_unlearned_posterior_is_reinitialised_when_the_launch_belief_moves():
                for s in advance.plan(_state(posterior_stale=True)))
 
 
-def test_a_shadow_graded_on_a_retrained_bundle_is_rerun_before_tune_can_block():
-    """After `--retrain` the backtest names the new bundle and shadow.json the
-    old one; tune's 'reports agree on one model' invariant is a BLOCK, and a
-    BLOCK stops the chain -- so the stale shadow must be re-run before tune
-    is consulted, or the only exit is deleting the report by hand."""
-    st = _state(stale={"shadow": "ran against bundle b0"},
-                tune={"findings": [{"key": "reports agree on one model",
-                                    "class": tune.BLOCK, "current": {},
-                                    "recommended": "one version"}],
-                      "blocked": True, "to_paste": [], "owner_decisions": []})
-    steps = advance.plan(st)
-    assert steps[0]["kind"] == "run" and steps[0]["args"][0] == "evaluate.shadow"
+def test_a_ghost_shadow_waits_for_the_pastes_and_the_reinit_it_must_price_with():
+    """After `--retrain` shadow.json names the old bundle. Re-run FIRST it
+    stood on the pre-retrain rho paste and the pre-re-init posterior, and
+    nothing re-ran it afterwards (the launch record and the pasted tau on a
+    belief no longer on disk). Now: tune's one-model invariant and its tau
+    derivation are set aside while the shadow is a ghost, the pastes and
+    the re-init run, and shadow follows at step 5 -- and a shadow that
+    priced from a posterior file no longer on disk is a ghost too."""
+    ghost = {"findings": [{"key": "reports agree on one model", "class": tune.BLOCK,
+                           "current": {}, "recommended": "one version"}],
+             "blocked": True, "owner_decisions": [],
+             "to_paste": [{"key": "dispersion.rho", "recommended": 0.5},
+                          {"key": "exploration.tau_initial", "recommended": 1.0}]}
+    st = _state(stale={"shadow": "ran against bundle b0"}, tune=ghost)
+    first = advance.plan(st)[0]
+    assert first["kind"] == "paste" and first["keys"] == ["dispersion.rho"]
+    st = _state(stale={"shadow": "ran against a posterior no longer on disk"},
+                tune=dict(ghost, to_paste=[]), posterior_stale=True, launched=False,
+                nulls=["data.launch_date"])
+    assert advance.plan(st)[0]["args"] == ["ops.init_posterior", "--force"]
+    st = _state(stale={"shadow": "ran against bundle b0"}, tune=dict(ghost, to_paste=[]))
+    assert advance.plan(st)[0]["args"][0] == "evaluate.shadow"
     # a CONFIG-stale shadow still waits for its place after the posterior step
     st = _state(stale={"shadow": "shadow: exploration.delta_min_log_bias"},
                 posterior=False)
     assert advance.plan(st)[0]["args"] == ["ops.init_posterior"]
+
+
+def test_a_paste_with_no_value_is_a_stop_not_a_loop():
+    """thresholds NOT RUN emits information_increment as PASTE with no
+    value; --apply skipped it, the plan repeated to the round budget and
+    exited with no readiness report."""
+    st = _state(tune={"findings": [], "blocked": False, "owner_decisions": [],
+                      "to_paste": [{"key": "learning.information_increment",
+                                    "recommended": None, "evidence": "NOT RUN -- x",
+                                    "source": "thresholds.information_increment_recommendation"}]})
+    steps = advance.plan(st)
+    assert steps[0]["kind"] == "stop" and steps[0]["phase"] == "tune"
+    assert "information_increment" in steps[0]["detail"][0]
+
+
+def test_a_guard_trip_is_a_reported_stop(monkeypatch, tmp_path):
+    """The loop guard and the round budget raised SystemExit with no journal
+    entry and no readiness report -- the previous stop stayed on disk as if
+    current. Both are stops now: journaled, reported, exit 1."""
+    calls = {"reports": 0, "stops": []}
+    run = [advance._run("shadow", ["evaluate.shadow"], phase="shadow", reevaluate=True)]
+
+    def fake_execute(steps, *a):
+        if steps[0]["kind"] == "stop":
+            calls["stops"].append(steps[0]["why"])
+            return (False, False)
+        return (True, False)
+    monkeypatch.setattr(advance, "load_config", lambda p: {})
+    monkeypatch.setattr(advance, "probe", lambda *a, **k: {})
+    monkeypatch.setattr(advance, "plan", lambda st: run)
+    monkeypatch.setattr(advance, "render_plan", lambda s: "")
+    monkeypatch.setattr(advance, "execute", fake_execute)
+    monkeypatch.setattr(advance, "_write_readiness", lambda *a: calls.__setitem__("reports", calls["reports"] + 1))
+    monkeypatch.setattr(sys, "argv", ["advance", "--reports", str(tmp_path)])
+    assert advance.main() == 1
+    assert calls["reports"] == 1 and "looping" in calls["stops"][0]

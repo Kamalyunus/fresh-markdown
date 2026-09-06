@@ -119,6 +119,10 @@ RERUN = {
                  "the backtest's own inputs moved -- re-run it (no artifact "
                  "reads them):\n    python3 -m evaluate.backtest --input "
                  "data/prepared.parquet"),
+    "backtest+shadow": ({"backtest", "shadow"},
+                        "the launch belief moved: re-run evaluate.backtest AND "
+                        "re-initialise the posterior, then evaluate.shadow "
+                        "(advance does all three in order)"),
     "calibration": ({"backtest", "thresholds", "shadow"},
                     "the calibration loop turned -- settle it WITHOUT retraining:\n"
                     "    python3 -m ops.bootstrap_loop --check-only\n"
@@ -151,6 +155,12 @@ READ_BY = (
     ("baseline_model.num_boost_round", "retrain"),
     ("baseline_model.num_leaves", "retrain"),
     ("baseline_model.min_data_in_leaf", "retrain"),
+    # the category anchors: d_ref drives the anchor rows and the SKU rate
+    # features the model is trained on (prepare_data), not only the factors
+    ("reference_discount.", "retrain"),
+    # the cell routing: init_posterior re-routes (advance re-inits while
+    # unlearned) and shadow prices from that file
+    ("posterior.min_episodes_per_week_for_cell", "shadow"),
     # fit inputs inside the assurance section (fit_dispersion, prior_density)
     ("assurance.rho_min_hours_per_episode", "calibration"),
     ("assurance.rho_drift_alert", "calibration"),
@@ -172,9 +182,12 @@ READ_BY = (
     ("posterior.min_std", "thresholds"),
     ("tuning.guardrail_inert_floor_multiple", "thresholds"),
     ("tuning.bounded_step_consistent_band", "thresholds"),
-    # the backtest's own inputs: the launch belief its DP arm is priced at
-    # (advance re-initialises the posterior while unlearned), its tables
-    ("posterior.cold_start_shift_std", "backtest"),
+    # the launch belief: the backtest prices its DP arm at it, and shadow
+    # prices from the re-initialised posterior file (advance re-inits while
+    # unlearned, then re-runs shadow on the moved file)
+    ("posterior.cold_start_shift_std", "backtest+shadow"),
+    # the backtest's own tables
+
     ("tuning.cost_ratio_bands", "backtest"),
     ("tuning.step_sensitivity_episodes", "backtest"),
 )

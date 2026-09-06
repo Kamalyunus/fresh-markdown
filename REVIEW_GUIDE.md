@@ -4,7 +4,7 @@ The part of the repo that can touch a live price is ~2,100 lines. This
 guide scopes a code review to risk, so the whole exercise is about two
 sittings.
 
-## Tier 1 — review line by line (~1,500 lines; prices real money, hourly)
+## Tier 1 — review line by line (~1,200 lines; prices real money, hourly)
 
 | File | What to verify |
 | --- | --- |
@@ -31,7 +31,7 @@ The review question: *can evidence be spent twice, or a belief move more
 than its bounds?* `test_update.py` (the tau walk and the bounded step) and
 the exactly-once tests in `test_end_to_end.py` are the pinned answers.
 
-## Tier 3 — skim; the gates and suite carry it (~9,600 lines, offline)
+## Tier 3 — skim; the gates and suite carry it (~9,800 lines, offline)
 
 `fit/` (data preparation, model/prior/dispersion fits), `evaluate/`
 (backtest, shadow, thresholds) and `ops/` (`advance.py` is the phase order

@@ -136,6 +136,29 @@ def test_a_moved_environment_fails_the_bundle_row_with_the_reseal_remedy(cfg):
     assert "bootstrap" in status._bundle(cfg, state)["where"]
 
 
+def test_a_pinned_fit_is_a_visible_warn_never_silently_green(cfg, tmp_path):
+    """Rule 3: the fits flag boundary solutions; nothing READ the flags, so
+    a prior pooled off the lower bound, a level factor at the bracket end
+    or an r at the search bound left status green."""
+    c = dict(cfg, posterior=dict(cfg["posterior"], prior={"path": str(tmp_path / "prior.json")}),
+             baseline_model=dict(cfg["baseline_model"],
+                                 calibration_factor_path=str(tmp_path / "cal.json")),
+             dispersion=dict(cfg["dispersion"], r_lookup_path=str(tmp_path / "r.json")))
+    assert status._boundaries(c)["verdict"] == status.NONE
+    _write(tmp_path, "prior", {"per_category": {}, "lower_boundary_categories": []})
+    _write(tmp_path, "cal", {"factors": {}, "pinned_cells": []})
+    _write(tmp_path, "r", {"global": 1.0, "at_bound": {}, "global_at_bound": False})
+    assert status._boundaries(c)["verdict"] == status.PASS
+    _write(tmp_path, "prior", {"per_category": {}, "lower_boundary_categories": ["DAIRY"]})
+    _write(tmp_path, "cal", {"factors": {}, "pinned_cells": ["MEAT/PORK"],
+                             "global_factor_at_bound": "upper"})
+    _write(tmp_path, "r", {"global": 1.0, "at_bound": {"VEG": 50.0}, "global_at_bound": False})
+    row = status._boundaries(c)
+    assert row["verdict"] == status.WARN
+    for name in ("DAIRY", "MEAT/PORK", "GLOBAL (upper)", "VEG"):
+        assert name in row["detail"]
+
+
 def test_vintages_without_a_bundle_read_not_run_never_pass(cfg):
     row = status._vintages(cfg, {"bundle": None}, {})
     assert row["verdict"] == status.NONE
@@ -364,7 +387,7 @@ def test_report_vintages_names_the_config_values_that_moved(cfg, tmp_path):
           "config": config_fingerprint(cfg, "thresholds")}
     pasted = _copy.deepcopy(cfg)
     pasted["exploration"]["delta_min_log_bias"] = dict(
-        cfg["exploration"]["delta_min_log_bias"], _default=0.15)
+        cfg["exploration"]["delta_min_log_bias"] or {}, _default=0.15)
     pasted["monitoring"]["stop_conditions"]["scrap_deterioration_pct"] = 0.43
     row = status._vintages(pasted, state, {"backtest": bt, "thresholds": bt, "shadow": same})
     assert row["verdict"] == status.WARN

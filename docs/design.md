@@ -1,6 +1,6 @@
 # Perishable Markdown MVP — System Design
 
-**Status:** Implemented; validated on production FLC data after the section 12a data-definition corrections; calibration and shadow gates PASSED (model `baseline-20260809120225`)
+**Status:** Implemented; validated on production FLC data after the section 12a data-definition corrections; calibration and shadow gates PASSED (§8 records the first production model; the settings in force are §12)
 **Standing:** The authoritative specification. Superseded designs and the incidents behind the rules live in `docs/learnings.md`.
 
 ---
@@ -192,9 +192,11 @@ while any measured or owner-decided value is null. Every value is labelled:
 `MEASURED` (produced by the pipeline), `SET` (design choice), or `SET BY
 OWNER` (business decision — **an agent must never invent one**). The
 runtime-required values `load_config(strict=True)` refuses on while null:
-`dispersion.rho`, `exploration.tau_initial`,
-`monitoring.stop_conditions.
-scrap_deterioration_pct` and `margin_deterioration_pct`. Config is the source of every tunable
+`data.launch_date`, `dispersion.rho`, `exploration.tau_initial`,
+`monitoring.stop_conditions.scrap_deterioration_pct` and
+`margin_deterioration_pct` (strict mode is a test of the config, not a
+start-up gate: production reads the config non-strict and `status`'s
+launch-blockers row is the refusal). Config is the source of every tunable
 and of **no secret**: credentials live in `~/.env` as `REDSHIFT_*` — no
 hostname, credential, or connection string in config, code, or a commit.
 
@@ -622,7 +624,7 @@ tends to 1 as history accumulates, so a day at ten times budget moves τ by
 0.76× instead of the 0.5× clip, and because
 `monitoring.exploration_cost_vs_budget` compares the same two numbers by
 design, the backstop goes blind at exactly the same rate. `il_by_close_day`
-(monitor) and `daily_exploration_spend` (update) are the one definition of
+(monitor) and `finalized_days` (update) are the one definition of
 each side, both keyed by the decision's TRADING day
 (`events.pairs.decision_day`) — never the outcome's UTC finalize time,
 which for an hour-23 decision is D+1 and put the controller a day ahead of
@@ -776,10 +778,13 @@ rate, current τ); safety (is the event pipeline healthy — match/duplicate/
 mismatch rates, quarantine, latency). A posterior std flat for 21 days
 alerts directly; `affordable_set_empty_rate` is the leading indicator of a
 non-explorable catalogue; `realised_vs_predicted_sold_ratio` is the daily
-continuation of the calibration diagnostic. Stop conditions (cost-floor
-violation, event-quality breach, mismatch, realised spend > 2× the day's
-budget, scrap/margin deterioration — the last three over `persistence_days`
-consecutive priced days, because one day over is a thin-IL day or two
+continuation of the calibration diagnostic. Stop conditions (an
+event-quality breach — duplicates, unmatched outcomes, price mismatches,
+measured over the trailing `event_quality_window_days` so one incident
+does not re-fire a resumed stop until history dilutes it — realised spend
+> 2× the day's budget, scrap/margin deterioration — the last three over
+`persistence_days` consecutive priced days, because one day over is a
+thin-IL day or two
 expensive draws and the τ controller halves τ on it the next morning; the
 spend series reads every PRICED day, 0 where nothing was forced, so a day
 under suspension ends the streak instead of leaving the over-budget days as
@@ -972,15 +977,28 @@ re-derives thresholds; `max_mean_step` re-derives thresholds AND re-runs
 shadow; keys tune does not paste but one report or fit reads are routed by
 prefix (`tune.READ_BY`: the budget and controller knobs to shadow, the
 guardrail window/smoothing/persistence and the `tuning.` floor multiples to
-thresholds, the launch belief and the backtest's own tables to a
-`backtest`-only class that re-runs `evaluate.backtest` and nothing else,
+thresholds, the backtest's own tables to a `backtest`-only class that
+re-runs `evaluate.backtest` and nothing else, the launch belief to
+`backtest+shadow` (the backtest's DP arm prices at it, and shadow prices
+from the posterior file `advance` re-initialises), the cell-routing floor
+and the category anchors to `shadow` and `retrain` respectively,
 the `assurance.` keys `fit_dispersion` reads to the loop, and the TRAINING
 inputs — `data.split`, `exclusion_window`, the LightGBM keys — to `retrain`,
 on which `advance` STOPS: a retrain is a new bundle and only `--retrain`
 runs one); runtime-only knobs are inert; an unclassified edit re-grades
 everything; a MEASURED paste that writes back what a report measured is
-inert. A shadow graded on a bundle no longer on disk is re-run before
-`tune` is consulted, or its one-model invariant would BLOCK the chain with
+inert. A shadow graded on a bundle no longer on disk — or on a posterior
+file no longer on disk (`artifact_versions.posterior_digest`; a re-init or
+a rho paste after a retrain moves it) — is a ghost: `tune`'s one-model
+invariant and its tau derivation are set aside while it stands, the pastes
+and the posterior re-init run first, and shadow follows at its own step,
+so the launch record and the pasted tau are never graded on the
+pre-retrain belief. Re-run before the pastes, as it once was, it stood on
+the old rho and belief and nothing re-ran it. A PASTE the report could not
+measure (NOT RUN, no value) is a stop naming the report, never a plan that
+repeats to the round budget; a guard trip (a step a third time, the round
+budget) is a stop too — journaled, reported, exit 1. Without this the
+one-model invariant would BLOCK the chain with
 no exit. Production reports (`monitor`, `assurance`) read the live config
 every run and are never re-graded by a paste. The classes do not nest, so a paste
 of several keys re-runs the union, and a per-category mapping is matched on
@@ -1347,6 +1365,13 @@ them. Iterate until `tune` reports no PASTE and no BLOCK.
 
 ### 9.3 Prior-acceptance gate (blocking) — is the prior honest?
 
+Rule 3's flags are READ, not only written: `status`'s `boundary solutions`
+row lists every fit pinned at a search bound — `lower_boundary_categories`
+(prior), `pinned_cells` and `global_factor_at_bound` (level factors; the
+category a thin subcategory shrinks toward carries its own flag), the
+`at_bound` entries of `r_lookup` — as a WARN naming each, so a pinned fit
+is never silently green.
+
 A human reading of `prior.json`, not a flag in it: `wrong_sign_categories`
 (peaks at positive ε — discarded for the pooled density), `std_basis` per
 category (which measured floor set the width), and the `holdout_comparison`
@@ -1420,7 +1445,7 @@ re-derived on the next `advance`; `status` names any drift.
 | `dispersion.rho` | 0.6364 | measured | mirrors `artifacts/rho.json` |
 | `learning.information_increment` | 0.237 | measured | derives from `max_std_shrink`, so the next `advance` re-pastes it lower for the 0.10 shrink |
 | `exploration.tau_initial` | 348.93 | measured | shadow's derivation on the pre-window week |
-| `exploration.delta_min_log_bias` | 17-category map, `_default` 0.1459 | measured | BABY_FOOD 0.3389, MEAL 0.2862, DRIED_&_FROZEN_PRODUCE 0.2446, the rest at the catalogue floor |
+| `exploration.delta_min_log_bias` | 16 categories + `_default` 0.1459 | measured | BABY_FOOD 0.3389, MEAL 0.2862, DRIED_&_FROZEN_PRODUCE 0.2446, the rest at the catalogue floor |
 | `scrap_deterioration_pct` | 0.3217 | measured | 3σ trailing floor, scrap smoothed 7 days |
 | `margin_deterioration_pct` | 0.0614 | measured | derived at 1-day smoothing; re-derives lower now that margin is smoothed 7 days |
 | `learning.max_std_shrink` | 0.10 | owner | 0.25 → 0.10: a conservative launch rail |

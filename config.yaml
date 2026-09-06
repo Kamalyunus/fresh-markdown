@@ -69,6 +69,8 @@ dispersion:
   r_bound_tolerance_rel: 0.01          # SET  an r within this of either search bound is a PINNED fit: flagged at_bound, excluded from the clamp percentile
   working_elasticity_fallback: -1.0    # SET  standalone working constant for the residuals when no prior artifact exists yet -- NOT a prior
   rho_clip_max: 0.95                   # SET  ceiling on the fitted intra-episode correlation
+  drift_min_windows: 3                 # SET  weekly windows drift_by_window needs before it grades rho's stability
+  drift_max_unusable_share: 0.34       # SET  share of windows with a pinned or thin r above which the drift verdict is not decision-grade
   r_lookup_path: "artifacts/r_lookup.json"
   rho_path: "artifacts/rho.json"
   rho: 0.6364  # MEASURED  fit_dispersion, on the calib window; mirrors artifacts/rho.json. m is NOT pasted: deff measures forced hours per episode per batch (common.config.deff_from_episodes)
@@ -97,6 +99,7 @@ posterior:
     min_rows_per_time_cell: 5          # SET  thinner time cells are dropped
     own_information_saturation: 2.0    # SET  log-lik units that count as informative
     stability_folds: 3                 # SET  disjoint train slices for fold_spread
+    fold_min_entry_rows: 50            # SET  entry rows a category needs in a fold before fold_spread scores it
     search_grid_size: 159              # SET  profile resolution
     unconstrained_search_below: 1.0    # SET  how far below epsilon_min the unconstrained peak search extends (same step); a peak within one grid step of epsilon_min is a boundary solution
     path: "artifacts/prior.json"
@@ -149,6 +152,7 @@ assurance:                             # daily.assurance -- live-data checks
   uniformity_min_draws: 100            # SET  below this, report insufficient
   uniformity_alert_p: 0.01             # SET  chi-square p floor: guards against calling noise a bias at low n
   uniformity_max_bin_deviation: 0.15   # SET  FAIL needs significance AND size. chi-square power grows with n on an unwindowed store, so p alone tightens every day; this is scale-free
+  uniformity_sample: 2000              # SET  most RECENT forced decisions the uniformity check re-solves (unbounded, it re-solved every forced decision ever, every day)
 
 monitoring:
   guardrail_noise_window_days: 28      # SET  trailing baseline for threshold calibration
@@ -165,6 +169,7 @@ monitoring:
       scrap: 7                         # per metric; both 7 (owner, 2026-09-06) -- the margin floor re-derives on the next advance
       margin: 7
     persistence_days: 2                # SET  consecutive days before a stop fires
+    event_quality_window_days: 14      # SET  trailing days the duplicate/unmatched and price-mismatch rates are measured over; all-time rates re-fired a resumed stop until history diluted one incident
     scrap_deterioration_pct: 0.3217    # MEASURED  3-sigma of the trailing noise, pasted by tune --apply from reports/thresholds.json (owner, 2026-09-06)
     margin_deterioration_pct: 0.0614   # MEASURED  3-sigma of the trailing noise, pasted by tune --apply from reports/thresholds.json (owner, 2026-09-06)
   alert_posterior_std_flat_days: 21    # SET  learning-loop health

@@ -71,6 +71,7 @@ def _bundle(cfg, state):
                     "run the bootstrap, then python3 -m ops.seal")
     if state["problems"]:
         env_only = all(p.split(" moved since sealing")[0] in ("config", "libraries")
+                       or p.startswith("environment not sealed")
                        for p in state["problems"])
         return _row("artifact bundle", FAIL, "; ".join(state["problems"]),
                     "a deliberate change: python3 -m ops.seal --reason "
@@ -244,6 +245,37 @@ def _prior(cfg):
     return _row("elasticity prior", PASS,
                 f"profile_density · {own}/{len(per)} categories on own data"
                 + (f" · {wrong} wrong-signed (pooled)" if wrong else ""))
+
+
+def _boundaries(cfg):
+    """Rule 3: a fit pinned at a search bound is not an estimate. The fits
+    flag it (the prior's lower-boundary categories, a level factor at the
+    bracket end, an r at the search bound); this row is where the flags are
+    READ, so a pinned fit is a visible WARN and never silently green."""
+    prior = read_json((cfg["posterior"].get("prior") or {}).get("path")) or {}
+    cal = read_json(cfg["baseline_model"]["calibration_factor_path"]) or {}
+    r_lookup = read_json(cfg["dispersion"]["r_lookup_path"]) or {}
+    if not (prior or cal or r_lookup):
+        return _row("boundary solutions", NONE, "no fitted artifacts yet")
+    pinned = []
+    lower = prior.get("lower_boundary_categories") or []
+    if lower:
+        pinned.append(f"prior at epsilon_min (pooled): {', '.join(map(str, lower))}")
+    cells = cal.get("pinned_cells") or []
+    if cal.get("global_factor_at_bound"):
+        cells = [f"GLOBAL ({cal['global_factor_at_bound']})", *cells]
+    if cells:
+        pinned.append(f"level factor at a bracket end: {', '.join(map(str, cells))}")
+    r_pinned = sorted(map(str, r_lookup.get("at_bound") or {}))
+    if r_lookup.get("global_at_bound"):
+        r_pinned.insert(0, "global")
+    if r_pinned:
+        pinned.append(f"r at a search bound: {', '.join(r_pinned)}")
+    if pinned:
+        return _row("boundary solutions", WARN, "; ".join(pinned),
+                    "investigate each before trusting it (rule 3); a widened "
+                    "epsilon_min or bracket is a config decision, never a paste")
+    return _row("boundary solutions", PASS, "no fit pinned at a search bound")
 
 
 def _shadow(shadow):
@@ -443,6 +475,7 @@ def collect(cfg, root="reports", reports=None):
         _calibration(cfg, backtest),
         _calibration_convergence(cfg),
         _prior(cfg),
+        _boundaries(cfg),
         _tau(cfg, backtest, shadow),
         _shadow(shadow),
         _guardrails(reports["thresholds"]),
