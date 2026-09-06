@@ -301,10 +301,10 @@ def test_delta_min_removes_the_tiers_the_model_cannot_tell_apart():
 
 def test_delta_min_is_derived_never_a_second_knob():
     """tau stays the one controller: the floor is k x bias / |eps| from a
-    MEASURED bias scale and the cell's own eps, and 0 until tune pastes
-    the scale -- the fixture ships no number."""
-    assert CFG["exploration"]["delta_min_log_bias"] is None
-    assert explore.delta_min(CFG, -1.0) == 0.0
+    MEASURED bias scale and the cell's own eps, and 0 while no scale is
+    pasted (null = no floor)."""
+    none = dict(CFG, exploration=dict(CFG["exploration"], delta_min_log_bias=None))
+    assert explore.delta_min(none, -1.0) == 0.0
     live = dict(CFG, exploration=dict(CFG["exploration"], delta_min_log_bias=0.30,
                                       delta_min_bias_multiple=1.0))
     assert explore.delta_min(live, -1.5) == pytest.approx(0.20)

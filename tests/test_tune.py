@@ -176,7 +176,9 @@ def test_max_std_shrink_is_suggested_with_its_alternative_never_written(
                                         "consistent_max_mean_step": 0.485},
         "guardrail_threshold_recommendation": {},
         "ab_duration": {"target_mde_rel": 0.075, "by_duration": {}}}})
-    rep = tune.collect(_cfg_with(cfg, tmp_path), str(reports_dir))
+    c = _cfg_with(cfg, tmp_path)
+    c["learning"] = dict(c["learning"], max_mean_step=0.15)
+    rep = tune.collect(c, str(reports_dir))
     f = [x for x in rep["findings"] if x["key"] == "learning.max_std_shrink"][0]
     assert f["class"] == "OWNER"
     # 1 - sqrt(1 - 0.15/1.1088) = 0.0701: the shrink that makes the CURRENT
@@ -487,7 +489,7 @@ def test_the_bottleneck_reads_the_population_rate_not_the_sample(
 def test_the_delta_min_bias_scale_is_the_largest_of_three_readings(cfg, tmp_path):
     """Each reading understates alone: the week-aggregate MAE averages
     noise away, the by_category ratios are one window, the gate band is a
-    tolerance. tune takes the largest and pastes it; the fixture ships null."""
+    tolerance. tune takes the largest and pastes it."""
     root = tmp_path / "r"
     root.mkdir()
     _reports(root)

@@ -23,11 +23,11 @@ def test_holdout_is_disjoint_from_every_fitting_window(cfg):
         assert not (h["start"] <= hi and lo <= h["end"])
 
 
-def test_config_ships_tau_initial_null(cfg):
-    # it is void until re-derived: the scoping fix changed what the backtest
-    # produces, so any value carried over from before is wrong
-    assert cfg["exploration"]["tau_initial"] is None
-    # and shadow can re-derive it: the floor is set, so the derivation runs
+def test_config_ships_the_owners_launch_tau_and_can_rederive_it(cfg):
+    """config.yaml carries the owner's production pastes as the defaults
+    (2026-09-06); tau is a positive currency amount, and the derivation
+    floor is set so shadow re-derives it on every run."""
+    assert cfg["exploration"]["tau_initial"] > 0
     assert cfg["exploration"]["tau0_derivation_min_decisions"] > 0
 
 

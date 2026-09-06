@@ -310,14 +310,17 @@ are specified in §5.2 and §12a.
 ## MEASURED pastes and launch blockers
 
 `load_config(strict=True)` refuses while any RUNTIME_REQUIRED value is null.
-Every paste has one source and one checker:
+**`config.yaml` ships the OWNER's production readings** (their
+`ops.advance` run of 2026-09-06) as the defaults; a local run on the
+fixture re-derives fixture values — read them, never commit them
+(`git checkout config.yaml` afterwards). Every paste has one source and one checker:
 
 | Config value | Paste from | Checked by |
 | --- | --- | --- |
 | `dispersion.rho` | `artifacts/rho.json`, after EVERY retrain (`m` is measured per batch, never pasted) | `artifact mirrors` (strict start-up refuses drift beyond `rho_paste_tolerance_rel`, 1% of the frozen rho — above the ~1e-3 step a `--check-only` turn takes, so a settle is not a new paste; tighter than tau's 5% because rho is frozen for the pilot while tau self-corrects daily) |
-| `calibration_fit_trailing_weeks`, `information_increment`, `calibration_gate_band` | the REPORT that derives each (`tune` names it) | `config mirrors reports` — these ship fixture values and cannot be null, so the check is the only thing between a pulled repo and a foreign number |
+| `calibration_fit_trailing_weeks`, `information_increment`, `calibration_gate_band` | the REPORT that derives each (`tune` names it) | `config mirrors reports` — these cannot be null, so the check is the only thing between a pulled repo and a number from another extract |
 | `exploration.tau_initial` | `reports/shadow.json` → `tau_initial_derivation` (backtest = cross-check only) | `tau_provenance_error` — shadow refuses a stale paste |
-| `exploration.delta_min_log_bias` | `tune` from `backtest.fidelity`, PER CATEGORY as a one-line mapping (own log ratio floored by MAE@W and the gate half-width; `_default` for unseen categories) — null = no floor, the fixture never ships a number | `config mirrors reports` |
+| `exploration.delta_min_log_bias` | `tune` from `backtest.fidelity`, PER CATEGORY as a one-line mapping (own log ratio floored by MAE@W and the gate half-width; `_default` for unseen categories) — null = no floor | `config mirrors reports` |
 | `scrap/margin_deterioration_pct` | `tune` pastes the 3σ trailing-mean floor from `reports/thresholds.json` (owner, 2026-08-30); OWNER only when the verdict is `TOO TIGHT`, `BLOCKED`, `LIKELY INERT` or `insufficient history` — all blocking, none pasted | `guardrail floors` |
 | `posterior.cold_start_shift_std` | OWNER — launch belief = prior mean − k·std per cell (0.5); read by `init_posterior` and the backtest's DP arm; inert once the posterior has consumed an outcome | `tune` (OWNER reading with `intra_episode_deepening` medians and the like-for-like IL gap) |
 | `data.launch_date` | OWNER — null until launch day; once set, `--fit-calibration` schedules through the latest data (the weekly cron) while every sealed fit keeps its pre-launch scope. Never move `split.test_end` for this | `launch blockers`; `calibration_schedule_current` on every `--apply` |

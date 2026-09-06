@@ -247,6 +247,7 @@ def test_a_measured_value_that_disagrees_with_its_report_fails(cfg, tmp_path):
     # align every OTHER measured value with the fixture reports, so the only
     # thing left disagreeing is the one downgraded to OWNER
     infeasible["learning"]["information_increment"] = 0.341
+    infeasible["exploration"]["tau_initial"] = 1234.5
     infeasible["baseline_model"]["calibration_gate_band"] = [0.997, 1.003]
     infeasible["baseline_model"]["calibration_fit_trailing_weeks"] = 1
     infeasible["data"]["split"] = dict(infeasible["data"]["split"],
@@ -512,6 +513,7 @@ def test_a_measured_key_no_report_measures_is_unverified_not_green(cfg, tmp_path
     c = _cfg_with(cfg, tmp_path, rho={"rho": cfg["dispersion"]["rho"]})
     c["baseline_model"] = dict(c["baseline_model"], calibration_gate_band=[0.997, 1.003],
                                calibration_fit_trailing_weeks=1)
+    c["exploration"] = dict(c["exploration"], tau_initial=1234.5)
     row = status._config_vs_reports(c, str(reports_dir))
     assert row["verdict"] == status.NONE, row
     assert "information_increment" in row["detail"]

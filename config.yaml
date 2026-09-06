@@ -2,15 +2,13 @@
 #
 # Every threshold, constant, window, and rate in the system lives here.
 #
-# WARNING -- every value marked MEASURED in this file was derived from the
-# repo's SYNTHETIC fixture and is evidence about the fixture only (AGENTS
-# rule 19). On a real extract they are all wrong, sometimes badly: pulling
-# this file overwrites whatever your own run derived. On your data, run
-# `python3 -m ops.advance`: it bootstraps, re-derives every MEASURED
-# value through `ops.tune --apply`, and stops at each value only you can
-# set. The values that must never ship a number at all (tau_initial,
-# delta_min_log_bias, the guardrail stops, launch_date) ship null; status lists them as launch blockers until you
-# paste your own, and delta_min_log_bias null simply means no floor.
+# Every value marked MEASURED in this file is the OWNER'S reading from their
+# production extract (ops.advance on bundle baseline-20260906040908,
+# 2026-09-06) -- the defaults the pilot launches with. `ops.advance`
+# re-derives them on every run and `ops.status` names any drift. A run on
+# the repo's SYNTHETIC fixture re-derives fixture values (AGENTS rule 19):
+# never commit those over the owner's -- `git checkout config.yaml` after a
+# local run. `data.launch_date` alone ships null, set on launch day.
 
 meta:
   config_version: "1.0.0"
@@ -73,7 +71,7 @@ dispersion:
   rho_clip_max: 0.95                   # SET  ceiling on the fitted intra-episode correlation
   r_lookup_path: "artifacts/r_lookup.json"
   rho_path: "artifacts/rho.json"
-  rho: 0.1161  # MEASURED  fit_dispersion, on the calib window; mirrors artifacts/rho.json. m is NOT pasted: deff measures forced hours per episode per batch (common.config.deff_from_episodes)
+  rho: 0.6364  # MEASURED  fit_dispersion, on the calib window; mirrors artifacts/rho.json. m is NOT pasted: deff measures forced hours per episode per batch (common.config.deff_from_episodes)
   rho_paste_tolerance_rel: 0.01        # SET  the paste vs artifacts/rho.json, relative to the frozen value. A PROVENANCE check sized to the consequence: rho is frozen for the pilot and divides every unit of evidence via deff, so 1% of rho is well under 1% of deff; tau's 5% is looser because the controller corrects tau daily. Above the ~1e-3 step a --check-only turn takes while the loop contracts (below it, every settle was a new paste)
 
 tuning:                                # SET  ops.tune's auto-apply gates, and the evaluate reports' own knobs (each routed to the one report that reads it -- ops.tune.READ_BY)
@@ -111,7 +109,7 @@ pricing:
 
 exploration:
   budget_share_of_il: 0.01             # SET BY OWNER  exploration spend, share of markdown IL
-  tau_initial: null                    # MEASURED  shadow derives the launch tau; ships null
+  tau_initial: 348.93                  # MEASURED  shadow derives the launch tau (owner, 2026-09-06)
   tau_paste_tolerance_rel: 0.05        # SET  tau_initial paste vs its derivation. A PROVENANCE check, not precision: tau_initial seeds day one only and tau_next moves tau up to 25%/day, so a few percent is absorbed. Wrong-run pastes are off by tens of percent
   tau0_derivation_min_decisions: 500   # SET  floor for shadow's launch-tau
   tau_adjust_clip: [0.5, 1.25]         # SET  max daily multiplicative change in tau
@@ -125,8 +123,8 @@ exploration:
 
 learning:
   update_cadence_days: 1               # SET BY OWNER  days between operator-gated posterior updates (daily.update --apply). DAILY: each cell triggers on its own batch, so a fast category updates the day it has the evidence and a slow one waits -- a longer cadence only delays the fast ones and discards their surplus (learning_yield_would_be.bounded_updates_worth_per_period). tau is walked daily regardless (--calibrate-tau)
-  information_increment: 0.591  # MEASURED  deff-deflated NB info per bounded update
-  max_mean_step: 0.15                  # SET BY OWNER, gated  cap on one update's mean move
+  information_increment: 0.237  # MEASURED  deff-deflated NB info per bounded update
+  max_mean_step: 0.796                 # SET BY OWNER, gated  cap on one update's mean move (pasted inside its gate, owner, 2026-09-06)
   max_std_shrink: 0.25                 # SET BY OWNER  the PRIMARY rate limit on learning
 
 events:
@@ -167,6 +165,6 @@ monitoring:
       scrap: 7                         # per metric, chosen from measured noise
       margin: 1
     persistence_days: 2                # SET  consecutive days before a stop fires
-    scrap_deterioration_pct: null      # MEASURED  3-sigma of the trailing noise, pasted by tune --apply from YOUR reports/thresholds.json; ships null
-    margin_deterioration_pct: null     # MEASURED  3-sigma of the trailing noise, pasted by tune --apply from YOUR reports/thresholds.json; ships null
+    scrap_deterioration_pct: 0.3217    # MEASURED  3-sigma of the trailing noise, pasted by tune --apply from reports/thresholds.json (owner, 2026-09-06)
+    margin_deterioration_pct: 0.0614   # MEASURED  3-sigma of the trailing noise, pasted by tune --apply from reports/thresholds.json (owner, 2026-09-06)
   alert_posterior_std_flat_days: 21    # SET  learning-loop health

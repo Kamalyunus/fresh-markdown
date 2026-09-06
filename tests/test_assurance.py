@@ -370,7 +370,9 @@ def test_a_stale_rho_still_fails_weighted_by_todays_clustering(cfg):
     episodes contribute more correlated hours."""
     from common.config import design_effect
 
-    rho = float(cfg["dispersion"]["rho"])
+    # a fixed rho, not the shipped paste: the claim is about how the
+    # verdict scales with clustering, not about the owner's extract
+    rho = 0.12
     gate = cfg["assurance"]["deff_drift_alert_rel"]
     stale = rho + cfg["assurance"]["rho_drift_alert"]
     m_small = cfg["assurance"]["rho_min_hours_per_episode"]
