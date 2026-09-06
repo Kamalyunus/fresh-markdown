@@ -101,11 +101,22 @@ def test_the_negative_window_dirt_lands_on_WHOLE_windows(): # noqa: N802
 def test_exclusion_window_comes_from_config():
     from common.config import load_config
 
+    """The SQL skips the window's INTERIOR only: an episode straddling an
+    edge has a row on the edge day, and step 1 drops it whole from that row.
+    Cut at the edge in SQL, its remnant would be a fresh entry row for the
+    prior's fit, mid-window (rule 7)."""
+    from datetime import date, timedelta
     excl = load_config()["data"]["exclusion_window"]
     sql = download_flc.build_query("2026-03-01", "2026-08-03",
                                    excl["start"], excl["end"])
-    assert f"NOT (date BETWEEN '{excl['start']}' AND '{excl['end']}')" in sql
+    lo = date.fromisoformat(str(excl["start"])) + timedelta(days=1)
+    hi = date.fromisoformat(str(excl["end"])) - timedelta(days=1)
+    assert f"NOT (date BETWEEN '{lo}' AND '{hi}')" in sql
+    assert str(excl["start"]) not in sql and str(excl["end"]) not in sql
     assert "NOT (date BETWEEN" not in QUERY  # omitted when not asked for
+    # a window of two days or fewer has no interior: nothing is skipped
+    assert "NOT (date BETWEEN" not in download_flc.build_query(
+        "2026-03-01", "2026-08-03", "2026-05-01", "2026-05-02")
 
 
 def test_dates_are_validated_before_interpolation():

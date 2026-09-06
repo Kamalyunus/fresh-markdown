@@ -271,8 +271,8 @@ def test_an_hour_23_decision_is_graded_on_its_trading_day(cfg, tmp_path):
     store.emit_outcome(o)
     decisions, outcomes = store.load_decisions(), store.load_outcomes()
 
-    assert upd.latest_priced_day(decisions, outcomes) == "2026-08-19"
-    spend = upd.daily_exploration_spend(decisions, outcomes)
+    days, spend = upd.finalized_days(decisions, outcomes)
+    assert days[-1] == "2026-08-19"
     assert spend == {"2026-08-19": pytest.approx(21 * 50.0)}, spend
 
     block = upd.tau_calibration(decisions, outcomes, _posterior(cfg, tmp_path), cfg)
@@ -569,5 +569,13 @@ def test_the_launch_belief_is_the_prior_pushed_by_k_stds_and_clipped(cfg):
         assert not p.launch_stale(prior, {"vegetables": 500})
         p.cfg = dict(c, posterior=dict(c["posterior"], cold_start_shift_std=1.0))
         assert p.launch_stale(prior, {"vegetables": 500})
-        p.state["processed_outcome_ids"] = ["O1"]           # the learner owns it now
-        assert not p.launch_stale(prior, {"vegetables": 500})
+        # production state of any kind ends it: a consumed outcome, a walked
+        # tau, or a standing suspension (a re-init would silently lift it)
+        for key, value in (("processed_outcome_ids", ["O1"]), ("tau", 12.0),
+                           ("exploration_suspended", {"reasons": ["x"], "since": "d"})):
+            p.state = {k: v for k, v in p.state.items()
+                       if k not in ("processed_outcome_ids", "tau", "exploration_suspended")}
+            p.state["processed_outcome_ids"] = []
+            assert p.launch_stale(prior, {"vegetables": 500})
+            p.state[key] = value
+            assert not p.launch_stale(prior, {"vegetables": 500})

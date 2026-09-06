@@ -3,8 +3,11 @@
 One SELECT against sb_scm.fresh_flc_detail, aliased to the names
 fit.prepare_data expects (the alias list is a contract --
 tests/test_download_flc.py). REDSHIFT_* credentials come from the environment
-/ --env-file only, never config or this file. The SQL exclusion window is
-row-scoped and only saves transfer; step 1's episode-scoped removal counts.
+/ --env-file only, never config or this file. The SQL exclusion only saves
+transfer and skips the window's INTERIOR (both edge days stay): an episode
+straddling an edge always has a row on the edge day, and step 1 removes it
+whole from that row -- cut in SQL, its remnant would enter the prior's
+entry-only fit mid-window. Step 1's episode-scoped removal is the one that counts.
 Run: python3 -m fit.download_flc [--days N | --start-date A --end-date B]
 """
 
@@ -74,9 +77,12 @@ def build_query(start_date, end_date, exclude_start=None, exclude_end=None):
 
     exclusion = ""
     if exclude_start and exclude_end:
-        exclusion = (
-            f"\n      AND NOT (date BETWEEN '{_iso(exclude_start, 'exclusion start')}'"
-            f" AND '{_iso(exclude_end, 'exclusion end')}')")
+        # the interior only: both edge days are pulled so step 1 sees every
+        # episode that touches the window and drops it whole
+        lo = date.fromisoformat(_iso(exclude_start, "exclusion start")) + timedelta(days=1)
+        hi = date.fromisoformat(_iso(exclude_end, "exclusion end")) - timedelta(days=1)
+        if lo <= hi:
+            exclusion = f"\n      AND NOT (date BETWEEN '{lo}' AND '{hi}')"
 
     return f"""
     SELECT
@@ -156,8 +162,9 @@ def main():
                                        "(default ~/.env)")
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--no-exclude", action="store_true",
-                    help="do not apply data.exclusion_window in SQL; step 1 "
-                         "removes it either way, episode-scoped")
+                    help="pull the exclusion window too (its interior is "
+                         "skipped in SQL by default); step 1 removes it "
+                         "either way, episode-scoped")
     args = ap.parse_args()
 
     end = date.fromisoformat(args.end_date) if args.end_date \

@@ -272,8 +272,31 @@ def test_an_unlearned_posterior_is_reinitialised_when_the_launch_belief_moves():
     """posterior.cold_start_shift_std changed after init: the file is state,
     not a report, so no vintage check catches it. While it holds no outcome
     a --force re-init is safe and due; once it has learned, never."""
-    steps = advance.plan(_state(posterior_stale=True))
+    pre = dict(launched=False, nulls=["data.launch_date"])
+    steps = advance.plan(_state(posterior_stale=True, **pre))
     assert steps[0]["args"] == ["ops.init_posterior", "--force"]
     assert steps[0]["phase"] == "posterior"
-    assert advance.plan(_state(posterior_stale=False))[0]["kind"] != "run" or \
-        advance.plan(_state(posterior_stale=False))[0]["args"][0] != "ops.init_posterior"
+    assert advance.plan(_state(posterior_stale=False, **pre))[0].get("args", [""])[0] \
+        != "ops.init_posterior"
+    # after launch the file is production state whatever launch_stale says
+    # (tau walks, a suspension may stand): never re-initialised by the process
+    assert all(s.get("args", [""])[0] != "ops.init_posterior"
+               for s in advance.plan(_state(posterior_stale=True)))
+
+
+def test_a_shadow_graded_on_a_retrained_bundle_is_rerun_before_tune_can_block():
+    """After `--retrain` the backtest names the new bundle and shadow.json the
+    old one; tune's 'reports agree on one model' invariant is a BLOCK, and a
+    BLOCK stops the chain -- so the stale shadow must be re-run before tune
+    is consulted, or the only exit is deleting the report by hand."""
+    st = _state(stale={"shadow": "ran against bundle b0"},
+                tune={"findings": [{"key": "reports agree on one model",
+                                    "class": tune.BLOCK, "current": {},
+                                    "recommended": "one version"}],
+                      "blocked": True, "to_paste": [], "owner_decisions": []})
+    steps = advance.plan(st)
+    assert steps[0]["kind"] == "run" and steps[0]["args"][0] == "evaluate.shadow"
+    # a CONFIG-stale shadow still waits for its place after the posterior step
+    st = _state(stale={"shadow": "shadow: exploration.delta_min_log_bias"},
+                posterior=False)
+    assert advance.plan(st)[0]["args"] == ["ops.init_posterior"]

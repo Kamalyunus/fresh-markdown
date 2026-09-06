@@ -169,19 +169,6 @@ def finalized_days(decisions, outcomes):
     return sorted(days), spend
 
 
-def latest_priced_day(decisions, outcomes):
-    """The TRADING date of the most recent decision with a finalized outcome
-    -- the day the controller prices and the stop condition backstops."""
-    days, _ = finalized_days(decisions, outcomes)
-    return days[-1] if days else None
-
-
-def daily_exploration_spend(decisions, outcomes):
-    """Realised exploration cost by TRADING date, once the outcome has
-    finalized -- the one per-day spend the controller and the monitor read."""
-    return finalized_days(decisions, outcomes)[1]
-
-
 def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None):
     """Move tau toward the budget from realised spend (design 5.8) -- on
     the SAME two numbers the monitor's stop condition compares, so the

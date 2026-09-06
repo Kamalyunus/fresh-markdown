@@ -26,8 +26,14 @@ from fit.prepare_data import SOURCE_TO_CANONICAL
 from events.store import EventStore
 
 
+def _day(value):
+    """One spelling of a trading day, whatever the producer's dtype: a
+    parquet datetime column reads `2026-08-19 00:00:00` under str()."""
+    return pd.Timestamp(value).strftime("%Y-%m-%d")
+
+
 def _key(sku, fc, date, hour):
-    return (str(sku), str(fc), str(date), int(hour))
+    return (str(sku), str(fc), _day(date), int(hour))
 
 
 def load_failures(path):

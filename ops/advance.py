@@ -139,6 +139,15 @@ def _stop(phase, why, detail=()):
     return {"kind": "stop", "phase": phase, "why": why, "detail": list(detail)}
 
 
+def _shadow_step(st):
+    why = st["stale"].get("shadow")
+    return _run("shadow (hold-out, every episode" + (f"; {why}" if why else "") + ")",
+                ["evaluate.shadow", "--input", PREPARED,
+                 "--out", "reports/shadow.json", "--max-episodes", "0",
+                 "--workers", "0"],          # every core but one; byte-identical
+                phase="shadow", reevaluate=True)
+
+
 def plan(st):
     """The next steps, in order, ending in a stop -- pure over probe()'s
     state so every branch is testable without a workspace."""
@@ -172,6 +181,12 @@ def plan(st):
                           ["evaluate.derive_thresholds", "--input", PREPARED],
                           phase="tune", reevaluate=True))
         return steps
+    # a shadow graded on a bundle no longer on disk (a retrain) is re-run
+    # HERE: left until step 5, tune's "reports agree on one model" invariant
+    # blocks on it first and the chain has no exit. A config-stale shadow
+    # waits for step 5 -- the posterior it prices with may be about to move.
+    if str(st["stale"].get("shadow", "")).startswith("ran against bundle"):
+        return [_shadow_step(st)]
 
     # 3. tune: paste what the reports measured, settle, repeat
     rep = st["tune"]
@@ -188,13 +203,13 @@ def plan(st):
                       "reevaluate": True, "keys": keys})
         return steps
 
-    # 4. posterior, once -- re-initialised only while it holds no learning
-    #    and the launch belief it was written with has moved
+    # 4. posterior, once -- re-initialised only BEFORE launch, while it holds
+    #    no production state and the launch belief it was written with moved
     if not st["posterior"]:
         steps.append(_run("init posterior", ["ops.init_posterior"],
                           phase="posterior", reevaluate=True))
         return steps
-    if st.get("posterior_stale"):
+    if st.get("posterior_stale") and not st["launched"]:
         steps.append(_run("re-init posterior (launch belief moved; no outcome "
                           "consumed yet)", ["ops.init_posterior", "--force"],
                           phase="posterior", reevaluate=True))
@@ -202,14 +217,7 @@ def plan(st):
 
     # 5. shadow on the hold-out, the launch record
     if "shadow" not in st["have"] or "shadow" in st["stale"]:
-        steps.append(_run("shadow (hold-out, every episode"
-                          + (f"; {st['stale']['shadow']}" if "shadow" in st["stale"] else "")
-                          + ")",
-                          ["evaluate.shadow", "--input", PREPARED,
-                           "--out", "reports/shadow.json", "--max-episodes", "0",
-                           "--workers", "0"],          # every core but one; byte-identical
-                          phase="shadow", reevaluate=True))
-        return steps
+        return [_shadow_step(st)]
     if st["shadow_gate"] and not str(st["shadow_gate"]).startswith("PASS"):
         return [_stop("shadow", f"shadow gate: {st['shadow_gate']}",
                       ["read reports/shadow.json -> shadow_gate, rejected_reasons"])]

@@ -124,7 +124,7 @@ def guardrail_series(decisions, outcomes, cfg):
 
 def overspend_series(learning, business, cfg):
     """spend / budget_today per priced day, through the day the controller
-    prices (update.latest_priced_day -- the last day with a closed episode is
+    prices (update.finalized_days -- the last day with a closed episode is
     a different day whenever the latest day's episodes are still open). A
     zero-budget day has no reading and breaks a streak."""
     il_by_day = business.get("il_by_close_day") or {}
@@ -135,11 +135,14 @@ def overspend_series(learning, business, cfg):
         return {"basis": "spend / budget_today", "by_day": {}, "latest": None}
     widest_std = PosteriorStore.widest_active_std(cells, learning.get("cell_of") or {})
     by_day = {}
-    for day in sorted(d for d in spend_by_day if d <= last):
+    # every PRICED day gets a reading -- a day with no forced spend (the
+    # suspension in force, or nothing affordable) reads 0, so it ends the
+    # streak instead of leaving the last over-budget days as "latest"
+    for day in learning.get("priced_days") or sorted(spend_by_day):
         budget = explore.budget_today(
             explore.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
         if budget > 0:
-            by_day[day] = round(float(spend_by_day[day]) / budget, 4)
+            by_day[day] = round(float(spend_by_day.get(day, 0.0)) / budget, 4)
     return {"basis": "spend / budget_today", "by_day": by_day,
             "latest": by_day.get(last)}
 
@@ -186,8 +189,12 @@ def learning_metrics(decisions, posterior, cfg, outcomes=()):
     cell_of = posterior.state["cell_of"]
     forced = [d for d in decisions if d["is_exploration"]]
     realised_cost = sum(d["exploration_cost"] for d in forced)
-    empty_rate = (np.mean([d["affordable_set_size"] == 0 for d in decisions])
-                  if decisions else None)
+    # a suspended decision has no budget to afford anything with; counting
+    # it would read the suspension as an empty affordable set
+    budgeted = [d for d in decisions if d.get("tau_current") is not None]
+    empty_rate = (np.mean([d["affordable_set_size"] == 0 for d in budgeted])
+                  if budgeted else None)
+    priced_days, spend_by_day = update_mod.finalized_days(decisions, outcomes)
     return {
         # routing, so the budget's widest-std is taken over cells a category
         # actually reaches (an unrouted GLOBAL never narrows)
@@ -205,12 +212,11 @@ def learning_metrics(decisions, posterior, cfg, outcomes=()):
                         / (1 - d["reference_discount"]))) for d in forced])), 4)
             if forced else None,
         "realised_exploration_cost": round(realised_cost, 1),
-        # per-day, from update.daily_exploration_spend -- the ONE definition
-        # the tau controller and the stop condition both price a day with
-        "exploration_cost_by_day": {
-            k: round(v, 1) for k, v in
-            update_mod.daily_exploration_spend(decisions, outcomes).items()},
-        "latest_priced_day": update_mod.latest_priced_day(decisions, outcomes),
+        # per-day, from update.finalized_days -- the ONE definition the tau
+        # controller and the stop condition both price a day with
+        "exploration_cost_by_day": {k: round(v, 1) for k, v in spend_by_day.items()},
+        "priced_days": priced_days,
+        "latest_priced_day": priced_days[-1] if priced_days else None,
         # the budget the last decision was priced with: None while
         # exploration is suspended (design 5.12)
         "tau_current": decisions[-1]["tau_current"] if decisions else None,

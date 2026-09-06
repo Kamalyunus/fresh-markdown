@@ -120,11 +120,15 @@ class PosteriorStore:
             os.close(dir_fd)
 
     def launch_stale(self, prior_by_category, episodes_per_week):
-        """True while the store holds NO learning and its cells differ from
-        what initialise() would write now (the launch belief moved, or the
-        prior did). Once an outcome has been consumed the learner owns the
-        mean and the file is never re-initialised by the process."""
-        if self.state.get("processed_outcome_ids"):
+        """True while the store holds NO production state and its cells
+        differ from what initialise() would write now (the launch belief
+        moved, or the prior did). Once an outcome has been consumed, tau has
+        walked, or a stop condition has suspended exploration, the file is
+        production state and the process never re-initialises it -- a re-init
+        would silently lift a suspension and reset tau to the launch value."""
+        if self.state.get("processed_outcome_ids") \
+                or self.state.get("tau") is not None \
+                or self.state.get("exploration_suspended"):
             return False
         fresh = self.launch_state(self.cfg, prior_by_category, episodes_per_week)
         mine = {c: (round(r["mean"], 9), round(r["std"], 9))

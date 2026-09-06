@@ -162,6 +162,15 @@ def test_failures_can_arrive_as_a_table(tmp_path):
         writer(p, index=False)
         assert load_failures(str(p)) == {
             ("7", "F1", "2026-08-19", 17): "push_timeout"}
+    # a datetime `date` column (what a warehouse export carries) keys the
+    # same day -- str() of it is '2026-08-19 00:00:00' and matched nothing,
+    # so every failed push was learned from as an applied price
+    p = tmp_path / "dt.parquet"
+    rows.assign(date=pd.to_datetime(rows["date"])).to_parquet(p, index=False)
+    assert load_failures(str(p)) == {("7", "F1", "2026-08-19", 17): "push_timeout"}
+    outs, rep = build_outcomes([_dec(1)], _feed([{"start": 3, "sold": 1, "end": 2}]),
+                               failures=load_failures(str(p)))
+    assert outs[0]["execution_status"] == "failed" and rep["push_failures_applied"] == 1
 
 
 def test_one_unusable_feed_row_costs_its_decision_not_the_days_batch():

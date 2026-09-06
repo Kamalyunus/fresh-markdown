@@ -38,6 +38,9 @@ def test_duplicate_ids_written_by_a_foreign_producer_are_counted_on_load(cfg, tm
 
     store = EventStore(cfg, root=str(root))
     assert store.duplicate_counts == {"decision": 2, "outcome": 1}
+    # counted, and loaded ONCE: a duplicate line must never reach the
+    # learner as a second outcome or the matcher as a second decision
+    assert len(store.load_decisions()) == 1 and len(store.load_outcomes()) == 1
     # and an emit of the same id counts on top
     assert not store.emit_outcome(dict(o))
     assert store.duplicate_counts["outcome"] == 2
@@ -133,3 +136,8 @@ def test_a_torn_quarantine_line_does_not_take_the_store_down(cfg, tmp_path):
     store = EventStore(cfg, root=str(root))
     assert store.load_quarantine() == []
     assert store.emit_outcome(_outcome())
+    # the torn line was closed, so the next quarantined record is its own
+    # line and reads back -- not glued onto the fragment and lost with it
+    assert not store.emit_outcome(_outcome(outcome_id="O-bad", ending_inventory=99))
+    q = store.load_quarantine()
+    assert [r["event"].get("outcome_id") for r in q] == ["O-bad"]

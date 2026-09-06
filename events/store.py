@@ -150,6 +150,7 @@ class EventStore:
             key = _quarantine_key(parsed.get("event", {}))
             if key is not None:
                 self._quarantined_ids.add(key)
+        self._terminate_last_line(self.paths["quarantine"])
 
         self._ids = {"decision": set(), "outcome": set()}
         for kind, path in (("decision", self.paths["decisions"]),
@@ -250,16 +251,28 @@ class EventStore:
         self._append(self.paths["outcomes"], evt)
         return True
 
-    def _load(self, path):
-        # unparseable lines were quarantined at construction; here they are
-        # skipped so the readable stream stays readable
-        return [parsed for _, parsed, _ in self._lines(path) if parsed is not None]
+    def _load(self, path, id_field=None):
+        """The readable stream: torn lines were quarantined at construction
+        and are skipped; a repeated id (a foreign producer's re-append) is
+        COUNTED in duplicate_counts and loaded ONCE, first occurrence -- the
+        learner must never consume the same outcome twice."""
+        out, seen = [], set()
+        for _, parsed, _ in self._lines(path):
+            if parsed is None:
+                continue
+            ident = parsed.get(id_field) if id_field else None
+            if ident is not None:
+                if ident in seen:
+                    continue
+                seen.add(ident)
+            out.append(parsed)
+        return out
 
     def load_decisions(self):
-        return self._load(self.paths["decisions"])
+        return self._load(self.paths["decisions"], "decision_id")
 
     def load_outcomes(self):
-        return self._load(self.paths["outcomes"])
+        return self._load(self.paths["outcomes"], "outcome_id")
 
     def load_quarantine(self):
         return self._load(self.paths["quarantine"])

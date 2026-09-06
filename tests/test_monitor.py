@@ -52,6 +52,31 @@ def test_persistence_counts_calendar_days_not_observed_days():
     assert evaluate_guardrail(stale, 0.20, 2)["consecutive_days_over"] == 1
 
 
+def test_overspend_reads_zero_on_a_priced_day_with_no_forced_spend():
+    """After a stop suspended exploration, the following days have NO forced
+    spend. Without a reading for them the streak was still counted from the
+    last two over-budget days, and the next --feed re-suspended what a human
+    had just resumed. A priced day with nothing spent is a day at 0."""
+    from daily.monitor import overspend_series, evaluate_guardrail
+    from common.config import load_config
+    cfg = load_config()
+    il = {f"2026-09-{d:02d}": 1000.0 for d in range(1, 8)}
+    learning = {"posterior_by_cell": {"GLOBAL": {"std": 0.5}},
+                "cell_of": {"MEAT": "GLOBAL"},
+                "exploration_cost_by_day": {"2026-09-05": 1e6, "2026-09-06": 1e6},
+                "priced_days": ["2026-09-05", "2026-09-06", "2026-09-07"],
+                "latest_priced_day": "2026-09-07"}
+    series = overspend_series(learning, {"il_by_close_day": il}, cfg)
+    assert series["by_day"]["2026-09-07"] == 0.0 and series["latest"] == 0.0
+    assert not evaluate_guardrail(series, 2.0, 2)["fired"]
+    # the two over days alone still fire
+    learning["priced_days"] = learning["priced_days"][:2]
+    learning["latest_priced_day"] = "2026-09-06"
+    fired = evaluate_guardrail(overspend_series(learning, {"il_by_close_day": il}, cfg),
+                               2.0, 2)
+    assert fired["fired"] and fired["consecutive_days_over"] == 2
+
+
 def test_business_metrics_counts_shrink_like_the_guardrail_and_il_pct_do():
     """Scrap = leftover + shrink has ONE definition. business_metrics read
     leftover only, so IL, waste_units, sell-through -- the pilot's read and
