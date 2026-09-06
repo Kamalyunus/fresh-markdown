@@ -83,6 +83,59 @@ def test_a_pinned_r_is_flagged_and_kept_out_of_the_clamp_percentile(
     assert r_lookup["subcategory"]["S2"] == pytest.approx(2.0)
     assert "at_bound_note" in r_lookup
     assert rho_out["fit_window"] == "calib"
+    # the residual basis is reported as what was USED: the per-category
+    # means, with the constant named as the fallback for unseen categories
+    # -- never a bare `working_elasticity` that was always the constant
+    assert "working_elasticity" not in r_lookup
+    assert r_lookup["working_elasticity_fallback"] == -1.0
+    assert r_lookup["working_elasticity_by_category"] == {}
+
+
+def test_lookup_r_walks_the_fallback_chain_and_treats_zero_as_a_value():
+    r = {"subcategory": {"S": 0.0}, "category": {"C": 2.0}, "global": 9.0,
+         "fallback_order": ["subcategory", "category", "global"]}
+    assert fd.lookup_r(r, "S", "C") == 0.0          # 0.0 is a value, not a miss
+    assert fd.lookup_r(r, "X", "C") == 2.0
+    assert fd.lookup_r(r, "X", "Y") == 9.0
+    # the vectorised form is the row rule, row for row
+    sub = pd.Series(["S", "X", "X", "S"], index=[7, 3, 9, 1])
+    cat = pd.Series(["C", "C", "Y", "Y"], index=[7, 3, 9, 1])
+    got = fd.lookup_r_vec(r, sub, cat)
+    assert list(got) == [fd.lookup_r(r, s, c) for s, c in zip(sub, cat)]
+    assert got.dtype == float
+
+
+def test_drift_windows_hold_whole_episodes_keyed_on_the_opening_week(
+        cfg, monkeypatch):
+    """A row-level `to_period` bucket split every window crossing a week
+    seam into two clusters (rule 15) -- its Monday rows became a phantom
+    one-hour episode in the next window's rho."""
+    cfg = copy.deepcopy(cfg)
+    cfg["dispersion"]["min_rows_per_group"] = 4
+    monkeypatch.setattr(fd, "BaselineModel", lambda c: _FlatModel())
+    monkeypatch.setattr(fd, "_working_elasticity", lambda c: ({}, -1.0))
+    monkeypatch.setattr(fd, "pre_launch", lambda d, c: d)
+    monkeypatch.setattr(fd, "population", lambda d, c: d)
+    monkeypatch.setattr(fd, "fit_r", lambda k, mu, cen, b: (2.0, True))
+
+    def hours(eid, day, hrs):
+        return [dict(episode_id=eid, date=day, hour_of_day=h, category="A",
+                     starting_inventory=10, units_sold=1, ending_inventory=9,
+                     total_discount=0.25, d_ref=0.25) for h in hrs]
+    rows = (hours("w1a", "2026-07-07", range(10, 14))          # Tue, week 1
+            + hours("w1b", "2026-07-08", range(10, 14))
+            + hours("w2a", "2026-07-14", range(10, 14))        # Tue, week 2
+            + hours("w2b", "2026-07-15", range(10, 14))
+            # opens Sunday 22:00 of week 1, runs into Monday of week 2
+            + hours("SEAM", "2026-07-12", [22, 23])
+            + hours("SEAM", "2026-07-13", [0, 1, 2]))
+    d = pd.DataFrame(rows)
+
+    drift = fd.drift_by_window(d, cfg)
+    assert sorted(drift["by_window"]) == ["2026-07-06", "2026-07-13"]
+    # all five SEAM rows sit in the week it OPENED in, none in the next
+    assert drift["by_window"]["2026-07-06"]["rows"] == 8 + 5
+    assert drift["by_window"]["2026-07-13"]["rows"] == 8
 
 
 def test_the_working_elasticity_fallback_is_a_config_key(cfg, tmp_path):

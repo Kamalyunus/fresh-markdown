@@ -68,6 +68,76 @@ def test_the_trace_says_when_a_sample_is_too_thin_to_read_daily(cfg):
     assert "spend_over_budget" in trace["note"]
 
 
+def test_the_trace_streak_counts_consecutive_calendar_days(cfg):
+    """The stop condition's persistence is the monitor's rule
+    (daily.monitor.evaluate_guardrail): consecutive CALENDAR days over the
+    multiple. The trace once incremented on consecutive ledger ENTRIES, so
+    two over-budget days a day apart read as a two-day streak and fired."""
+    from evaluate.shadow import _controller_trace
+
+    sc = cfg["monitoring"]["stop_conditions"]
+    persist = int(sc["persistence_days"])
+
+    def trace(days):
+        led = SpreadLedger()
+        for day in days:
+            led.add(day, [10.0, 20.0])
+        # a thin trailing IL base: every day's expected spend is over budget
+        return _controller_trace(led, {"2026-08-09": 100.0}, tau0=1000.0,
+                                 widest_std=1.0, cfg=cfg, window_days=3)
+
+    gapped = trace(["2026-08-10", "2026-08-12"])
+    rows = gapped["by_day"]
+    assert all(r["over_budget"] > sc["exploration_cost_vs_budget"] for r in rows)
+    assert [r["days_over"] for r in rows] == [1, 1]
+    assert not any(r["stop_condition_fires"] for r in rows)
+    assert gapped["days_stop_condition_fires"] == 0
+
+    contiguous = trace(["2026-08-10", "2026-08-11"])
+    assert [r["days_over"] for r in contiguous["by_day"]] == [1, 2]
+    assert contiguous["by_day"][-1]["stop_condition_fires"] == (2 >= persist)
+
+
+def test_deeper_and_shallower_hours_are_counted_with_their_sign(
+        cfg, tmp_path, monkeypatch):
+    """`share_hours_recommending_deeper_than_legacy_price` was the unsigned
+    differing share under a second name. Deeper and shallower are tallied
+    apart, and the differing share is their sum."""
+    from evaluate import shadow
+
+    recommended = iter([0.40, 0.20, 0.30])        # deeper, shallower, same
+
+    def fake_decide(state, posterior, store, cfg, rng, tau, model_version,
+                    spread_sink=None):
+        d = next(recommended)
+        evt = {"decision_id": f"d-{state['hour_of_day']}",
+               "applied_discount": d,
+               "applied_price": state["original_price"] * (1 - d),
+               "cost": state["cost"], "is_exploration": False,
+               "affordable_set_size": 1, "reference_discount": 0.30,
+               "epsilon_posterior_mean": -1.0, "solver_latency_s": 0.0}
+        store.emit_decision(evt)
+        return evt
+
+    monkeypatch.setattr(shadow, "decide", fake_decide)
+    g = _hours("e", "2026-08-10", 3, disc=0.30)
+    g["r"], g["mu_ref_hat"], g["is_observed"] = 1.0, 2.0, True
+    ep = dict({c: g[c].to_numpy() for c in shadow.EP_COLS}, episode_id="e")
+    ctx = {"cfg": cfg, "tau": None, "model_version": "x", "seed": 0,
+           "cal_grain": "category", "cells": {"FRUIT": None}}
+    out = shadow._shadow_one(ep, ctx)
+    assert (out["deeper"], out["shallower"]) == (1, 1)
+
+    # and the report's three shares are one tally read three ways
+    monkeypatch.undo()
+    cfg = _harness_cfg(cfg, tmp_path)
+    rv = _run_shadow(cfg, _shadow_frame(), _Applier(cfg),
+                     monkeypatch)["recommendation_vs_legacy"]
+    assert rv["share_hours_differing"] == pytest.approx(
+        rv["share_hours_recommending_deeper_than_legacy_price"]
+        + rv["share_hours_recommending_shallower_than_legacy_price"], abs=1e-4)
+
+
 def test_the_budget_base_is_the_trailing_realised_il(cfg):
     """The IL base for a day's budget is the mean of REALISED daily IL over
     the trailing budget_il_window_days, ending YESTERDAY -- never the same
@@ -219,24 +289,33 @@ def _run_shadow(cfg, frame, model, monkeypatch, refit=None, **kw):
     history = shadow.pre_window_il_history(frame, cfg, WINDOW_START)
     window = episodes.window_slice(frame, WINDOW_START, WINDOW_END)
     kw.setdefault("max_episodes", 0)
+    kw.setdefault("pre_window_frame", frame)
     return shadow.run_shadow(window, cfg, prior_il_by_day=history,
-                             pre_window_frame=frame, window_start=WINDOW_START,
-                             **kw)
+                             window_start=WINDOW_START, **kw)
 
 
 def test_every_per_day_figure_divides_by_the_unsampled_unextended_span(
         cfg, tmp_path, monkeypatch):
     """n_days once came from three places: the extended frame (a synthetic
     tail adds a day), the sampled frame (a sample shrinks the span), the
-    calendar. It is the window population's span, computed before either."""
+    calendar. It is the window population's span, computed before either --
+    and the report's `window` is that frame's too, so a reader (ops.tune)
+    dividing by its dates lands on the same span."""
+    from common.io import read_json
+    from evaluate.backtest import predict_frame
     cfg = _harness_cfg(cfg, tmp_path)
     frame = _shadow_frame()
     report = _run_shadow(cfg, frame, _Applier(cfg), monkeypatch)
     b, td = report["exploration_budget_would_be"], report["tau_initial_derivation"]
+    w = report["window"]
     # window: 08-10..08-13 opened (4 days); w3's tail reaches 08-14 (5)
-    assert b["days"] == 4 == b["tau_controller_trace"]["window_days"]
-    assert report["window"]["date_max"] == "2026-08-14", \
-        "the extended frame does reach a fifth day -- days must not read it"
+    assert b["days"] == 4 == b["tau_controller_trace"]["window_days"] == w["days"]
+    assert (w["date_min"], w["date_max"]) == ("2026-08-10", "2026-08-13")
+    # the extended frame really does reach a fifth day; nothing reads it
+    extended = predict_frame(episodes.window_slice(frame, WINDOW_START, WINDOW_END),
+                             cfg, _Applier(cfg),
+                             read_json(cfg["dispersion"]["r_lookup_path"]))
+    assert str(extended.date.max()) == "2026-08-14"
     # pre-window: 08-04..08-08 opened (5 days); p3's tail reaches 08-09
     assert not td["fallback"] and td["days"] == 5
     assert b["implied_daily_spend"] == pytest.approx(
@@ -246,7 +325,33 @@ def test_every_per_day_figure_divides_by_the_unsampled_unextended_span(
     sampled = _run_shadow(cfg, frame, _Applier(cfg), monkeypatch, max_episodes=1)
     assert sampled["window"]["sampled"] and sampled["window"]["episodes"] == 1
     assert sampled["exploration_budget_would_be"]["days"] == 4
+    assert sampled["window"]["days"] == 4
     assert sampled["tau_initial_derivation"]["days"] == 5
+
+
+def test_the_paste_fallback_is_checked_against_the_runs_own_out_path(
+        cfg, tmp_path, monkeypatch):
+    """When the tau in force falls back to the config paste, the paste is
+    checked against the derivation at the path THIS run writes to (--out),
+    not a hard-coded reports/shadow.json."""
+    from common.config import ConfigError
+    from common.io import write_json
+    cfg = _harness_cfg(cfg, tmp_path)
+    cfg["exploration"] = dict(cfg["exploration"], tau_initial=5.0)
+    frame = _shadow_frame()
+    out = str(tmp_path / "elsewhere" / "shadow.json")
+
+    # no pre-window frame -> the paste is the tau in force; a derivation at
+    # `out` that disagrees with it is a stale paste and blocks the run
+    write_json(out, {"tau_initial_derivation": {"tau_initial": 100.0}})
+    with pytest.raises(ConfigError, match="stale"):
+        _run_shadow(cfg, frame, _Applier(cfg), monkeypatch,
+                    pre_window_frame=None, shadow_path=out)
+    write_json(out, {"tau_initial_derivation": {"tau_initial": 5.0}})
+    report = _run_shadow(cfg, frame, _Applier(cfg), monkeypatch,
+                         pre_window_frame=None, shadow_path=out)
+    b = report["exploration_budget_would_be"]
+    assert b["tau"] == 5.0 and b["tau_source"].startswith("config paste")
 
 
 def test_the_aggregate_budget_is_the_mean_over_the_windows_decision_days(

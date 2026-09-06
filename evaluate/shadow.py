@@ -9,7 +9,6 @@ and ZERO cost-floor violations."""
 
 import argparse
 import hashlib
-import json
 
 import numpy as np
 import pandas as pd
@@ -90,7 +89,9 @@ SCALARS = ("cost_floor_violations", "n_forced", "empty_affordable",
            "would_be_cost", "raw_information",
            # info is quadratic in the log price move, linear in demand
            "abs_log_ratio", "forced_mu", "forced_discount_gap",
-           "rec_disc", "leg_disc", "differs")
+           # SIGNED: hours the recommendation is deeper / shallower than
+           # the legacy price in force (a differing hour is one or the other)
+           "rec_disc", "leg_disc", "deeper", "shallower")
 
 
 def weekly_refit_schedule(d_full, cfg, model, r_lookup, start, end):
@@ -249,12 +250,12 @@ def derive_tau0(d_full, cfg, start, model, posterior, r_lookup, il_history,
 
 
 def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None,
-                      sampled_episodes=None, population_episodes=None,
-                      max_days=60):
+                      sampled_episodes=None, population_episodes=None):
     """Day-by-day tau-controller walk: does the pilot survive its first
     week? Spend per day is EXPECTED spend at the tau in force."""
     sc = cfg["monitoring"]["stop_conditions"]
     stop_at, persist = sc["exploration_cost_vs_budget"], int(sc["persistence_days"])
+    max_days = int(cfg["tuning"]["controller_trace_max_days"])
     days = ledger.days
     order = sorted(range(len(days)), key=lambda i: days[i])[:max_days]
     index = {days[i]: i for i in order}
@@ -264,12 +265,21 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
         float(tau0), [days[i] for i in order],
         lambda day, t: ledger.spend_by_day(t)[index[day]],
         il_by_day, widest_std, cfg)
-    rows, first_within, suspend_days, streak = [], None, 0, 0
+    rows, first_within, suspend_days, streak, prev = [], None, 0, 0, None
     for rank, r in enumerate(walked):
         over = (r["spend"] / r["budget"]) if r["budget"] > 0 else None
-        # the monitor's rule: over the multiple on persistence_days
-        # CONSECUTIVE priced days (a zero-budget day breaks the streak)
-        streak = streak + 1 if (over is not None and over > stop_at) else 0
+        # the monitor's rule (daily.monitor.evaluate_guardrail): over the
+        # multiple on persistence_days CONSECUTIVE CALENDAR days -- a
+        # calendar day with no decision breaks the streak, as does a
+        # zero-budget day (no reading, not an overspend)
+        day = pd.Timestamp(r["day"])
+        if not (over is not None and over > stop_at):
+            streak = 0
+        elif prev is not None and (day - prev).days == 1:
+            streak += 1
+        else:
+            streak = 1
+        prev = day
         fired = streak >= persist
         suspend_days += int(fired)
         if over is not None and over <= 1.0 and first_within is None:
@@ -444,8 +454,11 @@ def _shadow_one(ep, ctx):
             out["empty_affordable"] += 1
         out["rec_disc"] += evt["applied_discount"]
         out["leg_disc"] += legacy_d
-        if abs(evt["applied_discount"] - legacy_d) > dp_mod.TIER_EPS:
-            out["differs"] += 1
+        gap = evt["applied_discount"] - legacy_d
+        if gap > dp_mod.TIER_EPS:
+            out["deeper"] += 1
+        elif gap < -dp_mod.TIER_EPS:
+            out["shallower"] += 1
 
         # outcome = what actually happened under the LEGACY price
         outcome = {
@@ -483,15 +496,18 @@ def _shadow_one(ep, ctx):
 
 def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
                prior_il_by_day=None, pre_window_frame=None, window_start=None,
-               window_basis=HOLDOUT_BASIS, workers=None):
+               window_basis=HOLDOUT_BASIS, workers=None,
+               shadow_path="reports/shadow.json"):
+    """`shadow_path` is where THIS run's report will be written -- the
+    derivation a config-paste tau is checked against when the run falls
+    back to the paste."""
     # precondition, inside run_shadow so a programmatic caller cannot skip it
     d = population(d, cfg, "dp_eligible")
     if d.empty:
         raise RuntimeError("no DP-eligible episodes in this window")
     model = BaselineModel(cfg)
     posterior = PosteriorStore(cfg)
-    with open(cfg["dispersion"]["r_lookup_path"]) as f:
-        r_lookup = json.load(f)
+    r_lookup = read_json(cfg["dispersion"]["r_lookup_path"])
     store = EventStore(cfg, root=events_root or cfg["events"]["shadow_store_dir"])
     rng = np.random.default_rng(seed)
 
@@ -512,7 +528,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     else:
         why = (tau_deriv.get("note") if tau_deriv
                else "no pre-window frame or window start given")
-        _require_shadow_config(cfg, why=why)
+        _require_shadow_config(cfg, shadow_path=shadow_path, why=why)
         tau = float(cfg["exploration"]["tau_initial"])
         tau_source = "config paste (exploration.tau_initial)"
 
@@ -533,8 +549,10 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     # the span every "per day" figure divides by: the WINDOW's, on the
     # unsampled, unextended frame (a sample can shrink it; extend_to_window's
     # synthetic tail can add a day). Both sides -- spend and budget -- cover
-    # the same episodes over the same days.
+    # the same episodes over the same days. The report's window is this
+    # frame's too, so a reader dividing by its dates gets the same span.
     n_days = episodes.calendar_days(d.date)
+    date_min, date_max = str(d.date.min()), str(d.date.max())
     sampled = bool(max_episodes) and n_population > max_episodes
     if sampled:
         keep = rng.choice(population_ids, max_episodes, replace=False)
@@ -809,7 +827,10 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             # schedule's end
             "calibration_coverage": model.calibration_coverage(),
         },
-        "window": {"date_min": str(d.date.min()), "date_max": str(d.date.max()),
+        "window": {"date_min": date_min, "date_max": date_max,
+                   # the ONE n_days (episodes.calendar_days) every per-day
+                   # figure in this report divides by
+                   "days": int(n_days),
                    "episodes": len(groups),
                    "population_episodes": int(n_population),
                    "basis": window_basis,
@@ -840,13 +861,17 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         "recommendation_vs_legacy": {
             "mean_recommended_discount": round(tot["rec_disc"] / n_dec, 4),
             "mean_legacy_discount": round(tot["leg_disc"] / n_dec, 4),
-            "share_hours_differing": round(tot["differs"] / n_dec, 4),
-            # every hour re-anchors on LEGACY's price, so a differing hour is
-            # one where the agent would cut below the price in force; the
-            # agent's own within-episode steps are the backtest's
+            "share_hours_differing": round(
+                (tot["deeper"] + tot["shallower"]) / n_dec, 4),
+            # every hour re-anchors on LEGACY's price, so "deeper" is the
+            # share of hours the agent would cut below the price in force
+            # and "shallower" the share it would hold above it; the agent's
+            # own within-episode steps are the backtest's
             # intra_episode_moves (shadow never walks its own path)
             "share_hours_recommending_deeper_than_legacy_price": round(
-                tot["differs"] / n_dec, 4),
+                tot["deeper"] / n_dec, 4),
+            "share_hours_recommending_shallower_than_legacy_price": round(
+                tot["shallower"] / n_dec, 4),
         },
         "realised_vs_predicted_sold_ratio_at_legacy_price": round(drift_ratio, 4)
             if drift_ratio else None,
@@ -1027,7 +1052,8 @@ def main():
                         seed=args.seed, max_episodes=args.max_episodes,
                         window_basis=basis, workers=args.workers,
                         prior_il_by_day=history,
-                        pre_window_frame=full, window_start=start)
+                        pre_window_frame=full, window_start=start,
+                        shadow_path=args.out)
 
     write_json(args.out, report)
     _print_summary(report, args.out)

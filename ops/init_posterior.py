@@ -8,10 +8,10 @@ Run: python3 -m ops.init_posterior [--force]
 """
 
 import argparse
-import json
 import os
 
 from common.config import load_config
+from common.io import read_json
 from engine.posterior import PosteriorStore
 
 
@@ -30,8 +30,7 @@ def main():
                          "state. Re-run with --force only if you mean to "
                          "discard it.")
 
-    with open(cfg["posterior"]["prior"]["path"]) as f:
-        prior = json.load(f)
+    prior = read_json(cfg["posterior"]["prior"]["path"])
 
     store = PosteriorStore.initialise(cfg, prior["per_category"],
                                       prior["episodes_per_week"])

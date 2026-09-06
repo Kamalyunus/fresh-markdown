@@ -5,6 +5,11 @@ import pytest
 
 from conftest import _cfg_with, _reports, _write
 from ops import status
+import copy as _copy
+import json as _json
+from ops import tune
+from common.provenance import config_fingerprint, file_digest
+from engine.explore import tau_provenance_error
 
 
 def _verdicts(report):
@@ -171,7 +176,6 @@ def test_convergence_goes_stale_when_the_chain_it_checked_moves(cfg, tmp_path):
              dispersion=dict(cfg["dispersion"],
                              r_lookup_path=str(tmp_path / "absent_r.json"),
                              rho_path=str(tmp_path / "absent_rho.json")))
-    from common.provenance import file_digest
 
     cal.write_text(json.dumps({"factors": {"A": 1.1}, "convergence": {
         "converged": True, "max_abs_dlog": 0.001, "tol_log": 0.02,
@@ -216,9 +220,7 @@ def test_a_measured_value_that_disagrees_with_its_report_fails(cfg, tmp_path):
     Values pasted from a REPORT had no equivalent: a number from another run
     -- or from the repo's synthetic fixture, which ships in config.yaml --
     survived every check until somebody happened to run tune."""
-    import copy as _copy
 
-    from ops import tune
 
     _reports(tmp_path)                           # a complete, block-free set
     # artifacts that MATCH config, so only the drift under test shows up
@@ -268,7 +270,6 @@ def test_an_invariant_a_block_names_is_not_reported_as_green(cfg, tmp_path):
     """Setting W without the calib >= 2W the split can support raises a
     tune BLOCK. Reporting that as 'not evaluated' left the owner reading
     'all gates green (1 not run)' immediately after breaking an invariant."""
-    import copy as _copy
 
     _write(tmp_path, "backtest", {
         "artifact_versions": {"baseline_model_version": "m1"},
@@ -297,13 +298,24 @@ def test_an_invariant_a_block_names_is_not_reported_as_green(cfg, tmp_path):
             if x["check"] == "config mirrors reports"][0]["verdict"] == status.NONE
 
 
+def test_an_unverified_key_does_not_hide_a_stale_paste(cfg, tmp_path):
+    """An older thresholds schema (no increment block) made the row 'not run'
+    BEFORE the drift check ran, so a drifted W read as unevaluated and
+    advance walked past it into the daily lane."""
+    _reports(tmp_path, thresholds={"bounded_step_recommendation": {
+        "consistent_max_mean_step": 0.485, "verdict": "MEAN RAIL BINDS FIRST"}})
+    drifted = _copy.deepcopy(_cfg_with(cfg, tmp_path, rho={"rho": cfg["dispersion"]["rho"]}))
+    drifted["baseline_model"]["calibration_gate_band"] = [0.5, 1.5]
+    row = [r for r in status.collect(drifted, str(tmp_path))["checks"]
+           if r["check"] == "config mirrors reports"][0]
+    assert row["verdict"] == status.FAIL and "calibration_gate_band" in row["detail"]
+
+
 def test_report_vintages_names_the_config_values_that_moved(cfg, tmp_path):
     """A report is evidence about the config it ran under. After a paste the
     old check still read PASS because meta.config_version had not been
     bumped; the fingerprint makes the paste visible and names it."""
-    import copy as _copy
 
-    from common.provenance import config_fingerprint
 
     bundle = "m1"
     state = {"bundle": bundle, "problems": [], "missing": [],
@@ -333,7 +345,7 @@ def test_report_vintages_names_the_config_values_that_moved(cfg, tmp_path):
     # the backtest -- and reports that share a vintage share ONE sentence
     # instead of repeating the whole list per report
     bt = {"artifact_versions": {"baseline_model_version": bundle},
-          "config": config_fingerprint(cfg, "backtest")}
+          "config": config_fingerprint(cfg, "thresholds")}
     pasted = _copy.deepcopy(cfg)
     pasted["exploration"]["delta_min_log_bias"] = {"_default": 0.15}
     pasted["monitoring"]["stop_conditions"]["scrap_deterioration_pct"] = 0.43
@@ -345,10 +357,17 @@ def test_report_vintages_names_the_config_values_that_moved(cfg, tmp_path):
     assert "thresholds ran under" in row["detail"] and "shadow ran under" in row["detail"]
     row = status._vintages(pasted, state, {"backtest": bt})
     assert row["verdict"] == status.PASS and "none it reads" in row["detail"]
+    # a production report reads the live config every run: no move re-grades
+    # it, and it is never labelled as if a paste could
+    mon = {"artifact_versions": {"baseline_model_version": bundle},
+           "config": config_fingerprint(cfg, "production")}
+    row = status._vintages(edited, state, {"monitor": mon})
+    assert row["verdict"] == status.PASS and "monitor=production" in row["detail"]
+    assert "none it reads" not in row["detail"]
 
     # a model mismatch still outranks a config move, and is FAIL
     other = {"artifact_versions": {"baseline_model_version": "m0"},
-             "config": config_fingerprint(cfg, "backtest")}
+             "config": config_fingerprint(cfg, "thresholds")}
     row = status._vintages(cfg, state, {"backtest": other, "shadow": same})
     assert row["verdict"] == status.FAIL and "m0" in row["detail"]
 
@@ -393,32 +412,27 @@ def _derivation(tau, scoped=True):
 
 
 def test_a_matching_paste_from_a_current_backtest_is_clean(cfg):
-    from engine.explore import tau_provenance_error
     assert tau_provenance_error(_cfg_with_tau(cfg, 410.74),
                                 _derivation(410.74)) is None
 
 
 def test_a_null_tau_is_not_this_check_s_business(cfg):
-    from engine.explore import tau_provenance_error
     # the null case is _require_shadow_config's, and it is louder
     assert tau_provenance_error(_cfg_with_tau(cfg, None), None) is None
 
 
 def test_a_paste_with_no_derivation_on_disk_is_refused(cfg):
-    from engine.explore import tau_provenance_error
     assert "no backtest derivation" in tau_provenance_error(
         _cfg_with_tau(cfg, 410.74), None)
 
 
 def test_a_derivation_predating_the_scoping_fix_is_refused(cfg):
-    from engine.explore import tau_provenance_error
     err = tau_provenance_error(_cfg_with_tau(cfg, 410.74),
                                _derivation(410.74, scoped=False))
     assert "ENTRY decisions only" in err
 
 
 def test_a_paste_that_no_longer_matches_its_source_is_refused(cfg):
-    from engine.explore import tau_provenance_error
     err = tau_provenance_error(_cfg_with_tau(cfg, 500.0), _derivation(410.74))
     assert "500.0" in err and "410.74" in err
 
@@ -442,7 +456,6 @@ def test_a_shadow_derivation_is_the_trusted_paste_source(cfg):
     """The anchored-path derivation outranks the backtest's exploit-only one:
     a paste matching shadow is clean even when the backtest disagrees, and a
     paste matching only the backtest is refused once shadow has derived."""
-    from engine.explore import tau_provenance_error
     shadow = {"tau_initial_derivation": {"tau_initial": 257.48,
                                          "fallback": False}}
     assert tau_provenance_error(_cfg_with_tau(cfg, 257.48),
@@ -454,7 +467,6 @@ def test_a_shadow_derivation_is_the_trusted_paste_source(cfg):
 
 def test_a_fallback_shadow_block_defers_to_the_backtest_checks(cfg):
     # a shadow run that itself fell back to the paste is not a paste source
-    from engine.explore import tau_provenance_error
     shadow = {"tau_initial_derivation": {"tau_initial": None, "fallback": True}}
     assert tau_provenance_error(_cfg_with_tau(cfg, 410.74),
                                 _derivation(410.74), shadow) is None
@@ -487,13 +499,16 @@ def test_a_missing_artifact_is_not_a_matching_mirror(cfg, tmp_path):
 def test_a_measured_key_no_report_measures_is_unverified_not_green(cfg, tmp_path, reports_dir):
     """An older thresholds schema with no information_increment block used
     to read PASS: no finding, no drift, 'every MEASURED value matches'."""
-    import json as _json
     th = _json.loads((reports_dir / "thresholds.json").read_text())
     th.pop("information_increment_recommendation", None)
     (reports_dir / "thresholds.json").write_text(_json.dumps(th))
-    c = _cfg_with(cfg, tmp_path)
+    # every OTHER measured value aligned with the fixture reports: a drift
+    # elsewhere is FAIL and outranks "unverified" (never hidden behind it)
+    c = _cfg_with(cfg, tmp_path, rho={"rho": cfg["dispersion"]["rho"]})
+    c["baseline_model"] = dict(c["baseline_model"], calibration_gate_band=[0.997, 1.003],
+                               calibration_fit_trailing_weeks=1)
     row = status._config_vs_reports(c, str(reports_dir))
-    assert row["verdict"] == status.NONE
+    assert row["verdict"] == status.NONE, row
     assert "information_increment" in row["detail"]
 
 

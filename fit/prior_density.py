@@ -39,19 +39,26 @@ def scored_rows(frame):
 def hour_multipliers(mu, cell, k, censored, min_rows=1):
     """Multiplicative time-cell fixed effects profiled out by first-moment
     matching on uncensored rows -- family-agnostic (Poisson and NB alike).
-    Thin cells (under `min_rows`) fall back to 1.0 -- a small cell absorbs the
-    price response itself; returns (multipliers, fallback share)."""
-    frame = pd.DataFrame({"cell": cell, "k": k, "mu": mu, "cen": censored})
-    unc = frame[~frame.cen]
-    if not len(unc):
-        return np.ones(len(frame)), 0.0
-    g = unc.groupby("cell")
-    m = (g.k.sum() / g.mu.sum()).clip(0.05, 20.0)
-    if min_rows > 1:
-        m = m[g.size() >= min_rows]
-    mult = frame.cell.map(m).fillna(1.0).to_numpy()
-    thin = float(np.mean(frame.cell.map(m).isna().to_numpy()))
-    return mult, thin
+    Thin cells (under `min_rows` uncensored rows) fall back to 1.0 -- a small
+    cell absorbs the price response itself; returns (multipliers, fallback
+    share). `cell` is integer codes (or labels, factorised here): a caller
+    profiling a whole grid factorises once and this runs on bincount."""
+    codes = np.asarray(cell)
+    if codes.dtype.kind not in "iu":
+        codes = pd.factorize(codes)[0]
+    n_cells = int(codes.max()) + 1 if len(codes) else 0
+    unc = ~np.asarray(censored, dtype=bool)
+    if not unc.any():
+        return np.ones(len(codes)), 0.0
+    size = np.bincount(codes[unc], minlength=n_cells)
+    sum_k = np.bincount(codes[unc], weights=np.asarray(k, dtype=float)[unc],
+                        minlength=n_cells)
+    sum_mu = np.bincount(codes[unc], weights=np.asarray(mu, dtype=float)[unc],
+                         minlength=n_cells)
+    fitted = size >= max(int(min_rows), 1)
+    m = np.ones(n_cells)
+    m[fitted] = np.clip(sum_k[fitted] / sum_mu[fitted], 0.05, 20.0)
+    return m[codes], float(np.mean(~fitted[codes]))
 
 
 def time_cell(g):
@@ -79,7 +86,7 @@ def curve(g, mu_ref, grid, controlled, cfg):
     pc = cfg["posterior"]["prior"]
     k = g.units_sold.to_numpy()
     censored = g.censored.to_numpy()
-    cell = time_cell(g)
+    cell = pd.factorize(time_cell(g))[0]      # once, not per grid point
     min_cell = int(pc.get("min_rows_per_time_cell", 1))
     log_ratio = np.log((1 - g.total_discount.to_numpy())
                        / (1 - g.d_ref.to_numpy()))
@@ -90,7 +97,7 @@ def curve(g, mu_ref, grid, controlled, cfg):
                      for e in grid])
 
 
-def deflation_deff(rows, model, cfg):
+def deflation_deff(rows, mu_ref, cfg):
     """Design effect for the prior's likelihood -- eps-FREE, keeping the
     epsilon step out of the dispersion chain (`fit_dispersion` owns the
     fitted rho). Returns (deff, rho, mean rows per cluster).
@@ -99,16 +106,21 @@ def deflation_deff(rows, model, cfg):
     per episode, so a within-episode ICC is 1.0 by construction. The
     correlation that does exist between entry rows is the same unit recurring
     across days -- the unit the pilot's outcomes recur on.
+
+    ONE unit set for both moments: rho and the mean cluster size are both
+    taken over the units with at least `rho_min_hours_per_episode` rows
+    (singletons carry no within-unit correlation and would only shrink `m`
+    against a rho they did not enter). No such unit: deff is 1.0.
     """
-    resid = rows.units_sold.to_numpy() - model.predict_mu_ref(rows)
+    resid = rows.units_sold.to_numpy() - np.asarray(mu_ref, dtype=float)
     unit = (rows.sku_id.astype(str) + "|" + rows.fc.astype(str)).to_numpy()
     f = pd.DataFrame({"unit": unit, "resid": resid})
     sizes = f.groupby("unit").resid.size()
-    min_rows = cfg["assurance"]["rho_min_hours_per_episode"]
-    sub = f[f.unit.isin(sizes[sizes >= min_rows].index)]
+    kept = sizes[sizes >= cfg["assurance"]["rho_min_hours_per_episode"]]
+    sub = f[f.unit.isin(kept.index)]
     rho = intraclass_correlation(sub.resid, sub.unit,
                                  cfg["dispersion"]["rho_clip_max"])
-    m = float(sizes.mean()) if len(sizes) else 1.0
+    m = float(kept.mean()) if len(kept) else 1.0
     return design_effect(rho, m), rho, m     # design_effect floors at 1.0
 
 
@@ -147,8 +159,8 @@ def build_curves(d, cfg, model, grid, window):
     rows = scored_rows(frame)
     out = {}
     for cat, g in rows.groupby("category"):
-        deff, rho, m = deflation_deff(g, model, cfg)
         mu_ref = model.predict_mu_ref(g)
+        deff, rho, m = deflation_deff(g, mu_ref, cfg)
         lr = np.log((1 - g.total_discount.to_numpy())
                     / (1 - g.d_ref.to_numpy()))
         # de-meaned on the SAME cell the controlled arm profiles out, or the
@@ -181,18 +193,44 @@ def extend_below(grid, margin):
     return np.concatenate([below[::-1], grid])
 
 
-def unconstrained_argmax(d, cfg, model, lo, hi, n):
+def extend_above(grid, margin):
+    """`grid` with points appended above its last value, at its own step,
+    up to (at least) `margin` above it."""
+    step = float(grid[1] - grid[0])
+    above = grid[-1] + step * np.arange(1, int(np.ceil(margin / step)) + 1)
+    return np.concatenate([grid, above])
+
+
+def search_grid(grid, cfg):
+    """The lattice the unconstrained peak is searched on: the FIT grid
+    itself, extended at ITS step past both policy bounds -- to at least +1.0
+    above (a positive optimum must be visible; not a tunable) and
+    `unconstrained_search_below` past epsilon_min below. Returns (wide, sl):
+    `wide[sl]` is exactly `grid`, so one set of curves over `wide` serves
+    both the fit and the boundary search. Rationale: design 5.6."""
+    hi = float(grid[-1])
+    margin = float(cfg["posterior"]["prior"]["unconstrained_search_below"])
+    above = extend_above(grid, max(1.0, hi) - hi)
+    wide = extend_below(above, margin)
+    start = len(wide) - len(above)           # points prepended below lo
+    return wide, slice(start, start + len(grid))
+
+
+# Float noise on a FLAT curve (no price variation) can put its argmax on an
+# edge point by ~1e-12; an edge "wins" only by more than this RELATIVE margin.
+# A tolerance on floating-point noise, not a tunable.
+_FLAT_TOL_REL = 1e-9
+
+
+def unconstrained_peaks(curves, wide, fit_start):
     """Each arm's unconstrained peak, searched PAST both policy bounds: a
     wrong-signed likelihood must be caught, not clipped and reported as
     measured, and one running off the lower bound is a boundary solution
-    (rule 3), not an estimate."""
-    margin = float(cfg["posterior"]["prior"]["unconstrained_search_below"])
-    # past the sign bound above, `unconstrained_search_below` past lo below
-    wide = extend_below(np.linspace(lo, max(1.0, hi), n), margin)
-    step = (hi - lo) / (n - 1)               # the fit grid's step
-    interior = wide > lo + step
+    (rule 3), not an estimate. `wide[fit_start]` is epsilon_min; a peak at
+    or below epsilon_min + one grid step is "at the bound"."""
+    interior = np.arange(len(wide)) > fit_start + 1
     out = {}
-    for cat, c in build_curves(d, cfg, model, wide, "train").items():
+    for cat, c in curves.items():
         peaks, pinned = {}, []
         for arm in ("naive", "controlled"):
             ll = np.asarray(c[arm])
@@ -201,7 +239,9 @@ def unconstrained_argmax(d, cfg, model, lo, hi, n):
             # pinned = the edge STRICTLY beats every interior point. A flat
             # likelihood (no price variation) argmaxes at the first grid
             # point too, and that is absence of information, not a run-off.
-            if not interior[i] and ll[i] > ll[interior].max():
+            best_in = float(ll[interior].max())
+            if not interior[i] and \
+                    ll[i] > best_in + _FLAT_TOL_REL * max(1.0, abs(best_in)):
                 pinned.append(arm)
         out[cat] = {**peaks, "lower_pinned": pinned}
     return out
@@ -211,18 +251,21 @@ def fold_spread(d, cfg, model, grid, folds=3):
     """How far the estimate moves between disjoint slices of the train window
     -- MODEL uncertainty (confounding, imperfect mu_ref, non-stationarity)
     that within-sample curvature cannot see. Measured, not configured; feeds
-    the std floor in `estimate`. Rationale: design 5.6."""
+    the std floor in `estimate`. Folds are cut by EPISODE (opening date,
+    rule 15): a row-level cut put a midnight-straddling episode in two folds
+    and scored its 00:00 row as an entry row. Rationale: design 5.6."""
     frames = split_frames(d, cfg)
     train = population(frames["train"], cfg)
     if train.empty:
         return {}
-    dates = np.array_split(np.sort(train.date.astype(str).unique()), folds)
+    opened = episodes.opening_dates(train)
+    dates = np.array_split(np.sort(opened.unique()), folds)
     out = {}
     per_cat = {}
     for chunk in dates:
         if not len(chunk):
             continue
-        sl = train[train.date.astype(str).isin(set(chunk))]
+        sl = episodes.window_slice(train, chunk[0], chunk[-1], opened=opened)
         rows = scored_rows(sl)
         for cat, g in rows.groupby("category"):
             if len(g) < 50:
@@ -239,7 +282,6 @@ def fold_spread(d, cfg, model, grid, folds=3):
     return out
 
 
-
 def estimate(d, cfg, model, fast=False):
     """The prior, as a density per category. No constant anywhere in it.
     `fast` skips fold_spread (it only widens the std FLOOR, so it cannot move
@@ -250,9 +292,14 @@ def estimate(d, cfg, model, fast=False):
     step = float(grid[1] - grid[0])
     sat = float(pc["own_information_saturation"])
 
-    fit = build_curves(d, cfg, model, grid, "train")
-    unconstrained = unconstrained_argmax(d, cfg, model, lo, hi,
-                                         pc["search_grid_size"])
+    # ONE pass over the wide lattice: the fit range is sliced out of it, the
+    # rest is the unconstrained search past both bounds
+    wide, fit_sl = search_grid(grid, cfg)
+    curves = build_curves(d, cfg, model, wide, "train")
+    fit = {cat: {**c, "naive": c["naive"][fit_sl],
+                 "controlled": c["controlled"][fit_sl]}
+           for cat, c in curves.items()}
+    peaks = unconstrained_peaks(curves, wide, fit_sl.start)
     folds = ({} if fast else
              fold_spread(d, cfg, model, grid,
                          int(pc.get("stability_folds", 3))))
@@ -262,25 +309,33 @@ def estimate(d, cfg, model, fast=False):
     # sign and boundary decided BEFORE the pool is built: the pool excludes
     # wrong-signed and lower-boundary categories, or the fallback inherits
     # the confound (or the run-off) they were rejected for
-    signs, boundary = {}, {}
-    for cat in fit:
-        u = unconstrained.get(cat, {})
-        peak = max(u.get("naive", lo), u.get("controlled", lo))
-        signs[cat] = (peak >= -step, peak)
-        # an arm whose likelihood is maximised at or below epsilon_min + one
-        # grid step ran off the support: a boundary solution, not an estimate
-        # (rule 3). epsilon_min MAY be widened when this fires; epsilon_max
-        # never (design 5.6).
-        pinned = sorted(u.get("lower_pinned", []))
-        boundary[cat] = ("lower", pinned) if pinned else (None, [])
+    rejected = {}
+    for cat, c in fit.items():
+        u = peaks[cat]
+        pinned = sorted(u["lower_pinned"])
+        rejected[cat] = {
+            # wrong sign: the unconstrained peak at or above zero -- within
+            # one grid step of it, since the lattice need not hold zero
+            "wrong_sign": max(u["naive"], u["controlled"]) >= -step,
+            # an arm whose likelihood is maximised at or below epsilon_min +
+            # one grid step ran off the support: a boundary solution, not
+            # an estimate (rule 3). epsilon_min MAY be widened when this
+            # fires; epsilon_max never (design 5.6).
+            "boundary": "lower" if pinned else None,
+            "pinned_arms": pinned,
+            "no_price_variation": c["log_ratio_sd"] < 1e-9,
+        }
 
-    def rejected(cat):
-        return signs[cat][0] or boundary[cat][0] is not None
+    def takes_pool(cat):
+        r = rejected[cat]
+        return r["wrong_sign"] or r["boundary"] is not None
+
+    def in_pool(cat):
+        return not takes_pool(cat) and not rejected[cat]["no_price_variation"]
 
     # pooled by SUMMING log-likelihoods across usable categories: one measured
     # likelihood, not an average of summaries -- the anti-fallback-constant
-    usable = [c for cat, c in fit.items()
-              if not rejected(cat) and c["log_ratio_sd"] > 1e-9]
+    usable = [c for cat, c in fit.items() if in_pool(cat)]
     if usable:
         pooled_deff = float(np.mean([c["deff"] for c in usable]))
         pooled = mixture(
@@ -318,11 +373,8 @@ def estimate(d, cfg, model, fast=False):
 
         # wrong sign and a lower-boundary peak both reject: the peak was
         # searched PAST the bounds; the own density is discarded for the pool
-        u = unconstrained.get(cat, {})
-        wrong_sign, peak = signs[cat]
-        bound, pinned_arms = boundary[cat]
-
-        w = pooled if rejected(cat) else mixture(own, pooled, w_own)
+        u, r = peaks[cat], rejected[cat]
+        w = pooled if takes_pool(cat) else mixture(own, pooled, w_own)
         mean, std = moments(grid, w)
 
         # std is the WIDEST of three measured floors (density width, grid
@@ -341,12 +393,12 @@ def estimate(d, cfg, model, fast=False):
             "std_basis": binding,
             "std_candidates": {k: round(float(v), 4)
                                for k, v in floor_reasons.items()},
-            "wrong_sign": bool(wrong_sign),
+            "wrong_sign": bool(r["wrong_sign"]),
             # None, or "lower": an arm's unconstrained peak sits at or below
             # epsilon_min + step (the sign bound above is `wrong_sign`)
-            "boundary": bound,
-            "unconstrained_argmax": {k: round(u[k], 4) for k in
-                                     ("naive", "controlled") if k in u},
+            "boundary": r["boundary"],
+            "unconstrained_argmax": {k: round(u[k], 4)
+                                     for k in ("naive", "controlled")},
             "own_mean": round(own_mean, 4), "own_std": round(own_std, 4),
             "own_information_weight": round(w_own, 4),
             "likelihood_span": round(span, 3),
@@ -366,22 +418,22 @@ def estimate(d, cfg, model, fast=False):
         }
         if fold:
             per_category[cat]["stability"] = fold
-        if wrong_sign:
+        if r["wrong_sign"]:
             per_category[cat]["wrong_sign_note"] = (
-                f"unconstrained peak at {peak:+.3f} -- demand rising with "
-                "price. Own density discarded for the pooled one; usual cause "
-                "is the legacy ramp, and only exogenous price variation fixes "
-                "it.")
-        if bound is not None:
+                f"unconstrained peak at {max(u['naive'], u['controlled']):+.3f}"
+                " -- demand rising with price. Own density discarded for the "
+                "pooled one; usual cause is the legacy ramp, and only "
+                "exogenous price variation fixes it.")
+        if r["boundary"] is not None:
             per_category[cat]["boundary_note"] = (
-                f"{' and '.join(pinned_arms)} arm peak at or below "
+                f"{' and '.join(r['pinned_arms'])} arm peak at or below "
                 f"epsilon_min {lo:+.2f} (+ one grid step): the likelihood ran "
                 "off the lower end of the support, so this is a boundary "
                 "solution, not an estimate (rule 3). Own density discarded "
                 "for the pooled one and the category left OUT of the pool. "
                 "Owner: consider widening posterior.epsilon_min -- the lower "
                 "bound may be widened when a fit pins there; epsilon_max never.")
-        if c["log_ratio_sd"] < 1e-9:
+        if r["no_price_variation"]:
             per_category[cat]["no_price_variation"] = (
                 "every scored row sits at one discount: epsilon is ABSENT "
                 "from this likelihood, and the category takes the pooled "
@@ -391,8 +443,7 @@ def estimate(d, cfg, model, fast=False):
         "pooled_std": round(pooled_std, 4),
         "pooled_deff": round(pooled_deff, 3),
         "pooled_basis": pooled_basis,
-        "pooled_categories": sorted(
-            c for c in fit if not rejected(c) and fit[c]["log_ratio_sd"] > 1e-9),
+        "pooled_categories": sorted(c for c in fit if in_pool(c)),
         "pooled_density": [round(float(x), 8) for x in pooled],
     }
 

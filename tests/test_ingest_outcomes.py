@@ -191,6 +191,58 @@ def test_one_unusable_feed_row_costs_its_decision_not_the_days_batch():
     assert rep["unusable_examples"][0]["decision_id"] == "D2"
 
 
+def test_a_feed_row_naming_no_hour_costs_that_row_not_the_batch():
+    """`int(nan)` on one feed row's hour_of_day raised while the rows were
+    being keyed -- before any decision was matched -- so a single bad row
+    aborted the whole daily ingest and the day read as a 100% gap."""
+    import numpy as np
+
+    feed = _feed([{"start": 3, "sold": 1, "end": 2},
+                  {"hour": 18, "start": 2, "sold": 0, "end": 2},
+                  {"hour": 19, "start": 4, "sold": 1, "end": 3}])
+    feed.loc[1, "hour"] = np.nan                # the column is float now
+    outs, rep = build_outcomes(
+        [_dec(1), _dec(2, hour=18), _dec(3, hour=19)], feed)
+
+    assert [o["decision_id"] for o in outs] == ["D1", "D3"]
+    assert rep["decisions_without_feed_row"] == 1      # D2 has no keyable row
+    assert rep["unusable_feed_rows"] == 1
+    bad = rep["unusable_examples"][0]
+    assert bad["decision_id"] is None and bad["feed_row"] == 1
+    assert "unkeyable" in bad["reason"]
+    # a decision that names no hour is one decision, by id
+    outs, rep = build_outcomes([_dec(1), dict(_dec(2, hour=18), hour_of_day=None)],
+                               _feed([{"start": 3, "sold": 1, "end": 2}]))
+    assert [o["decision_id"] for o in outs] == ["D1"]
+    assert rep["unusable_examples"][0]["decision_id"] == "D2"
+
+
+def test_an_integer_id_read_as_float_still_keys_its_decision(tmp_path):
+    """pandas reads an integer column as float once it holds a NaN, so the
+    feed's sku 7.0 met the decision's "7" and matched nothing -- a silent
+    100% completeness gap with every row present. 7.0, 7 and "7" are one
+    key, on the feed and on the failures table alike."""
+    decisions = [_dec(1, sku="7"), _dec(2, sku=8, hour=18), _dec(3, sku="9", hour=19)]
+    feed = _feed([{"sku": 7, "start": 3, "sold": 1, "end": 2},
+                  {"sku": 8, "hour": 18, "start": 2, "sold": 0, "end": 2},
+                  {"sku": 9, "hour": 19, "start": 4, "sold": 1, "end": 3}])
+    feed["skuseq"] = feed["skuseq"].astype(float)            # 7.0, 8.0, 9.0
+    fails = tmp_path / "failures.parquet"
+    pd.DataFrame([{"sku_id": 7.0, "fc": "F1", "date": "2026-08-19",
+                   "hour_of_day": 17.0, "reason": "push_timeout"}]).to_parquet(fails)
+    outs, rep = build_outcomes(decisions, feed, failures=load_failures(str(fails)))
+    assert sorted(o["decision_id"] for o in outs) == ["D1", "D2", "D3"]
+    assert rep["decisions_without_feed_row"] == 0
+    by = {o["decision_id"]: o for o in outs}
+    assert by["D1"]["execution_status"] == "failed"
+    assert by["D2"]["execution_status"] == "ok"
+    # a fractional value is not an identifier, and says so
+    feed.loc[0, "skuseq"] = 7.5
+    outs, rep = build_outcomes(decisions, feed)
+    assert rep["unusable_feed_rows"] == 1
+    assert "identifier" in rep["unusable_examples"][0]["reason"]
+
+
 def test_a_zero_base_price_is_refused_not_priced_at_full_discount():
     """Offline, prepare_data ffills then drops original_price == 0. Live it
     produced applied_price 0.0, which the store accepts and monitor charges

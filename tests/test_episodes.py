@@ -40,6 +40,38 @@ def test_window_slice_is_a_noop_without_bounds():
     assert episodes.window_slice(d) is d
 
 
+def test_a_precomputed_opening_date_gives_the_same_cut():
+    """A weekly schedule sliced the whole scope once per week, regrouping it
+    every time; the opening date is computed once and passed through
+    `opened`, and the cut -- and the weeks-seen count -- are unchanged."""
+    d = _frame()
+    opened = episodes.opening_dates(d)
+    assert list(opened.unique()) == ["2026-08-03", "2026-08-04"]
+    for start, end in (("2026-08-04", None), (None, "2026-08-03"),
+                       ("2026-08-04", "2026-08-21")):
+        pd.testing.assert_frame_equal(
+            episodes.window_slice(d, start, end),
+            episodes.window_slice(d, start, end, opened=opened))
+    plain = episodes.trailing_weeks_window(d, "2026-08-10", 1)
+    fed = episodes.trailing_weeks_window(d, "2026-08-10", 1, opened=opened)
+    pd.testing.assert_frame_equal(plain[0], fed[0])
+    assert plain[1] == fed[1] == 1
+
+
+def test_the_hour_discrepancy_has_one_home():
+    """`(start - end) - sold` was spelled in three functions; shrink, the
+    live adjustment and the flow's arrivals all read `hour_discrepancy`."""
+    import inspect
+    disc = episodes.hour_discrepancy([10, 8, 5], [1, 0, 3], [8, 8, 0])
+    assert list(disc) == [1, 0, 2]          # shrink, clean, shrink
+    assert list(episodes.hour_discrepancy([5], [1], [8])) == [-4]   # arrival
+    for fn in (episodes.shrink_by_hour, episodes.episode_flow,
+               episodes.hour_adjustment):
+        src = inspect.getsource(fn)
+        assert "hour_discrepancy(" in src, fn.__name__
+        assert "- np.asarray(units_sold)" not in src, fn.__name__
+
+
 def test_implausible_window_is_refused_not_expanded():
     """flc_window carries very large values from upstream data issues. The
     window drives episode identification, the DP horizon AND the synthetic
@@ -149,7 +181,8 @@ def test_a_feed_with_no_closure_sentinel_reads_unclosed_and_says_so():
     from common import episodes
 
     honest = _last_row_frame([("a", 3, 9, 4, 5), ("b", 2, 6, 6, 0)])
-    assert not episodes.write_off_convention(honest)     # <- read this first
+    # <- read this first: the sentinel is read off the flow frame
+    assert not episodes.write_off_convention(episodes.episode_flow(honest))
     kind = episodes.classify(honest)
     assert kind["a"] == episodes.NOT_CLOSED
     # "b" sold out AND its ending is genuinely 0, so it closed on its own
@@ -158,7 +191,7 @@ def test_a_feed_with_no_closure_sentinel_reads_unclosed_and_says_so():
     assert pd.isna(episodes.scrap_units(honest)["a"])
 
     mixed = _last_row_frame([("a", 3, 9, 4, 5), ("w", 1, 8, 2, 0)])
-    assert episodes.write_off_convention(mixed)
+    assert episodes.write_off_convention(episodes.episode_flow(mixed))
     assert episodes.classify(mixed)["a"] == episodes.NOT_CLOSED
     assert pd.isna(episodes.scrap_units(mixed)["a"])
 

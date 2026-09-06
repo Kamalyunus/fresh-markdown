@@ -3,14 +3,14 @@ flow identity that decides them (and which consumer is entitled to which),
 the rate features, the waterfall's own basis, and the pre-launch slice."""
 
 import inspect
-import os
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from fit.prepare_data import (DP_INELIGIBLE, load_and_filter, population,
                                     tag_dp_eligibility)
-from conftest import ROOT, episode_frame
+from conftest import episode_frame
 
 
 def _frame(**over):
@@ -186,9 +186,9 @@ def test_recovery_cannot_merge_a_negative_episode_into_its_neighbour():
     assert d.episode_id.nunique() == 2
 
 
-def test_recovery_runs_after_the_resegmentation_check(cfg):
+def test_recovery_runs_after_the_resegmentation_check(cfg, synth_flc):
     """Order, asserted on the waterfall itself rather than on a comment."""
-    _, wf = load_and_filter(os.path.join(ROOT, "data", "flc_synth.parquet"), cfg)
+    _, wf = load_and_filter(synth_flc, cfg)
     steps = [t[0] for t in wf]
     assert steps.index("contiguous_episodes_built") < \
         steps.index("negative_window_recovered"), (
@@ -633,7 +633,7 @@ def test_true_leftover_on_the_production_worked_example():
 
     # the final row carries the closure sentinel (ending_inventory zeroed with
     # a unit still on hand), so the listing ended and that unit IS scrap
-    assert episodes.write_off_convention(last)
+    assert episodes.write_off_convention(episodes.episode_flow(d))
     kind = episodes.classify(d)
     assert kind.iloc[0] == episodes.COMPLETED
     assert float(episodes.scrap_units(d).iloc[0]) == 1.0
@@ -682,10 +682,10 @@ def test_a_restock_is_detected_from_the_source_convention():
 
 # ------------------------------------------------ the waterfall's own basis
 
-def test_the_raw_waterfall_row_counts_rows_episodes_and_cogs_on_one_frame(cfg):
+def test_the_raw_waterfall_row_counts_rows_episodes_and_cogs_on_one_frame(cfg, synth_flc):
     """`raw` used to count rows pre-dedup but episodes and COGS post-dedup,
     so the first row of the artifact was two frames wearing one label."""
-    path = os.path.join(ROOT, "data", "flc_synth.parquet")
+    path = synth_flc
     _, wf = load_and_filter(path, cfg)
     raw, dedup = wf[0], wf[1]
     assert raw[0] == "raw" and dedup[0] == "duplicate_hour_rows_dropped"
@@ -697,12 +697,12 @@ def test_the_raw_waterfall_row_counts_rows_episodes_and_cogs_on_one_frame(cfg):
     assert raw[1] >= dedup[1]
 
 
-def test_population_gate_rows_record_no_removed_episodes(cfg):
+def test_population_gate_rows_record_no_removed_episodes(cfg, synth_flc):
     """`eligible` and `dp_eligible` drop nothing, so the examples collector
     must not list their flagged episodes as removals -- they are still in
     the frame."""
     examples = {}
-    _, wf = load_and_filter(os.path.join(ROOT, "data", "flc_synth.parquet"),
+    _, wf = load_and_filter(synth_flc,
                             cfg, examples=examples)
     labels = [t[0] for t in wf]
     assert labels[-2:] == ["eligible", "dp_eligible"]
@@ -798,3 +798,64 @@ def test_cogs_at_risk_counts_supply_not_opening_stock():
         "ending_inventory": [5, 0],
     })
     assert cogs_at_risk(flat) == pytest.approx(400.0)
+
+
+def test_the_per_episode_cogs_table_reproduces_every_stage_and_flag_reading():
+    """cogs_at_risk re-ran the arrival pass on every waterfall row and every
+    flag mask (~24 passes per run). Every stage after the ids are fixed drops
+    WHOLE episodes, so one per-episode table summed over the episodes left
+    gives the same number -- NaN included, never skipped."""
+    from fit.prepare_data import cogs_at_risk, episode_cogs
+
+    d = pd.DataFrame({
+        "episode_id": ["e"] * 3 + ["f"] * 2 + ["n"] * 2,
+        "date": ["2026-03-01"] * 7, "hour_of_day": [10, 11, 12, 10, 11, 10, 11],
+        "cost": [100.0] * 3 + [50.0] * 2 + [np.nan] * 2,
+        "starting_inventory": [3, 13, 4, 8, 5, 2, 1],
+        "units_sold": [0, 9, 3, 3, 5, 1, 1],
+        "ending_inventory": [13, 4, 0, 5, 0, 1, 0],
+    })
+    table = episode_cogs(d)
+    assert table["e"] == pytest.approx(1300.0) and table["f"] == pytest.approx(400.0)
+    assert np.isnan(table["n"])
+    for keep in (["e"], ["f"], ["e", "f"], ["e", "n"], ["e", "f", "n"], []):
+        sub = d[d.episode_id.isin(keep)]
+        direct, tabled = cogs_at_risk(sub), cogs_at_risk(sub, table)
+        assert (np.isnan(direct) and np.isnan(tabled)) or direct == tabled, keep
+
+
+def test_a_precomputed_flow_and_cogs_table_change_nothing_in_the_flags(cfg):
+    """load_and_filter hands tag_dp_eligibility the flow it already built at
+    episode_universe (and the COGS table); the result must be the one a bare
+    call computes for itself."""
+    from common.episodes import episode_flow
+    from fit.prepare_data import episode_cogs
+
+    d = pd.concat([_frame(),
+                   _frame(episode_id="R", starting_inventory=[12, 20],
+                          ending_inventory=[20, 0]),
+                   _frame(episode_id="u", ending_inventory=[9, 7]),
+                   _frame(episode_id="bad", cost=0.0)], ignore_index=True)
+    bare, bare_detail = tag_dp_eligibility(d, cfg)
+    fed, fed_detail = tag_dp_eligibility(d, cfg, flow=episode_flow(d),
+                                         per_episode_cogs=episode_cogs(d))
+    pd.testing.assert_frame_equal(bare, fed)
+    assert bare_detail == fed_detail
+    # and the sentinel diagnostic the design names is on the manifest
+    assert fed_detail["edge_truncated"]["write_off_convention_in_force"] is True
+    none = _frame(episode_id="open", ending_inventory=[9, 7])
+    _, no_sentinel = tag_dp_eligibility(none, cfg)
+    assert no_sentinel["edge_truncated"]["write_off_convention_in_force"] is False
+
+
+def test_the_universe_stage_reports_where_censoring_was_decided(cfg, synth_flc):
+    """`censoring_off_last_row` was a function nothing in the pipeline
+    called; the manifest now carries it (design 12a: censoring is decided
+    on the LAST row only, and a row that empties the shelf mid-episode says
+    the feed carried on past zero)."""
+    _, wf = load_and_filter(synth_flc, cfg)
+    universe = next(t for t in wf if t[0] == "episode_universe")
+    cen = universe[4]["censoring"]
+    assert {"rows_shelf_emptied_mid_episode",
+            "rows_with_zero_starting_inventory"} <= set(cen)
+    assert cen["rows_shelf_emptied_mid_episode"] == 0

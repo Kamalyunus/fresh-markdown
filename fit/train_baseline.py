@@ -108,6 +108,12 @@ class BaselineModel:
         self._freeze_from = pd.Timestamp(date) if date is not None else None
         return self
 
+    def level_factors(self, d):
+        """The per-row level factor `predict_mu_ref` applies -- for a caller
+        that needs the factor itself (a rescale between two freezes is exact,
+        so the backtest's weekly-refit reading never predicts twice)."""
+        return self._factor_vector(d)
+
     def _factor_vector(self, d):
         """Per-row level factor: each row takes the factors in force for ITS
         week; unfitted weeks fall back to the frozen anchor, never forward."""
@@ -251,12 +257,14 @@ def train(d, cfg):
 def _solve_level_factors(calib, model, k_shrink, min_anchor,
                          tier_step, max_k, r_lookup):
     """Factors for one fit window (shared by the anchor fit and every schedule
-    week). Returns (factors, detail, global_factor), or None when the window
-    holds too few anchor rows -- the caller holds those weeks at 1.0. Cells
-    ABOVE that floor are shrunk toward their parent (category, then global)
-    by `k_shrink` pseudo-units; a cell whose bisection ran off the bracket
-    carries `at_bound` in its detail -- a bound is not a solve."""
-    from fit.fit_dispersion import lookup_r   # local: avoids a cycle
+    week). Returns (factors, detail, global_factor, global_at_bound), or
+    None when the window holds too few anchor rows -- the caller holds those
+    weeks at 1.0. Cells ABOVE that floor are shrunk toward their parent
+    (category, then global) by `k_shrink` pseudo-units; a cell whose
+    bisection ran off the bracket carries `at_bound` in its detail, and
+    `global_at_bound` names the bracket end the GLOBAL solve pinned to (None
+    when it converged) -- a bound is not a solve, at any level (rule 3)."""
+    from fit.fit_dispersion import lookup_r_vec   # local: avoids a cycle
 
     bm = model.cfg["baseline_model"]
     f_lo, f_hi = (float(x) for x in bm["calibration_factor_search_bounds"])
@@ -264,8 +272,8 @@ def _solve_level_factors(calib, model, k_shrink, min_anchor,
 
     calib["mu_ref_hat"] = model.predict_mu_ref(calib, raw=True)
     if r_lookup is not None:
-        calib["r_val"] = [lookup_r(r_lookup, s, c)
-                          for s, c in zip(calib.subcategory, calib.category)]
+        calib["r_val"] = lookup_r_vec(r_lookup, calib.subcategory,
+                                      calib.category)
 
     def solve_factor(anchor):
         """(factor, predicted at f=1, at_bound): solved against the censored
@@ -309,7 +317,7 @@ def _solve_level_factors(calib, model, k_shrink, min_anchor,
     if len(anchor_all) < min_anchor or anchor_all["mu_ref_hat"].sum() <= 0:
         return None
 
-    f_global, _, _ = solve_factor(anchor_all)
+    f_global, _, global_at_bound = solve_factor(anchor_all)
 
     def fit_level(groups, parent_of):
         out, det = {}, {}
@@ -344,7 +352,7 @@ def _solve_level_factors(calib, model, k_shrink, min_anchor,
     factors, detail = fit_level(
         anchor_all.groupby("subcategory"),
         lambda k, g: cat_factors.get(str(g["category"].iloc[0]), f_global))
-    return factors, detail, f_global
+    return factors, detail, f_global, global_at_bound
 
 
 def fit_level_calibration(d, cfg):
@@ -392,7 +400,7 @@ def fit_level_calibration(d, cfg):
         raise RuntimeError(
             f"fit window has only {anchors} anchor rows (need {min_anchor})"
             " -- widen calibration_fit_trailing_weeks")
-    factors, detail, f_global = fitted
+    factors, detail, f_global, global_at_bound = fitted
 
     # POINT-IN-TIME schedule. Pre-launch: over every pre-launch week (a
     # forward replay must see exactly what production re-fits weekly; the
@@ -409,9 +417,10 @@ def fit_level_calibration(d, cfg):
         weeks.append((episodes.week_start(weeks[-1]) + pd.Timedelta(days=7))
                      .strftime("%Y-%m-%d"))
     by_week, coverage = {}, []
+    opened = episodes.opening_dates(scope)     # once, not once per week
     for w in weeks:
         window, weeks_seen = episodes.trailing_weeks_window(
-            scope, w, weeks_back)
+            scope, w, weeks_back, opened=opened)
         if not len(window):
             continue
         f = _solve_level_factors(window.copy(), model, k_shrink,
@@ -423,7 +432,8 @@ def fit_level_calibration(d, cfg):
         coverage.append({"week": w, "fitted": True,
                          "fit_rows": int(len(window)),
                          "weeks_in_window": weeks_seen,
-                         "partial": weeks_seen < weeks_back})
+                         "partial": weeks_seen < weeks_back,
+                         "global_at_bound": f[3]})
     schedule = {
         "mode": "rolling_trailing",
         "scope": (f"production -- launch_date {cfg['data']['launch_date']}; "
@@ -442,6 +452,11 @@ def fit_level_calibration(d, cfg):
         "weeks_on_partial_window": [
             {"week": c["week"], "weeks_in_window": c["weeks_in_window"]}
             for c in coverage if c.get("partial")],
+        # weeks whose GLOBAL solve pinned at a bracket end: every cell's
+        # parent that week is a bound, not a solve (rule 3)
+        "weeks_global_at_bound": {c["week"]: c["global_at_bound"]
+                                  for c in coverage
+                                  if c.get("global_at_bound")},
         "by_week": by_week,
     }
 
@@ -461,6 +476,10 @@ def fit_level_calibration(d, cfg):
                "schedule": schedule,
                "detail": detail,
                "global_factor": round(float(f_global), 4),
+               # None, or the bracket end ("lower"/"upper") the global solve
+               # pinned to: then the parent every category shrinks toward is
+               # a bound, not a solve (rule 3)
+               "global_factor_at_bound": global_at_bound,
                "shrinkage_units": k_shrink,
                "fit_window": "rolling_trailing",
                "fit_basis": "censored E[min(D,q)]" if censored_basis
@@ -591,7 +610,10 @@ def _describe_calibration(art, factors, widest_n=12):
     """The --fit-calibration console summary of a calibration artifact."""
     detail = art["detail"]
     lines = [f"grain: {art['grain']}  ({len(factors)} cells, global factor "
-             f"{art['global_factor']:.4f})",
+             f"{art['global_factor']:.4f}"
+             + (f" AT {art['global_factor_at_bound'].upper()} BOUND -- not "
+                "a solve" if art.get("global_factor_at_bound") else "")
+             + ")",
              f"fit window: {art['fit_window']} "
              f"{art['fit_window_dates'][0]}..{art['fit_window_dates'][1]} "
              f"({art['fit_rows']:,} rows, basis {art['fit_basis']})"]

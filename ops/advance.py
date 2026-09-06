@@ -165,16 +165,32 @@ def plan(st):
         if not st["raw"]:
             return [_stop("bootstrap", "no raw extract to (re)train from",
                           [f"expected {RAW}"])]
-        steps.append(_run("bootstrap", ["ops.bootstrap_loop", "--input", RAW],
+        steps.append(_run("bootstrap", ["ops.bootstrap_loop", "--input", RAW]
+                          + (["--seal-reason", "retrain"] if st["retrain"] else []),
                           phase="bootstrap", reevaluate=True))
         return steps
 
     # 2. reports that grade a bundle or config no longer in force -- only
     #    for the keys they read (stale_reports says which)
     if "backtest" in st["stale"]:
-        steps.append(_run(f"re-grade ({st['stale']['backtest']})",
-                          ["ops.bootstrap_loop", "--check-only"],
-                          phase="tune", reevaluate=True))
+        why = st["stale"]["backtest"]
+        if why.startswith("retrain:"):
+            # rule 1: a training input moved. A retrain is a NEW bundle and
+            # never happens by accident -- the human runs it
+            return [_stop("bootstrap", "a training input moved -- the model on "
+                          "disk was fit under another", [why,
+                          "python3 -m ops.advance --retrain   (a NEW bundle; "
+                          "nothing from before is comparable)"])]
+        if why.startswith("backtest:"):
+            # only the backtest reads it: no artifact moved, no loop to turn
+            steps.append(_run(f"re-run backtest ({why})",
+                              ["evaluate.backtest", "--input", PREPARED,
+                               "--workers", "0", "--out", "reports/backtest.json"],
+                              phase="tune", reevaluate=True))
+        else:
+            steps.append(_run(f"re-grade ({why})",
+                              ["ops.bootstrap_loop", "--check-only"],
+                              phase="tune", reevaluate=True))
         return steps
     if "thresholds" in st["stale"]:
         steps.append(_run(f"re-derive thresholds ({st['stale']['thresholds']})",
@@ -222,15 +238,21 @@ def plan(st):
         return [_stop("shadow", f"shadow gate: {st['shadow_gate']}",
                       ["read reports/shadow.json -> shadow_gate, rejected_reasons"])]
 
-    # 6. owner decisions: never invented
-    owner = [n for n in st["nulls"] if n != "data.launch_date"]
-    if owner:
-        detail = []
-        by_key = {f["key"]: f for f in rep["findings"]}
-        for key in owner:
-            f = by_key.get(key)
-            detail.append(f"{key}: " + (f"{f['evidence']}  [{f['source']}]"
-                                        if f else "null -- see reports/thresholds.json"))
+    # 6. values still null. A MEASURED one the process could not derive is a
+    #    report problem (the note in that report says why -- a thin week, no
+    #    pre-window); the SET BY OWNER ones are never invented
+    nulls = [n for n in st["nulls"] if n != "data.launch_date"]
+    by_key = {f["key"]: f for f in rep["findings"]}
+    measured = {".".join(k) for k in tune.MEASURED_KEYS}
+    underived = [k for k in nulls if k in measured and k not in by_key]
+    if underived:
+        return [_stop("tune", "a MEASURED value could not be derived",
+                      [f"{k}: null -- {tune.DERIVED_IN.get(k, 'see ops.tune')} "
+                       "produced nothing; read its note" for k in underived])]
+    if nulls:
+        detail = [f"{k}: " + (f"{by_key[k]['evidence']}  [{by_key[k]['source']}]"
+                              if k in by_key else "null -- see reports/thresholds.json")
+                  for k in nulls]
         return [_stop("owner", "SET BY OWNER values are null", detail)]
 
     # 7. launch day
@@ -385,7 +407,7 @@ def report(cfg, root="reports", journal=JOURNAL, decisions=DECISIONS):
             lines.append(f"| {run['at'][:16]} | `{f['key']}` | {f.get('current')} → "
                          f"{f.get('recommended')} | {str(f.get('evidence', '')).replace('|', '/')} "
                          f"| {f.get('source', '')} |")
-    if len(lines) and lines[-1].startswith("|---"):
+    if lines[-1].startswith("|---"):
         lines.append("| — | — | no paste recorded yet | — | — |")
     lines.append("")
 

@@ -181,7 +181,7 @@ def test_apply_persists_tau_and_monitor_only_does_not(cfg, tmp_path):
     """The operator gate governs tau exactly as it governs the posterior."""
     for mode, expect_moved in (("dry", False), ("apply", True)):
         root = tmp_path / mode
-        store = _store(cfg, root, 20, cost_each=0.5)
+        _store(cfg, root, 20, cost_each=0.5)
         posterior = _posterior(cfg, root)
         before = posterior.tau(cfg)
 
@@ -197,8 +197,8 @@ def test_apply_persists_tau_and_monitor_only_does_not(cfg, tmp_path):
 def test_tau_moves_even_when_no_cell_reaches_the_information_threshold(cfg, tmp_path):
     """Spend and evidence are different currencies. A day that explored and
     learned nothing still cost money, and that is what tau prices."""
-    store = _store(cfg, tmp_path, 20, cost_each=0.5)
-    posterior = _posterior(cfg, tmp_path)
+    _store(cfg, tmp_path, 20, cost_each=0.5)
+    _posterior(cfg, tmp_path)
     report = upd.run(cfg, apply=True, events_root=str(tmp_path / "events"),
                      posterior_path=str(tmp_path / "posterior.json"))
 
@@ -434,6 +434,47 @@ def test_the_bounded_step_holds_in_the_report_unrounded(cfg, tmp_path):
                                 c["raw_mean"], c["raw_std"], learn)
     assert c["proposed_mean"] == mean and c["proposed_std"] == std
     assert abs(c["proposed_mean"] - c["mean_before"]) <= learn["learning"]["max_mean_step"]
+    # one figure for the batch's information: the same number under two
+    # names read as two quantities
+    assert "information_pending" not in c
+
+
+def test_the_bounded_step_never_leaves_the_epsilon_range(cfg):
+    """The sign constraint (epsilon_max) and the grid floor hold on the
+    stored mean structurally, not only because the grid moments happen to
+    fall inside them: a step from a belief AT a bound stops at the bound."""
+    from engine.posterior import bounded_step
+    pc, step = cfg["posterior"], cfg["learning"]["max_mean_step"]
+    m, _, clipped = bounded_step(pc["epsilon_max"], 0.5,
+                                 pc["epsilon_max"] + step / 2, 0.5, cfg)
+    assert m == pc["epsilon_max"] and clipped
+    m, _, _ = bounded_step(pc["epsilon_min"], 0.5, pc["epsilon_min"] - step / 2, 0.5, cfg)
+    assert m == pc["epsilon_min"]
+    # inside the range the step rule is untouched, in both directions
+    for raw in (-1.0 - step / 2, -1.0 + step / 2):
+        m, _, _ = bounded_step(-1.0, 0.5, raw, 0.5, cfg)
+        assert m == pytest.approx(raw)
+
+
+def test_a_long_lived_store_sees_another_writer_only_after_reload(cfg, tmp_path):
+    """The hourly pricing service holds ONE PosteriorStore; the monitor writes
+    a suspension into the same file from another process. The service reads
+    the file once per decision batch (reload), never per decision -- so the
+    handle is stale by design until it does, and current once it has."""
+    service = _posterior(cfg, tmp_path)
+    monitor = PosteriorStore(cfg, path=str(tmp_path / "posterior.json"))
+
+    monitor.suspend_exploration(["price_mismatch"], "2026-08-19")
+    assert service.exploration_suspended() is None      # not read yet
+    assert service.reload() is service
+    assert service.exploration_suspended()["since"] == "2026-08-19"
+
+    # every cached view goes with the old state: the processed-id set too
+    assert not service.is_processed("X1")
+    monitor.commit_update("vegetables", -1.1, 0.55, 1, 1.0, ["X1"], applied=True)
+    assert not service.is_processed("X1")
+    assert service.reload().is_processed("X1")
+    assert service.state["cells"]["vegetables"]["version"] == 1
 
 
 # ------------------------------------------------------- exploration suspension
@@ -527,7 +568,7 @@ def test_the_flat_std_alert_reads_only_cells_that_can_learn(cfg, tmp_path):
 def test_calibrate_tau_commits_tau_without_touching_the_cells(cfg, tmp_path):
     """tau moves on spend, not evidence: the daily --calibrate-tau commits
     the walk while the posterior cells wait for the operator's --apply."""
-    store = _store(cfg, tmp_path, 20, cost_each=5000.0)
+    _store(cfg, tmp_path, 20, cost_each=5000.0)
     posterior = _posterior(cfg, tmp_path)
     cells_before = {k: dict(v) for k, v in posterior.state["cells"].items()}
     rep = upd.run(cfg, apply=False, calibrate_tau=True,

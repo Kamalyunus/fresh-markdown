@@ -55,6 +55,31 @@ def test_duplicate_ids_written_by_a_foreign_producer_are_counted_on_load(cfg, tm
     assert not gates["duplicate_or_unmatched_rate"]["pass"]
 
 
+def test_a_failed_append_leaves_no_id_behind_so_the_retry_is_not_a_duplicate(cfg, tmp_path, monkeypatch):
+    """The id was registered BEFORE the write. A disk-full append then left
+    an id for an event that was never on disk, and the producer's retry --
+    the correct response -- was refused as a duplicate."""
+    store = _store(cfg, tmp_path)
+    real_append = store._append
+
+    def disk_full(path, evt):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(store, "_append", disk_full)
+    with pytest.raises(OSError):
+        store.emit_decision(decision_event())
+    with pytest.raises(OSError):
+        store.emit_outcome(_outcome())
+    monkeypatch.setattr(store, "_append", real_append)
+
+    assert store.emit_decision(decision_event()) and store.emit_outcome(_outcome())
+    assert store.duplicate_counts == {"decision": 0, "outcome": 0}
+    assert len(store.load_decisions()) == 1 and len(store.load_outcomes()) == 1
+    # and a real second emit is still the duplicate it always was
+    assert not store.emit_decision(decision_event())
+    assert store.duplicate_counts["decision"] == 1
+
+
 # ------------------------------------------------------------------- the date
 @pytest.mark.parametrize("bad", [
     "2026-8-19", "20260819", "2026-08-19T17:00:00", "2026-13-01", "2026-02-30",

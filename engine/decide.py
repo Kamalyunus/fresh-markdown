@@ -1,4 +1,4 @@
-"""inference -- validate state, decide, emit decision event.
+"""engine.decide -- validate state, decide, emit decision event.
 
 Design section 5.10. Validation rejects the state rather than returning
 an unsafe price. The decision path is: feasible tiers -> DP over Q(p) ->
@@ -21,25 +21,33 @@ class StateRejected(ValueError):
     """Raised instead of returning an unsafe price (design 5.10)."""
 
 
-def _finite_number(v):
+def finite_number(v):
+    """A real, finite number. bool is excluded (True is not a price of 1);
+    numpy numerics count -- pandas producers must not quarantine in bulk.
+    The ONE finiteness test: events.store reads it for applied_price."""
     return (isinstance(v, (int, float, np.integer, np.floating))
             and not isinstance(v, (bool, np.bool_)) and math.isfinite(v))
 
 
-def priceable_economics(original_price, cost):
-    """Can a tier grid be built from this price and cost at all? Finite,
-    positive price and a finite cost -- anything else has no d_max, and the
-    grid builder must not be asked (it would divide by zero or floor a NaN)."""
-    return (_finite_number(original_price) and original_price > 0
-            and _finite_number(cost))
+def economics_failures(original_price, cost):
+    """Why no tier grid can be built from this price and cost -- [] when one
+    can. Judged BEFORE the grid is asked for (it would divide by a zero
+    price or floor a NaN), and only here: validate_state takes everything
+    else, so nothing is checked twice."""
+    failures = []
+    if not (finite_number(original_price) and original_price > 0):
+        failures.append("original_price must be a finite positive number")
+    if not (finite_number(cost) and cost >= 0):
+        failures.append("cost must be a finite non-negative number")
+    elif not failures and cost > original_price:
+        failures.append("cost must not exceed original_price")
+    return failures
 
 
 def validate_state(s, tiers, anchor_discount, mu_ref_path):
+    """Every check but the economics (economics_failures runs first, because
+    `tiers` is built from its verdict)."""
     failures = []
-    if not (_finite_number(s["original_price"]) and s["original_price"] > 0):
-        failures.append("original_price must be a finite positive number")
-    if not (_finite_number(s["cost"]) and 0 <= s["cost"] <= s["original_price"]):
-        failures.append("cost must be finite and within [0, original_price]")
     if not (isinstance(s["q"], (int, np.integer)) and s["q"] >= 0):
         failures.append("q must be a non-negative integer")
     if not (isinstance(s["hours_remaining"], (int, np.integer))
@@ -47,8 +55,10 @@ def validate_state(s, tiers, anchor_discount, mu_ref_path):
         failures.append("hours_remaining must be an integer >= 1")
     if anchor_discount is not None and not math.isfinite(anchor_discount):
         failures.append("p_current must be finite")
-    if not (s["r"] > 0):
-        failures.append("r must be positive")
+    # r parameterises every pmf the DP sums: None is a TypeError in the
+    # solver and inf a NaN Q, neither of which is a rejection
+    if not (finite_number(s["r"]) and s["r"] > 0):
+        failures.append("r must be a finite positive number")
     if not tiers:
         failures.append("feasible set is empty")
     if not all(math.isfinite(m) and m > 0 for m in mu_ref_path):
@@ -79,19 +89,20 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
     While the posterior store carries an exploration suspension (design
     5.12, set by daily.monitor) the decision is priced with NO budget:
     exploitation continues, nothing is drawn, and `tau_current` is recorded
-    as None so the event says why it did not explore."""
+    as None so the event says why it did not explore. The store is read as
+    loaded: a long-lived caller reloads it per decision batch
+    (PosteriorStore.reload), never per decision."""
     s = state
     d_ref = reference_discount(cfg, s["category"])
     entry = s["current_discount"] is None
     anchor = None if entry else float(s["current_discount"])
 
     # the contract is REJECT, never crash: a bad price or cost has no tier
-    # grid, so validate first and only then build one
-    tiers, d_max = [], float("nan")
-    if priceable_economics(s["original_price"], s["cost"]):
-        tiers, d_max = dp_mod.feasible_tiers(
-            s["original_price"], s["cost"], cfg["pricing"]["tier_step"])
-    failures = validate_state(s, tiers, anchor, s["mu_ref_path"])
+    # grid, so judge the economics first and only then build one
+    failures = economics_failures(s["original_price"], s["cost"])
+    tiers, d_max = ([], float("nan")) if failures else dp_mod.feasible_tiers(
+        s["original_price"], s["cost"], cfg["pricing"]["tier_step"])
+    failures += validate_state(s, tiers, anchor, s["mu_ref_path"])
     if failures:
         raise StateRejected("; ".join(failures))
 
@@ -113,13 +124,14 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
     # the smallest informative move for THIS cell: tiers closer to p* than
     # this are neither drawn nor priced into tau (explore.admissible)
     dmin = explore.delta_min(cfg, eps, s["category"])
+    # one cost table for the ledger and the draw -- the same set, priced once
+    costs = explore.admissible_costs(result, dmin)
     if spread_sink is not None and explorable:
-        costs, moves = explore.spread_table(result, dmin)
-        spread_sink((costs, moves, dmin))
+        spread_sink((*explore.spread_table(result, costs=costs), dmin))
     suspended = posterior_store.exploration_suspended()
     tau_in_force = None if suspended else tau_current
     choice = explore.select(result, tau_in_force, rng, explorable=explorable,
-                            delta_min=dmin)
+                            costs=costs)
 
     d_opt = result.tiers[result.optimal_index]
     d_applied = result.tiers[choice["chosen_index"]]

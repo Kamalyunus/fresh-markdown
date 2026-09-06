@@ -6,6 +6,8 @@ metric can cross zero -- margin_rate does, so its relative floor exceeded the
 series' own level and was structurally blocked (measured; docs/learnings.md).
 """
 
+import numpy as np
+
 RELATIVE = "relative"
 ABSOLUTE_PP = "absolute_pp"
 BASES = (RELATIVE, ABSOLUTE_PP)
@@ -22,11 +24,13 @@ def smooth(series, days):
 def deviation(treatment, control, worse_when_higher, basis):
     """Deterioration of `treatment` against `control`, positive = WORSE.
     Inputs are already smoothed and index-aligned; the sign convention is the
-    caller's (scrap worse when higher, margin when lower)."""
+    caller's (scrap worse when higher, margin when lower). A relative
+    deviation from a ZERO control is undefined, not infinite: it comes back
+    NaN (no reading), so neither the floor nor the trigger sees +-inf."""
     if basis == ABSOLUTE_PP:
         return (treatment - control) if worse_when_higher else (control - treatment)
     if basis == RELATIVE:
-        ratio = treatment / control
+        ratio = (treatment / control).replace([np.inf, -np.inf], np.nan)
         return (ratio - 1) if worse_when_higher else (1 - ratio)
     raise ValueError(f"unknown deterioration basis {basis!r}, expected one of {BASES}")
 

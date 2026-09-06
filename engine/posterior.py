@@ -28,14 +28,17 @@ GLOBAL_CELL = "GLOBAL"
 
 
 def bounded_step(mean_before, std_before, raw_mean, raw_std, cfg):
-    """Design 5.11: clip the mean step, floor the std shrink. Returns
+    """Design 5.11: clip the mean step, floor the std shrink, and keep the
+    mean inside [epsilon_min, epsilon_max] -- the sign constraint (rule 2)
+    holds structurally, not only because the grid moments happen to. Returns
     (new_mean, new_std, clipped)."""
-    lc = cfg["learning"]
+    lc, pc = cfg["learning"], cfg["posterior"]
     step = lc["max_mean_step"]
     new_mean = min(max(raw_mean, mean_before - step), mean_before + step)
+    new_mean = min(max(new_mean, pc["epsilon_min"]), pc["epsilon_max"])
     new_std = max(raw_std,
                   std_before * (1.0 - lc["max_std_shrink"]),
-                  cfg["posterior"]["min_std"])
+                  pc["min_std"])
     clipped = (new_mean != raw_mean) or (new_std != raw_std)
     return new_mean, new_std, clipped
 
@@ -52,11 +55,26 @@ def launch_belief(mean, std, cfg):
 
 
 class PosteriorStore:
+    """The production learning state, read from posterior.json once at
+    construction. Two writers share the file -- `daily.update` (cells, tau)
+    and `daily.monitor` (the exploration suspension) -- so a long-lived
+    reader (the hourly pricing service holding one store) sees neither
+    until it calls `reload()`. The contract: the CALLER reloads once per
+    decision batch, before its first `decide()`; `decide()` itself never
+    re-reads the file (one read per hour, not one per SKU)."""
+
     def __init__(self, cfg, path=None):
         self.cfg = cfg
         self.path = path or cfg["posterior"]["path"]
+        self.reload()
+
+    def reload(self):
+        """Re-read the file, dropping every cached view of the old state.
+        Returns self, so `PosteriorStore(cfg).reload()` reads as intended."""
         with open(self.path) as f:
             self.state = json.load(f)
+        self._processed = None
+        return self
 
     @staticmethod
     def launch_state(cfg, prior_by_category, episodes_per_week):
@@ -98,9 +116,7 @@ class PosteriorStore:
         state = cls.launch_state(cfg, prior_by_category, episodes_per_week)
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         cls._atomic_write(path, state)
-        store = cls.__new__(cls)
-        store.cfg, store.path, store.state = cfg, path, state
-        return store
+        return cls(cfg, path)
 
     @staticmethod
     def _atomic_write(path, state):
@@ -173,7 +189,7 @@ class PosteriorStore:
     def is_processed(self, outcome_id):
         # cached: the ledger only grows, and rebuilding the set per lookup
         # made the daily batch quadratic in its own history
-        if getattr(self, "_processed", None) is None:
+        if self._processed is None:
             self._processed = set(self.state["processed_outcome_ids"])
         return outcome_id in self._processed
 
@@ -195,7 +211,7 @@ class PosteriorStore:
         rec["updated_at"] = pd.Timestamp.now("UTC").isoformat()
         rec["n_obs"] += n_new_obs
         self.state["processed_outcome_ids"].extend(outcome_ids)
-        if getattr(self, "_processed", None) is not None:
+        if self._processed is not None:
             self._processed.update(outcome_ids)
         self._atomic_write(self.path, self.state)
 

@@ -43,3 +43,42 @@ def test_export_events_writes_warehouse_safe_tables(tmp_path):
     assert export(store, str(tmp_path / "exports"))["decisions"][1] == 2
     assert export(store, str(tmp_path / "exports"),
                   since="2026-08-19")["decisions"][1] == 1
+
+
+def test_since_cuts_both_tables_on_the_trading_day(tmp_path):
+    """An hour-23 outcome finalizes at D+1T00:00Z. Cut on `finalized_at`,
+    `--since D+1` shipped that outcome without its decision and `--since D`
+    shipped the decision without... the outcome landed in the next load: a
+    trading day split across two exports. Both tables now cut on the
+    decision's trading day (events.pairs.decision_day)."""
+    from conftest import decision_event, outcome_event
+    from common.config import load_config
+    from events.store import EventStore
+    from daily.export_events import export
+
+    store = EventStore(load_config(), root=str(tmp_path / "events"))
+
+    def outcome(**over):                      # reconciling (2 - 1 = 1): admitted
+        return outcome_event(ending_inventory=1, **over)
+
+    assert store.emit_decision(decision_event(
+        decision_id="D-late", date="2026-08-18", hour_of_day=23,
+        timestamp="2026-08-18T23:00:00+00:00"))
+    assert store.emit_outcome(outcome(outcome_id="O-late", decision_id="D-late",
+                                      finalized_at="2026-08-19T00:00:00+00:00"))
+    assert store.emit_decision(decision_event(decision_id="D-next", date="2026-08-19"))
+    assert store.emit_outcome(outcome(outcome_id="O-next", decision_id="D-next"))
+    # an outcome naming no known decision has no trading day: it keeps the
+    # only day it carries, its finalized_at
+    assert store.emit_outcome(outcome(outcome_id="O-orphan", decision_id="D-gone",
+                                      finalized_at="2026-08-18T12:00:00+00:00"))
+
+    def rows(since):
+        out = export(store, str(tmp_path / "exports"), since=since)
+        return {name: sorted(pd.read_parquet(path)[f"{name[:-1]}_id"])
+                for name, (path, _) in out.items()}
+
+    assert rows("2026-08-19") == {"decisions": ["D-next"], "outcomes": ["O-next"]}
+    assert rows("2026-08-18") == {"decisions": ["D-late", "D-next"],
+                                  "outcomes": ["O-late", "O-next", "O-orphan"]}
+    assert rows(None)["outcomes"] == ["O-late", "O-next", "O-orphan"]

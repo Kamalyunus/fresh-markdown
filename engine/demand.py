@@ -16,18 +16,26 @@ def mu_at(mu_ref, d, d_ref, epsilon, demand_floor):
     return float(max(mu_ref * ratio ** epsilon, demand_floor))
 
 
-def nb_pmf_vector(mu, r, max_k):
-    """P(D = k) for k = 0..max_k, tail mass folded into the last bucket.
+def nb_pmf_table(mu, r, max_k):
+    """P(D = k) for k = 0..max_k at every mu in `mu` (any shape), tail mass
+    folded into the last bucket -- one scipy call for a whole DP's worth of
+    (stage, tier) cells. Returns (pmf of shape mu.shape + (max_k + 1,),
+    tail of shape mu.shape).
 
     scipy parameterisation: nbinom(n=r, p=r/(r+mu)) has mean mu.
-    Returns (pmf, tail_mass).
     """
-    p = r / (r + mu)
+    p = r / (r + np.asarray(mu, dtype=float))
     k = np.arange(max_k + 1)
-    pmf = nbinom.pmf(k, r, p)
-    tail = float(max(0.0, 1.0 - pmf.sum()))
-    pmf[-1] += tail
+    pmf = nbinom.pmf(k, r, p[..., None])
+    tail = np.maximum(0.0, 1.0 - pmf.sum(axis=-1))
+    pmf[..., -1] += tail
     return pmf, tail
+
+
+def nb_pmf_vector(mu, r, max_k):
+    """The one-mu case of nb_pmf_table: (pmf over k = 0..max_k, tail_mass)."""
+    pmf, tail = nb_pmf_table(mu, r, max_k)
+    return pmf, float(tail)
 
 
 def expected_min_demand_inventory(mu, r, q, max_k):

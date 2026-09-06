@@ -129,18 +129,20 @@ def _config_vs_reports(cfg, root, reports=None):
     seen = {f["key"] for f in rep["findings"]}
     unverified = sorted(k for k in measured if k not in seen
                         and config_get(cfg, tuple(k.split("."))) is not None)
-    if unverified:
-        # a pasted value no report produced a finding for (older schema,
-        # missing block) is unverified, not a match
-        return _row("config mirrors reports", NONE,
-                    "no report measures: " + ", ".join(unverified),
-                    "re-run the report that derives it (ops.tune names it)")
     drift = [f for f in rep["findings"]
              if f["status"] == tune.ACT and f["key"] in measured
              and f["current"] is not None]
     if not drift:
+        if unverified:
+            # a pasted value no report produced a finding for (older schema,
+            # missing block) is unverified, not a match
+            return _row("config mirrors reports", NONE,
+                        "no report measures: " + ", ".join(unverified),
+                        "re-run the report that derives it (ops.tune names it)")
         return _row("config mirrors reports", PASS,
                     "every MEASURED value matches the report that derived it")
+    # a drift is graded even when another key is unverified: "not run" must
+    # never hide a stale paste behind a missing block
 
     # A MEASURED value tune classes PASTE is simply stale: --apply fixes it,
     # so FAIL. One it downgraded to OWNER cannot be fixed at that key at all
@@ -282,8 +284,12 @@ def _vintages(cfg, state, reports):
             continue
         fp = rep.get("config")
         if fp:
-            if fp.get("digest") != live:
-                from ops import tune                    # sibling; no cycle
+            from ops import tune                        # sibling; no cycle
+            if name not in tune.ROUTED_REPORTS:
+                # a production report reads the live config on every run;
+                # no config move re-grades it
+                checked.append(f"{name}={fp.get('phase')}")
+            elif fp.get("digest") != live:
                 diff = provenance.config_diff(fp.get("snapshot") or {}, cfg)
                 # only a key THIS report reads re-grades it (tune.stale_keys,
                 # the routing advance re-runs by): a paste that writes back

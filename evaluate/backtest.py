@@ -10,9 +10,8 @@ section 2.3 denominator.
 from contextlib import contextmanager
 
 import argparse
-import json
 from common.config import load_config
-from common.io import write_json
+from common.io import read_json, write_json
 from common.provenance import config_fingerprint
 from fit.train_baseline import BaselineModel
 import numpy as np
@@ -62,104 +61,33 @@ def _attach_predictions(d, cfg, model, prior, r_lookup):
     d["eps_belief"] = d.category.map(
         lambda c: launch_belief(per[str(c)]["mean"], per[str(c)]["std"], cfg)
     ).astype(float)
-    ratio = (1 - d.total_discount.to_numpy()) / (1 - d.d_ref.to_numpy())
-    mu = np.clip(d.mu_ref_hat.to_numpy() * ratio ** d.eps.to_numpy(),
-                 cfg["pricing"]["demand_floor"], None)
-    d["mu_hat"] = mu
+    d["predicted_units"] = _predicted_at_actual_prices(
+        d, cfg, d.mu_ref_hat.to_numpy())
+    return d
 
-    d["predicted_units"] = expected_min_demand_inventory_vec(
+
+def _predicted_at_actual_prices(d, cfg, mu_ref):
+    """E[min(D, q)] at the row's ACTUAL price from `mu_ref` (the level in
+    force) and the prior-mean elasticity `d.eps` -- the censored basis every
+    prediction-vs-sales comparison uses (rule 5a)."""
+    ratio = (1 - d.total_discount.to_numpy()) / (1 - d.d_ref.to_numpy())
+    mu = np.clip(mu_ref * ratio ** d.eps.to_numpy(),
+                 cfg["pricing"]["demand_floor"], None)
+    return expected_min_demand_inventory_vec(
         mu, d.r.to_numpy(), d.starting_inventory.to_numpy(),
         cfg["pricing"]["negbin_max_k"])
-    return d
 
 
 def _fidelity_metrics(d):
     err = d.predicted_units - d.units_sold
-    nz = d[d.units_sold > 0]
     return {
         "fidelity_episode_sold_ratio": round(
             float(d.units_sold.sum() / d.predicted_units.sum()), 4),
         "fidelity_hourly_mae": round(float(err.abs().mean()), 4),
-        "fidelity_hourly_rmse": round(float(np.sqrt((err ** 2).mean())), 4),
         "fidelity_hourly_bias": round(float(err.mean()), 4),
-        "fidelity_nz_mae": round(float((nz.predicted_units - nz.units_sold)
-                                       .abs().mean()), 4),
-        "fidelity_nz_bias": round(float((nz.predicted_units - nz.units_sold)
-                                        .mean()), 4),
-        "fidelity_zero_acc": round(float(((d.predicted_units < 0.5)
-                                          == (d.units_sold == 0)).mean()), 4),
-        "fidelity_pct_nonzero": round(float((d.units_sold > 0).mean()), 4),
         "by_category": {
             k: round(float(g.units_sold.sum() / g.predicted_units.sum()), 4)
             for k, g in d.groupby("category") if g.predicted_units.sum() > 0},
-    }
-
-
-def level_mix_decomposition(d, cfg):
-    """Weekly anchor-level movement split into demand drift vs SKU mix
-    (ratios fit once over all history; mix_expected varies composition only)."""
-    tier_step = cfg["pricing"]["tier_step"]
-    min_unit_rows = cfg["baseline_model"]["mix_decomposition_min_unit_rows"]
-
-    a = d[episodes.is_anchor_row(d, tier_step)].copy()
-    if not len(a) or a.predicted_units.sum() <= 0:
-        return "NOT RUN -- no anchor rows"
-    a["week"] = pd.to_datetime(a.date).dt.to_period("W").astype(str)
-    a["unit"] = a.sku_id.astype(str) + "|" + a.fc.astype(str)
-    overall = float(a.units_sold.sum() / a.predicted_units.sum())
-
-    u = a.groupby("unit").agg(sold=("units_sold", "sum"),
-                              pred=("predicted_units", "sum"),
-                              rows=("units_sold", "size"),
-                              category=("category", "first"))
-    c = a.groupby("category").agg(sold=("units_sold", "sum"),
-                                  pred=("predicted_units", "sum"))
-    cat_ratio = c.sold / c.pred.replace(0, np.nan)
-    enough = (u.rows >= min_unit_rows) & (u.pred > 0)
-    u["ratio"] = np.where(enough, u.sold / u.pred.replace(0, np.nan),
-                          u.category.map(cat_ratio).fillna(overall))
-    ratio_map = u.ratio
-
-    series = {}
-    for w, g in a.groupby("week"):
-        pred = float(g.predicted_units.sum())
-        if pred <= 0:
-            continue
-        mix_expected = float(
-            (g.predicted_units * g.unit.map(ratio_map).fillna(overall)).sum() / pred)
-        series[w] = {"raw": round(float(g.units_sold.sum() / pred), 4),
-                     "mix_expected": round(mix_expected, 4)}
-
-    weeks = sorted(series)
-    summary = {}
-    if len(weeks) >= 2:
-        raw_chg = series[weeks[-1]]["raw"] - series[weeks[0]]["raw"]
-        mix_chg = (series[weeks[-1]]["mix_expected"]
-                   - series[weeks[0]]["mix_expected"])
-        summary = {
-            "raw_change_first_to_last": round(raw_chg, 4),
-            "mix_change_first_to_last": round(mix_chg, 4),
-            "mix_explained_share": round(mix_chg / raw_chg, 4)
-                if abs(raw_chg) > 1e-9 else None,
-        }
-
-    trusted = u[enough]
-    return {
-        "by_week": series,
-        "summary": summary,
-        "sku_level_feasibility": {
-            "sku_fc_units": int(len(u)),
-            "share_units_ge_10_anchor_rows": round(float((u.rows >= 10).mean()), 4),
-            "share_units_ge_30_anchor_rows": round(float((u.rows >= 30).mean()), 4),
-            "share_units_ge_100_anchor_rows": round(float((u.rows >= 100).mean()), 4),
-            "anchor_rows_per_unit_p50": int(np.percentile(u.rows, 50)),
-            "trusted_unit_ratio_p10_p90": [
-                round(float(np.percentile(trusted.ratio, 10)), 3),
-                round(float(np.percentile(trusted.ratio, 90)), 3)]
-                if len(trusted) > 10 else None,
-        },
-        "note": ("mix_explained_share near 1 = composition, not demand "
-                 "drift; per-SKU factors need enough anchor rows per unit."),
     }
 
 
@@ -336,7 +264,6 @@ def fidelity(d, cfg, model, prior, r_lookup):
     gate_start = pd.Timestamp(split["test_start"])
     # predict over the FULL window (the DP plans over it); every ratio below
     # sees observed rows only -- synthetic rows would read as under-prediction
-    d_in = d                      # unextended; the refit pass below re-reads it
     model.freeze_calibration_from(gate_start)
     d_full = _attach_predictions(d, cfg, model, prior, r_lookup)
     d = d_full[d_full.is_observed]
@@ -384,27 +311,6 @@ def fidelity(d, cfg, model, prior, r_lookup):
                     "SKUs are driving the level gap, not a macro trend",
         }
 
-    # sizes the censoring gap: the gate basis is censored E[min(D,q)], and a
-    # comparison against raw mu (E[D]) would flatter the model by this much
-    raw_mu_total = float(gate_d.mu_hat.sum())
-    censored_total = float(gate_d.predicted_units.sum())
-    sold_total = float(gate_d.units_sold.sum())
-    block["prediction_basis"] = {
-        "sold_over_censored_prediction": round(sold_total / censored_total, 4)
-            if censored_total > 0 else None,
-        "sold_over_raw_mu": round(sold_total / raw_mu_total, 4)
-            if raw_mu_total > 0 else None,
-        "censoring_shrinkage": round(censored_total / raw_mu_total, 4)
-            if raw_mu_total > 0 else None,
-        "censored_hour_rate": round(
-            float((gate_d.units_sold >= gate_d.starting_inventory).mean()), 4),
-        "note": ("censored is the gate basis and the one every fit must use; "
-                 "the raw-mu figure is shown only to size the gap between "
-                 "them -- a factor fit on raw mu is wrong by this much"),
-    }
-
-    # is the weekly level movement demand drift, or SKU composition?
-    block["level_mix_decomposition"] = level_mix_decomposition(d, cfg)
     # how long should the level factor's fit window be? measured, not assumed
     block["calibration_window_sweep"] = calibration_window_sweep(d, cfg)
 
@@ -429,16 +335,20 @@ def fidelity(d, cfg, model, prior, r_lookup):
                                       "investigate drift (design 9.2)")
     block["calibration_frozen_at"] = str(gate_start.date())
 
-    # mechanism reading: same gate window under the weekly schedule. NOT the
-    # gate; the spread to it is what weekly re-fitting is worth.
-    with _coverage_preserved(model):
-        model.freeze_calibration_from(None)
-        refit = _attach_predictions(d_in, cfg, model, prior, r_lookup)
-        refit = refit[refit.is_observed]
-        refit_gate = (split_frames(refit, cfg)["test"]
-                      if gate_window == "test" else refit)
-        refit_m10 = (fidelity_decomposition(refit_gate, cfg)
-                     if len(refit_gate) else {})
+    # mechanism reading: the same gate rows under the weekly schedule. NOT
+    # the gate; the spread to it is what weekly re-fitting is worth. A
+    # factor swap is an exact rescale of mu_ref, so the rows are rescaled
+    # by re-fit / frozen factor (what shadow's calibration_regimes does)
+    # rather than predicted a second time
+    refit_m10 = {}
+    if len(gate_d):
+        with _coverage_preserved(model):
+            frozen_factor = model.level_factors(gate_d)
+            model.freeze_calibration_from(None)
+            scale = model.level_factors(gate_d) / frozen_factor
+        refit_gate = gate_d.assign(predicted_units=_predicted_at_actual_prices(
+            gate_d, cfg, gate_d.mu_ref_hat.to_numpy() * scale))
+        refit_m10 = fidelity_decomposition(refit_gate, cfg)
     refit_anchor = refit_m10.get("level_bias_at_anchor")
     block["weekly_refit"] = {
         "level_bias_at_anchor": refit_anchor,
@@ -496,7 +406,10 @@ def _episode_frame(g):
         "mu_ref_path": g.mu_ref_hat.to_numpy(),
         "r": float(g.r.iloc[0]),
         "eps": float(g.eps.iloc[0]),
-        "eps_belief": float(g.eps_belief.iloc[0]) if "eps_belief" in g else float(g.eps.iloc[0]),
+        # the belief the DP arm prices at (posterior.launch_belief); no
+        # fallback to the world's eps -- a frame without it is not
+        # _attach_predictions output
+        "eps_belief": float(g["eps_belief"].iloc[0]),
         "episode_id": str(g.episode_id.iloc[0]),
         "sku_id": int(g.sku_id.iloc[0]),
         "fc": str(g.fc.iloc[0]),
@@ -577,7 +490,9 @@ def _dp_price(e, cfg, eps_belief, spread_sink=None):
 
 def _replay_one(e, cfg):
     """One episode's replay: actual path, legacy-under-model arm, DP arm.
-    Pure. Returns (row, [(date, q_spread_costs), ...]) or None."""
+    Pure. Returns (row, [(date, q_spread_costs), ...], dp_arm) or None;
+    `dp_arm` is (il, mean_discount, path), the base step_sensitivity shifts
+    the belief from rather than re-solving it."""
     pcfg = cfg["pricing"]
     p0, cost = e["original_price"], e["cost"]
     tiers, _ = dp_mod.feasible_tiers(p0, cost, pcfg["tier_step"])
@@ -652,7 +567,9 @@ def _replay_one(e, cfg):
         "n_observed": e["n_observed"], "r": e["r"],
         "original_price": p0, "cost": cost, "d_ref": e["d_ref"],
     })
-    return row, spreads
+    dp = arms["dp"]
+    return row, spreads, (dp["disc_cost"] + dp["scrap"], dp["mean_discount"],
+                          dp["path"])
 
 
 def intra_episode_steps(path):
@@ -693,44 +610,36 @@ def intra_episode_moves(ep, cfg):
                      "hour, not that the price was pinned (design 5.7)")}
 
 
-def _dp_arm(e, cfg, eps_belief, eps_world=None):
-    """The DP arm alone, for `step_sensitivity`: the solver prices at
-    `eps_belief` while demand transitions at `eps_world` (default: the
-    same), so a shifted belief is charged only for the prices it changes.
-    Returns (il, mean_discount, path)."""
-    arm = _simulate_arm(e, cfg, _dp_price(e, cfg, eps_belief),
-                        eps_belief if eps_world is None else eps_world)
-    return arm["disc_cost"] + arm["scrap"], arm["mean_discount"], arm["path"]
-
-
-def step_sensitivity(frames, cfg, seed=0, sample=300):
+def step_sensitivity(replayed, cfg, seed=0):
     """Prices `learning.max_mean_step` on real episodes: re-solve the DP arm
     at eps +- step; report how many episodes change price, and the IL cost.
     The step shifts the BELIEF while the world stays at base eps. `crossers`
-    (deepening bar within one step of |eps|) are where the cap is load-bearing."""
+    (deepening bar within one step of |eps|) are where the cap is load-bearing.
+    `replayed` is [(episode_frame, dp_arm), ...] from `_replay_one`: the
+    base arm is the replay's own, never solved a second time."""
     step = float(cfg["learning"]["max_mean_step"])
     lo = cfg["posterior"]["epsilon_min"]
     hi = cfg["posterior"]["epsilon_max"]
     rng = np.random.default_rng(seed)
-    take = min(sample, len(frames))
-    picked = [frames[i] for i in rng.choice(len(frames), take, replace=False)]
+    take = min(int(cfg["tuning"]["step_sensitivity_episodes"]), len(replayed))
+    picked = [replayed[i] for i in rng.choice(len(replayed), take, replace=False)]
 
     shifts = {"deeper_belief": -step, "shallower_belief": +step}
     out = {"step": step, "episodes_swept": take,
            "note": ("DP arm re-solved at the launch belief +- max_mean_step, "
                     "world held at the prior mean; crossers are where the cap "
                     "is load-bearing.")}
-    base = {id(e): _dp_arm(e, cfg, e["eps_belief"], eps_world=e["eps"]) for e in picked}
     for label, shift in shifts.items():
         changed = il_base = il_shift = 0.0
         cross_n = cross_changed = 0
         disc_delta = 0.0
-        for e in picked:
-            b_il, b_disc, b_path = base[id(e)]
+        for e, (b_il, b_disc, b_path) in picked:
             eps_s = float(np.clip(e["eps_belief"] + shift, lo, hi))
             # belief shifts, the world stays at base eps -- the delta is the
             # cost of the changed prices alone
-            s_il, s_disc, s_path = _dp_arm(e, cfg, eps_s, eps_world=e["eps"])
+            arm = _simulate_arm(e, cfg, _dp_price(e, cfg, eps_s), e["eps"])
+            s_il, s_disc, s_path = (arm["disc_cost"] + arm["scrap"],
+                                    arm["mean_discount"], arm["path"])
             moved = s_path != b_path
             changed += moved
             il_base += b_il
@@ -788,14 +697,16 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
         if e["q0"] > 0 and e["hours"] >= 1:
             frames.append(e)
 
+    # results return in submission order, so each pairs with its frame
     results = map_episodes(_replay_one, frames, cfg, workers)
 
-    rows, ledger = [], explore.SpreadLedger()
-    for out in results:
+    rows, ledger, replayed = [], explore.SpreadLedger(), []
+    for e, out in zip(frames, results):
         if out is None:
             continue
-        row, spreads = out
+        row, spreads, dp_arm = out
         rows.append(row)
+        replayed.append((e, dp_arm))
         for day, costs in spreads:
             ledger.add(day, costs)
 
@@ -867,7 +778,7 @@ def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
                  "Replay output is never evidence the policy works (5.14)."),
     }
     block["q_spread_distribution"] = ledger.distribution()
-    block["step_sensitivity"] = step_sensitivity(frames, cfg, seed=seed)
+    block["step_sensitivity"] = step_sensitivity(replayed, cfg, seed=seed)
     return block, ep, ledger
 
 
@@ -879,15 +790,17 @@ def derive_tau_initial(ledger, ep, cfg, launch_std):
     a tau EXISTS, not that it is right (AGENTS rule 17)."""
     if not ledger.decisions:
         return None
-    # ONE day count on both sides: the budget is the mean IL over the days
-    # that traded and the spend is divided by the same days (the ledger's
-    # trading-day notion) -- a calendar span would cross the pre-launch
-    # frame's exclusion gap and understate spend per day
-    daily_il = pd.DataFrame(ep).groupby("date")["actual_il"].sum()
-    n_days = int(len(daily_il))
+    # ONE day count on both sides, and the same one shadow divides by
+    # (episodes.calendar_days over the replayed sample's dates): the budget
+    # is IL per calendar day and the spend is divided by the same days, so
+    # the count cancels in tau; `days`, implied_daily_spend and daily_budget
+    # are on the calendar basis. On the pre-launch frame that span crosses
+    # data.exclusion_window, which lowers both per-day figures equally.
+    ep = pd.DataFrame(ep)
+    n_days = int(episodes.calendar_days(ep.date))
     # production's own budget rule at the launch posterior width
     budget_per_day = float(explore.budget_today(
-        daily_il.sum() / n_days, launch_std, cfg))
+        ep.actual_il.sum() / n_days, launch_std, cfg))
     tau = ledger.solve_tau(budget_per_day, n_days=n_days)
     if tau is None:
         return None
@@ -940,10 +853,8 @@ def main():
             f"no episodes opened on or before split.test_end "
             f"({cfg['data']['split']['test_end']})")
     model = BaselineModel(cfg)
-    with open(cfg["posterior"]["prior"]["path"]) as f:
-        prior = json.load(f)
-    with open(cfg["dispersion"]["r_lookup_path"]) as f:
-        r_lookup = json.load(f)
+    prior = read_json(cfg["posterior"]["prior"]["path"])
+    r_lookup = read_json(cfg["dispersion"]["r_lookup_path"])
 
     fid, d_pred = fidelity(d, cfg, model, prior, r_lookup)
     pol, ep, ledger = policy_replay(d_pred, cfg,
@@ -1010,12 +921,10 @@ def main():
               f"(q{tau['cost_distribution_quantile']:.2f} of Q-spread; "
               f"daily spend {tau['implied_daily_spend']:,.0f} "
               f"vs budget {tau['daily_budget']:,.0f})")
-        print("paste into config.yaml: exploration.tau_initial")
+        print("advisory cross-check on the exploit-only path -- NOT the paste; "
+              "exploration.tau_initial is pasted from "
+              "shadow.tau_initial_derivation (ops.tune)")
     print(f"wrote {args.out}")
-
-
-if __name__ == "__main__":
-    main()
 
 
 if __name__ == "__main__":

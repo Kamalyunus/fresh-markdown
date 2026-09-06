@@ -17,28 +17,45 @@ import os
 import pandas as pd
 
 from common.config import load_config
+from events.pairs import decision_day
 from events.store import EventStore
 
 
-def _frame(events, since=None, date_field="date"):
+def _frame(events):
     if not events:
         return pd.DataFrame()
     df = pd.DataFrame(events)
-    if since and date_field in df.columns:
-        df = df[df[date_field].astype(str) >= str(since)]
     for col in df.columns:                    # warehouse-safe: no list cells
         if df[col].map(lambda v: isinstance(v, (list, dict))).any():
             df[col] = df[col].map(json.dumps)
     return df.reset_index(drop=True)
 
 
+def since_filter(decisions, outcomes, since):
+    """Both streams cut on the ONE day key: the trading day the decision
+    priced (events.pairs.decision_day). An outcome inherits its decision's
+    day -- its own `finalized_at` is a UTC clock that rolls to D+1 for hour
+    23, so cutting on it split a trading day across two exports. An outcome
+    naming no known decision has no trading day and falls back to the date
+    of its `finalized_at`, the only day it carries."""
+    since = str(since)
+    day_of = {d["decision_id"]: decision_day(d) for d in decisions}
+
+    def outcome_day(o):
+        return day_of.get(o.get("decision_id")) or str(o["finalized_at"])[:10]
+
+    return ([d for d in decisions if day_of[d["decision_id"]] >= since],
+            [o for o in outcomes if outcome_day(o) >= since])
+
+
 def export(store, out_dir, since=None):
     os.makedirs(out_dir, exist_ok=True)
+    decisions, outcomes = store.load_decisions(), store.load_outcomes()
+    if since:
+        decisions, outcomes = since_filter(decisions, outcomes, since)
     written = {}
-    for name, events, date_field in (
-            ("decisions", store.load_decisions(), "date"),
-            ("outcomes", store.load_outcomes(), "finalized_at")):
-        df = _frame(events, since, date_field)
+    for name, events in (("decisions", decisions), ("outcomes", outcomes)):
+        df = _frame(events)
         path = os.path.join(out_dir, f"{name}.parquet")
         df.to_parquet(path, index=False)
         written[name] = (path, len(df))
@@ -51,8 +68,9 @@ def main():
     ap.add_argument("--events-dir", default=None)
     ap.add_argument("--out-dir", default="exports")
     ap.add_argument("--since", default=None,
-                    help="keep events on/after this date (decisions by their "
-                         "pricing date, outcomes by finalized_at)")
+                    help="keep events whose TRADING day is on/after this date "
+                         "(decisions by their pricing date, outcomes by their "
+                         "decision's), so both tables hold whole trading days")
     args = ap.parse_args()
 
     cfg = load_config(args.config)

@@ -52,7 +52,7 @@ def test_the_noise_block_measures_and_points_at_the_one_verdict(cfg):
         [("e1", "2026-03-01"), ("e2", "2026-03-02"), ("e3", "2026-03-03")],
         columns=["episode_id", "date"], hour_of_day=10, starting_inventory=5,
         units_sold=3, ending_inventory=0, original_price=1000.0,
-        offered_price=800.0, cost=500.0, hours_remaining=0)
+        offered_price=800.0, cost=500.0, hours_remaining=0, dp_eligible=True)
     out = dt.guardrail_noise(d, cfg)
     for metric in ("scrap_rate", "margin_rate"):
         block = out[metric]
@@ -109,22 +109,71 @@ def test_noise_floor_and_monitor_use_the_same_smoothing():
     assert sm["scrap"] > 1 and sm["margin"] == 1
 
 
-def _daily_frame(days=70, skus=60, seed=0):
+def _daily_frame(days=70, skus=60, seed=0, start="2026-01-01", dp=True):
     """Episode-hour rows over many days with a shared day effect, so the
     trailing-mean floor has genuine day-to-day swing to measure."""
     rng = np.random.default_rng(seed)
     rows = []
-    for i, day in enumerate(pd.date_range("2026-01-01", periods=days)):
+    for i, day in enumerate(pd.date_range(start, periods=days)):
         day_effect = 1.0 + 0.35 * np.sin(i / 3.0)      # shared by both arms
         for sku in range(skus):
             sold = int(np.clip(rng.poisson(9 * day_effect), 0, 20))
-            rows.append(dict(episode_id=f"{day.date()}|{sku}", date=day.date(),
+            rows.append(dict(episode_id=f"{day.date()}|{sku}|{dp}", date=day.date(),
                              hour_of_day=10, sku_id=sku, fc="FC1",
                              starting_inventory=20, units_sold=sold,
                              ending_inventory=0, hours_remaining=0,
                              offered_price=1000.0, original_price=1000.0,
-                             cost=600.0))
+                             cost=600.0, dp_eligible=dp))
     return pd.DataFrame(rows)
+
+
+def test_the_floor_is_measured_on_a_calendar_so_a_gap_is_not_a_seam():
+    """The pre-launch series has data.exclusion_window cut out of it. Rolled
+    over ROWS, the first post-gap days were smoothed with, and graded
+    against, days six weeks earlier -- while the basis text said "trailing
+    N-day mean". On the calendar each side of the gap warms up on its own:
+    the scored days are exactly the two segments' scored days added."""
+    pre = _daily_frame(70, start="2026-01-01")
+    post = _daily_frame(70, start="2026-05-01", seed=1)     # a 50-day hole
+    both = pd.concat([pre, post], ignore_index=True)
+    for metric in ("scrap_rate", "margin_rate"):
+        a, b = dt.guardrail_noise(pre, CFG)[metric], dt.guardrail_noise(post, CFG)[metric]
+        gapped = dt.guardrail_noise(both, CFG)[metric]
+        assert gapped["days"] == a["days"] + b["days"]
+        assert gapped["days_scored"] == a["days_scored"] + b["days_scored"]
+        # a row-rolled series would have scored every post-gap day but the
+        # first: more scored days, seamed across the hole
+        assert gapped["days_scored"] < a["days_scored"] + b["days"]
+    assert "CALENDAR" in dt.guardrail_noise(both, CFG)["basis"]
+
+
+def test_the_floor_is_measured_on_the_population_the_trigger_runs_on():
+    """The monitor's series is the system-priced episodes -- the ones the DP
+    could price. Measured on the integrity population, the floor carried
+    the noise of episodes the guardrail will never see."""
+    d = _daily_frame()
+    # dp-INELIGIBLE episodes whose scrap swings wildly day to day
+    wild = _daily_frame(seed=3, dp=False, skus=20)
+    wild["units_sold"] = np.where(pd.to_datetime(wild.date).dt.day % 2 == 0, 0, 20)
+    floor = dt.guardrail_noise(d, CFG)["scrap_rate"]["three_sigma"]
+    assert dt.guardrail_noise(pd.concat([d, wild]), CFG)["scrap_rate"]["three_sigma"] == floor
+    assert dt.guardrail_noise(pd.concat([d, wild.assign(dp_eligible=True)]),
+                              CFG)["scrap_rate"]["three_sigma"] != floor
+
+
+def test_a_relative_deviation_from_a_zero_control_is_no_reading():
+    """t / 0 is not an infinite deterioration, it is undefined: the shared
+    comparison returns NaN so neither the floor's sigma nor the trigger's
+    streak ever sees +-inf (the monitor once replaced it locally)."""
+    from common import guardrail
+    t, c = pd.Series([0.1, 0.2, 0.3]), pd.Series([0.0, 0.1, 0.0])
+    for worse_high in (True, False):
+        dev = guardrail.deviation(t, c, worse_high, guardrail.RELATIVE)
+        assert dev.isna().tolist() == [True, False, True]
+        assert np.isfinite(dev.dropna()).all()
+        # the absolute basis has no such singularity
+        assert np.isfinite(guardrail.deviation(t, c, worse_high,
+                                               guardrail.ABSOLUTE_PP)).all()
 
 
 def test_trailing_floor_is_measured_on_the_smoothed_series():

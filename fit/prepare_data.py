@@ -1,7 +1,8 @@
 """fit.prepare_data -- schema mapping, filter chain, episode construction.
 
-Implements docs/design.md section 5.2; column mapping applied here once and
-nowhere else. Load-bearing (section 9.1): `discount` is PERCENT in source,
+Implements docs/design.md section 5.2 (the filter chain; episodes per 12a);
+column mapping applied here once and nowhere else. Load-bearing (source
+schema, section 6): `discount` is PERCENT in source,
 converted to a fraction exactly once at load; `final_price` is a realised
 price (0 on zero-sale rows), never used to reconstruct the offered price;
 episode_id is built here, the rule persisted in the split manifest."""
@@ -83,13 +84,13 @@ def gap_split_windows(df):
     return ids, detail
 
 
-def cogs_at_risk(d):
-    """Exposure: unit cost x SUPPLY (opening stock + GROSS arrivals; shrink
-    not subtracted), once at each episode's opening row. Requires window
+def episode_cogs(d):
+    """Exposure PER EPISODE (indexed by episode_id): unit cost x SUPPLY
+    (opening stock + GROSS arrivals; shrink not subtracted), read at the
+    opening row. NaN where the opening row's cost is null. Requires window
     order, which `load_and_filter` guarantees. Pre-`episode_universe` stages
-    deliberately carry impossible values / an unverified arrival term (5.2)."""
-    if not len(d):
-        return 0.0
+    deliberately carry impossible values / an unverified arrival term (5.2).
+    Per episode so the waterfall and the flag details reuse ONE table."""
     opening = (~d.episode_id.duplicated()).to_numpy()
     # gross arrivals per episode (ending[t] IS starting[t+1]); reset_index +
     # sort_index realigns hour_adjustment's (date, hour)-sorted values to
@@ -100,18 +101,35 @@ def cogs_at_risk(d):
     opening_ids = pd.Series(d.episode_id.to_numpy()[opening])
     supply = (d.starting_inventory.to_numpy()[opening]
               + opening_ids.map(arrivals).fillna(0.0).to_numpy())
-    return float((d.cost.to_numpy()[opening] * supply).sum())
+    return pd.Series(d.cost.to_numpy()[opening] * supply,
+                     index=opening_ids.to_numpy(), dtype=float)
 
 
-def edge_truncated_episodes(d):
+def cogs_at_risk(d, per_episode=None):
+    """`episode_cogs` summed over the episodes in `d` -- NaN, never skipped,
+    when any is NaN. `per_episode` is a precomputed `episode_cogs` table
+    covering every episode in `d` (the chain drops whole episodes, so one
+    table serves every stage after the ids are fixed)."""
+    if not len(d):
+        return 0.0
+    if per_episode is None:
+        per_episode = episode_cogs(d)
+    return float(per_episode.reindex(pd.unique(d.episode_id)).to_numpy().sum())
+
+
+def edge_truncated_episodes(d, flow=None):
     """Split unclosed episodes into EDGE (window still running when the
     extract was cut -- not a defect) vs NOT EDGE (ended inside the data with
     no sentinel -- a feed problem). Neither is removed: returns
-    (edge_episode_ids, detail) and the caller flags, never filters."""
+    (edge_episode_ids, detail) and the caller flags, never filters. `flow`
+    is `episode_flow(d)` when the caller already holds it."""
     last = episodes.last_rows(d)
     ids = last.episode_id.to_numpy()
-    kind = episodes.classify_last(last)
-    unknown = kind.index[kind == episodes.NOT_CLOSED]
+    if flow is None:
+        kind = episodes.classify_last(last)
+        unknown = kind.index[kind == episodes.NOT_CLOSED]
+    else:                                 # NOT_CLOSED is exactly ~closed
+        unknown = flow.index[~flow.closed]
 
     ts = pd.Series(
         (pd.to_datetime(last.date) + pd.to_timedelta(last.hour_of_day, unit="h")
@@ -153,7 +171,8 @@ def edge_truncated_episodes(d):
 
 
 def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
-    """Section 9.1 mapping + section 9.2 filter chain. Returns (df, waterfall).
+    """Source mapping (design 6) + the filter chain (design 5.2, episodes per
+    12a). Returns (df, waterfall).
     Every DROP is an integrity or scope rule; pricing conditions are FLAGS set
     by `tag_dp_eligibility` and stay in the frame. Pass a dict as `examples`
     to collect up to `examples_per_step` removed episode ids per step."""
@@ -177,12 +196,17 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     df["episode_id"] = assign_episode_ids(df)
     wf = []
     prev_ids = {"ids": set()}
+    # per-episode COGS, computed ONCE the ids are final: every later stage
+    # drops whole episodes (asserted at contiguous_episodes_built), so each
+    # stage's cogs_at_risk is a sum over this table, not a fresh pass
+    per_ep = {"cogs": None}
 
     def step(d, label, detail=None, gate=False):
         """Append one waterfall row for `d`. `gate` rows (the population
         gates) drop nothing, so they neither record removed-episode examples
         nor advance the set the next drop is measured against."""
-        row = (label, len(d), d.episode_id.nunique(), cogs_at_risk(d))
+        row = (label, len(d), d.episode_id.nunique(),
+               cogs_at_risk(d, per_ep["cogs"]))
         wf.append(row if detail is None else row + (detail,))
         if examples is not None and not gate:
             now = set(d.episode_id.unique())
@@ -195,6 +219,7 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     step(df, "raw", gate=True)
     df = df[~dup]
     df["episode_id"] = assign_episode_ids(df)
+    per_ep["cogs"] = episode_cogs(df)
     prev_ids["ids"] = set(df.episode_id.unique())
     step(df, "duplicate_hour_rows_dropped", gate=True)
 
@@ -241,7 +266,8 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
         "rows_chain_discontinuous_dropped": int(discontinuous.sum()),
         "episodes_dropped": int(len(set(
             d_before_universe.episode_id) - set(d.episode_id))),
-        "identity_violations": int(len(episodes.flow_identity_violations(d))),
+        "identity_violations": int(len(
+            episodes.flow_identity_violations(d, flow=flow0))),
         "episodes_final_hour_not_clean": int((~flow0.final_hour_clean).sum()),
         "episodes_with_restock": int((flow0.arrived > 0).sum()),
         "episodes_with_shrink": int((flow0.vanished > 0).sum()),
@@ -249,6 +275,9 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
         "rows_write_off": int((status0 == episodes.WRITE_OFF).sum()),
         "rows_hour_shortfall_NOT_dropped": int(
             (status0 == episodes.SHORTFALL).sum()),
+        # censoring is decided on the LAST row only (design 12a): a row that
+        # emptied the shelf mid-episode means the feed carried on past zero
+        "censoring": episodes.censoring_off_last_row(d),
         "note": ("Only continuity DROPS here; the identity and a dirty "
                  "final hour FLAG. Hour-level restock/shrink are real events, "
                  "counted gross, settled at episode level."),
@@ -310,7 +339,12 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     d["d_ref"] = d.category.map(lambda c: reference_discount(cfg, c))
     d["d_max"] = 1.0 - d.cost / d.original_price
     d["offered_price"] = d.original_price * (1 - d.total_discount)
-    d, economic = tag_dp_eligibility(d, cfg)
+    # the flow of every episode still here is unchanged since the universe
+    # stage (only whole episodes left; the counter and price fills do not
+    # enter it), so the table is re-used rather than re-derived
+    d, economic = tag_dp_eligibility(
+        d, cfg, flow=flow0.loc[pd.unique(d.episode_id)],
+        per_episode_cogs=per_ep["cogs"])
 
     # THE TWO POPULATION GATES GET A ROW EACH: they drop NOTHING, and they
     # are exactly where the consumers diverge (design.md 5.2).
@@ -464,15 +498,20 @@ def eligible_detail(d):
     }
 
 
-def tag_dp_eligibility(d, cfg):
+def tag_dp_eligibility(d, cfg, flow=None, per_episode_cogs=None):
     """Flag (never drop) the episodes the DP cannot price; episode-scoped,
     since the DP plans the window as a unit (docs/learnings.md on what
     dropping cost). Must run AFTER re-segmentation so the ids it groups on
-    are final and the chain tests cannot mistake a data gap for a restock."""
+    are final and the chain tests cannot mistake a data gap for a restock.
+    `flow` / `per_episode_cogs` are `episode_flow(d)` / `episode_cogs(d)`
+    when the caller already holds them."""
     cap = cfg["data"]["max_window_hours"]
     # supply accounting attached once; `episode_supply` is the only correct
     # clearance denominator now that a window can gain stock
-    flow = episodes.episode_flow(d)
+    if flow is None:
+        flow = episodes.episode_flow(d)
+    ep_cogs = (episode_cogs(d) if per_episode_cogs is None
+               else per_episode_cogs)
     d = d.copy()
     for col, src in (("units_restocked", "arrived"),
                      ("units_shrink", "vanished"),
@@ -482,11 +521,14 @@ def tag_dp_eligibility(d, cfg):
         d[col] = d.episode_id.map(flow[src]).astype(
             float if src == "clearance" else "int64")
 
+    def cogs_of(hit):
+        """COGS at risk behind an episode-scoped mask, off the one table."""
+        return round(cogs_at_risk(d[hit], ep_cogs), 1)
+
     def hit_detail(hit, **extra):
         """Episodes, rows and COGS at risk behind one flag mask."""
         return {"episodes": int(d.loc[hit, "episode_id"].nunique()),
-                "rows": int(hit.sum()),
-                "cogs_at_risk": round(cogs_at_risk(d[hit]), 1), **extra}
+                "rows": int(hit.sum()), "cogs_at_risk": cogs_of(hit), **extra}
     # ELIGIBLE: the frozen-artifact gate; `dp_eligible` is a strict subset
     # with solver requirements on top.
     d["final_hour_clean"] = d.episode_id.map(flow.final_hour_clean).astype(bool)
@@ -565,17 +607,21 @@ def tag_dp_eligibility(d, cfg):
 
     # also reported-only: an unclosed ending is a missing OUTCOME, and every
     # outcome consumer already handles it (NaN scrap, outcome_known, COMPLETED).
-    at_edge, edge_detail = edge_truncated_episodes(d)
+    at_edge, edge_detail = edge_truncated_episodes(d, flow=flow)
     edge = d.episode_id.isin(at_edge)
     d["edge_truncated"] = edge
-    edge_detail.update(rows=int(edge.sum()),
-                       cogs_at_risk=round(cogs_at_risk(d[edge]), 1),
-                       still_dp_eligible=still_eligible(edge))
+    edge_detail.update(rows=int(edge.sum()), cogs_at_risk=cogs_of(edge),
+                       still_dp_eligible=still_eligible(edge),
+                       # False on a feed that never zeroes a close: every
+                       # unclosed episode above is then the feed, not the
+                       # extract boundary (design 12a)
+                       write_off_convention_in_force=(
+                           episodes.write_off_convention(flow)))
     detail["edge_truncated"] = edge_detail
 
     # THE EPISODE IDENTITY, checked not assumed: provable given continuity,
     # so a violation is a bug in episode_flow that would move every IL figure.
-    violations = episodes.flow_identity_violations(d)
+    violations = episodes.flow_identity_violations(d, flow=flow)
     detail["flow_identity"] = {
         "rule": "opening + restocked == sold + shrink + leftover_at_last_hour",
         "episodes_checked": int(d.episode_id.nunique()),
@@ -621,7 +667,7 @@ def tag_dp_eligibility(d, cfg):
         detail["unreconciled_anomalies"] = {
             "episodes": int(len(ep)),
             "units_unaccounted": int(ep.units.sum()),
-            "cogs_at_risk": hit_detail(bad)["cogs_at_risk"],
+            "cogs_at_risk": cogs_of(bad),
             "median_units_per_episode": float(ep.units.median()),
             "by_category": _by("category"),
             "by_month": _by("month"),

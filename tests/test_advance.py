@@ -3,6 +3,10 @@ probe()'s state, so every branch is exercised without a workspace."""
 
 from ops import advance
 from ops import tune
+import copy
+import json
+import sys
+from common.provenance import config_fingerprint
 
 
 def _state(**over):
@@ -146,7 +150,6 @@ def test_the_readiness_report_is_assembled_from_the_journal_and_the_decision_log
     """What ran per phase, every value the process changed and why, the
     config in force, status, and what is waited on -- from files, never
     from memory."""
-    import json
     journal = tmp_path / "journal.json"
     journal.write_text(json.dumps({"runs": [
         {"at": "2026-09-01T02:00:00+00:00", "phase": "bootstrap", "stop": None,
@@ -180,8 +183,6 @@ def test_a_measured_paste_does_not_stale_the_report_that_derived_it(cfg):
     stale -> re-run shadow (hours) -> slightly different tau -> paste ->
     ... for a day on the owner's extract. Staleness is judged on the keys a
     report actually READS (tune.rerun_for)."""
-    import copy
-    from common.provenance import config_fingerprint
     reps = {n: {"artifact_versions": {"baseline_model_version": "b"},
                 "config": config_fingerprint(cfg, n)}
             for n in ("backtest", "thresholds", "shadow")}
@@ -239,12 +240,34 @@ def test_only_the_invalidated_report_is_re_run():
     assert steps[0]["args"][0] == "evaluate.derive_thresholds"
     steps = advance.plan(_state(stale={"shadow": "shadow: exploration.delta_min_log_bias"}))
     assert steps[0]["args"][0] == "evaluate.shadow"
+    # a key only the backtest reads re-runs the backtest, not the loop
+    steps = advance.plan(_state(stale={"backtest": "backtest: posterior.cold_start_shift_std"}))
+    assert steps[0]["args"][:2] == ["evaluate.backtest", "--input"]
+    steps = advance.plan(_state(stale={"backtest": "calibration: pricing.tier_step"}))
+    assert steps[0]["args"] == ["ops.bootstrap_loop", "--check-only"]
+    # a training input moved: rule 1, a retrain is deliberate -- STOP
+    steps = advance.plan(_state(stale={"backtest": "retrain: data.split.train_end",
+                                       "thresholds": "retrain: data.split.train_end",
+                                       "shadow": "retrain: data.split.train_end"}))
+    assert steps[0]["kind"] == "stop" and "--retrain" in " ".join(steps[0]["detail"])
+    # and the deliberate retrain seals under its own reason
+    steps = advance.plan(_state(retrain=True))
+    assert steps[0]["args"][-2:] == ["--seal-reason", "retrain"]
+
+
+def test_a_measured_value_the_report_could_not_derive_is_not_an_owner_stop():
+    """tau_initial null after shadow ran is shadow's derivation failing (a
+    thin week), never a SET BY OWNER decision; the stop names the report."""
+    steps = advance.plan(_state(nulls=["exploration.tau_initial"]))
+    assert steps[0]["kind"] == "stop" and steps[0]["phase"] == "tune"
+    assert "shadow.json" in " ".join(steps[0]["detail"])
+    steps = advance.plan(_state(nulls=["learning.max_std_shrink"]))
+    assert steps[0]["phase"] == "owner"
 
 
 def test_the_round_budget_counts_work_not_stops(monkeypatch, tmp_path):
     """A legitimate STOP on the ninth plan was raised as "did not settle"
     before the stop was journaled or the readiness report written."""
-    import sys
     calls = {"n": 0}
     stop = [advance._stop("owner", "SET BY OWNER values are null", ["x"])]
     monkeypatch.setattr(advance, "load_config", lambda p: {})

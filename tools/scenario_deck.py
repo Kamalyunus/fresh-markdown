@@ -41,11 +41,13 @@ def beliefs(cfg):
     posterior: the same shelf under a wide belief and a tighter, steeper one."""
     prior = read_json(cfg["posterior"]["prior"]["path"]) or {}
     per = prior.get("per_category") or {}
-    # the belief the system LAUNCHES at (posterior.launch_belief), not the raw prior
+    # the belief the system LAUNCHES at (posterior.launch_belief), exactly --
+    # a steeper prior shows as it is, not clamped to a display range
     cold = (float(np.mean([launch_belief(v["mean"], v["std"], cfg) for v in per.values()]))
             if per else -1.0)
-    cold = max(min(cold, -0.3), -2.5)
-    return {"cold": round(cold, 3), "learned": round(max(cold * 1.4, -3.0), 3)}
+    # a learned belief: steeper than launch, inside the posterior's own grid
+    learned = max(cold * 1.4, float(cfg["posterior"]["epsilon_min"]))
+    return {"cold": round(cold, 3), "learned": round(learned, 3)}
 
 
 def _solve(cache, key, cfg, d_ref, r):

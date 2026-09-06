@@ -33,9 +33,8 @@ RETIRED = [
 
 
 @pytest.fixture(scope="module")
-def stages():
-    _, wf = load_and_filter(os.path.join(ROOT, "data", "flc_synth.parquet"),
-                            load_config(os.path.join(ROOT, "config.yaml")))
+def stages(synth_flc):
+    _, wf = load_and_filter(synth_flc, load_config(os.path.join(ROOT, "config.yaml")))
     return [t[0] for t in wf]
 
 

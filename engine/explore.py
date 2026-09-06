@@ -81,38 +81,42 @@ def admissible(dp_result, delta_min=0.0):
                  or log_move(d_ref, dp_result.tiers[j]) >= delta_min - LOG_EPS)]
 
 
-def tier_costs(dp_result):
-    """{tier index: Q(p_star) - Q(p)} over the actions allowed now -- the
-    expected IL each non-optimal action forgoes, in currency."""
+def admissible_costs(dp_result, delta_min=0.0):
+    """{tier index: Q(p_star) - Q(p)} over the ADMISSIBLE tiers, in tier
+    order -- the expected IL each forced action forgoes, in currency. The
+    one table the chooser, the ledger and the assurance check all read;
+    `costs=` on the readers below takes it precomputed so a decision prices
+    its tiers once."""
     q = dp_result.q_by_tier
     q_star = q[dp_result.optimal_index]
-    return {j: q_star - q[j] for j in q}
+    return {j: q_star - q[j] for j in admissible(dp_result, delta_min)}
 
 
-def affordable_set(dp_result, tau, delta_min=0.0):
-    """Tier indices a perturbation may legally land on, and every tier's
-    cost. Public: `daily.assurance` reconstructs this exact set to test
-    that the draw was uniform."""
-    costs = tier_costs(dp_result)
-    return [j for j in admissible(dp_result, delta_min) if costs[j] <= tau], costs
+def affordable_set(dp_result, tau, delta_min=0.0, costs=None):
+    """Tier indices a perturbation may legally land on, and the admissible
+    tiers' costs. Public: `daily.assurance` reconstructs this exact set to
+    test that the draw was uniform."""
+    if costs is None:
+        costs = admissible_costs(dp_result, delta_min)
+    return [j for j, c in costs.items() if c <= tau], costs
 
 
-def spread_table(dp_result, delta_min=0.0):
+def spread_table(dp_result, delta_min=0.0, costs=None):
     """(costs, log moves from the reference) over the admissible tiers -- the
     Q-spreads the ledger prices tau against, so a tau solved here funds the
     draws production will make; the moves let the ledger re-judge
     admissibility at a deeper floor (SpreadLedger.sweep)."""
-    costs = tier_costs(dp_result)
-    kept = admissible(dp_result, delta_min)
-    return ([costs[j] for j in kept],
-            [log_move(dp_result.d_ref, dp_result.tiers[j]) for j in kept])
+    if costs is None:
+        costs = admissible_costs(dp_result, delta_min)
+    return (list(costs.values()),
+            [log_move(dp_result.d_ref, dp_result.tiers[j]) for j in costs])
 
 
 def spread_costs(dp_result, delta_min=0.0):
-    return spread_table(dp_result, delta_min)[0]
+    return list(admissible_costs(dp_result, delta_min).values())
 
 
-def select(dp_result, tau, rng, explorable=True, delta_min=0.0):
+def select(dp_result, tau, rng, explorable=True, delta_min=0.0, costs=None):
     """Returns a dict describing the chosen action.
 
     explorable=False marks a structurally non-explorable episode (fewer than
@@ -130,7 +134,7 @@ def select(dp_result, tau, rng, explorable=True, delta_min=0.0):
     if not explorable or tau is None:
         return choice
 
-    affordable, costs = affordable_set(dp_result, tau, delta_min)
+    affordable, costs = affordable_set(dp_result, tau, delta_min, costs)
     choice["affordable_set_size"] = len(affordable)
     if affordable:
         j = affordable[int(rng.integers(0, len(affordable)))]
@@ -155,6 +159,11 @@ class SpreadLedger:
         self._mchunks, self._mbuf = [], []      # log moves, aligned to costs
         self._lens, self._day_of, self._day_index = [], [], {}
         self._dmin = []                          # the floor in force, per decision
+        # the built arrays: costs/moves flat over every decision, and per
+        # tier its decision; per decision its day and floor
+        self._costs = self._moves = np.zeros(0)
+        self._dec_of = self._dec_day = self._dec_start = np.zeros(0, dtype=np.int64)
+        self._dec_dmin = np.zeros(0)
 
     def add(self, day, costs, moves=None, delta_min=0.0):
         """Record one decision's spreads. `costs` excludes the optimum;
@@ -181,20 +190,16 @@ class SpreadLedger:
             self._chunks.append(np.asarray(self._buf, dtype=np.float64))
             self._mchunks.append(np.asarray(self._mbuf, dtype=np.float64))
             self._buf, self._mbuf = [], []
-        if getattr(self, "_costs", None) is None or self._chunks:
+        if self._chunks:
             # _lens/_day_of span the FULL history, so _costs must too --
             # dropping prior chunks after add()-query-add() mis-aligns every
             # index against _dec_of
-            have = getattr(self, "_costs", None) is not None and len(self._costs)
-            prior = [self._costs] if have else []
-            mprior = [self._moves] if have else []
-            self._costs = (np.concatenate(prior + self._chunks)
-                           if (prior or self._chunks) else np.zeros(0))
-            self._moves = (np.concatenate(mprior + self._mchunks)
-                           if (mprior or self._mchunks) else np.zeros(0))
+            self._costs = np.concatenate([self._costs] + self._chunks)
+            self._moves = np.concatenate([self._moves] + self._mchunks)
             self._chunks, self._mchunks = [], []
             lens = np.asarray(self._lens, dtype=np.int64)
             self._dec_of = np.repeat(np.arange(len(lens)), lens)
+            self._dec_start = np.cumsum(lens) - lens       # first tier of each decision
             self._dec_day = np.asarray(self._day_of, dtype=np.int64)
             self._dec_dmin = np.asarray(self._dmin, dtype=np.float64)
 
@@ -216,8 +221,20 @@ class SpreadLedger:
         if keep is not None:
             m &= keep
         w = self._costs if weights is None else weights
-        sums = np.bincount(self._dec_of[m], weights=w[m], minlength=n_dec)
-        cnts = np.bincount(self._dec_of[m], minlength=n_dec)
+        if 2 * np.count_nonzero(m) <= len(m):
+            # the affordable tiers are the minority (every step once the
+            # bisection has closed in): index them once and take twice
+            idx = np.flatnonzero(m)
+            sums = np.bincount(self._dec_of[idx], weights=w[idx], minlength=n_dec)
+            cnts = np.bincount(self._dec_of[idx], minlength=n_dec)
+        else:
+            # the majority: one full pass. A masked-out tier adds exactly 0.0
+            # in the same index order, so both branches give the same sums
+            # to the bit; the counts are segment sums (tiers of one decision
+            # are contiguous in _dec_of)
+            sums = np.bincount(self._dec_of, weights=np.where(m, w, 0.0),
+                               minlength=n_dec)
+            cnts = np.add.reduceat(m, self._dec_start, dtype=np.int64)
         return np.divide(sums, cnts, out=np.zeros(n_dec), where=cnts > 0), cnts
 
     def spend_by_day(self, tau, keep=None):

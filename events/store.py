@@ -7,11 +7,13 @@ quarantined with the validation failure attached and surfaced to monitoring.
 
 import datetime
 import json
-import math
 import os
 import re
 
 import numpy as np
+
+# the one finiteness test, shared with the state validation that prices
+from engine.decide import finite_number
 
 DECISION_REQUIRED = [
     "decision_id", "episode_id", "is_entry", "sku_id", "fc", "category",
@@ -57,16 +59,6 @@ OUTCOME_REQUIRED = [
 ]
 
 
-def _is_finite_price(v):
-    """A real, finite number. bool is excluded (True is not a price of 1);
-    numpy numerics count -- pandas producers must not quarantine in bulk."""
-    if isinstance(v, (bool, np.bool_)):
-        return False
-    if not isinstance(v, (int, float, np.integer, np.floating)):
-        return False
-    return math.isfinite(v)
-
-
 def _iso_day(v):
     """Exactly `YYYY-MM-DD`, and a real calendar date."""
     if not isinstance(v, str) or not ISO_DAY.match(v):
@@ -107,7 +99,7 @@ def _validate_outcome(evt):
                             "adjustment_reason documented (expected "
                             "'intraday_restock', 'episode_close_write_off' "
                             "or 'unexplained_shortfall')")
-    if not _is_finite_price(evt.get("applied_price")):
+    if not finite_number(evt.get("applied_price")):
         problems.append("applied_price must be a finite number")
     return problems
 
@@ -233,8 +225,10 @@ class EventStore:
         if evt["decision_id"] in self._ids["decision"]:
             self.duplicate_counts["decision"] += 1
             return False
-        self._ids["decision"].add(evt["decision_id"])
+        # append FIRST: an id registered before a failed write (disk full)
+        # would refuse the retry as a duplicate of an event never written
         self._append(self.paths["decisions"], evt)
+        self._ids["decision"].add(evt["decision_id"])
         return True
 
     def emit_outcome(self, evt):
@@ -247,8 +241,8 @@ class EventStore:
         if evt["outcome_id"] in self._ids["outcome"]:
             self.duplicate_counts["outcome"] += 1
             return False
+        self._append(self.paths["outcomes"], evt)     # append first, as above
         self._ids["outcome"].add(evt["outcome_id"])
-        self._append(self.paths["outcomes"], evt)
         return True
 
     def _load(self, path, id_field=None):

@@ -29,10 +29,14 @@ from common.provenance import config_fingerprint
 from common import guardrail as guard
 
 
-def event_frame(decisions, outcomes):
+def event_frame(decisions, outcomes, pairs=None):
     """Matched (decision, outcome) pairs as HOURLY rows in the prepared-frame
     vocabulary, so metrics.episode_economics is the one episode-grain
-    definition on live events too -- floor and trigger measure one thing."""
+    definition on live events too -- floor and trigger measure one thing.
+    `pairs` is events.pairs.match_pairs(decisions, outcomes) if the caller
+    already built it."""
+    if pairs is None:
+        pairs = match_pairs(decisions, outcomes)
     return pd.DataFrame([{
         "episode_id": d["episode_id"], "date": decision_day(d),
         "hour_of_day": d["hour_of_day"],
@@ -40,16 +44,30 @@ def event_frame(decisions, outcomes):
         "original_price": d["original_price"], "offered_price": o["applied_price"],
         "cost": d["cost"], "starting_inventory": o["starting_inventory"],
         "units_sold": o["units_sold"], "ending_inventory": o["ending_inventory"],
-    } for d, o in match_pairs(decisions, outcomes)])
+    } for d, o in pairs])
 
 
-def business_metrics(decisions, outcomes):
+def settled_episodes(decisions, outcomes, pairs=None):
+    """The ONE episode frame the business metrics, the guardrail series and
+    the tau controller's IL base all read: metrics.settled over
+    metrics.episode_economics on the live pairs. (settled frame, exclusion
+    counts), or None when no outcome matches a decision -- built once per
+    run (build_report) and passed down, never per metric family."""
+    df = event_frame(decisions, outcomes, pairs)
+    if df.empty:
+        return None
+    return metrics.settled(metrics.episode_economics(df))
+
+
+def business_metrics(decisions, outcomes, episodes=None):
+    """`episodes` is settled_episodes(...) if the caller already built it."""
     if not outcomes:
         return {"note": "no finalized outcomes yet"}
-    df = event_frame(decisions, outcomes)
-    if df.empty:
+    if episodes is None:
+        episodes = settled_episodes(decisions, outcomes)
+    if episodes is None:
         return {"note": "no outcome matches a decision -- nothing to measure"}
-    ep, excluded = metrics.settled(metrics.episode_economics(df))
+    ep, excluded = episodes
 
     def cut(g):
         den = float(g.denom.sum())
@@ -76,16 +94,17 @@ def business_metrics(decisions, outcomes):
     }
 
 
-def guardrail_series(decisions, outcomes, cfg):
+def guardrail_series(decisions, outcomes, cfg, episodes=None):
     """Daily scrap and realised-margin rates plus the deterioration series
     (design 5.12), on metrics.daily_rates -- keyed by CLOSE day, the series
     the noise floors are measured on. Basis: the trailing window mean of the
     same system-priced episodes (there is no control arm; the pilot runs on
-    the episodes engineering supplies)."""
-    df = event_frame(decisions, outcomes)
-    if df.empty:
+    the episodes engineering supplies). `episodes` as in business_metrics."""
+    if episodes is None:
+        episodes = settled_episodes(decisions, outcomes)
+    if episodes is None:
         return {"note": "no finalized outcomes yet"}
-    ep, _ = metrics.settled(metrics.episode_economics(df))
+    ep, _ = episodes
     overall = metrics.daily_rates(ep)
     window = cfg["monitoring"]["guardrail_noise_window_days"]
     smoothing = cfg["monitoring"]["stop_conditions"]["deterioration_smoothing_days"]
@@ -98,7 +117,7 @@ def guardrail_series(decisions, outcomes, cfg):
         t = guard.smooth(overall[metric], smooth)
         c = t.rolling(window, min_periods=window).mean().shift(smooth)
         dev = guard.deviation(t, c, worse_when_higher, dev_basis)
-        return dev.replace([np.inf, -np.inf], np.nan).dropna(), f"trailing_{window}d_mean"
+        return dev.dropna(), f"trailing_{window}d_mean"     # deviation drops +-inf itself
 
     out = {"days_observed": int(len(overall)),
            "day_key": "close_day",
@@ -184,7 +203,8 @@ def evaluate_guardrail(block, threshold, persistence_days):
     }
 
 
-def learning_metrics(decisions, posterior, cfg, outcomes=()):
+def learning_metrics(decisions, posterior, cfg, outcomes=(), pairs=None):
+    """`pairs` as in event_frame."""
     cells = posterior.state["cells"]
     cell_of = posterior.state["cell_of"]
     forced = [d for d in decisions if d["is_exploration"]]
@@ -194,7 +214,7 @@ def learning_metrics(decisions, posterior, cfg, outcomes=()):
     budgeted = [d for d in decisions if d.get("tau_current") is not None]
     empty_rate = (np.mean([d["affordable_set_size"] == 0 for d in budgeted])
                   if budgeted else None)
-    priced_days, spend_by_day = update_mod.finalized_days(decisions, outcomes)
+    priced_days, spend_by_day = update_mod.finalized_days(decisions, outcomes, pairs)
     return {
         # routing, so the budget's widest-std is taken over cells a category
         # actually reaches (an unrouted GLOBAL never narrows)
@@ -235,10 +255,12 @@ def learning_metrics(decisions, posterior, cfg, outcomes=()):
     }
 
 
-def safety_metrics(store, decisions, outcomes):
+def safety_metrics(store, decisions, outcomes, pairs=None):
+    """`pairs` as in event_frame."""
     matched = {o["decision_id"] for o in outcomes}
     dec = {d["decision_id"]: d for d in decisions}
-    pairs = match_pairs(decisions, outcomes)
+    if pairs is None:
+        pairs = match_pairs(decisions, outcomes)
     compared = len(pairs)
     mismatches = sum(1 for d, o in pairs if not price_matches(d, o))
     expected_denom, realised_denom = 0.0, 0.0
@@ -328,25 +350,23 @@ def apply_stop_conditions(stop, posterior, since):
     return posterior.exploration_suspended()
 
 
-def main():
-    ap = argparse.ArgumentParser(prog="daily.monitor")
-    ap.add_argument("--out", default="reports/monitor.json")
-    ap.add_argument("--config", default="config.yaml")
-    args = ap.parse_args()
-
-    cfg = load_config(args.config)
-    store = EventStore(cfg)
-    posterior = PosteriorStore(cfg)
+def build_report(store, posterior, cfg):
+    """The monitor snapshot: the four metric families, the stop conditions
+    and the suspension they leave in force (written to the posterior). The
+    pairing and the episode frame are built ONCE here and handed down --
+    every family reads the same pairs."""
     decisions = store.load_decisions()
     outcomes = store.load_outcomes()
+    pairs = match_pairs(decisions, outcomes)
+    episodes = settled_episodes(decisions, outcomes, pairs)
 
-    learning = learning_metrics(decisions, posterior, cfg, outcomes)
-    safety = safety_metrics(store, decisions, outcomes)
+    learning = learning_metrics(decisions, posterior, cfg, outcomes, pairs)
+    safety = safety_metrics(store, decisions, outcomes, pairs)
     learning["realised_vs_predicted_sold_ratio"] = \
         safety["realised_vs_predicted_sold_ratio"]
 
-    business = business_metrics(decisions, outcomes)
-    guardrail = guardrail_series(decisions, outcomes, cfg)
+    business = business_metrics(decisions, outcomes, episodes)
+    guardrail = guardrail_series(decisions, outcomes, cfg, episodes)
     report = {
         "config": config_fingerprint(cfg, "production"),
         "business": business,
@@ -359,6 +379,17 @@ def main():
     since = learning.get("latest_priced_day") or str(pd.Timestamp.now("UTC").date())
     report["exploration_suspended"] = apply_stop_conditions(
         report["stop_conditions"], posterior, since)
+    return report
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="daily.monitor")
+    ap.add_argument("--out", default="reports/monitor.json")
+    ap.add_argument("--config", default="config.yaml")
+    args = ap.parse_args()
+
+    cfg = load_config(args.config)
+    report = build_report(EventStore(cfg), PosteriorStore(cfg), cfg)
 
     write_json(args.out, report)
     print(json.dumps(report["stop_conditions"], indent=2))

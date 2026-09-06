@@ -2,21 +2,20 @@
 
 Guardrail noise floors on the trailing-mean basis the monitor compares
 against (a threshold below 3-sigma false-fires and silently suspends
-exploration, design 15.4), and the two learning-rail consistency checks.
+exploration, design 12), and the two learning-rail consistency checks.
 Run: python3 -m evaluate.derive_thresholds --input data/prepared.parquet
 """
 
 import argparse
-import json
 
 import numpy as np
 import pandas as pd
 
 from common.config import load_config
-from common.io import write_json
+from common.io import read_json, write_json
 from common import guardrail
 from common import metrics
-from fit.prepare_data import pre_launch
+from fit.prepare_data import population, pre_launch
 from common.provenance import config_fingerprint
 
 
@@ -55,7 +54,20 @@ def _floor_of(block):
     return block["three_sigma"], "3-sigma"
 
 
-_smooth = guardrail.smooth   # one definition, shared with daily.monitor
+def _smoothed_calendar(series, days):
+    """`guardrail.smooth` (the monitor's smoothing) over each contiguous run
+    of close days, laid on the full daily calendar. The pre-launch series
+    has data.exclusion_window cut out of it: rolled over ROWS, the first
+    post-gap days would be averaged with, and graded against, days six
+    weeks earlier. On the calendar a gap is NaN on both sides, so a
+    trailing window that spans it reads NaN -- no reading, never a seam."""
+    s = pd.Series(series.to_numpy(), index=pd.to_datetime(series.index)).dropna()
+    if s.empty:
+        return s
+    run = (s.index.to_series().diff() != pd.Timedelta(days=1)).cumsum()
+    out = pd.concat([guardrail.smooth(g, days)
+                     for _, g in s.groupby(run.to_numpy())])
+    return out.asfreq("D") if len(out) else out
 
 
 def recommend_thresholds(trailing, cfg):
@@ -135,14 +147,18 @@ def guardrail_noise(d, cfg):
     window = mon["guardrail_noise_window_days"]
     min_days = window + int(mon["guardrail_noise_min_extra_days"])
     outlier_ratio = float(mon["guardrail_outlier_sigma_ratio"])
+    # the population the trigger runs on: the monitor's series is the
+    # system-priced episodes, i.e. the ones the DP could price
+    d = population(d, cfg, "dp_eligible")
     day = metrics.daily_rates(metrics.settled(metrics.episode_economics(d))[0])
 
     def noise(series, smooth=1, basis=guardrail.RELATIVE):
         # average `smooth` days BEFORE comparing; the trailing baseline is
         # shifted by the same amount so the two windows never overlap
-        s = _smooth(series, smooth)
-        if len(s) < min_days:
-            return {"days": int(len(s)),
+        s = _smoothed_calendar(series, smooth)
+        n_days = int(s.notna().sum())
+        if n_days < min_days:
+            return {"days": n_days,
                     "note": f"needs at least {min_days} days"}
         # FULL trailing window only: min_periods below `window` manufactures
         # huge deviations that are an estimator artifact, not the series
@@ -154,7 +170,7 @@ def guardrail_noise(d, cfg):
         # set thresholds from the MAD figure when the two disagree. Units
         # depend on the basis; the report says which (RELATIVE: 0.1336 = 13.36%)
         out = {
-            "days": int(len(s)),
+            "days": n_days,
             "days_scored": int(len(rel_dev)),
             "smoothing_days": smooth,
             "deterioration_basis": basis,
@@ -202,10 +218,12 @@ def guardrail_noise(d, cfg):
                    guardrail.basis_for("margin"))
 
     return {
-        "basis": ("daily ratio-of-sums series over all episodes, smoothed over "
-                  "deterioration_smoothing_days; relative deviation vs "
-                  f"trailing {window}-day mean -- the basis the monitor "
-                  "compares against"),
+        "basis": ("daily ratio-of-sums series over the dp_eligible episodes "
+                  "(the population the monitor's trigger runs on), smoothed "
+                  "over deterioration_smoothing_days; deviation vs the "
+                  f"trailing {window}-CALENDAR-day mean -- a day with no "
+                  "close (data.exclusion_window) is NaN, so no window spans "
+                  "the gap"),
         "scrap_rate": {**scrap,
                        "config_key": "monitoring.stop_conditions.scrap_deterioration_pct",
                        "verdict_in": "guardrail_threshold_recommendation.scrap_rate"},
@@ -217,7 +235,7 @@ def guardrail_noise(d, cfg):
                   "before quoting one -- a floor above 1.0 means the series "
                   "swings by more than its own level and no useful threshold "
                   "sits above it."),
-        "note": ("A false fire only suspends exploration (section 15.4), but a "
+        "note": ("A false fire only suspends exploration (design 12), but a "
                  "threshold that fires constantly kills the learning loop. "
                  "Set thresholds at or above the floor the verdict names; add "
                  "a persistence rule rather than lowering below it."),
@@ -231,8 +249,7 @@ def information_increment(cfg):
     LAUNCH stds and re-derived after any prior change."""
     s = cfg["learning"]["max_std_shrink"]
     k = 1.0 / (1.0 - s) ** 2 - 1.0
-    with open(cfg["posterior"]["prior"]["path"]) as f:
-        prior = json.load(f)
+    prior = read_json(cfg["posterior"]["prior"]["path"], {})
     per = prior.get("per_category", {})
     stds = {c: float(v["std"]) for c, v in per.items() if v.get("std")}
     if not stds:
@@ -289,8 +306,7 @@ def bounded_step(cfg):
                         cfg["tuning"]["bounded_step_consistent_band"])
     pull_frac = 1.0 - (1.0 - shrink) ** 2
     min_std = cfg["posterior"]["min_std"]
-    with open(cfg["posterior"]["prior"]["path"]) as f:
-        prior = json.load(f)
+    prior = read_json(cfg["posterior"]["prior"]["path"], {})
     stds = {c: float(v["std"]) for c, v in prior.get("per_category", {}).items()
             if v.get("std")}
     if not stds:
@@ -366,7 +382,7 @@ def main():
 
     trailing = guardrail_noise(d, cfg)
     report = {
-        "config": config_fingerprint(cfg, "backtest"),
+        "config": config_fingerprint(cfg, "thresholds"),
         "guardrail_noise": trailing,
         "guardrail_threshold_recommendation": recommend_thresholds(trailing, cfg),
         "information_increment_recommendation": information_increment(cfg),

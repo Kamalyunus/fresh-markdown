@@ -384,7 +384,7 @@ def test_decision_loop_and_exactly_once_update(workspace):
     assert all(c["update_triggered"] for c in triggered["cells"].values())
     assert not update_run(cfg, apply=True, today=day)["cells"]
 
-    # the section 15.4 guardrails must be computed from these events, not
+    # the design 12 guardrails must be computed from these events, not
     # merely declared in config: with both thresholds null they report BLOCKED,
     # and once set they evaluate a real deterioration series
     from daily.monitor import (guardrail_series, stop_conditions,
@@ -605,7 +605,8 @@ def test_shadow_phase_harness(workspace, shadow_reports):
     assert tr["window_days"] == b["days"]
     assert tr["days_with_decisions"] <= tr["window_days"]
     assert tr["days_simulated"] + tr["days_truncated"] == tr["days_with_decisions"]
-    assert tr["days_truncated"] == max(tr["days_with_decisions"] - 60, 0)
+    max_days = yaml.safe_load(open("config.yaml"))["tuning"]["controller_trace_max_days"]
+    assert tr["days_truncated"] == max(tr["days_with_decisions"] - max_days, 0)
     assert tr["tau_start"] == pytest.approx(b["tau"])
     assert tr["days_stop_condition_fires"] <= tr["days_simulated"]
     assert len(tr["by_day"]) == tr["days_simulated"]

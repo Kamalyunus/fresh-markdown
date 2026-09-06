@@ -123,17 +123,20 @@ def _pairs(decisions, outcomes):
             if o.get("starting_inventory", 0) >= 1]
 
 
-def dispersion_fit(decisions, outcomes, cfg):
+def dispersion_fit(decisions, outcomes, cfg, pairs=None):
     """Is live demand as lumpy as the frozen r says? Two statistics are EXACT
     under censoring (with stock on hand): P(sold=0) = P(D=0) and
     P(shelf emptied) = P(D>=q), so both compare against the NB with no
     correction. Binned by mu: only miscalibration that grows with mu indicts
     r. "Emptied" is the shared censoring rule (episodes.is_censored_hour),
     never `sold >= q`; a restocked hour (`intraday_restock`) has no single q
-    to empty and is left out of this check."""
+    to empty and is left out of this check. `pairs` is
+    _pairs(decisions, outcomes) if the caller already built it (run does)."""
     ac = cfg["assurance"]
     pcfg = cfg["pricing"]
-    pairs = [(d, o) for d, o in _pairs(decisions, outcomes)
+    if pairs is None:
+        pairs = _pairs(decisions, outcomes)
+    pairs = [(d, o) for d, o in pairs
              if o.get("adjustment_reason") != episodes.RESTOCK]
     if len(pairs) < ac["dispersion_min_outcomes"]:
         return {"outcomes": len(pairs), "verdict": "INSUFFICIENT",
@@ -193,17 +196,19 @@ def dispersion_fit(decisions, outcomes, cfg):
 
 
 # ------------------------------------------------------------- 3 · correlation
-def correlation_drift(decisions, outcomes, cfg):
+def correlation_drift(decisions, outcomes, cfg, pairs=None):
     """Re-measure rho on live residuals, against the frozen artifact. Same
     basis as fit.fit_dispersion: residuals against raw mu at the working
     elasticity (per-category prior means via the shared helper), never the
-    moved posterior -- a basis mismatch would read as drift and fire the alert."""
+    moved posterior -- a basis mismatch would read as drift and fire the
+    alert. `pairs` as in dispersion_fit."""
     from fit.fit_dispersion import _working_elasticity
 
     ac = cfg["assurance"]
     pcfg = cfg["pricing"]
     eps_by_cat, eps_fallback = _working_elasticity(cfg)
-    pairs = _pairs(decisions, outcomes)
+    if pairs is None:
+        pairs = _pairs(decisions, outcomes)
 
     rows = {}
     for d, o in pairs:
@@ -309,11 +314,12 @@ def exploration_uniformity(decisions, cfg):
 
 
 def run(decisions, outcomes, cfg):
+    pairs = _pairs(decisions, outcomes)              # once, for both checks
     report = {
         "config": config_fingerprint(cfg, "production"),
         "reproduction": reproduction(decisions, cfg),
-        "dispersion": dispersion_fit(decisions, outcomes, cfg),
-        "correlation": correlation_drift(decisions, outcomes, cfg),
+        "dispersion": dispersion_fit(decisions, outcomes, cfg, pairs),
+        "correlation": correlation_drift(decisions, outcomes, cfg, pairs),
         "exploration": exploration_uniformity(decisions, cfg),
     }
     report["failing"] = sorted(k for k, v in report.items()

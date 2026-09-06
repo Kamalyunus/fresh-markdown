@@ -53,7 +53,6 @@ baseline_model:
   calibration_convergence_tol_log: 0.02  # SET  the f<->r chain is circular; above this max |log(f_new/f_old)| the fixed point has not settled
   calibration_shrinkage_units: 100     # SET  pseudo-count, in anchor units
   calibration_min_anchor_rows: 200     # SET  anchor basis needs this many rows
-  mix_decomposition_min_unit_rows: 30  # SET  anchor rows before a SKU x FC unit gets its own ratio
   calibration_window_sweep_weeks: [1, 2, 4, 8]  # SET  windows the rolling-origin sweep scores to choose W
   calibration_fit_trailing_weeks: 1  # MEASURED by the sweep; W, and calib must be >= 2W (design 6)
   calibration_factor_search_bounds: [0.1, 10.0]  # SET  bisection bracket for one level factor; a solve pinned at either end is flagged at_bound in calibration.json detail
@@ -77,7 +76,7 @@ dispersion:
   rho: 0.1161  # MEASURED  fit_dispersion, on the calib window; mirrors artifacts/rho.json. m is NOT pasted: deff measures forced hours per episode per batch (common.config.deff_from_episodes)
   rho_paste_tolerance_rel: 0.01        # SET  the paste vs artifacts/rho.json, relative to the frozen value. A PROVENANCE check sized to the consequence: rho is frozen for the pilot and divides every unit of evidence via deff, so 1% of rho is well under 1% of deff; tau's 5% is looser because the controller corrects tau daily. Above the ~1e-3 step a --check-only turn takes while the loop contracts (below it, every settle was a new paste)
 
-tuning:                                # SET  gates ops.tune checks before auto-applying
+tuning:                                # SET  ops.tune's auto-apply gates, and the evaluate reports' own knobs (each routed to the one report that reads it -- ops.tune.READ_BY)
   max_price_share_changed_for_auto_rail: 0.10   # SET  auto-rail ceiling on price churn
   max_il_delta_pct_for_auto_rail: 0.005         # SET  auto-rail ceiling on the IL move
   calibration_band_sigma_multiple: 3            # SET  band = this many sigma of log f
@@ -85,6 +84,8 @@ tuning:                                # SET  gates ops.tune checks before auto-
   guardrail_inert_floor_multiple: 3             # SET  a stop threshold above this multiple of its noise floor is LIKELY INERT
   bounded_step_consistent_band: [0.7, 1.4]      # SET  std-surprise band inside which the two learning rails are called CONSISTENT
   cost_ratio_bands: [0.4, 0.6]                  # SET  cost/price cut points for the backtest's within-episode move table (the deepening bar falls with cost)
+  step_sensitivity_episodes: 300                # SET  replayed episodes the backtest re-solves at the launch belief +- max_mean_step
+  controller_trace_max_days: 60                 # SET  decision days shadow's tau-controller trace walks from the window start
 
 posterior:
   min_episodes_per_week_for_cell: 150  # SET  below this, fall back to the global cell

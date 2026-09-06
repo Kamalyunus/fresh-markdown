@@ -170,7 +170,7 @@ def test_max_std_shrink_is_suggested_with_its_alternative_never_written(
         cfg, tmp_path, reports_dir):
     """Both rails resolve the same mismatch; WHICH one moves is a safety
     posture. The tool supplies both numbers and takes neither decision."""
-    _reports(reports_dir, **{"thresholds.json": {
+    _reports(reports_dir, **{"thresholds": {
         "information_increment_recommendation": {"recommended": 0.341},
         "bounded_step_recommendation": {"median_launch_std": 1.1088,
                                         "consistent_max_mean_step": 0.485},
@@ -247,6 +247,23 @@ def test_apply_names_the_minimum_rerun_and_never_asks_for_a_retrain(
     assert tune.rerun_for(["monitoring.stop_conditions.persistence_days"]) == "thresholds"
     assert tune.rerun_for(["exploration.tau_paste_tolerance_rel"]) == "none"
     assert tune.rerun_for(["pricing.tier_step"]) == "calibration"
+    # a training input is a RETRAIN, never a loop turn: the model on disk was
+    # fit under the old value and --check-only would re-fit factors against
+    # it. This used to fall through to "calibration"
+    for key in ("data.split.train_end", "data.exclusion_window.start",
+                "baseline_model.num_leaves", "baseline_model.objective"):
+        assert tune.rerun_for([key]) == "retrain", key
+    # read keys inside otherwise inert sections route to their reader
+    assert tune.rerun_for(["tuning.guardrail_inert_floor_multiple"]) == "thresholds"
+    assert tune.rerun_for(["tuning.max_price_share_changed_for_auto_rail"]) == "none"
+    assert tune.rerun_for(["assurance.rho_min_hours_per_episode"]) == "calibration"
+    assert tune.rerun_for(["assurance.uniformity_bins"]) == "none"
+    # keys only one report reads never turn the loop
+    assert tune.rerun_for(["exploration.delta_min_bias_multiple"]) == "shadow"
+    assert tune.rerun_for(["monitoring.guardrail_outlier_sigma_ratio"]) == "thresholds"
+    assert tune.rerun_for(["posterior.cold_start_shift_std"]) == "backtest"
+    assert tune.INVALIDATES["backtest"] == {"backtest"}
+    assert set(tune.RERUN_ORDER) == set(tune.RERUN_STEPS) == set(tune.INVALIDATES)
 
     # and the decision log records which re-run the run required
     log = json.load(open(res["log"]))["runs"][-1]
@@ -258,7 +275,6 @@ def test_the_fit_window_holds_on_a_near_tie_instead_of_oscillating(cfg, tmp_path
     the loop re-scores the sweep -- a strict argmin flips between near-tied
     windows and loops an agent on apply -> check-only forever. Near-tie:
     HOLD. Material win: switch."""
-    from ops import tune as tune
 
     def w_finding(sweep):
         backtest = {"fidelity": {"calibration_window_sweep": sweep}}
@@ -296,7 +312,6 @@ def test_no_factors_winning_is_reported_and_is_never_a_paste(cfg):
     """`uncalibrated` beating every window says the level factors are adding
     noise. That is an owner reading, not a W: W=0 is not a config value, so
     the paste stays on the best CALIBRATED window."""
-    from ops import tune as tune
 
     cur = cfg["baseline_model"]["calibration_fit_trailing_weeks"]
     sweep = {

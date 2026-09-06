@@ -5,7 +5,7 @@ stamp intact); sealing records per-file hashes beside the agreed bundle id so
 both failures are detectable and distinguishable. Refuses an inconsistent set
 -- a sealed mixed bundle looks decided. Every seal also copies the bundle, config and posterior into
 artifacts/history/<bundle>/<sealed_at>/ -- the audit trail.
-Run: python3 -m ops.seal [--reason bootstrap|retrain|weekly-refit]
+Run: python3 -m ops.seal [--reason bootstrap|retrain|check-only|weekly-refit]
 """
 
 import argparse
@@ -36,7 +36,8 @@ def main():
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--reason", default=None,
                     help="why this seal happened (bootstrap, retrain, "
-                         "weekly-refit); recorded in the history MANIFEST")
+                         "check-only, weekly-refit); recorded in the history "
+                         "MANIFEST")
     args = ap.parse_args()
 
     cfg = load_config(args.config)

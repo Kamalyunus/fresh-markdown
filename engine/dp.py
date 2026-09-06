@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from engine.demand import mu_at, nb_pmf_vector
+from engine.demand import mu_at, nb_pmf_table
 
 # float noise on the discount grid: tiers are round(k * step, 6), so two
 # discounts closer than this ARE the same tier. Every "is this on / at /
@@ -116,13 +116,10 @@ def solve(original_price, cost, q0, mu_ref_path, d_ref, epsilon, r, cfg,
     max_k = pcfg["negbin_max_k"]
 
     # pmf[t][j] over sold counts for pricing tier j at stage t
-    pmf = np.empty((horizon, n_tiers, max_k + 1))
-    tail_max = 0.0
-    for t in range(horizon):
-        for j, d in enumerate(tiers):
-            mu = mu_at(mu_ref_path[t], d, d_ref, epsilon, pcfg["demand_floor"])
-            pmf[t, j], tail = nb_pmf_vector(mu, r, max_k)
-            tail_max = max(tail_max, tail)
+    mu = np.array([[mu_at(m, d, d_ref, epsilon, pcfg["demand_floor"])
+                    for d in tiers] for m in mu_ref_path])
+    pmf, tail = nb_pmf_table(mu, r, max_k)
+    tail_max = float(tail.max())
 
     reward_per_unit = np.array([-(original_price - original_price * (1 - d))
                                 for d in tiers])          # -(P0 - p) = -P0 * d
@@ -131,18 +128,21 @@ def solve(original_price, cost, q0, mu_ref_path, d_ref, epsilon, r, cfg,
     V = np.zeros((horizon + 1, n_tiers, q0 + 1))
     V[horizon, :, :] = -cost * np.arange(q0 + 1)[None, :]
 
+    # sold[q, k] = min(k, q) and the inventory left after it, for every
+    # (inventory, demand) pair -- the gather is the same at every stage
     k = np.arange(max_k + 1)
+    q_grid = np.arange(q0 + 1)
+    sold = np.minimum(k[None, :], q_grid[:, None])
+    left = q_grid[:, None] - sold
     Q_now = None
     for t in range(horizon - 1, -1, -1):
-        Q = np.full((n_tiers, q0 + 1), -np.inf)
-        for j in range(n_tiers):                      # action tier j
-            for q in range(q0 + 1):
-                sold = np.minimum(k, q)
-                Q[j, q] = np.sum(pmf[t, j] * (sold * reward_per_unit[j]
-                                              + V[t + 1, j, q - sold]))
+        # Q[j, q] = sum_k pmf[t, j, k] * (sold[q, k] * reward[j] + V[t+1, j, left[q, k]])
+        # over every action tier j and inventory q at once
+        Q = np.sum(pmf[t][:, None, :]
+                   * (sold[None] * reward_per_unit[:, None, None]
+                      + V[t + 1][:, left]), axis=2)
         # V under anchor a = max over actions j >= a (deeper or equal discount)
-        running = np.maximum.accumulate(Q[::-1], axis=0)[::-1]
-        V[t] = running
+        V[t] = np.maximum.accumulate(Q[::-1], axis=0)[::-1]
         if t == 0:
             Q_now = Q
 

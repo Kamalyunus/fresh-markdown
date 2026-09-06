@@ -135,8 +135,8 @@ def _replay_episode(eid, ending_last=0, hours_remaining_last=0):
         total_discount=[0.25, 0.25, 0.30], original_price=10_000.0,
         cost=4000.0, d_ref=0.25, starting_inventory=[10, 8, 6], units_sold=2,
         ending_inventory=[8, 6, ending_last], mu_ref_hat=2.0, r=3.0, eps=-2.0,
-        is_observed=True, sku_id=7, fc="FC1", category="FRUIT",
-        subcategory="BERRY")
+        eps_belief=-2.0, is_observed=True, sku_id=7, fc="FC1",
+        category="FRUIT", subcategory="BERRY")
 
 
 def test_the_replay_refuses_an_unclosed_episode_rather_than_aggregate_it(cfg):
@@ -151,32 +151,37 @@ def test_the_replay_refuses_an_unclosed_episode_rather_than_aggregate_it(cfg):
 
 
 def test_the_tau_cross_check_uses_one_day_count_on_both_sides(cfg):
-    """derive_tau_initial averaged IL over the days with episodes while the
-    ledger divided spend by the CALENDAR span -- which, on the pre-launch
-    frame, crosses the exclusion gap. Both sides now count the days that
-    traded, so the bisection lands the spend under the budget it was given."""
+    """The budget is IL per day and the spend is divided by the same days,
+    so the bisection lands the spend under the budget it was given whatever
+    the count -- and the count is the ONE n_days (episodes.calendar_days),
+    the basis shadow's derivation reports on, so the two `days`,
+    `implied_daily_spend` and `daily_budget` figures are comparable. The
+    count cancels in tau itself."""
+    from common import episodes
     from evaluate.backtest import derive_tau_initial
     rng = np.random.default_rng(6)
     led = SpreadLedger()
-    days = ["2026-07-01", "2026-07-02", "2026-07-10"]         # an 8-day gap
+    days = ["2026-07-01", "2026-07-02", "2026-07-10"]   # 3 trading, 10 calendar
     for i in range(300):
         led.add(days[i % 3], rng.lognormal(6, 1, 6))
     ep = pd.DataFrame({"date": [days[i % 3] for i in range(30)],
                        "actual_il": 5_000.0})
     out = derive_tau_initial(led, ep, cfg, launch_std=1.0)
-    assert out["days"] == 3
-    budget = explore_mod.budget_today(ep.actual_il.sum() / 3, 1.0, cfg)
+    n = episodes.calendar_days(ep.date)
+    assert out["days"] == n == 10
+    budget = explore_mod.budget_today(ep.actual_il.sum() / n, 1.0, cfg)
     assert out["daily_budget"] == pytest.approx(budget, abs=0.1)
     # the bisection lands just under the budget it was given -- on the SAME
     # day count (tau is reported to 2dp and spend steps at every cost, so
     # the re-computation is close, not exact)
     assert 0.9 * out["daily_budget"] < out["implied_daily_spend"] <= out["daily_budget"]
     tau = out["tau_initial"]
-    s3 = led.implied_daily_spend(tau, 3)
-    assert out["implied_daily_spend"] == pytest.approx(s3, rel=0.05)
-    # the calendar span (10 days) would have read the same spend at 3/10 of
-    # its size: a tau that overspends the trading day 3.3x, reported as within
-    assert led.implied_daily_spend(tau, 10) == pytest.approx(s3 * 3 / 10)
+    assert out["implied_daily_spend"] == pytest.approx(
+        led.implied_daily_spend(tau, n), rel=0.05)
+    # the same ledger solved per trading day lands on the same tau: the
+    # day count divides both sides and cancels
+    per_trading_day = explore_mod.budget_today(ep.actual_il.sum() / 3, 1.0, cfg)
+    assert led.solve_tau(per_trading_day, n_days=3) == pytest.approx(tau, rel=0.01)
 
 
 def test_predict_frame_is_the_one_extend_lookup_predict_path(cfg, tmp_path):
@@ -204,16 +209,24 @@ def test_fidelity_grades_the_frozen_artifact_and_reports_the_refit_beside_it(
         cfg, tmp_path):
     """The gate freezes calibration at the test window's start (a factor fit
     inside the graded window has read the rows it grades); the weekly-refit
-    reading sits beside it and must not disturb the gate's coverage."""
-    from evaluate.backtest import fidelity
+    reading sits beside it and must not disturb the gate's coverage. The
+    refit reading is a RESCALE of the gate rows (a factor swap is an exact
+    rescale of mu_ref), equal to predicting them again under the schedule
+    -- which it once did, a second full predict for a side reading."""
+    from common.metrics import fidelity_decomposition
+    from evaluate.backtest import _attach_predictions, fidelity
+    from fit.prepare_data import split_frames
     cfg = _harness_cfg(cfg, tmp_path)
     r_lookup = json.load(open(cfg["dispersion"]["r_lookup_path"]))
     prior = {"per_category": {"FRUIT": {"mean": -1.2, "std": 0.5}}}
     frame = _fidelity_frame(cfg)
+    schedule = {"2026-07-27": {"FRUIT": 2.0}, "2026-08-03": {"FRUIT": 2.0}}
     anchor_only = _Applier(cfg, schedule={"2026-07-27": {"FRUIT": 1.0},
                                           "2026-08-03": {"FRUIT": 1.0}})
-    doubled = _Applier(cfg, schedule={"2026-07-27": {"FRUIT": 2.0},
-                                      "2026-08-03": {"FRUIT": 2.0}})
+    doubled = _Applier(cfg, schedule=schedule)
+    predicts, predict = [], doubled.predict_mu_ref
+    doubled.predict_mu_ref = lambda d, raw=False: (predicts.append(len(d)),
+                                                  predict(d, raw))[1]
     a, _ = fidelity(frame, cfg, anchor_only, prior, r_lookup)
     b, _ = fidelity(frame, cfg, doubled, prior, r_lookup)
     assert a["calibration_frozen_at"] == b["calibration_frozen_at"] == "2026-07-27"
@@ -228,6 +241,17 @@ def test_fidelity_grades_the_frozen_artifact_and_reports_the_refit_beside_it(
     assert cov["verdict"].startswith("OK") and cov["frozen_from"] == "2026-07-27"
     assert cov["rows_frozen_at_anchor"] == 8 and cov["rows_on_schedule"] == 0
     assert doubled._freeze_from == pd.Timestamp("2026-07-27")
+
+    # the rescale equals a second predict under the schedule, row for row
+    fresh = _Applier(cfg, schedule=schedule)
+    fresh.freeze_calibration_from(None)
+    again = _attach_predictions(frame, cfg, fresh, prior, r_lookup)
+    want = fidelity_decomposition(
+        split_frames(again[again.is_observed], cfg)["test"], cfg)
+    for key in ("level_bias_at_anchor", "overall_sold_ratio"):
+        assert b["weekly_refit"][key] == pytest.approx(want[key], abs=1.5e-4)
+    # ... without that second predict: one pass over the full frame
+    assert predicts == [len(again)]
 
 
 def test_the_backtest_slices_to_pre_launch_before_anything_reads_the_frame(
@@ -291,8 +315,9 @@ def test_step_sensitivity_prices_the_cap_on_real_episodes(cfg):
     Far below the deepening bar a step must change NOTHING -- that measured
     insensitivity is what makes a wrong-direction update cheap (design
     5.11). The block must also be structurally sound: shares in [0, 1],
-    finite IL on both sides, crossers a subset of the sample."""
-    from evaluate.backtest import _episode_frame, step_sensitivity
+    finite IL on both sides, crossers a subset of the sample -- and its base
+    arm is the replay's own DP arm, not a second solve of it."""
+    from evaluate.backtest import _episode_frame, _replay_one, step_sensitivity
 
     def episode(eid, eps):
         g = pd.DataFrame({
@@ -302,7 +327,8 @@ def test_step_sensitivity_prices_the_cap_on_real_episodes(cfg):
             "original_price": [10_000.0] * 4, "cost": [4000.0] * 4,
             "d_ref": [0.25] * 4, "starting_inventory": [6, 5, 4, 3],
             "units_sold": [1, 1, 1, 1], "mu_ref_hat": [1.5] * 4,
-            "r": [3.0] * 4, "eps": [eps] * 4, "is_observed": [True] * 4,
+            "r": [3.0] * 4, "eps": [eps] * 4, "eps_belief": [eps] * 4,
+            "is_observed": [True] * 4,
             "sku_id": [7] * 4, "fc": ["FC1"] * 4, "category": ["FRUIT"] * 4,
         })
         g["ending_inventory"] = g.starting_inventory - g.units_sold
@@ -312,7 +338,9 @@ def test_step_sensitivity_prices_the_cap_on_real_episodes(cfg):
     # |eps| = 1.0 sits far below it and a 0.15 step is deep inside the
     # insensitive region
     frames = [episode(f"e{i}", -1.0) for i in range(4)]
-    out = step_sensitivity(frames, cfg, sample=4)
+    replays = [_replay_one(e, cfg) for e in frames]
+    assert cfg["tuning"]["step_sensitivity_episodes"] >= len(frames)
+    out = step_sensitivity([(e, r[2]) for e, r in zip(frames, replays)], cfg)
 
     assert out["episodes_swept"] == 4
     assert out["step"] == cfg["learning"]["max_mean_step"]
@@ -322,9 +350,25 @@ def test_step_sensitivity_prices_the_cap_on_real_episodes(cfg):
         assert np.isfinite(b["il_base"]) and np.isfinite(b["il_shifted"])
         assert b["crossers"] <= out["episodes_swept"]
         assert b["crossers_prices_changed"] <= max(b["crossers"], 0)
+        # the base IL is the replay's dp_il, summed -- one solve, read twice
+        assert b["il_base"] == pytest.approx(sum(r[0]["dp_il"] for r in replays),
+                                             abs=0.1)
     # the load-bearing claim: far below the bar, a bounded step is free
     assert out["deeper_belief"]["share_prices_changed"] == 0.0
     assert out["deeper_belief"]["il_delta"] == pytest.approx(0.0, abs=1e-6)
+
+    # a frame without the launch belief is not _attach_predictions output
+    # and is refused, never priced at the world's eps
+    with pytest.raises(KeyError):
+        _episode_frame(pd.DataFrame({
+            "episode_id": ["e"] * 2, "date": ["2026-05-01"] * 2,
+            "hour_of_day": [9, 10], "total_discount": [0.25] * 2,
+            "original_price": [10_000.0] * 2, "cost": [4000.0] * 2,
+            "d_ref": [0.25] * 2, "starting_inventory": [6, 5],
+            "units_sold": [1, 1], "ending_inventory": [5, 4],
+            "mu_ref_hat": [1.5] * 2, "r": [3.0] * 2, "eps": [-1.0] * 2,
+            "is_observed": [True] * 2, "sku_id": [7] * 2, "fc": ["FC1"] * 2,
+            "category": ["FRUIT"] * 2}))
 
 
 def test_simulated_arms_absorb_only_the_shrink_their_shelf_held(cfg):
@@ -344,12 +388,13 @@ def test_simulated_arms_absorb_only_the_shrink_their_shelf_held(cfg):
         "starting_inventory": [3, 3, 1], "units_sold": [0, 0, 0],
         "ending_inventory": [3, 1, 1],
         "mu_ref_hat": [2.5] * 3, "r": [3.0] * 3, "eps": [-1.5] * 3,
+        "eps_belief": [-1.5] * 3,
         "is_observed": [True] * 3, "sku_id": [7] * 3, "fc": ["FC1"] * 3,
         "category": ["FRUIT"] * 3,
     })
     e = _episode_frame(g)
     assert e["shrink"] == 2
-    row, _ = _replay_one(e, cfg)
+    row, _, _ = _replay_one(e, cfg)
     # the identity holds for ALL THREE arms, exactly
     for arm in ("actual", "legacy_model", "dp"):
         assert row[f"{arm}_supply_residual"] == pytest.approx(0.0, abs=1e-9)
@@ -367,7 +412,6 @@ def test_within_episode_moves_are_counted_on_the_arms_own_path(cfg):
     nothing about whether the agent moves after entry. `intra_episode_moves`
     counts steps on the DP arm's own path -- a fresh solve every hour, so a
     high-cost shelf (low deepening bar) steps where a mid-cost one holds."""
-    import numpy as np
     from evaluate.backtest import intra_episode_steps, intra_episode_moves, _episode_frame, _replay_one
 
     # a step is a deepening between consecutive priced hours; empty-shelf
@@ -383,7 +427,8 @@ def test_within_episode_moves_are_counted_on_the_arms_own_path(cfg):
             "cost": [cost] * 6, "d_ref": [0.25] * 6,
             "starting_inventory": [12, 12, 12, 12, 12, 12],
             "units_sold": [0] * 6, "mu_ref_hat": [0.4] * 6,       # slow shelf
-            "r": [3.0] * 6, "eps": [-2.0] * 6, "is_observed": [True] * 6,
+            "r": [3.0] * 6, "eps": [-2.0] * 6, "eps_belief": [-2.0] * 6,
+            "is_observed": [True] * 6,
             "sku_id": [7] * 6, "fc": ["FC1"] * 6, "category": ["FRUIT"] * 6,
         })
         g["ending_inventory"] = g.starting_inventory - g.units_sold

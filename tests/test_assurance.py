@@ -421,6 +421,25 @@ def test_assurance_grades_only_prices_that_were_actually_charged(cfg):
     assert len(assurance._pairs(decs, outs)) == 20
 
 
+def test_run_pairs_the_events_once_for_both_live_checks(cfg, monkeypatch):
+    """dispersion and correlation grade the same learnable pairs; run builds
+    them once and hands them down, and each check answers the same on its
+    own."""
+    decs, outs = _demand_pairs(cfg, 30, r_true=R, seed=4)
+    calls = []
+    real = assurance._pairs
+
+    def counting(d, o):
+        calls.append(1)
+        return real(d, o)
+
+    monkeypatch.setattr(assurance, "_pairs", counting)
+    report = assurance.run(decs, outs, cfg)
+    assert len(calls) == 1
+    assert report["dispersion"] == assurance.dispersion_fit(decs, outs, cfg)
+    assert report["correlation"] == assurance.correlation_drift(decs, outs, cfg)
+
+
 def test_uniformity_reconstructs_the_set_with_the_decision_own_delta_min(cfg):
     """The affordable set the chooser drew from excluded tiers below the
     decision's delta_min; a reconstruction without it would call every

@@ -34,6 +34,25 @@ def cfg():
     return load_config()
 
 
+@pytest.fixture(scope="session")
+def synth_flc(tmp_path_factory):
+    """Path to a synthetic FLC extract covering the config's splits: the
+    repo's data/flc_synth.parquet when one has been generated, else a small
+    one generated once per session -- data/ is gitignored, so a fresh clone
+    has none and `pytest` must not fail on that."""
+    path = os.path.join(ROOT, "data", "flc_synth.parquet")
+    if os.path.exists(path):
+        return path
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from tools import make_dummy_flc as gen
+    start, days = gen.span_covering_splits(CFG)
+    df, _ = gen.generate(120, days, "randomized", 3, 0.004, 0.02, start=start)
+    out = str(tmp_path_factory.mktemp("synth") / "flc_synth.parquet")
+    pq.write_table(pa.Table.from_pandas(df, schema=gen.SCHEMA, preserve_index=False), out)
+    return out
+
+
 # ------------------------------------------------------------------ events
 
 def decision_event(**over):
@@ -83,7 +102,7 @@ def _reports(root, **over):
     """A complete, block-free set of the three reports ops.tune and
     ops.status read; keyword overrides replace a whole file."""
     base = {
-        "backtest.json": {
+        "backtest": {
             "artifact_versions": {"baseline_model_version": "m1"},
             "fidelity": {"calibration_window_sweep": {
                 "recommended_fit_window": "trailing_1w",
@@ -101,7 +120,7 @@ def _reports(root, **over):
                 "deeper_belief": {"share_prices_changed": 0.02,
                                   "il_delta_pct": -0.0004}}},
         },
-        "shadow.json": {
+        "shadow": {
             "artifact_versions": {"baseline_model_version": "m1"},
             "tau_initial_derivation": {"tau_initial": 1234.5},
             "calibration_regimes": {"frozen_anchor": 1.0002,
@@ -111,7 +130,7 @@ def _reports(root, **over):
             "window": {"date_min": "2026-08-10", "date_max": "2026-08-28",
                        "episodes": 111400},
         },
-        "thresholds.json": {
+        "thresholds": {
             "information_increment_recommendation": {
                 "recommended": 0.341, "verdict": "measured"},
             "bounded_step_recommendation": {
@@ -126,7 +145,7 @@ def _reports(root, **over):
     }
     base.update(over)
     for name, payload in base.items():
-        (root / name).write_text(json.dumps(payload))
+        _write(root, name, payload)
     return str(root)
 
 
@@ -138,8 +157,7 @@ def _cfg_with(cfg, tmp_path, cal=None, rho=None):
         "convergence": {"converged": True, "max_abs_dlog": 0.001,
                         "tol_log": 0.02}}))
     rho_path = tmp_path / "rho.json"
-    rho_path.write_text(json.dumps(rho or {"rho": 0.2436,
-                                           "mean_forced_hours_per_episode": 5.909}))
+    rho_path.write_text(json.dumps(rho or {"rho": 0.2436}))
     return dict(
         cfg,
         baseline_model=dict(cfg["baseline_model"],

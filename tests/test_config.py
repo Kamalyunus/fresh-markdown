@@ -48,18 +48,15 @@ def test_config_detects_stale_paste_from_frozen_artifact(tmp_path):
     rho_path = tmp_path / "rho.json"
     cfg["dispersion"]["rho_path"] = str(rho_path)
     cfg["dispersion"]["rho"] = 0.3183
-    cfg["dispersion"]["mean_forced_hours_per_episode"] = 9.134
 
     # no artifact yet -- bootstrap has not run, which is not drift
     assert artifact_mirror_drift(cfg) == []
 
-    rho_path.write_text(json.dumps(
-        {"rho": 0.3183, "mean_forced_hours_per_episode": 9.134}))
+    rho_path.write_text(json.dumps({"rho": 0.3183}))
     assert artifact_mirror_drift(cfg) == []
 
     # retrain moved rho; config still holds the old paste
-    rho_path.write_text(json.dumps(
-        {"rho": 0.2510, "mean_forced_hours_per_episode": 9.134}))
+    rho_path.write_text(json.dumps({"rho": 0.2510}))
     drift = artifact_mirror_drift(cfg)
     assert len(drift) == 1 and "dispersion.rho" in drift[0]
     # a --check-only contraction step (~1e-3) is NOT drift: the tolerance is

@@ -42,7 +42,15 @@ def week_key(dates):
             .dt.strftime("%Y-%m-%d"))
 
 
-def trailing_weeks_window(d, week_start, weeks_back):
+def opening_dates(d):
+    """The date each row's episode OPENED on, as "YYYY-MM-DD" per row -- the
+    key every episode-scoped cut assigns by. A caller slicing one frame many
+    times (a weekly schedule, the prior's folds) computes it once and passes
+    it to `window_slice` / `trailing_weeks_window` as `opened`."""
+    return d.groupby("episode_id")["date"].transform("min").astype(str)
+
+
+def trailing_weeks_window(d, week_start, weeks_back, opened=None):
     """The rows a factor fit for the week starting `week_start` may read:
     WHOLE episodes that opened in the `weeks_back` weeks strictly before it,
     plus how many distinct opening weeks that window actually holds.
@@ -52,23 +60,27 @@ def trailing_weeks_window(d, week_start, weeks_back):
     midnight seam and the two solved on different rows."""
     w0 = pd.Timestamp(week_start)
     lo = w0 - pd.Timedelta(weeks=int(weeks_back))
+    if opened is None:
+        opened = opening_dates(d)
     window = window_slice(d, lo.strftime("%Y-%m-%d"),
-                          (w0 - pd.Timedelta(days=1)).strftime("%Y-%m-%d"))
+                          (w0 - pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+                          opened=opened)
     if not len(window):
         return window, 0
-    opened = window.groupby("episode_id")["date"].transform("min")
-    return window, int(week_key(opened).nunique())
+    return window, int(week_key(opened.loc[window.index]).nunique())
 
 
-def window_slice(d, start=None, end=None):
+def window_slice(d, start=None, end=None, opened=None):
     """Episodes whose WINDOW STARTED in [start, end] -- whole, never sliced.
 
     Assignment is by the window's FIRST date, so every episode lands in exactly
     one slice; a row-level date cut truncates windows that cross midnight.
+    `opened` is `opening_dates(d)`, precomputed by a caller slicing repeatedly.
     """
     if start is None and end is None:
         return d
-    opened = d.groupby("episode_id")["date"].transform("min").astype(str)
+    if opened is None:
+        opened = opening_dates(d)
     keep = pd.Series(True, index=d.index)
     if start is not None:
         keep &= opened.ge(str(start))
@@ -113,9 +125,17 @@ def leftover_units(starting_inventory, units_sold):
     return net_leftover(starting_inventory, units_sold).clip(lower=0)
 
 
+def hour_discrepancy(starting_inventory, units_sold, ending_inventory):
+    """`(starting - ending) - sold` per hour, UNCLIPPED: > 0 stock left the
+    shelf unsold (shrink), < 0 stock arrived, 0 the hour reconciles. The one
+    arithmetic behind shrink, arrivals and the live adjustment."""
+    return ((np.asarray(starting_inventory) - np.asarray(ending_inventory))
+            - np.asarray(units_sold))
+
+
 def shrink_by_hour(starting_inventory, units_sold, ending_inventory, is_last_row):
-    """Units that vanished in each hour: `(starting - ending) - sold`, clipped
-    at zero, with the write-off exemption on the LAST ROW ONLY.
+    """Units that vanished in each hour: `hour_discrepancy` clipped at zero,
+    with the write-off exemption on the LAST ROW ONLY.
 
     The one home for shrink. `episode_flow` aggregates it as `vanished` and
     `daily.monitor` measures the live guardrail with it -- a second
@@ -123,8 +143,7 @@ def shrink_by_hour(starting_inventory, units_sold, ending_inventory, is_last_row
     is compared against. Mid-episode a zeroed ending with stock still owed is
     shrink, not a close (learnings.md); restock hours clip to zero.
     """
-    disc = ((np.asarray(starting_inventory) - np.asarray(ending_inventory))
-            - np.asarray(units_sold))
+    disc = hour_discrepancy(starting_inventory, units_sold, ending_inventory)
     status = hour_status(starting_inventory, units_sold, ending_inventory)
     return np.where((status == WRITE_OFF) & np.asarray(is_last_row), 0,
                     np.clip(disc, 0, None))
@@ -156,8 +175,8 @@ def episode_flow(d):
     supply (= opening + arrived) counts everything that arrived (design 12a).
     """
     d = d.sort_values(["date", "hour_of_day"])
-    disc = ((d.starting_inventory.to_numpy() - d.ending_inventory.to_numpy())
-            - d.units_sold.to_numpy())
+    disc = hour_discrepancy(d.starting_inventory, d.units_sold,
+                            d.ending_inventory)
     # `d` is in time order, so the last occurrence of each id is its final hour.
     is_last_row = ~d.episode_id.duplicated(keep="last").to_numpy()
     # the write-off exemption lives in shrink_by_hour, the one home; `disc`
@@ -234,20 +253,22 @@ def hour_adjustment(d):
     status = hour_status(d.starting_inventory, d.units_sold,
                          d.ending_inventory)
     is_last = ~d.episode_id.duplicated(keep="last").to_numpy()
-    disc = ((d.starting_inventory.to_numpy() - d.ending_inventory.to_numpy())
-            - d.units_sold.to_numpy())
+    disc = hour_discrepancy(d.starting_inventory, d.units_sold,
+                            d.ending_inventory)
     return pd.Series(np.where((status == WRITE_OFF) & is_last, 0, -disc),
                      index=d.index)
 
 
-def flow_identity_violations(d):
+def flow_identity_violations(d, flow=None):
     """Episodes failing `opening + restocked == sold + shrink + leftover`.
 
     Not a tolerance check: on a continuous chain the identity is provable, so
     a violation means `episode_flow` has a bug. Returns the offending rows of
-    `episode_flow`, empty when all is well.
+    `episode_flow` (`flow`, when the caller already holds it for `d`), empty
+    when all is well.
     """
-    flow = episode_flow(d)
+    if flow is None:
+        flow = episode_flow(d)
     lhs = flow.opening + flow.arrived
     rhs = flow.sold + flow.scrap
     return flow[lhs != rhs]
@@ -331,15 +352,16 @@ def adjustment_reason(starting_inventory, units_sold, ending_inventory):
     return None
 
 
-def write_off_convention(last):
-    """Is the source's closure sentinel present in this frame? DIAGNOSTIC ONLY.
+def write_off_convention(flow):
+    """Is the source's closure sentinel present -- some episode CLOSED (last
+    row zeroed) with stock still on hand? DIAGNOSTIC ONLY, read off
+    `episode_flow`; prepare_data reports it as `write_off_convention_in_force`.
 
     Never a fallback into `classify_last`: closure is read from the zero and
     nothing else, so a feed without the sentinel reports every episode
     unclosed -- loudly, which is the point (learnings.md).
     """
-    left = leftover_units(last.starting_inventory, last.units_sold).to_numpy()
-    return bool(((last.ending_inventory.to_numpy() == 0) & (left > 0)).any())
+    return bool((flow.closed & (flow.leftover > 0)).any())
 
 
 def _last_index(last):

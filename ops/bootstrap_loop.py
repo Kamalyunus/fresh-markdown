@@ -35,7 +35,7 @@ from common.io import read_json
 PREPARED = "data/prepared.parquet"
 
 
-def step(label, args, fatal=True, quiet=False):
+def step(label, args, fatal=True):
     """One pipeline step. Output streams through: the console lines are the
     evidence, and swallowing them to keep the log tidy is how a warning gets
     missed."""
@@ -144,6 +144,10 @@ def main():
                     help="settle the loop against the artifacts already on "
                          "disk and refresh the reports -- NO retrain. This is "
                          "what a config paste needs; see ops.tune")
+    ap.add_argument("--seal-reason", default=None,
+                    help="recorded in the audit MANIFEST (default: bootstrap, "
+                         "or check-only under --check-only); advance --retrain "
+                         "passes retrain")
     args = ap.parse_args()
     cfg = load_config(args.config)
 
@@ -164,8 +168,9 @@ def main():
                               "--out", "reports/backtest.json"])
     step("step 6b: derive_thresholds",
          ["evaluate.derive_thresholds", "--input", PREPARED])
-    step("step 11: seal", ["ops.seal", "--reason",
-                           "check-only" if args.check_only else "bootstrap"], fatal=False)
+    step("step 11: seal", ["ops.seal", "--reason", args.seal_reason
+                           or ("check-only" if args.check_only else "bootstrap")],
+         fatal=False)
     # advisory HERE, not a gate: on a first bootstrap tau is null and shadow
     # has not run, so status is red by design. It gates the pilot (RUNBOOK),
     # and a red row above is the next thing to do, not a broken bundle.

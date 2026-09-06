@@ -46,7 +46,7 @@ def test_a_factor_pinned_at_the_bracket_is_flagged_not_returned_silently(cfg):
     # HOT sells 60 an hour against mu 1.0: no factor inside the bracket
     # reaches it. COLD sells 1 against mu 1.0: interior.
     calib = _anchor_frame({"HOT": ("C", 30, 60), "COLD": ("C", 30, 1)})
-    factors, detail, f_global = tb._solve_level_factors(
+    factors, detail, f_global, global_at_bound = tb._solve_level_factors(
         calib, _Model(cfg, 1.0), k_shrink=0.0, min_anchor=10,
         tier_step=cfg["pricing"]["tier_step"], max_k=cfg["pricing"]["negbin_max_k"],
         r_lookup=R_LOOKUP)
@@ -55,10 +55,13 @@ def test_a_factor_pinned_at_the_bracket_is_flagged_not_returned_silently(cfg):
     assert "not a solved value" in detail["HOT"]["at_bound_note"]
     assert "at_bound" not in detail["COLD"]
     assert f_lo < detail["COLD"]["raw_factor"] < f_hi
+    # the GLOBAL solve pools both cells: ~30 sold per unit predicted, so it
+    # pins too -- and that used to be discarded (rule 3)
+    assert global_at_bound == "upper" and f_global == pytest.approx(f_hi)
 
     # the bracket is config, not a literal: narrow it and the pin moves
     cfg["baseline_model"]["calibration_factor_search_bounds"] = [0.5, 2.0]
-    _, detail2, _ = tb._solve_level_factors(
+    _, detail2, _, _ = tb._solve_level_factors(
         calib.copy(), _Model(cfg, 1.0), 0.0, 10, cfg["pricing"]["tier_step"],
         cfg["pricing"]["negbin_max_k"], R_LOOKUP)
     assert detail2["HOT"]["raw_factor"] == pytest.approx(2.0)
@@ -73,18 +76,59 @@ def test_a_lower_pin_is_named_too(cfg):
     calib = _anchor_frame({"DEAD": ("C", 30, 0), "LIVE": ("C", 30, 1)})
     # DEAD sells nothing at all: solve_factor short-circuits to 1.0 (no
     # evidence), never a bound...
-    _, detail, _ = tb._solve_level_factors(
+    _, detail, _, _ = tb._solve_level_factors(
         calib, _Model(cfg, 1.0), 1.0, 10, cfg["pricing"]["tier_step"],
         cfg["pricing"]["negbin_max_k"], R_LOOKUP)
     assert detail["DEAD"]["raw_factor"] == 1.0 and "at_bound" not in detail["DEAD"]
     # ...while a cell selling far LESS than the lowest factor predicts pins low
     f_lo = cfg["baseline_model"]["calibration_factor_search_bounds"][0]
     calib = _anchor_frame({"SLOW": ("C", 30, 1), "LIVE": ("C", 30, 50)})
-    _, detail, _ = tb._solve_level_factors(
+    _, detail, _, _ = tb._solve_level_factors(
         calib, _Model(cfg, 50.0), 1.0, 10, cfg["pricing"]["tier_step"],
         cfg["pricing"]["negbin_max_k"], R_LOOKUP)
     assert detail["SLOW"]["at_bound"] == "lower"
     assert detail["SLOW"]["raw_factor"] == pytest.approx(f_lo)
+
+
+def test_a_pinned_global_factor_is_flagged_not_discarded(cfg):
+    """`f_global, _, _ = solve_factor(anchor_all)` threw the global solve's
+    at_bound away, so every cell shrank toward a bracket end that nothing
+    reported as one (rule 3). It is returned, written to the artifact and
+    printed."""
+    f_lo, f_hi = cfg["baseline_model"]["calibration_factor_search_bounds"]
+    # EVERY cell sells far more than mu predicts: the global solve pins high
+    calib = _anchor_frame({"HOT": ("C", 30, 60), "HOTTER": ("C", 30, 80)})
+    factors, detail, f_global, global_at_bound = tb._solve_level_factors(
+        calib, _Model(cfg, 1.0), 1.0, 10, cfg["pricing"]["tier_step"],
+        cfg["pricing"]["negbin_max_k"], R_LOOKUP)
+    assert global_at_bound == "upper" and f_global == pytest.approx(f_hi)
+    assert all(v["at_bound"] == "upper" for v in detail.values())
+
+    art = {"grain": "subcategory", "detail": detail, "factors": factors,
+           "global_factor": f_global, "global_factor_at_bound": global_at_bound,
+           "fit_window": "w", "fit_window_dates": ["a", "b"], "fit_rows": 60,
+           "fit_basis": "b", "fit_in_sample_share": 0.0}
+    text = tb._describe_calibration(art, factors)
+    assert "AT UPPER BOUND" in text.split("\n")[0], "the global pin is on line 1"
+    # the artifact writer carries the flag by name (payload key, not detail)
+    src = inspect.getsource(tb.fit_level_calibration)
+    assert '"global_factor_at_bound": global_at_bound' in src
+    assert '"weeks_global_at_bound"' in src
+
+
+def test_the_vectorised_r_lookup_is_used_for_the_censored_basis(cfg):
+    """One Python `lookup_r` call per row per schedule window was the cost;
+    the vectorised chain gives the same r per row."""
+    from fit.fit_dispersion import lookup_r, lookup_r_vec
+    r = {"subcategory": {"HOT": 3.0}, "category": {"C": 1.5}, "global": 5.0,
+         "fallback_order": ["subcategory", "category", "global"]}
+    calib = _anchor_frame({"HOT": ("C", 3, 6), "COLD": ("C", 3, 1),
+                           "ODD": ("Z", 3, 1)})
+    got = lookup_r_vec(r, calib.subcategory, calib.category)
+    assert list(got) == [lookup_r(r, s, c)
+                         for s, c in zip(calib.subcategory, calib.category)]
+    src = inspect.getsource(tb._solve_level_factors)
+    assert "lookup_r_vec(" in src and "for s, c in zip(" not in src
 
 
 def test_thin_cells_are_shrunk_toward_the_parent_not_held_at_one(cfg):
@@ -92,7 +136,7 @@ def test_thin_cells_are_shrunk_toward_the_parent_not_held_at_one(cfg):
     every cell above the window floor follows its parent by k_shrink."""
     # THIN wants twice the factor FAT does, on a fortieth of the evidence
     calib = _anchor_frame({"THIN": ("C", 12, 6), "FAT": ("C", 300, 3)})
-    factors, detail, f_global = tb._solve_level_factors(
+    factors, detail, f_global, _ = tb._solve_level_factors(
         calib, _Model(cfg, 1.0), k_shrink=1000.0, min_anchor=10,
         tier_step=cfg["pricing"]["tier_step"], max_k=cfg["pricing"]["negbin_max_k"],
         r_lookup=R_LOOKUP)

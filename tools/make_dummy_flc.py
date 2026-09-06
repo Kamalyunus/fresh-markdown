@@ -22,6 +22,7 @@ window boundary).
 
 import argparse
 import datetime as dt
+import os
 
 import numpy as np
 import pandas as pd
@@ -339,7 +340,6 @@ def main():
     df, master = generate(args.skus, days, args.policy, args.seed,
                           args.dirty_frac, args.shrink_rate, start=start)
 
-    import os
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     table = pa.Table.from_pandas(df, schema=SCHEMA, preserve_index=False)
     pq.write_table(table, args.out)

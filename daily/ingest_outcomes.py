@@ -32,8 +32,22 @@ def _day(value):
     return pd.Timestamp(value).strftime("%Y-%m-%d")
 
 
+def _ident(v):
+    """One spelling of an identifier column: pandas reads an integer column
+    as float once it holds a NaN, so the feed's 7.0 must key the decision's
+    "7". A NaN or an unparseable value raises -- the caller counts the row."""
+    if isinstance(v, (float, np.floating)):
+        if not np.isfinite(v) or v != int(v):
+            raise ValueError(f"not an identifier: {v!r}")
+        return str(int(v))
+    return str(v)
+
+
 def _key(sku, fc, date, hour):
-    return (str(sku), str(fc), _day(date), int(hour))
+    """The (sku, fc, day, hour) a feed row and a decision meet on. Raises on
+    a value that names no hour or no item -- the caller decides whether that
+    costs one row or one decision, never the batch."""
+    return (_ident(sku), _ident(fc), _day(date), int(hour))
 
 
 def load_failures(path):
@@ -67,33 +81,47 @@ def build_outcomes(decisions, feed, failures=None):
     if len(feed):
         # one spelling of the day, whatever dtype the feed carries
         feed = feed.assign(date=pd.to_datetime(feed["date"]).dt.strftime("%Y-%m-%d"))
-    rows = {}
+    rows, unusable = {}, []
     dup_feed = 0
-    for r in feed.itertuples():
-        k = _key(r.sku_id, r.fc, r.date, r.hour_of_day)
+    for i, r in enumerate(feed.itertuples()):
+        # a row that names no hour or no item (NaN hour_of_day) is one
+        # unusable row, never a fatal int(nan) before any decision is matched
+        try:
+            k = _key(r.sku_id, r.fc, r.date, r.hour_of_day)
+        except (TypeError, ValueError) as exc:
+            unusable.append({"decision_id": None, "feed_row": i,
+                             "reason": f"unkeyable feed row: {type(exc).__name__}: {exc}"})
+            continue
         if k in rows:
             dup_feed += 1        # two states for one hour: match neither
             rows[k] = None
         else:
             rows[k] = r
-    feed_days = sorted(set(feed["date"])) if len(feed) else []
+    # the keyable days only: a NaN date is an unkeyable row, counted above
+    feed_days = sorted(d for d in set(feed["date"]) if isinstance(d, str)) \
+        if len(feed) else []
     feed_range = (feed_days[0], feed_days[-1]) if feed_days else None
 
-    outcomes, unmatched, reasons, unusable = [], [], {}, []
+    outcomes, unmatched, reasons = [], [], {}
     outside = 0
     for dec in decisions:
         day = str(dec["date"])
         if feed_range is None or not (feed_range[0] <= day <= feed_range[1]):
             outside += 1         # not this feed's business: no gap, no match
             continue
-        k = _key(dec["sku_id"], dec["fc"], day, dec["hour_of_day"])
+        # one unusable row costs its own decision, never the day's batch: it
+        # is counted below, and a zero/absent base price is refused rather
+        # than priced as a full-list discount
+        try:
+            k = _key(dec["sku_id"], dec["fc"], day, dec["hour_of_day"])
+        except (TypeError, ValueError) as exc:
+            unusable.append({"decision_id": dec["decision_id"],
+                             "reason": f"unkeyable decision: {type(exc).__name__}: {exc}"})
+            continue
         r = rows.get(k)
         if r is None:
             unmatched.append(dec["decision_id"])
             continue
-        # one unusable row costs its own decision, never the day's batch: it
-        # is counted below, and a zero/absent base price is refused rather
-        # than priced as a full-list discount
         try:
             start = int(round(float(r.starting_inventory)))
             sold = int(float(r.units_sold))
@@ -191,10 +219,12 @@ def main():
           f"quarantined {report['quarantined']:,})")
     if report["unusable_feed_rows"]:
         print(f"unusable feed rows : {report['unusable_feed_rows']:,} "
-              "(non-numeric inventory or a zero/absent base price -- counted "
-              "into the completeness gap, batch NOT aborted)")
+              "(non-numeric inventory, a zero/absent base price, or a row "
+              "naming no hour or item -- counted into the completeness gap, "
+              "batch NOT aborted)")
         for row in report["unusable_examples"][:5]:
-            print(f"  {row['decision_id']}: {row['reason']}")
+            who = row["decision_id"] or f"feed row {row.get('feed_row')}"
+            print(f"  {who}: {row['reason']}")
     print(f"no feed row        : {report['decisions_without_feed_row']:,}"
           + (" -- this is the completeness gap the gate measures"
              if report["decisions_without_feed_row"] else ""))

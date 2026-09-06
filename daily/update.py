@@ -151,17 +151,18 @@ def grid_update(pairs, cell_record, cfg):
     }
 
 
-def finalized_days(decisions, outcomes):
-    """ONE pass over the matched pairs with a finalized outcome, keyed on the
-    TRADING day the decision priced (events.pairs.decision_day, never the
-    UTC clock of `finalized_at`). Returns (priced_days ascending,
-    {day: realised exploration spend} over the forced decisions) -- the day
-    key and the spend the tau controller and the monitor's stop condition
-    both read, so the correction and its backstop cannot drift apart."""
+def finalized_days(decisions, outcomes, pairs=None):
+    """ONE pass over the matched pairs, keyed on the TRADING day the decision
+    priced (events.pairs.decision_day, never the UTC clock of
+    `finalized_at`). Every stored outcome is final -- `finalized_at` is in
+    events.store.OUTCOME_REQUIRED -- so a matched pair is a priced day.
+    Returns (priced_days ascending, {day: realised exploration spend} over
+    the forced decisions) -- the day key and the spend the tau controller
+    and the monitor's stop condition both read, so the correction and its
+    backstop cannot drift apart. `pairs` is match_pairs(decisions, outcomes)
+    if the caller already built it."""
     days, spend = set(), {}
-    for d, o in match_pairs(decisions, outcomes):
-        if not o.get("finalized_at"):
-            continue
+    for d, o in (match_pairs(decisions, outcomes) if pairs is None else pairs):
         day = decision_day(d)
         days.add(day)
         if d.get("is_exploration"):
@@ -179,7 +180,7 @@ def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None):
     to the store's current widest routed std. `run` passes the value read
     BEFORE any cell is committed, so a dry run and `--apply` price the same
     days from the same posterior."""
-    from daily.monitor import business_metrics      # sibling; no cycle
+    from daily.monitor import business_metrics, settled_episodes  # sibling; no cycle
 
     tau_now = posterior.tau(cfg)
     block = {"tau_before": tau_now, "tau_after": tau_now, "commit": False}
@@ -189,7 +190,8 @@ def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None):
                             "force to calibrate")
         return block
 
-    priced_days, spend_by_day = finalized_days(decisions, outcomes)
+    pairs = match_pairs(decisions, outcomes)          # once, for both reads
+    priced_days, spend_by_day = finalized_days(decisions, outcomes, pairs)
     if not priced_days:
         block["skipped"] = "no finalized outcomes"
         return block
@@ -217,7 +219,8 @@ def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None):
                             "no day to walk")
         block["through_date"] = through
         return block
-    business = business_metrics(decisions, outcomes)
+    business = business_metrics(decisions, outcomes,
+                                settled_episodes(decisions, outcomes, pairs))
     il_by_day = business.get("il_by_close_day") or {}
     cells = posterior.state["cells"]
     if not il_by_day or not cells:
@@ -338,7 +341,6 @@ def run(cfg, apply=False, events_root=None, posterior_path=None, today=None,
         report["cells"][cell] = {
             "forced_outcomes": len(pairs),
             "effective_information": round(eff_info, 3),
-            "information_pending": round(eff_info, 3),
             "information_required": cfg["learning"]["information_increment"],
             "update_triggered": trigger,
             # a batch that keeps growing without triggering is the learning
@@ -407,7 +409,7 @@ def main():
     for cell, c in report["cells"].items():
         print(f"[{cell}] forced={c['forced_outcomes']} "
               f"info+={c['effective_information']} "
-              f"(pending {c['information_pending']}, "
+              f"(required {c['information_required']}, "
               f"trigger={c['update_triggered']}) "
               f"mean {c['mean_before']:+.3f}->{c['proposed_mean']:+.3f} "
               f"std {c['std_before']:.3f}->{c['proposed_std']:.3f}"

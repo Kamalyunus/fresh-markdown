@@ -215,6 +215,52 @@ def test_daily_rates_are_keyed_on_the_close_day_not_the_opening_day():
     assert g["daily_scrap_rate"] == {"2026-08-19": 0.0, "2026-08-20": 0.5}
 
 
+def test_the_report_pairs_the_events_once_and_reads_one_episode_frame(cfg, tmp_path, monkeypatch):
+    """Four metric families used to pair decisions to outcomes four or five
+    times and settle the episode frame twice. build_report does each once
+    and hands them down; each family, called on its own, still answers the
+    same."""
+    from conftest import decision_event, outcome_event
+    from daily import monitor as mon
+    from daily import update as upd
+    from events.store import EventStore
+    from engine.posterior import PosteriorStore
+
+    store = EventStore(cfg, root=str(tmp_path / "events"))
+    for i in range(4):
+        store.emit_decision(decision_event(decision_id=f"D{i}", episode_id=f"EP{i}",
+                                           sku_id=f"S{i}"))
+        store.emit_outcome(outcome_event(outcome_id=f"O{i}", decision_id=f"D{i}",
+                                         adjustment_reason="episode_close_write_off"))
+    posterior = PosteriorStore.initialise(
+        cfg, {"vegetables": {"mean": -1.0, "std": 0.6}}, {"vegetables": 500},
+        path=str(tmp_path / "posterior.json"))
+
+    calls = {"pairs": 0, "economics": 0}
+    real_pairs, real_econ = mon.match_pairs, mon.metrics.episode_economics
+
+    def counting_pairs(*a, **k):
+        calls["pairs"] += 1
+        return real_pairs(*a, **k)
+
+    def counting_econ(*a, **k):
+        calls["economics"] += 1
+        return real_econ(*a, **k)
+
+    monkeypatch.setattr(mon, "match_pairs", counting_pairs)
+    monkeypatch.setattr(upd, "match_pairs", counting_pairs)
+    monkeypatch.setattr(mon.metrics, "episode_economics", counting_econ)
+    report = mon.build_report(store, posterior, cfg)
+    assert calls == {"pairs": 1, "economics": 1}, calls
+
+    decisions, outcomes = store.load_decisions(), store.load_outcomes()
+    assert report["business"] == mon.business_metrics(decisions, outcomes)
+    assert report["guardrails"] == mon.guardrail_series(decisions, outcomes, cfg)
+    assert report["safety"] == mon.safety_metrics(store, decisions, outcomes)
+    assert report["learning"]["priced_days"] == ["2026-08-19"]
+    assert report["business"]["waste_units"] == 4
+
+
 def test_price_mismatch_is_a_rate_over_compared_pairs():
     """Dividing by every outcome let unmatched outcomes dilute the rate
     below the stop threshold."""

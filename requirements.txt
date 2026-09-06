@@ -11,7 +11,7 @@ matplotlib>=3.8
 # the pipeline itself reads or writes xlsx.
 xlsxwriter>=3.1
 
-# bootstrap.download_flc only (step 0). Every other step reads the parquet it
+# fit.download_flc only (step 0). Every other step reads the parquet it
 # writes, so the pipeline runs without these.
 psycopg2-binary>=2.9
 python-dotenv>=1.0

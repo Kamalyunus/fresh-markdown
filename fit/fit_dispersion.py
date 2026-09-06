@@ -180,9 +180,10 @@ def fit_dispersion(d, cfg):
                     "extract. If this list is long, the NB is the wrong family "
                     "for this extract and not just for these cells."),
                 "fallback_order": ["subcategory", "category", "global"],
-                # what the residuals were ACTUALLY formed at -- per category,
-                # from the prior in force
-                "working_elasticity": eps0,
+                # what the residuals were ACTUALLY formed at: each category's
+                # own prior mean (`working_elasticity_by_category`), the
+                # constant only where the prior has no entry for a category
+                "working_elasticity_fallback": eps0,
                 "working_elasticity_basis": (
                     "per-category prior means" if eps_by_cat
                     else f"constant {eps0} (dispersion.working_elasticity_"
@@ -229,7 +230,11 @@ def drift_by_window(d, cfg, freq="W"):
                            cfg, model, eps_by_cat, eps0)
     if not len(full):
         return {"verdict": "NOT RUN -- no rows"}
-    full["_win"] = pd.to_datetime(full.date).dt.to_period(freq)
+    # by EPISODE, keyed on its opening date (rule 15; the rule window_slice
+    # and week_key apply): a row-level bucket split every window crossing a
+    # week seam into two clusters and read its Monday rows as a new episode
+    full["_win"] = pd.to_datetime(
+        episodes.opening_dates(full)).dt.to_period(freq)
 
     by_window, thin = {}, []
     for win, g in full.groupby("_win"):
@@ -324,14 +329,29 @@ def drift_by_window(d, cfg, freq="W"):
 
 
 def lookup_r(r_lookup, subcategory, category):
+    """r for one row, down `fallback_order` (explicit None tests: 0.0 is a
+    value, not a miss)."""
+    keys = {"subcategory": str(subcategory), "category": str(category)}
     for level in r_lookup["fallback_order"]:
-        if level == "subcategory" and str(subcategory) in r_lookup["subcategory"]:
-            return r_lookup["subcategory"][str(subcategory)]
-        if level == "category" and str(category) in r_lookup["category"]:
-            return r_lookup["category"][str(category)]
         if level == "global":
             return r_lookup["global"]
+        r = r_lookup[level].get(keys[level])
+        if r is not None:
+            return r
     return r_lookup["global"]
+
+
+def lookup_r_vec(r_lookup, subcategory, category):
+    """`lookup_r` over two aligned Series, as a float array -- the same
+    fallback chain, one map per level instead of a Python call per row."""
+    keys = {"subcategory": pd.Series(subcategory).astype(str),
+            "category": pd.Series(category).astype(str)}
+    out = pd.Series(np.nan, index=keys["subcategory"].index, dtype=float)
+    for level in r_lookup["fallback_order"]:
+        if level == "global":
+            return out.fillna(float(r_lookup["global"])).to_numpy()
+        out = out.fillna(keys[level].map(r_lookup[level]).astype(float))
+    return out.fillna(float(r_lookup["global"])).to_numpy()
 
 
 def main():

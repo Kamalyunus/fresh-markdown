@@ -49,8 +49,8 @@ OK, ACT = "OK", "ACT"
 #               chose.
 #   rerun    -> what a paste invalidates: "none" = read at runtime or mirrors
 #               the artifact; "calibration" = the loop turns (3b-5b, NO
-#               retrain); "retrain" = only data.split, which is SET BY OWNER
-#               and never auto-applied.
+#               retrain). tune never pastes a "retrain" key (the training
+#               inputs are SET / SET BY OWNER); READ_BY routes them.
 KEYS = {
     # derive_thresholds grades the configured increment against I*; shadow's
     # bounded_updates_supported is eff_info / increment, a division a reader
@@ -87,39 +87,96 @@ KEYS = {
         {"anchor": "  calibration_gate_band:", "measured": True, "rerun": "none"},
 }
 MEASURED_KEYS = {k for k, v in KEYS.items() if v["measured"]}
+# where each MEASURED value comes from -- what advance names when a report
+# ran and still produced nothing for it
+DERIVED_IN = {
+    "learning.information_increment": "reports/thresholds.json -> information_increment_recommendation",
+    "exploration.tau_initial": "reports/shadow.json -> tau_initial_derivation",
+    "exploration.delta_min_log_bias": "reports/backtest.json -> fidelity (level error at W)",
+    "dispersion.rho": "artifacts/rho.json (fit_dispersion)",
+    "baseline_model.calibration_fit_trailing_weeks": "reports/backtest.json -> fidelity.calibration_window_sweep",
+    "baseline_model.calibration_gate_band": "reports/backtest.json -> fidelity.calibration_window_sweep",
+}
 
-# what a config change invalidates, weakest to strongest: a key is an INPUT
-# to the reports its class names, and nothing else (design 5.14a)
-RERUN_ORDER = ["none", "thresholds", "shadow", "thresholds+shadow",
-               "calibration", "retrain"]
+# The re-run classes, weakest to strongest: (reports the class invalidates,
+# what to run). A key is an INPUT to the reports its class names and nothing
+# else (design 5.14a); classes do not nest, so staleness is the UNION over
+# moved keys (stale_keys), never the strongest alone.
+RERUN = {
+    "none": (set(), "nothing to re-run: every value written is read at runtime "
+                    "or mirrors an artifact that already holds it"),
+    "thresholds": ({"thresholds"},
+                   "a stop threshold moved -- re-derive its verdict:\n"
+                   "    python3 -m evaluate.derive_thresholds --input "
+                   "data/prepared.parquet"),
+    "shadow": ({"shadow"},
+               "shadow's own inputs moved -- re-run evaluate.shadow so its "
+               "tau derivation and gate are graded under the value in force"),
+    "thresholds+shadow": ({"thresholds", "shadow"},
+                          "a learning rail moved: re-derive thresholds AND "
+                          "re-run evaluate.shadow (both read it)"),
+    "backtest": ({"backtest"},
+                 "the backtest's own inputs moved -- re-run it (no artifact "
+                 "reads them):\n    python3 -m evaluate.backtest --input "
+                 "data/prepared.parquet"),
+    "calibration": ({"backtest", "thresholds", "shadow"},
+                    "the calibration loop turned -- settle it WITHOUT retraining:\n"
+                    "    python3 -m ops.bootstrap_loop --check-only\n"
+                    "  (iterates 3b -> 4 -> 5 -> 5b to CONVERGED and refreshes "
+                    "the reports), then re-run evaluate.shadow"),
+    "retrain": ({"backtest", "thresholds", "shadow"},
+                "the model's own training data or hyper-parameters changed -- a "
+                "deliberate `python3 -m ops.advance --retrain` is required; "
+                "nothing from before is comparable (rule 1)"),
+}
+RERUN_ORDER = list(RERUN)
+INVALIDATES = {k: v[0] for k, v in RERUN.items()}
+RERUN_STEPS = {k: v[1] for k, v in RERUN.items()}
+ROUTED_REPORTS = set().union(*INVALIDATES.values())
 
-# which reports each class invalidates; the classes do not nest, so staleness
-# is the UNION over moved keys (tune.stale_keys), never the strongest alone
-INVALIDATES = {"none": set(),
-               "thresholds": {"thresholds"},
-               "shadow": {"shadow"},
-               "thresholds+shadow": {"thresholds", "shadow"},
-               "calibration": {"backtest", "thresholds", "shadow"},
-               "retrain": {"backtest", "thresholds", "shadow"}}
-
-# keys tune does not paste but a report READS: prefix -> the report class.
-# Everything not listed here, in KEYS or in INERT_PREFIXES is an edit nobody
-# classified and re-grades everything.
+# keys tune does not paste but a report or a fit READS: prefix -> class.
+# Checked before INERT_PREFIXES, so a read key inside an otherwise inert
+# section is listed here. Everything in none of the three tables is an edit
+# nobody classified and turns the loop ("calibration").
 READ_BY = (
+    # the training run itself: a new model, never a loop turn (rule 1)
+    ("data.split.", "retrain"),
+    ("data.exclusion_window", "retrain"),
+    ("data.max_window_hours", "retrain"),
+    ("data.manufacturing_window_hours", "retrain"),
+    ("baseline_model.objective", "retrain"),
+    ("baseline_model.tweedie_variance_power", "retrain"),
+    ("baseline_model.ref_rate_", "retrain"),
+    ("baseline_model.learning_rate", "retrain"),
+    ("baseline_model.num_boost_round", "retrain"),
+    ("baseline_model.num_leaves", "retrain"),
+    ("baseline_model.min_data_in_leaf", "retrain"),
+    # fit inputs inside the assurance section (fit_dispersion, prior_density)
+    ("assurance.rho_min_hours_per_episode", "calibration"),
+    ("assurance.rho_drift_alert", "calibration"),
+    # shadow's inputs
     ("exploration.budget_", "shadow"),           # budget base, scale, window
     ("exploration.tau_adjust_clip", "shadow"),   # the controller trace
     ("exploration.tau_spend_guard", "shadow"),
     ("exploration.tau0_derivation_min_decisions", "shadow"),
+    ("exploration.delta_min_bias_multiple", "shadow"),
     ("monitoring.shadow_gate.", "shadow"),
     ("monitoring.stop_conditions.exploration_cost_vs_budget", "shadow"),
     ("learning.update_cadence_days", "shadow"),  # learning_yield's calendar floor
-    ("monitoring.guardrail_noise_window_days", "thresholds"),
+    ("tuning.controller_trace_max_days", "shadow"),
+    # derive_thresholds' inputs
+    ("monitoring.guardrail_noise_", "thresholds"),
+    ("monitoring.guardrail_outlier_sigma_ratio", "thresholds"),
     ("monitoring.stop_conditions.deterioration_smoothing_days", "thresholds"),
     ("monitoring.stop_conditions.persistence_days", "thresholds"),
     ("posterior.min_std", "thresholds"),
-    # the launch belief: the backtest prices its DP arm at it (the loop
-    # re-grades); the posterior file is re-initialised by advance while unlearned
-    ("posterior.cold_start_shift_std", "calibration"),
+    ("tuning.guardrail_inert_floor_multiple", "thresholds"),
+    ("tuning.bounded_step_consistent_band", "thresholds"),
+    # the backtest's own inputs: the launch belief its DP arm is priced at
+    # (advance re-initialises the posterior while unlearned), its tables
+    ("posterior.cold_start_shift_std", "backtest"),
+    ("tuning.cost_ratio_bands", "backtest"),
+    ("tuning.step_sensitivity_episodes", "backtest"),
 )
 
 
@@ -128,8 +185,7 @@ def rerun_classes(keys):
     ("none" only when nothing else is)."""
     found = set()
     for k in keys:
-        cls = _class_of(k)
-        found.update(cls.split("+") if "+" in cls else [cls])
+        found.update(_class_of(k).split("+"))
     found -= {"none"}
     return sorted(found, key=RERUN_ORDER.index, reverse=True) or ["none"]
 
@@ -168,6 +224,8 @@ def _class_of(key):
     for prefix, cls in READ_BY:
         if key.startswith(prefix):
             return cls
+    # neither pasted, read by a named report, nor inert: an edit nobody
+    # classified turns the loop, which re-grades every report
     return "none" if key.startswith(INERT_PREFIXES) else "calibration"
 
 
@@ -175,26 +233,6 @@ def rerun_for(keys):
     """The strongest re-run a set of moved dotted config keys demands."""
     return max((_class_of(k) for k in keys), key=RERUN_ORDER.index, default="none")
 
-
-RERUN_STEPS = {
-    "none": ("nothing to re-run: every value written is read at runtime or "
-             "mirrors an artifact that already holds it"),
-    "thresholds": ("a stop threshold moved -- re-derive its verdict:\n"
-                   "    python3 -m evaluate.derive_thresholds --input "
-                   "data/prepared.parquet"),
-    "shadow": ("shadow's own inputs moved -- re-run evaluate.shadow so its "
-               "tau derivation and gate are graded under the value in force"),
-    "thresholds+shadow": ("a learning rail moved: re-derive thresholds AND "
-                          "re-run evaluate.shadow (both read it)"),
-    "calibration": (
-        "the calibration loop turned -- settle it WITHOUT retraining:\n"
-        "    python3 -m ops.bootstrap_loop --check-only\n"
-        "  (iterates 3b -> 4 -> 5 -> 5b to CONVERGED and refreshes the "
-        "reports), then re-run evaluate.shadow"),
-    "retrain": ("the model's own training data changed -- a full "
-                "`python3 -m ops.bootstrap_loop --input <raw>` is required; "
-                "nothing from before is comparable (rule 1)"),
-}
 
 def _window_in_force(cfg):
     return f"trailing_{cfg['baseline_model']['calibration_fit_trailing_weeks']}w"
