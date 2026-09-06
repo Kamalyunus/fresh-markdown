@@ -17,7 +17,7 @@ from common import episodes
 from common.config import (design_effect, intraclass_correlation,
                            load_config)
 from events.store import EventStore
-from events.pairs import match_pairs
+from events.pairs import learnable_with_stock, is_restocked
 from common.io import write_json
 from common.provenance import config_fingerprint, environment
 from engine import dp as dp_mod
@@ -25,14 +25,23 @@ from engine.explore import affordable_set
 from engine.demand import mu_at
 
 
-def _resolve(evt, cfg):
-    """Re-solve one logged decision from nothing but its own event payload."""
-    return dp_mod.solve(
+def _resolve(evt, cfg, cache=None):
+    """Re-solve one logged decision from nothing but its own event payload.
+    `cache` is {decision_id: result} shared by the checks in one `run`, so a
+    decision both reproduction and the uniformity check read is solved
+    once; a solve that raises is not cached."""
+    key = evt.get("decision_id")
+    if cache is not None and key in cache:
+        return cache[key]
+    res = dp_mod.solve(
         evt["original_price"], evt["cost"], int(evt["q_remaining"]),
         list(evt["mu_ref_path"]), evt["reference_discount"],
         evt["epsilon_posterior_mean"], evt["dispersion_r"], cfg,
         anchor_discount=evt.get("anchor_discount"),
         entry=bool(evt["is_entry"]))
+    if cache is not None and key is not None:
+        cache[key] = res
+    return res
 
 
 def _tier_index(tiers, discount, step):
@@ -50,10 +59,10 @@ def _replayable(decisions):
 
 
 # --------------------------------------------------------------- 1 · reproduce
-def reproduction(decisions, cfg):
+def reproduction(decisions, cfg, cache=None):
     """Re-solve recent decisions and assert they come out the same. The most
     RECENT decisions, not a random sample: a deploy or config break shows
-    there, and a uniform sample would dilute it."""
+    there, and a uniform sample would dilute it. `cache` as in _resolve."""
     ac = cfg["assurance"]
     step = cfg["pricing"]["tier_step"]
     pool = _replayable(decisions)
@@ -71,13 +80,14 @@ def reproduction(decisions, cfg):
     for evt in sample:
         checked += 1
         try:
-            res = _resolve(evt, cfg)
+            res = _resolve(evt, cfg, cache)
         except Exception as exc:
             # a decision that no longer solves WAS checked, and failed: a
             # broken solver must read FAIL, never INSUFFICIENT
-            failures.append({"decision_id": evt.get("decision_id"),
-                             "error": f"{type(exc).__name__}: {exc}"})
             mismatches += 1
+            if len(failures) < ac["reproduction_report_max"]:
+                failures.append({"decision_id": evt.get("decision_id"),
+                                 "error": f"{type(exc).__name__}: {exc}"})
             continue
 
         d_opt = res.tiers[res.optimal_index]
@@ -110,8 +120,7 @@ def reproduction(decisions, cfg):
         "decisions_checked": checked,
         "decisions_skipped_no_inputs": skipped,
         "mismatch_count": mismatches,
-        "mismatch_rate": (round(min(mismatches / checked, 1.0), 6)
-                          if checked else None),
+        "mismatch_rate": round(mismatches / checked, 6) if checked else None,
         "worst_expected_il_delta": round(worst_il, 6),
         "failures": failures,
         "priced_under_another_config": other_config,
@@ -123,12 +132,10 @@ def reproduction(decisions, cfg):
 
 
 # -------------------------------------------------------------- 2 · dispersion
-def _pairs(decisions, outcomes):
-    """Pairs with stock on hand whose push SUCCEEDED: a failed push sold at
-    a price we did not choose, and grading r or rho on it indicts the model
-    for the integration's miss."""
-    return [(d, o) for d, o in match_pairs(decisions, outcomes, learnable=True)
-            if o.get("starting_inventory", 0) >= 1]
+# The pairs these checks grade: stock on hand and a push that SUCCEEDED (a
+# failed push sold at a price we did not choose, and grading r or rho on it
+# indicts the model for the integration's miss). One home, shared with the
+# learner: events.pairs.learnable_with_stock.
 
 
 def dispersion_fit(decisions, outcomes, cfg, pairs=None):
@@ -137,15 +144,15 @@ def dispersion_fit(decisions, outcomes, cfg, pairs=None):
     P(shelf emptied) = P(D>=q), so both compare against the NB with no
     correction. Binned by mu: only miscalibration that grows with mu indicts
     r. "Emptied" is the shared censoring rule (episodes.is_censored_hour),
-    never `sold >= q`; a restocked hour (`intraday_restock`) has no single q
-    to empty and is left out of this check. `pairs` is
-    _pairs(decisions, outcomes) if the caller already built it (run does)."""
+    never `sold >= q`; a restocked hour (events.pairs.is_restocked) has no
+    single q to empty and is left out of this check. `pairs` is
+    learnable_with_stock(decisions, outcomes) if the caller already built
+    it (run does)."""
     ac = cfg["assurance"]
     pcfg = cfg["pricing"]
     if pairs is None:
-        pairs = _pairs(decisions, outcomes)
-    pairs = [(d, o) for d, o in pairs
-             if o.get("adjustment_reason") != episodes.RESTOCK]
+        pairs = learnable_with_stock(decisions, outcomes)
+    pairs = [(d, o) for d, o in pairs if not is_restocked(o)]
     if len(pairs) < ac["dispersion_min_outcomes"]:
         return {"outcomes": len(pairs), "verdict": "INSUFFICIENT",
                 "required": ac["dispersion_min_outcomes"]}
@@ -216,7 +223,7 @@ def correlation_drift(decisions, outcomes, cfg, pairs=None):
     pcfg = cfg["pricing"]
     eps_by_cat, eps_fallback = _working_elasticity(cfg)
     if pairs is None:
-        pairs = _pairs(decisions, outcomes)
+        pairs = learnable_with_stock(decisions, outcomes)
 
     rows = {}
     for d, o in pairs:
@@ -261,22 +268,28 @@ def correlation_drift(decisions, outcomes, cfg, pairs=None):
 
 
 # ------------------------------------------------------------- 4 · exploration
-def exploration_uniformity(decisions, cfg):
+def exploration_uniformity(decisions, cfg, cache=None):
     """Is the applied price a uniform draw from the affordable set?
     Reconstructs the set by re-solving and maps the applied tier's rank onto
     [0, 1) -- uniform whatever the set size, so all sets pool into one test.
-    Invariant also checked: a non-empty affordable set MUST explore."""
+    The re-solve is capped to the most RECENT `assurance.uniformity_sample`
+    forced decisions (the store is append-only; unbounded, this re-solved
+    every forced decision ever, every day). Invariant also checked, over
+    every replayable decision (no solve needed): a non-empty affordable set
+    MUST explore. `cache` as in _resolve."""
     ac = cfg["assurance"]
     step = cfg["pricing"]["tier_step"]
     u, contradictions, unreconstructed = [], 0, 0
 
-    for evt in _replayable(decisions):
-        if evt.get("affordable_set_size", 0) > 0 and not evt.get("is_exploration"):
-            contradictions += 1
-        if not evt.get("is_exploration") or evt.get("tau_current") is None:
-            continue
+    replayable = _replayable(decisions)
+    contradictions = sum(1 for evt in replayable
+                         if evt.get("affordable_set_size", 0) > 0
+                         and not evt.get("is_exploration"))
+    forced = [evt for evt in replayable
+              if evt.get("is_exploration") and evt.get("tau_current") is not None]
+    for evt in forced[-int(ac["uniformity_sample"]):]:
         try:
-            res = _resolve(evt, cfg)
+            res = _resolve(evt, cfg, cache)
         except Exception:
             unreconstructed += 1
             continue
@@ -294,6 +307,8 @@ def exploration_uniformity(decisions, cfg):
     n = len(u)
     if n < ac["uniformity_min_draws"]:
         return {"exploration_draws": n, "required": ac["uniformity_min_draws"],
+                "forced_decisions": len(forced),
+                "resolve_sample_cap": ac["uniformity_sample"],
                 "affordable_but_not_explored": contradictions,
                 "verdict": "INSUFFICIENT"}
 
@@ -308,6 +323,8 @@ def exploration_uniformity(decisions, cfg):
     biased = pval < ac["uniformity_alert_p"] and max_dev > ac["uniformity_max_bin_deviation"]
     return {
         "exploration_draws": n,
+        "forced_decisions": len(forced),
+        "resolve_sample_cap": ac["uniformity_sample"],
         "unreconstructed": unreconstructed,
         "affordable_but_not_explored": contradictions,
         "bin_counts": counts.tolist(),
@@ -322,13 +339,14 @@ def exploration_uniformity(decisions, cfg):
 
 
 def run(decisions, outcomes, cfg):
-    pairs = _pairs(decisions, outcomes)              # once, for both checks
+    pairs = learnable_with_stock(decisions, outcomes)   # once, for both checks
+    solved = {}                                         # one re-solve per decision
     report = {
         "config": config_fingerprint(cfg, "production"),
-        "reproduction": reproduction(decisions, cfg),
+        "reproduction": reproduction(decisions, cfg, solved),
         "dispersion": dispersion_fit(decisions, outcomes, cfg, pairs),
         "correlation": correlation_drift(decisions, outcomes, cfg, pairs),
-        "exploration": exploration_uniformity(decisions, cfg),
+        "exploration": exploration_uniformity(decisions, cfg, solved),
     }
     report["failing"] = sorted(k for k, v in report.items()
                                if isinstance(v, dict) and v.get("verdict") == "FAIL")

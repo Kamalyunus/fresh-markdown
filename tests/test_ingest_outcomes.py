@@ -138,7 +138,7 @@ def test_push_failures_mark_the_outcome_ineligible(tmp_path):
 def test_built_outcomes_pass_the_store_and_rerun_is_a_dedup(tmp_path):
     """The derived events must clear the store's own validation (including
     the reconciliation rule), and re-ingesting the same feed is a no-op."""
-    from common.config import load_config
+    from conftest import load_config
     from events.store import EventStore
 
     cfg = load_config()
@@ -267,3 +267,38 @@ def test_a_discount_outside_percent_range_is_refused():
     assert [o["decision_id"] for o in outs] == ["D3"]
     assert rep["unusable_feed_rows"] == 2
     assert all("total_discount" in x["reason"] for x in rep["unusable_examples"])
+
+
+def test_units_sold_is_rounded_like_the_inventory_columns_never_truncated():
+    """A parquet float column carries 1.9999999 for 2; int() truncated it
+    to 1 while start/end were rounded, and the row then failed to
+    reconcile in the store."""
+    feed = _feed([{"start": 3.0, "sold": 1.9999999, "end": 1.0}])
+    outs, rep = build_outcomes([_dec(1)], feed)
+    assert outs[0]["units_sold"] == 2
+    assert rep["unusable_feed_rows"] == 0
+
+
+def test_a_reported_push_failure_that_lands_on_no_outcome_is_counted(tmp_path):
+    """A failure row naming an hour with no decision or no feed row was
+    dropped in silence; it is an integration miss and the report says so."""
+    p = tmp_path / "failures.jsonl"
+    p.write_text(json.dumps({"sku_id": "7", "fc": "F1", "date": "2026-08-19",
+                             "hour_of_day": 17, "reason": "push_timeout"}) + "\n"
+                 + json.dumps({"sku_id": "7", "fc": "F1", "date": "2026-08-19",
+                               "hour_of_day": 21, "reason": "push_timeout"}) + "\n")
+    outs, rep = build_outcomes([_dec(1)], _feed([{"start": 3, "sold": 1, "end": 2}]),
+                               failures=load_failures(str(p)))
+    assert outs[0]["execution_status"] == "failed"
+    assert rep["push_failures_applied"] == 1
+    assert rep["push_failures_unmatched"] == 1
+
+
+def test_a_decision_is_keyed_on_its_trading_day():
+    """events.pairs.decision_day is the one day key: a decision carrying no
+    `date` still keys on the trading day of its timestamp."""
+    dec = dict(_dec(1), timestamp="2026-08-19T17:00:00+00:00")
+    del dec["date"]
+    outs, rep = build_outcomes([dec], _feed([{"start": 3, "sold": 1, "end": 2}]))
+    assert [o["decision_id"] for o in outs] == ["D1"]
+    assert rep["decisions_without_feed_row"] == 0

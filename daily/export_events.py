@@ -37,29 +37,36 @@ def since_filter(decisions, outcomes, since):
     day -- its own `finalized_at` is a UTC clock that rolls to D+1 for hour
     23, so cutting on it split a trading day across two exports. An outcome
     naming no known decision has no trading day and falls back to the date
-    of its `finalized_at`, the only day it carries."""
+    of its `finalized_at`, the only day it carries. An orphan carrying
+    neither has no day to cut on: skipped and counted, never a KeyError
+    that stops the export. Returns (decisions, outcomes, undated_skipped)."""
     since = str(since)
     day_of = {d["decision_id"]: decision_day(d) for d in decisions}
 
     def outcome_day(o):
-        return day_of.get(o.get("decision_id")) or str(o["finalized_at"])[:10]
+        return (day_of.get(o.get("decision_id"))
+                or str(o.get("finalized_at") or "")[:10] or None)
 
+    days = [(o, outcome_day(o)) for o in outcomes]
     return ([d for d in decisions if day_of[d["decision_id"]] >= since],
-            [o for o in outcomes if outcome_day(o) >= since])
+            [o for o, day in days if day is not None and day >= since],
+            sum(1 for _, day in days if day is None))
 
 
 def export(store, out_dir, since=None):
+    """Returns ({table: (path, rows)}, undated outcomes skipped by --since)."""
     os.makedirs(out_dir, exist_ok=True)
     decisions, outcomes = store.load_decisions(), store.load_outcomes()
+    undated = 0
     if since:
-        decisions, outcomes = since_filter(decisions, outcomes, since)
+        decisions, outcomes, undated = since_filter(decisions, outcomes, since)
     written = {}
     for name, events in (("decisions", decisions), ("outcomes", outcomes)):
         df = _frame(events)
         path = os.path.join(out_dir, f"{name}.parquet")
         df.to_parquet(path, index=False)
         written[name] = (path, len(df))
-    return written
+    return written, undated
 
 
 def main():
@@ -75,8 +82,12 @@ def main():
 
     cfg = load_config(args.config)
     store = EventStore(cfg, root=args.events_dir)
-    for name, (path, n) in export(store, args.out_dir, args.since).items():
+    written, undated = export(store, args.out_dir, args.since)
+    for name, (path, n) in written.items():
         print(f"{name:9s}: {n:,} rows -> {path}")
+    if undated:
+        print(f"skipped  : {undated:,} outcome(s) naming no known decision and "
+              "carrying no finalized_at -- no trading day to cut on")
     print("derived export -- the JSONL event streams remain the audit record")
     return 0
 

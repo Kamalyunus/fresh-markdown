@@ -25,7 +25,8 @@ def episode_economics(d):
     `d` is hourly in the prepared-frame vocabulary: episode_id, date,
     hour_of_day, starting_inventory, units_sold, ending_inventory,
     original_price, offered_price, cost (+ any of ECON_CARRY). Returns one
-    row per episode: `date` (opened), `close_day`, `opening`, `units_sold`,
+    row per episode: `date` (opened), `close_day`, `opening`, `supply`
+    (opening + arrived, episodes.episode_flow -- design 12a), `units_sold`,
     `scrap` (episodes.scrap_units -- NaN where the episode is not settled),
     `revenue`, `margin`, `discount_cost`, `il`, `denom`.
     """
@@ -41,6 +42,9 @@ def episode_economics(d):
         discount_cost=("_disc", "sum"), revenue=("_rev", "sum"),
         margin=("_mar", "sum"), **carry)
     ep["scrap"] = episodes.scrap_units(d)
+    # what the episode actually had to sell: a restocked window's scrap is a
+    # share of everything that arrived, not of the opening count alone
+    ep["supply"] = episodes.episode_flow(d).supply.reindex(ep.index)
     ep["il"] = ep.discount_cost + ep.cost * ep.scrap
     ep["denom"] = ep.original_price * ep.units_sold      # ENDOGENOUS denominator
     return ep
@@ -70,10 +74,13 @@ def daily_rates(ep):
     newest days only the episodes that closed EARLY (sold out, low scrap)
     have settled, which reads as an improvement exactly where the persistence
     rule evaluates."""
-    day = ep.groupby("close_day").agg(opening=("opening", "sum"), scrap=("scrap", "sum"),
+    day = ep.groupby("close_day").agg(opening=("opening", "sum"), supply=("supply", "sum"),
+                                      scrap=("scrap", "sum"),
                                       revenue=("revenue", "sum"),
                                       margin=("margin", "sum")).sort_index()
-    day["scrap_rate"] = day.scrap / day.opening
+    # scrap over SUPPLY (opening + arrived, design 12a): over opening alone a
+    # restocked day reads a scrap rate above what it could have scrapped
+    day["scrap_rate"] = day.scrap / day.supply
     day["margin_rate"] = day.margin / day.revenue.replace(0, np.nan)
     return day
 
@@ -109,7 +116,7 @@ def fidelity_decomposition(d, cfg, pred_col="predicted_units"):
         "level_bias_at_anchor": ratio(at_anchor),
         "rows_at_anchor": int(len(at_anchor)),
         "slope_ratio_by_discount_gap": by_gap,
-        "by_category": {k: ratio(g) for k, g in d.groupby("category")},
+        # per-category ratios live in fidelity.by_category (what tune reads)
         "interpretation": (
             "level_bias_at_anchor well below 1 with a flat slope -> mu_ref level "
             "error, multiplicative recalibration permitted. Ratio near 1 at the "

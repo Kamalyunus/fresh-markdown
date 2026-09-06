@@ -440,6 +440,39 @@ now. Dates are owner sign-off, 2026-08.
   prediction-basis rows, the second `__main__` guard, `information_pending`,
   the `_dp_arm` re-solve, the `latest_priced_day`/`daily_exploration_spend`
   wrappers. Hard-coded `sample=300` and `max_days=60` became `tuning.` keys.
+- **The third review (2026-09-06), after the seal.** Mostly windows and
+  bases that had drifted between two readers of one series:
+  - the event-quality gates were all-time rates on an append-only store,
+    so one incident kept a resumed pilot suspended forever; they now read
+    the trailing `event_quality_window_days`, from one home
+    (`events.pairs.quality_counts`), and the monitor names the window;
+  - the guardrail floor and the trigger each smoothed the deterioration
+    series their own way (the floor scored one reading on 41 days and
+    called it a floor; a NaN floor read OK); one series now
+    (`common.guardrail.deterioration_series`), and the floor needs
+    `guardrail_noise_min_extra_days` SCORED readings or reads
+    `insufficient history`;
+  - the calibration-window sweep keyed rows by row date, bridged the
+    exclusion gap with the last W fitted weeks and scored weeks the
+    baseline was trained on; it now keys by opening week, windows by
+    calendar and scores after `train_end` — the schedule production runs;
+  - shadow's `n_days` spanned row dates, so a 22:00 opener bought an
+    extra day of budget; `calendar_days(opening_dates)` in both harnesses;
+  - `scrap_rate` divided by the opening count while the flow identity
+    divides by supply; a restocked episode read scrap above 1;
+  - zero-stock and restocked hours were learned from (no demand at any
+    price; a restocked count is not a censored draw) —
+    `learnable_with_stock`;
+  - the uniformity check re-solved every forced decision ever logged
+    (unbounded at volume) and `reproduction` re-solved them again;
+    capped at `assurance.uniformity_sample`, one re-solve shared;
+  - shadow's report carried no posterior digest, so a re-init after a
+    retrain left a ghost shadow `advance` could not tell from a current
+    one; a failed-push row matching no decision vanished; an orphan outcome
+    was exported under a guessed date; `decide` accepted a non-integer
+    hour and cast `current_discount` before validating it.
+  Renamed for what they are: `deff_applied_all_time`,
+  `updates_to_min_std_median`, `range_across_categories`.
 
 ## The lesson under all of it
 

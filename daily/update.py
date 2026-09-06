@@ -20,43 +20,38 @@ from common.config import load_config, deff_from_episodes
 from common import episodes
 from common.io import read_json
 from events.store import EventStore
-from events.pairs import match_pairs, decision_day, is_learnable, price_matches
+from events.pairs import (match_pairs, decision_day, is_learnable, has_stock,
+                          is_restocked, quality_counts, quality_rates)
 from engine import explore
 from engine.posterior import PosteriorStore, bounded_step
 
 
 def collect_batch(store, posterior, cfg):
-    """Match outcomes to decisions, compute event-quality gates, and return
-    eligible (decision, outcome) pairs per cell -- plus the loaded event
-    lists, so the caller does not re-parse the whole JSONL log a second time
-    for tau calibration."""
+    """Match outcomes to decisions, compute the event-quality gates, and
+    return the batch as a dict: `per_cell` -- the (decision, outcome, ratio)
+    triples a cell may learn from; `gates`; `decisions`, `outcomes` and
+    `pairs` (every matched pair) so tau calibration does not re-parse the
+    log or re-pair it; `event_quality`, the windowed counts the gates read
+    (events.pairs.quality_counts -- the monitor's stop condition reads the
+    same); and the pairs the learner refused: `excluded_no_stock` (the hour
+    opened empty -- no information, and a wrong censored term) and
+    `excluded_restock` (no single q to empty), the same rule assurance
+    grades on (events.pairs.learnable_with_stock)."""
     decision_list = store.load_decisions()
-    decisions = {d["decision_id"]: d for d in decision_list}
     outcomes = store.load_outcomes()
-
-    unmatched = [o for o in outcomes if o["decision_id"] not in decisions]
     pairs = match_pairs(decision_list, outcomes)
-    n_events = max(len(outcomes), 1)
 
-    mismatch = (sum(1 for d, o in pairs if not price_matches(d, o))
-                / max(len(pairs), 1))
-    dup_or_unmatched = (store.duplicate_counts["decision"]
-                        + store.duplicate_counts["outcome"]
-                        + len(unmatched)) / n_events
-
+    quality = quality_counts(decision_list, outcomes, cfg,
+                             store.duplicate_counts, pairs)
+    rates = quality_rates(quality)
     sc = cfg["monitoring"]["stop_conditions"]
-    gates = {
-        "duplicate_or_unmatched_rate": {
-            "value": round(dup_or_unmatched, 4),
-            "threshold": sc["duplicate_or_unmatched_rate"],
-            "pass": dup_or_unmatched <= sc["duplicate_or_unmatched_rate"]},
-        "price_mismatch_rate": {
-            "value": round(mismatch, 4),
-            "threshold": sc["price_mismatch_rate"],
-            "pass": mismatch <= sc["price_mismatch_rate"]},
-    }
+    gates = {name: {"value": round(rates[name], 4), "threshold": sc[name],
+                    "pass": rates[name] <= sc[name],
+                    "window_days": quality["event_quality_window_days"]}
+             for name in ("duplicate_or_unmatched_rate", "price_mismatch_rate")}
 
     per_cell = {}
+    excluded = {"excluded_no_stock": 0, "excluded_restock": 0}
     for dec, o in pairs:
         if posterior.is_processed(o["outcome_id"]):
             continue
@@ -68,9 +63,17 @@ def collect_batch(store, posterior, cfg):
                                     (dec["reference_mu"], dec["dispersion_r"], ratio)))
         if not ok or not is_learnable(o):
             continue
+        if not has_stock(o):
+            excluded["excluded_no_stock"] += 1
+            continue
+        if is_restocked(o):
+            excluded["excluded_restock"] += 1
+            continue
         cell = posterior.cell_name(dec["category"])
         per_cell.setdefault(cell, []).append((dec, o, ratio))
-    return per_cell, gates, decision_list, outcomes
+    return {"per_cell": per_cell, "gates": gates, "decisions": decision_list,
+            "outcomes": outcomes, "pairs": pairs, "event_quality": quality,
+            **excluded}
 
 
 def grid_update(pairs, cell_record, cfg):
@@ -90,13 +93,17 @@ def grid_update(pairs, cell_record, cfg):
     censored = episodes.is_censored_hour(inv, k, end)
     lgamma_const = gammaln(k + r) - gammaln(r) - gammaln(k + 1)
 
+    # the censored term only where the shelf emptied: logsf is the costly
+    # call, and on an uncensored row it was computed and thrown away
+    inv_c, r_c = np.maximum(inv[censored], 1) - 1, r[censored]
     loglik = np.empty(len(grid))
     for i, eps in enumerate(grid):
         mu = np.clip(mu0 * np.exp(eps * log_ratio),
                      cfg["pricing"]["demand_floor"], None)
         p = r / (r + mu)
-        exact = lgamma_const + r * np.log(p) + k * np.log1p(-p)
-        ll = np.where(censored, nbinom.logsf(np.maximum(inv, 1) - 1, r, p), exact)
+        ll = lgamma_const + r * np.log(p) + k * np.log1p(-p)
+        if len(inv_c):
+            ll[censored] = nbinom.logsf(inv_c, r_c, p[censored])
         loglik[i] = ll.sum()
 
     log_prior = -0.5 * ((grid - cell_record["mean"]) / cell_record["std"]) ** 2
@@ -170,7 +177,8 @@ def finalized_days(decisions, outcomes, pairs=None):
     return sorted(days), spend
 
 
-def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None):
+def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None,
+                    pairs=None):
     """Move tau toward the budget from realised spend (design 5.8) -- on
     the SAME two numbers the monitor's stop condition compares, so the
     correction and the backstop cannot disagree. Always returns a block;
@@ -179,7 +187,8 @@ def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None):
     `widest_std` is the posterior std the budget is sized for; it defaults
     to the store's current widest routed std. `run` passes the value read
     BEFORE any cell is committed, so a dry run and `--apply` price the same
-    days from the same posterior."""
+    days from the same posterior. `pairs` is match_pairs(decisions,
+    outcomes) if the caller already built it (collect_batch did)."""
     from daily.monitor import business_metrics, settled_episodes  # sibling; no cycle
 
     tau_now = posterior.tau(cfg)
@@ -190,7 +199,8 @@ def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None):
                             "force to calibrate")
         return block
 
-    pairs = match_pairs(decisions, outcomes)          # once, for both reads
+    if pairs is None:
+        pairs = match_pairs(decisions, outcomes)      # once, for both reads
     priced_days, spend_by_day = finalized_days(decisions, outcomes, pairs)
     if not priced_days:
         block["skipped"] = "no finalized outcomes"
@@ -251,11 +261,10 @@ def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None):
         "budget": last["budget"],
         "tau_after": round(float(tau_end), 2),
         "commit": True,
+        # the walk says which steps sat on a clip bound; never inferred
+        # from the rounded taus
+        "clipped": any(r["clipped"] for r in rows),
     })
-    lo, hi = cfg["exploration"]["tau_adjust_clip"]
-    block["clipped"] = any(r["tau_after"] in (round(r["tau"] * lo, 2),
-                                              round(r["tau"] * hi, 2))
-                           for r in rows if r["tau_after"] != r["tau"])
     return block
 
 
@@ -263,7 +272,10 @@ def calibration_current(cfg, today=None):
     """Does the level-calibration schedule cover the week being priced?
     A week past the schedule takes the FROZEN fallback silently, so this is
     the hard gate against learning from stale factors. Static calibration
-    passes; `today` is injectable for tests."""
+    passes. `today` is the day being priced -- `run` passes the store's
+    latest TRADING day (events.pairs.decision_day), never the UTC wall
+    clock, which rolls into the next week hours before the shop does; the
+    clock is the fallback only while no decision has been priced."""
     path = cfg["baseline_model"]["calibration_factor_path"]
     if not os.path.exists(path):
         return {"value": "none", "threshold": "schedule covers today",
@@ -296,14 +308,19 @@ def run(cfg, apply=False, events_root=None, posterior_path=None, today=None,
         calibrate_tau=False, resume_exploration=False):
     store = EventStore(cfg, root=events_root)
     posterior = PosteriorStore(cfg, path=posterior_path)
-    per_cell, gates, decision_list, outcome_list = collect_batch(
-        store, posterior, cfg)
+    batch = collect_batch(store, posterior, cfg)
+    gates = batch["gates"]
     # a HARD gate beside the event-quality ones: learning from prices set on
-    # stale factors banks evidence about a model that is not the one running
+    # stale factors banks evidence about a model that is not the one running.
+    # Judged on the latest TRADING day priced, not the wall clock
+    if today is None:
+        today = max((decision_day(d) for d in batch["decisions"]), default=None)
     gates["calibration_schedule_current"] = calibration_current(cfg, today)
 
     hard_fail = [name for name, g in gates.items() if not g["pass"]]
     report = {"event_quality_gates": gates, "cells": {}, "applied": False,
+              "batch": {k: batch[k] for k in ("excluded_no_stock",
+                                              "excluded_restock")},
               "exploration_suspended": posterior.exploration_suspended()}
 
     # tau moves on SPEND, not on evidence, so it is calibrated whether or not
@@ -312,10 +329,10 @@ def run(cfg, apply=False, events_root=None, posterior_path=None, today=None,
     # Computed BEFORE the commit loop: the budget is sized on the posterior
     # the days were priced under, so a dry run and --apply agree on tau_after.
     report["tau_calibration"] = tau_calibration(
-        decision_list, outcome_list, posterior, cfg,
-        widest_std=posterior.widest_std())
+        batch["decisions"], batch["outcomes"], posterior, cfg,
+        widest_std=posterior.widest_std(), pairs=batch["pairs"])
 
-    for cell, pairs in sorted(per_cell.items()):
+    for cell, pairs in sorted(batch["per_cell"].items()):
         rec = posterior.state["cells"][cell]
         raw_mean, raw_std, eff_info, diag = grid_update(pairs, rec, cfg)
         new_mean, new_std, clipped = bounded_step(
@@ -405,7 +422,13 @@ def main():
 
     for name, g in report["event_quality_gates"].items():
         print(f"gate {name}: {g['value']} vs {g['threshold']} "
-              f"-> {'PASS' if g['pass'] else 'FAIL'}")
+              f"-> {'PASS' if g['pass'] else 'FAIL'}"
+              + (f"  (trailing {g['window_days']} trading days)"
+                 if "window_days" in g else ""))
+    b = report["batch"]
+    if b["excluded_no_stock"] or b["excluded_restock"]:
+        print(f"batch excluded: {b['excluded_no_stock']} hour(s) that opened "
+              f"empty, {b['excluded_restock']} restocked hour(s)")
     for cell, c in report["cells"].items():
         print(f"[{cell}] forced={c['forced_outcomes']} "
               f"info+={c['effective_information']} "

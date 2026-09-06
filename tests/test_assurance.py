@@ -125,7 +125,7 @@ def test_a_solver_that_raises_on_every_decision_is_a_fail_not_insufficient(cfg, 
     so a broken solver read INSUFFICIENT (status WARN) instead of FAIL."""
     decs = [_decision(cfg, q=3, path=[0.8] * 4) for _ in range(4)]
 
-    def boom(evt, cfg):
+    def boom(evt, cfg, cache=None):
         raise RuntimeError("solver broken")
     monkeypatch.setattr(assurance, "_resolve", boom)
     out = assurance.reproduction(decs, cfg)
@@ -256,9 +256,12 @@ def test_correlation_catches_drift_that_would_rescale_every_update(cfg):
     far above the frozen value, and evidence is being over-counted until it
     does."""
     decs, outs = _episodes(cfg, 300, hours=4, episode_shift=3.0, seed=5)
-    out = assurance.correlation_drift(decs, outs, cfg)
+    # a fixed frozen rho, not the owner's paste: the claim is that a world
+    # far more clustered than the artifact says fails, whatever ships
+    frozen = {**cfg, "dispersion": {**cfg["dispersion"], "rho": 0.12}}
+    out = assurance.correlation_drift(decs, outs, frozen)
     assert out["verdict"] == "FAIL"
-    assert out["rho_live"] > cfg["dispersion"]["rho"]
+    assert out["rho_live"] > 0.12 and out["rho_frozen"] == 0.12
     assert out["deff_live"] > out["deff_frozen"]
 
 
@@ -430,13 +433,16 @@ def test_icc_survives_a_nan_residual():
 def test_assurance_grades_only_prices_that_were_actually_charged(cfg):
     """A failed push sold at a price we did not choose. Grading r on it
     indicts the model for the integration's miss."""
-    from events.pairs import match_pairs
+    from events.pairs import match_pairs, learnable_with_stock
     decs, outs = _demand_pairs(cfg, 30, r_true=R, seed=4)
     for o in outs[:10]:
         o["execution_status"] = "failed"
+    outs[12]["starting_inventory"] = 0                 # opened empty: no evidence
     assert len(match_pairs(decs, outs)) == 30
     assert len(match_pairs(decs, outs, learnable=True)) == 20
-    assert len(assurance._pairs(decs, outs)) == 20
+    # the one home, read by assurance and the learner alike
+    assert len(learnable_with_stock(decs, outs)) == 19
+    assert assurance.learnable_with_stock is learnable_with_stock
 
 
 def test_run_pairs_the_events_once_for_both_live_checks(cfg, monkeypatch):
@@ -445,13 +451,13 @@ def test_run_pairs_the_events_once_for_both_live_checks(cfg, monkeypatch):
     own."""
     decs, outs = _demand_pairs(cfg, 30, r_true=R, seed=4)
     calls = []
-    real = assurance._pairs
+    real = assurance.learnable_with_stock
 
     def counting(d, o):
         calls.append(1)
         return real(d, o)
 
-    monkeypatch.setattr(assurance, "_pairs", counting)
+    monkeypatch.setattr(assurance, "learnable_with_stock", counting)
     report = assurance.run(decs, outs, cfg)
     assert len(calls) == 1
     assert report["dispersion"] == assurance.dispersion_fit(decs, outs, cfg)
@@ -476,3 +482,70 @@ def test_uniformity_reconstructs_the_set_with_the_decision_own_delta_min(cfg):
         decs.append(d)
     rep = assurance.exploration_uniformity(decs, cfg)
     assert rep["verdict"] == "PASS", rep
+
+
+def test_uniformity_re_solves_only_the_most_recent_forced_decisions(cfg, monkeypatch):
+    """The store is append-only: unbounded, the check re-solved every
+    forced decision ever, every day. It re-solves the most recent
+    `assurance.uniformity_sample`; the affordable-but-not-explored
+    contradiction is still counted over every replayable decision."""
+    decs = _exploration_events(cfg, 300, 9)
+    forced = [d for d in decs if d["is_exploration"]]
+    assert len(forced) > 60
+    decs[0].update(is_exploration=False, affordable_set_size=3)   # oldest: a contradiction
+    capped = dict(cfg, assurance=dict(cfg["assurance"], uniformity_sample=50,
+                                      uniformity_min_draws=10))
+    solves = []
+    real = assurance.dp_mod.solve
+
+    def counting(*a, **k):
+        solves.append(1)
+        return real(*a, **k)
+    monkeypatch.setattr(assurance.dp_mod, "solve", counting)
+
+    out = assurance.exploration_uniformity(decs, capped)
+    assert len(solves) == 50 and out["resolve_sample_cap"] == 50
+    assert out["exploration_draws"] <= 50
+    assert out["forced_decisions"] == len(forced) - 1
+    assert out["affordable_but_not_explored"] == 1 and out["verdict"] == "FAIL"
+
+
+def test_run_shares_one_re_solve_between_reproduction_and_uniformity(cfg, monkeypatch):
+    """Both checks re-solve the same recent decisions; run hands them one
+    cache so a decision is solved once, and a solve that raises is not
+    cached as an answer."""
+    decs = _exploration_events(cfg, 120, 9)
+    small = dict(cfg, assurance=dict(cfg["assurance"], reproduction_sample=80,
+                                     uniformity_sample=80, uniformity_min_draws=10))
+    solves = []
+    real = assurance.dp_mod.solve
+
+    def counting(*a, **k):
+        solves.append(1)
+        return real(*a, **k)
+    monkeypatch.setattr(assurance.dp_mod, "solve", counting)
+    report = assurance.run(decs, [], small)
+    forced_recent = sum(1 for d in decs[-80:] if d["is_exploration"])
+    # reproduction solves the last 80; uniformity's last 80 forced overlap
+    # those and add only the older ones
+    older_forced = sum(1 for d in decs[:-80] if d["is_exploration"])
+    need = 80 + max(0, min(older_forced, 80 - forced_recent))
+    assert len(solves) == need, (len(solves), need)
+    assert report["reproduction"]["verdict"] == "PASS"
+
+    cache = {}
+    with pytest.raises(ValueError):
+        assurance._resolve(dict(decs[0], q_remaining=0), cfg, cache)
+    assert cache == {}
+
+
+def test_reproduction_caps_listed_exception_failures_like_mismatches(cfg, monkeypatch):
+    decs = [_decision(cfg, q=3, path=[0.8] * 4) for _ in range(5)]
+
+    def boom(evt, cfg, cache=None):
+        raise RuntimeError("solver broken")
+    monkeypatch.setattr(assurance, "_resolve", boom)
+    out = assurance.reproduction(
+        decs, dict(cfg, assurance=dict(cfg["assurance"], reproduction_report_max=2)))
+    assert out["mismatch_count"] == 5 and out["mismatch_rate"] == 1.0
+    assert len(out["failures"]) == 2

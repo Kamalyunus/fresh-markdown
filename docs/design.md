@@ -717,7 +717,11 @@ takes moments.
   Zero-sale hours are retained through `P(D = 0)`.
 - **Exploitation outcomes are discarded.** Exploitation prices are chosen
   *by* the posterior; learning from them feeds beliefs back to themselves.
-  Off-policy correction is phase 2.
+  Off-policy correction is phase 2. So are hours with nothing to sell and
+  restocked hours (`events.pairs.learnable_with_stock`): a zero-stock hour
+  carries no demand information at any price, and a restocked hour's
+  sold count is not a censored draw. The batch summary counts both
+  (`batch.excluded_no_stock`, `batch.excluded_restock`).
 - **Correlation deflation.** Hours within an episode share an inventory
   pool, a demand shock, and a monotone price path; accumulated information
   is divided by `deff = 1 + (forced_hours − 1) × rho`. Without it the
@@ -789,7 +793,10 @@ thin-IL day or two
 expensive draws and the τ controller halves τ on it the next morning; the
 spend series reads every PRICED day, 0 where nothing was forced, so a day
 under suspension ends the streak instead of leaving the over-budget days as
-the latest reading and re-firing the stop a human had just lifted) **suspend
+the latest reading and re-firing the stop a human had just lifted; the
+safety block reports the window it read — `event_quality_window_start`,
+`event_quality_through`, `outcomes_in_window` — and its counts are the
+window's, while `deff_applied_all_time` says what it is) **suspend
 exploration — exploitation pricing continues**: the monitor writes
 `exploration_suspended` into the posterior state, `decide` selects with no
 budget (no draw) while it is set, `status` reads WARN with the reason, and
@@ -797,7 +804,10 @@ only a human lifts it (`daily.update --resume-exploration`). Nothing
 auto-resumes: a stop is a finding to investigate, not a transient. The
 guardrail series is keyed by an episode's **close day**, so the newest
 days count every episode that closed rather than only the early
-sell-outs, and floor and trigger read the same, unbiased series.
+sell-outs, and floor and trigger read the same, unbiased series —
+`common.guardrail.deterioration_series` lays the days on the calendar,
+smooths within each contiguous run and never lets a reading span a gap.
+Scrap is a share of **supply** (opening + restocked, §12a) in both.
 
 ### 5.13 Shadow harness — full rehearsal at zero pricing risk
 
@@ -852,8 +862,11 @@ scrap and IL the guardrail floors and the monitor read, never a local copy.
 days** (`ledger.days`, the days the controller trace walks), never over the
 seed days, whose first day has no trailing history and a budget of exactly
 zero. Every per-day figure divides by one `n_days`: the calendar span of
-the unsampled, unextended window frame (a sample can shrink the span; the
-window extension adds a next-day row with no decisions). Shadow freezes the
+the episodes' **opening dates** in the unsampled, unextended window frame
+(`window.date_min/date_max` are opening dates too — a late opener's rows
+run past midnight, and a row-date span would count a day no episode
+opened on; a sample can shrink the span; the window extension adds a
+next-day row with no decisions). Shadow freezes the
 calibration at the window start (`freeze_calibration_from`) before
 predicting, so `calibration_regimes.frozen_anchor` is the anchor by
 construction on any window, and `calibration_coverage` reads the deliberate
@@ -1057,6 +1070,10 @@ with no window, so a p-value alone tightens every day the system runs — at
 same draw distribution would pass in week one and fail at volume with nothing
 about the draw having changed. `uniformity_max_bin_deviation` is scale-free
 and carries the meaning; the p-value only stops noise being called bias.
+The check re-solves each forced decision's admissible set, so it reads
+the newest `assurance.uniformity_sample` forced decisions (reported as
+`exploration.forced_decisions` / `resolve_sample_cap`), and one re-solve
+per event is shared with `reproduction` rather than done twice.
 
 Details that carry the value: the decision event carries `mu_ref_path` and
 `anchor_discount` so it is *sufficient* to re-solve (never remove an event
@@ -1091,9 +1108,15 @@ Rules, in order:
 2. **W from the rolling-origin sweep** (`calibration_window_sweep`). If the
    sweep wants a W that violates rule 1, revisit the split, not the band.
    Every row — `uncalibrated` included — is scored on **one common set of
-   evaluation weeks** (the longest candidate's burn-in). Per-window burn-in
-   judged a long window on a later, smaller sample than a short one, so the
-   ranking read *which weeks* rather than which window. `uncalibrated` is
+   evaluation weeks** (the longest candidate's burn-in, and every one
+   after `split.train_end`, so no week the baseline was fit on is scored;
+   `eval_weeks` and `eval_starts_after_train` are reported). Per-window
+   burn-in judged a long window on a later, smaller sample than a short
+   one, so the ranking read *which weeks* rather than which window. Rows
+   are keyed by the episode's **opening week** and each candidate window
+   is the calendar weeks `[t − W, t)` — a gap is a gap, not bridged by the
+   last W fitted weeks — exactly the schedule production applies (§9.2).
+   `uncalibrated` is
    ranked with the windows: when no-factors wins, `verdict` says so and
    `tune` raises it as an INFO reading. **The ranking is not the evidence.**
    It compares aggregates over ~10 weeks and then turns on a lexicographic
@@ -1468,9 +1491,15 @@ order (`guardrail_threshold_recommendation` reports the floor and the
 verdict). The pre-launch series is laid on a full calendar first, so the
 trailing window and the smoothing never straddle the exclusion gap — a
 28-day window over close-day ROWS graded the first post-gap days against
-days six weeks earlier. The comparison itself lives once, in
-`common.guardrail.deviation`, which also drops the ±inf a zero baseline
-produces, so floor and trigger see the same finite series.
+days six weeks earlier. The series itself lives once, in
+`common.guardrail.deterioration_series` (the monitor's trigger calls the
+same function), and the comparison in `common.guardrail.deviation`, which
+also drops the ±inf a zero baseline produces, so floor and trigger see the
+same finite series. The floor needs
+`monitoring.guardrail_noise_min_extra_days` **scored** readings — each
+contiguous run scores its length minus the window minus the smoothing
+days — and a run that scores none, or a floor that solves to NaN, reads
+`insufficient history` (`days_scored` reported), never a number.
 
 Bases are per metric in `common.guardrail.BASIS`: `scrap: relative`
 (strictly positive), `margin: absolute_pp` — `margin_rate` **crosses

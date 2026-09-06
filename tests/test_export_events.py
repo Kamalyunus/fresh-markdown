@@ -9,7 +9,7 @@ def test_export_events_writes_warehouse_safe_tables(tmp_path):
     """Derived tables for the warehouse: one row per event, list fields
     JSON-encoded, idempotent, --since filters. The JSONL stays authoritative
     -- the export reads through the store, never bypasses it."""
-    from common.config import load_config
+    from conftest import load_config
     from events.store import EventStore
     from daily.export_events import export
 
@@ -34,16 +34,16 @@ def test_export_events_writes_warehouse_safe_tables(tmp_path):
             "baseline_model_version": "b", "posterior_version": 0,
             "config_version": "1.0.0", "config_digest": "0123456789abcdef",
             "timestamp": f"{day}T17:00:00+00:00"})
-    written = export(store, str(tmp_path / "exports"))
+    written, _ = export(store, str(tmp_path / "exports"))
     path, n = written["decisions"]
     assert n == 2
     df = pd.read_parquet(path)
     # list field arrives JSON-encoded, so any warehouse loads it
     assert json.loads(df.mu_ref_path.iloc[0]) == [0.8, 0.7]
     # idempotent overwrite, and --since filters by pricing date
-    assert export(store, str(tmp_path / "exports"))["decisions"][1] == 2
+    assert export(store, str(tmp_path / "exports"))[0]["decisions"][1] == 2
     assert export(store, str(tmp_path / "exports"),
-                  since="2026-08-19")["decisions"][1] == 1
+                  since="2026-08-19")[0]["decisions"][1] == 1
 
 
 def test_since_cuts_both_tables_on_the_trading_day(tmp_path):
@@ -52,8 +52,7 @@ def test_since_cuts_both_tables_on_the_trading_day(tmp_path):
     shipped the decision without... the outcome landed in the next load: a
     trading day split across two exports. Both tables now cut on the
     decision's trading day (events.pairs.decision_day)."""
-    from conftest import decision_event, outcome_event
-    from common.config import load_config
+    from conftest import decision_event, outcome_event, load_config
     from events.store import EventStore
     from daily.export_events import export
 
@@ -75,7 +74,7 @@ def test_since_cuts_both_tables_on_the_trading_day(tmp_path):
                                       finalized_at="2026-08-18T12:00:00+00:00"))
 
     def rows(since):
-        out = export(store, str(tmp_path / "exports"), since=since)
+        out, _ = export(store, str(tmp_path / "exports"), since=since)
         return {name: sorted(pd.read_parquet(path)[f"{name[:-1]}_id"])
                 for name, (path, _) in out.items()}
 
@@ -83,3 +82,29 @@ def test_since_cuts_both_tables_on_the_trading_day(tmp_path):
     assert rows("2026-08-18") == {"decisions": ["D-late", "D-next"],
                                   "outcomes": ["O-late", "O-next", "O-orphan"]}
     assert rows(None)["outcomes"] == ["O-late", "O-next", "O-orphan"]
+
+
+def test_an_orphan_outcome_with_no_finalized_at_is_skipped_and_counted(tmp_path):
+    """An outcome naming no known decision falls back to its `finalized_at`
+    day; one carrying neither raised KeyError and stopped the whole
+    export. It has no day to cut on: skipped under --since, counted, and
+    still exported in full without a cut."""
+    from conftest import decision_event, outcome_event, load_config
+    from events.store import EventStore
+    from daily.export_events import export, since_filter
+
+    store = EventStore(load_config(), root=str(tmp_path / "events"))
+    assert store.emit_decision(decision_event(decision_id="D1", date="2026-08-19"))
+    assert store.emit_outcome(outcome_event(outcome_id="O1", decision_id="D1",
+                                            ending_inventory=1))
+    # the store requires finalized_at, so the undated orphan is a foreign
+    # line; since_filter is what meets it
+    decisions, outcomes = store.load_decisions(), store.load_outcomes()
+    orphan = {"outcome_id": "O-undated", "decision_id": "D-gone", "units_sold": 0,
+              "starting_inventory": 1, "ending_inventory": 1, "applied_price": 1.0}
+    kept_d, kept_o, undated = since_filter(decisions, outcomes + [orphan], "2026-08-01")
+    assert [o["outcome_id"] for o in kept_o] == ["O1"] and undated == 1
+    written, skipped = export(store, str(tmp_path / "exports"), since="2026-08-01")
+    assert written["outcomes"][1] == 1 and skipped == 0
+    written, skipped = export(store, str(tmp_path / "exports"))
+    assert written["outcomes"][1] == 1 and skipped == 0

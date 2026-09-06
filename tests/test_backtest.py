@@ -19,23 +19,32 @@ from engine.explore import SpreadLedger
 from evaluate.backtest import calibration_window_sweep
 
 
-def _anchor_rows(weeks, categories=("VEG", "FRUIT"), seed=7):
-    """Anchor rows (total_discount == d_ref) the sweep can group by week."""
+def _anchor_rows(weeks, categories=("VEG", "FRUIT"), seed=7, start="2026-01-05"):
+    """Anchor rows (total_discount == d_ref), one single-day episode per day
+    and category, the sweep can key by the episode's opening week."""
     rng = np.random.default_rng(seed)
-    days = pd.date_range("2026-01-05", periods=7 * weeks, freq="D")
+    days = pd.date_range(start, periods=7 * weeks, freq="D")
     return pd.DataFrame([
-        {"date": str(d.date()), "category": c,
+        {"episode_id": f"{d.date()}|{c}", "date": str(d.date()), "category": c,
          "total_discount": 0.30, "d_ref": 0.30,
          "units_sold": float(rng.integers(40, 60)), "predicted_units": 50.0}
         for d in days for c in categories])
+
+
+def _sweep_cfg(cfg, windows, train_end="2025-12-31"):
+    """The sweep's config: its windows, and split.train_end placed BEFORE
+    the frame so the eval set is the burn-in alone unless a test moves it."""
+    cfg = copy.deepcopy(cfg)
+    cfg["baseline_model"]["calibration_window_sweep_weeks"] = list(windows)
+    cfg["data"]["split"]["train_end"] = train_end
+    return cfg
 
 
 def test_every_sweep_row_is_scored_on_the_same_weeks(cfg):
     """Per-window burn-in judged an 8w window on 11 weeks and a 2w window on
     17 DIFFERENT weeks, so the ranking read which weeks, not which window.
     One common eval set, and `uncalibrated` ranked with the rest."""
-    cfg = copy.deepcopy(cfg)
-    cfg["baseline_model"]["calibration_window_sweep_weeks"] = [1, 2, 4]
+    cfg = _sweep_cfg(cfg, [1, 2, 4])
     out = calibration_window_sweep(_anchor_rows(12), cfg)
 
     scored = {k: v["eval_weeks"] for k, v in out.items()
@@ -43,19 +52,86 @@ def test_every_sweep_row_is_scored_on_the_same_weeks(cfg):
     assert len(set(scored.values())) == 1, scored
     assert {"uncalibrated", "trailing_1w", "trailing_2w",
             "trailing_4w"} <= set(scored)
-    assert out["eval_weeks_common_from"]
+    # the eval set is named: every week from four weeks in (the longest
+    # window's span) to the end
+    assert out["eval_weeks"] == [str((pd.Timestamp("2026-01-05")
+                                      + pd.Timedelta(weeks=k)).date())
+                                 for k in range(4, 12)]
+    assert out["eval_weeks_common_from"] == out["eval_weeks"][0]
+    assert scored["uncalibrated"] == len(out["eval_weeks"])
     # uncalibrated is ranked, but the PASTE target stays a real window: W=0
     # is not a config value
     assert out["recommended_fit_window"].startswith("trailing_")
     assert isinstance(out["uncalibrated_beats_all_windows"], bool)
 
 
+def test_the_sweep_keys_rows_by_the_episodes_opening_week(cfg):
+    """Rule 15. Every episode opens on a Sunday at 23:00 and has a Monday
+    row: keyed by ROW week the Monday rows manufacture a second set of weeks
+    (the calibration fit never sees an episode split that way); keyed by
+    the episode's opening date each week is one Sunday's episodes."""
+    cfg = _sweep_cfg(cfg, [1])
+    sundays = pd.date_range("2026-01-04", periods=8, freq="7D")
+    rows = []
+    for s in sundays:
+        for c in ("VEG", "FRUIT"):
+            for day, hour in ((s, 23), (s + pd.Timedelta(days=1), 0)):
+                rows.append({"episode_id": f"{s.date()}|{c}", "date": str(day.date()),
+                             "hour_of_day": hour, "category": c,
+                             "total_discount": 0.30, "d_ref": 0.30,
+                             "units_sold": 50.0, "predicted_units": 50.0})
+    out = calibration_window_sweep(pd.DataFrame(rows), cfg)
+    weeks = [str((s - pd.Timedelta(days=6)).date()) for s in sundays]
+    assert out["eval_weeks"] == weeks[1:]
+    # a row-week key would also have scored the Monday weeks (one past the
+    # last Sunday's), and the uncalibrated row would have counted them
+    assert out["uncalibrated"]["eval_weeks"] == len(weeks) - 1
+
+
+def test_the_sweep_windows_by_calendar_so_a_gap_is_not_bridged(cfg):
+    """Windowed by week INDEX, the first weeks after data.exclusion_window
+    were fit on the weeks before it -- six weeks stale, presented as a
+    trailing 2-week fit. Pre-gap weeks carry a 2x level, post-gap weeks
+    none: a calendar window fits the first post-gap weeks on nothing (the
+    anchor, as production's schedule does) and every eval week is in band;
+    an index window would have halved the first post-gap weeks' ratio."""
+    cfg = _sweep_cfg(cfg, [2])
+    pre = _anchor_rows(4, start="2026-01-05")
+    pre["units_sold"] = 100.0                              # level 2x
+    post = _anchor_rows(6, start="2026-04-06")             # a 9-week hole
+    post["units_sold"] = 50.0                              # level 1x
+    out = calibration_window_sweep(pd.concat([pre, post], ignore_index=True), cfg)
+    row = out["trailing_2w"]
+    assert row["share_weeks_in_band"] == 1.0
+    assert row["mean_abs_log_error"] == pytest.approx(0.0, abs=1e-9)
+    # the eval set spans both sides of the hole, so the pre-gap 2x weeks
+    # (fit on their own 2x predecessors) are in it too
+    assert out["eval_weeks"][0] < "2026-02-15" < out["eval_weeks"][-1]
+
+
+def test_the_sweep_scores_no_week_the_baseline_was_fit_on(cfg):
+    """Rule 16 in miniature: predicted_units on a train week are the
+    model's own residuals. The common eval set starts at the later of the
+    burn-in and the first week after split.train_end, and says so."""
+    frame = _anchor_rows(12)                               # weeks from 01-05
+    early = calibration_window_sweep(frame, _sweep_cfg(cfg, [1, 2]))
+    late = calibration_window_sweep(frame, _sweep_cfg(cfg, [1, 2],
+                                                      train_end="2026-02-11"))
+    assert early["eval_weeks"][0] == "2026-01-19"          # burn-in alone
+    assert late["eval_weeks"][0] == "2026-02-16"           # first week past train_end
+    assert late["eval_weeks"] == [w for w in early["eval_weeks"] if w > "2026-02-11"]
+    assert late["eval_starts_after_train"] and early["eval_starts_after_train"]
+    assert late["uncalibrated"]["eval_weeks"] == len(late["eval_weeks"])
+    # a frame entirely inside train has no eval week and says so
+    none = calibration_window_sweep(frame, _sweep_cfg(cfg, [1], train_end="2026-12-31"))
+    assert isinstance(none, str) and "train_end" in none
+
+
 def test_no_factors_winning_is_flagged_not_hidden(cfg):
     """On flat data the factors only add estimation noise, so uncalibrated
     wins -- and the sweep must say so instead of silently ranking the
     least-bad window."""
-    cfg = copy.deepcopy(cfg)
-    cfg["baseline_model"]["calibration_window_sweep_weeks"] = [1, 2]
+    cfg = _sweep_cfg(cfg, [1, 2])
     out = calibration_window_sweep(_anchor_rows(10), cfg)
 
     unc, best = out["uncalibrated"], out[out["recommended_fit_window"]]
@@ -67,9 +143,7 @@ def test_no_factors_winning_is_flagged_not_hidden(cfg):
 
 
 def test_the_sweep_refuses_rather_than_score_a_stub_eval_set(cfg):
-    cfg = copy.deepcopy(cfg)
-    cfg["baseline_model"]["calibration_window_sweep_weeks"] = [8]
-    out = calibration_window_sweep(_anchor_rows(3), cfg)
+    out = calibration_window_sweep(_anchor_rows(3), _sweep_cfg(cfg, [8]))
     assert isinstance(out, str) and out.startswith("NOT RUN")
 
 
@@ -79,8 +153,7 @@ def test_the_sweep_says_when_it_cannot_tell(cfg):
     which window 'wins'. The paired test asks the question that matters --
     same week, did the factors move the ratio closer to 1 -- and says so when
     the answer is undecidable."""
-    cfg = copy.deepcopy(cfg)
-    cfg["baseline_model"]["calibration_window_sweep_weeks"] = [1, 2]
+    cfg = _sweep_cfg(cfg, [1, 2])
     out = calibration_window_sweep(_anchor_rows(10), cfg)
 
     for key in ("trailing_1w", "trailing_2w"):
@@ -100,14 +173,14 @@ def test_a_window_that_genuinely_helps_is_called_out(cfg):
     import numpy as np
     import pandas as pd
 
-    cfg = copy.deepcopy(cfg)
-    cfg["baseline_model"]["calibration_window_sweep_weeks"] = [2]
+    cfg = _sweep_cfg(cfg, [2])
     rng = np.random.default_rng(3)
     days = pd.date_range("2026-01-05", periods=7 * 14, freq="D")
     rows = []
     for d in days:
         for c, bias in (("VEG", 1.6), ("FRUIT", 0.6)):   # stable, large offset
-            rows.append({"date": str(d.date()), "category": c,
+            rows.append({"episode_id": f"{d.date()}|{c}",
+                         "date": str(d.date()), "category": c,
                          "total_discount": 0.30, "d_ref": 0.30,
                          "units_sold": 50.0 * bias + rng.normal(0, 1.0),
                          "predicted_units": 50.0})
@@ -127,10 +200,23 @@ def test_replay_collects_every_decision_hour(cfg):
     assert ledger.decisions > d.episode_id.nunique()
 
 
-def _replay_episode(eid, ending_last=0, hours_remaining_last=0):
+def test_the_replay_ledger_keys_spreads_on_the_rows_day(cfg):
+    """Shadow's ledger keys every decision on the day it was made; the
+    replay's keyed the whole episode on its opening day, so a 22:00 opener
+    put its next-morning decisions on the wrong day of the controller's
+    walk. One key: the row's day."""
+    from evaluate.backtest import policy_replay
+    d = _replay_episode("cross", date=["2026-05-01", "2026-05-01", "2026-05-02"],
+                        hour_of_day=[22, 23, 0])
+    _, _, ledger = policy_replay(d, cfg)
+    assert ledger.days == ["2026-05-01", "2026-05-02"]
+
+
+def _replay_episode(eid, ending_last=0, hours_remaining_last=0,
+                    date="2026-05-01", hour_of_day=(9, 10, 11)):
     """One closed episode in the vocabulary `_attach_predictions` emits."""
     return episode_frame(
-        episode_id=eid, date="2026-05-01", hour_of_day=[9, 10, 11],
+        episode_id=eid, date=date, hour_of_day=list(hour_of_day),
         hours_remaining=[2, 1, hours_remaining_last],
         total_discount=[0.25, 0.25, 0.30], original_price=10_000.0,
         cost=4000.0, d_ref=0.25, starting_inventory=[10, 8, 6], units_sold=2,
@@ -153,10 +239,10 @@ def test_the_replay_refuses_an_unclosed_episode_rather_than_aggregate_it(cfg):
 def test_the_tau_cross_check_uses_one_day_count_on_both_sides(cfg):
     """The budget is IL per day and the spend is divided by the same days,
     so the bisection lands the spend under the budget it was given whatever
-    the count -- and the count is the ONE n_days (episodes.calendar_days),
-    the basis shadow's derivation reports on, so the two `days`,
-    `implied_daily_spend` and `daily_budget` figures are comparable. The
-    count cancels in tau itself."""
+    the count -- and the count is the ONE n_days: episodes.calendar_days
+    over episodes.opening_dates, the expression shadow's derivation divides
+    by, so the two `days`, `implied_daily_spend` and `daily_budget` figures
+    are comparable. The count cancels in tau itself."""
     from common import episodes
     from evaluate.backtest import derive_tau_initial
     rng = np.random.default_rng(6)
@@ -164,10 +250,11 @@ def test_the_tau_cross_check_uses_one_day_count_on_both_sides(cfg):
     days = ["2026-07-01", "2026-07-02", "2026-07-10"]   # 3 trading, 10 calendar
     for i in range(300):
         led.add(days[i % 3], rng.lognormal(6, 1, 6))
-    ep = pd.DataFrame({"date": [days[i % 3] for i in range(30)],
+    ep = pd.DataFrame({"episode_id": [f"e{i}" for i in range(30)],
+                       "date": [days[i % 3] for i in range(30)],
                        "actual_il": 5_000.0})
     out = derive_tau_initial(led, ep, cfg, launch_std=1.0)
-    n = episodes.calendar_days(ep.date)
+    n = episodes.calendar_days(episodes.opening_dates(ep))
     assert out["days"] == n == 10
     budget = explore_mod.budget_today(ep.actual_il.sum() / n, 1.0, cfg)
     assert out["daily_budget"] == pytest.approx(budget, abs=0.1)
@@ -194,6 +281,9 @@ def test_predict_frame_is_the_one_extend_lookup_predict_path(cfg, tmp_path):
     assert len(d) == 5 and d.is_observed.tolist() == [True, True, False, False, False]
     assert (d.r == 1.0).all() and (d.mu_ref_hat == 1.7).all()
     assert d.hours_remaining.tolist() == [4, 3, 2, 1, 0]
+    # the synthetic tail carries the last observed discount (legacy holds),
+    # which is what the replay's legacy arm reads -- no second forward-fill
+    assert (d.total_discount == 0.30).all()
 
 
 def _fidelity_frame(cfg):
@@ -233,6 +323,12 @@ def test_fidelity_grades_the_frozen_artifact_and_reports_the_refit_beside_it(
     assert a["gate_window"] == "test"
     assert a["calibration_gate_value"] == b["calibration_gate_value"], \
         "the test-week schedule factor reached the frozen gate value"
+    # each figure once: the gate window's ratio is fidelity_episode_sold_ratio
+    # (by_window carries the others), per-category ratios are fidelity's
+    assert set(a["by_window"]) == {"train", "calib", "all"}
+    assert "by_category" in a and "by_category" not in a["measurement_10"]
+    # the whole frame's weeks, keyed as episodes.week_key spells them
+    assert set(a["by_week"]) == {"2026-06-29", "2026-07-06", "2026-07-27", "2026-08-03"}
     # the mechanism reading DOES see the schedule: doubled mu, lower ratio
     assert b["weekly_refit"]["level_bias_at_anchor"] < a["weekly_refit"]["level_bias_at_anchor"]
     assert b["weekly_refit"]["vs_frozen"] < 0
@@ -335,8 +431,9 @@ def test_step_sensitivity_prices_the_cap_on_real_episodes(cfg):
         return _episode_frame(g)
 
     # cost ratio 0.4, d_ref 0.25 -> deepening bar (1-d)/(gamma-d) ~ 5, so
-    # |eps| = 1.0 sits far below it and a 0.15 step is deep inside the
-    # insensitive region
+    # |eps| = 1.0 sits far below it and a step of learning.max_mean_step
+    # (well under 1) stays deep inside the insensitive region
+    assert cfg["learning"]["max_mean_step"] < 1.0
     frames = [episode(f"e{i}", -1.0) for i in range(4)]
     replays = [_replay_one(e, cfg) for e in frames]
     assert cfg["tuning"]["step_sensitivity_episodes"] >= len(frames)

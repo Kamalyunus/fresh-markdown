@@ -19,14 +19,18 @@ def mu_at(mu_ref, d, d_ref, epsilon, demand_floor):
 def nb_pmf_table(mu, r, max_k):
     """P(D = k) for k = 0..max_k at every mu in `mu` (any shape), tail mass
     folded into the last bucket -- one scipy call for a whole DP's worth of
-    (stage, tier) cells. Returns (pmf of shape mu.shape + (max_k + 1,),
-    tail of shape mu.shape).
+    (stage, tier) cells. `r` is one dispersion for the whole table (the DP)
+    or one per row of `mu`, shape (n,) against an (n,) `mu` (the censored
+    expectation over prepared rows). Returns (pmf of shape
+    mu.shape + (max_k + 1,), tail of shape mu.shape). The ONE NB pmf.
 
     scipy parameterisation: nbinom(n=r, p=r/(r+mu)) has mean mu.
     """
-    p = r / (r + np.asarray(mu, dtype=float))
+    mu = np.asarray(mu, dtype=float)
+    r = np.asarray(r, dtype=float)
+    p = r / (r + mu)
     k = np.arange(max_k + 1)
-    pmf = nbinom.pmf(k, r, p[..., None])
+    pmf = nbinom.pmf(k, r[..., None], p[..., None])
     tail = np.maximum(0.0, 1.0 - pmf.sum(axis=-1))
     pmf[..., -1] += tail
     return pmf, tail
@@ -59,8 +63,6 @@ def expected_min_demand_inventory_vec(mu, r, q, max_k, chunk=100000):
     k = np.arange(max_k + 1)
     for start in range(0, len(mu), chunk):
         sl = slice(start, min(start + chunk, len(mu)))
-        p = (r[sl] / (r[sl] + mu[sl]))[:, None]
-        pmf = nbinom.pmf(k[None, :], r[sl][:, None], p)
-        pmf[:, -1] += np.clip(1.0 - pmf.sum(axis=1), 0.0, None)
+        pmf, _ = nb_pmf_table(mu[sl], r[sl], max_k)       # per-row r
         out[sl] = np.sum(pmf * np.minimum(k[None, :], q[sl][:, None]), axis=1)
     return out

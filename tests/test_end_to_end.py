@@ -84,9 +84,9 @@ def test_prepared_data_is_priceable_and_self_consistent(workspace):
     assert (full.dp_ineligible_reason.isna() == full.dp_eligible).all()
     assert not full[~full.dp_eligible].dp_ineligible_reason.isna().any()
 
-    # priceability: true of the subset the DP acts on
+    # priceability: true of the subset the DP acts on -- a non-empty subset
     d = full[full.dp_eligible]
-    assert len(d) and len(d) < len(full) or len(d) == len(full)
+    assert 0 < len(d) <= len(full)
 
     # every surviving episode has at least one feasible discount tier, and a
     # cost we actually know. A zero cost is a MISSING cost -- it reads as
@@ -1067,8 +1067,11 @@ def test_the_manifest_persists_the_waterfall_it_computed(workspace):
     describe an artifact that did not exist."""
     ws = workspace
     raw = (ws / "artifacts" / "split_manifest.json").read_text()
-    assert "NaN" not in raw, "bare NaN is not JSON and most parsers refuse it"
-    manifest = json.loads(raw)
+
+    def bare(token):                       # a NaN/Infinity TOKEN, not the word in prose
+        raise AssertionError(f"bare {token} is not JSON and most parsers refuse it")
+
+    manifest = json.loads(raw, parse_constant=bare)
 
     stages = manifest["waterfall"]
     assert len(stages) > 1

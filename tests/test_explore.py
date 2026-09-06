@@ -91,9 +91,18 @@ def test_budget_scales_down_as_posterior_narrows():
 
 
 def test_tau_next_clipped():
+    """(tau_after, clipped): the flag is the step's own verdict, so a
+    reader never infers the bound from rounded taus."""
     lo, hi = CFG["exploration"]["tau_adjust_clip"]
-    assert explore.tau_next(100.0, 1e9, 1.0, CFG) == pytest.approx(100.0 * hi)
-    assert explore.tau_next(100.0, 0.0, 1e9, CFG) == pytest.approx(100.0 * lo)
+    assert explore.tau_next(100.0, 1e9, 1.0, CFG) == (pytest.approx(100.0 * hi), True)
+    assert explore.tau_next(100.0, 0.0, 1e9, CFG) == (pytest.approx(100.0 * lo), True)
+    inside = (lo + hi) / 2
+    assert explore.tau_next(100.0, inside * 500.0, 500.0, CFG) == \
+        (pytest.approx(100.0 * inside), False)
+    # and the walk carries it per row
+    _, rows = explore.walk_tau(100.0, ["2026-08-02"], lambda d, t: 1.0,
+                               {"2026-08-01": 1e9}, 1.0, CFG)
+    assert rows[0]["clipped"] is True and rows[0]["tau_after"] == pytest.approx(100.0 * hi)
 
 
 def test_controller_cannot_correct_before_it_has_seen_a_day(cfg):
@@ -102,14 +111,15 @@ def test_controller_cannot_correct_before_it_has_seen_a_day(cfg):
     tau0 = 10_000.0
     budget, spend = 1_000.0, 8_700.0      # an 8.7x overspend, well past the clip
     lo = cfg["exploration"]["tau_adjust_clip"][0]
-    assert tau_next(tau0, budget, spend, cfg) == tau0 * lo    # clip floor
+    stop_at = 2.0                         # pinned: the count below is sized to it
+    assert tau_next(tau0, budget, spend, cfg)[0] == tau0 * lo    # clip floor
     # three halvings to get under a 2.0x stop, if spend fell proportionally
     tau, over = tau0, spend / budget
     days_over = 0
     for _ in range(5):
-        if over > cfg["monitoring"]["stop_conditions"]["exploration_cost_vs_budget"]:
+        if over > stop_at:
             days_over += 1
-        tau = tau_next(tau, budget, budget * over, cfg)
+        tau, _ = tau_next(tau, budget, budget * over, cfg)
         over = over / 2
     assert days_over >= 3
 
@@ -283,3 +293,34 @@ def test_the_sweep_refuses_a_zero_share_multiple_or_decision_count():
                            (None, 1.0, 2)):
         out = led.sweep(100.0, 1, n, share, mult, [0.01], [1.0])
         assert "note" in out and "rows" not in out, (share, mult, n)
+
+
+def test_the_ledger_refuses_moves_that_do_not_align_with_costs():
+    """`moves` are the same tiers' log distances, one per cost; a mismatch
+    silently mis-aligned the sweep's keep mask against the costs."""
+    led = SpreadLedger()
+    with pytest.raises(ValueError, match="aligned"):
+        led.add("d", [10.0, 20.0, 30.0], [0.1, 0.2])
+    led.add("d", [10.0, 20.0], [0.1, 0.2])
+    led.add("d", [10.0, 20.0])                     # no moves: zeros, allowed
+    assert led.decisions == 2
+
+
+def test_the_sweep_finds_the_in_force_cell_by_closeness_not_exact_key():
+    """The in-force (share, multiple) came back rounded on its way into the
+    grid, so an exact-key lookup found no reference and every row lost its
+    information_rel. The same isclose test that labels `in_force` finds it."""
+    rng = np.random.default_rng(8)
+    led = SpreadLedger()
+    for i in range(200):
+        moves = np.sort(rng.uniform(0.05, 0.6, 5))
+        led.add(f"d{i % 4}", 40.0 * moves ** 2 * rng.lognormal(6, 0.3), moves,
+                delta_min=0.05)
+    share = 0.01
+    sw = led.sweep(daily_budget=5000.0, n_days=4, n_decisions=200,
+                   share_in_force=share, multiple_in_force=1.0,
+                   shares=[share * (1 + 1e-12), 0.005], multiples=[1.0])
+    rows = {r["budget_share_of_il"]: r for r in sw["rows"]}
+    assert rows[share * (1 + 1e-12)]["in_force"]
+    assert rows[share * (1 + 1e-12)]["information_rel"] == 1.0
+    assert 0 < rows[0.005]["information_rel"] < 1.0

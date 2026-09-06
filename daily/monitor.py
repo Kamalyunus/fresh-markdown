@@ -1,7 +1,8 @@
 """daily.monitor -- learning, business, and safety series (design 5.12).
 
-Reads the event store and posterior; emits one JSON snapshot of the three
-metric families plus stop-condition evaluation. IL% is a ratio of sums
+Reads the event store and posterior; emits one JSON snapshot of the four
+metric families (business, guardrails, learning, safety) plus stop-condition
+evaluation. IL% is a ratio of sums
 reported WITH its denominator, absolute IL alongside every IL% (design 2.3).
 A fired stop condition SUSPENDS forced exploration (recorded in the
 posterior store, read by engine.decide); exploitation pricing continues,
@@ -19,7 +20,7 @@ import pandas as pd
 from common.config import load_config, deff_from_episodes
 from common.io import write_json
 from events.store import EventStore
-from events.pairs import match_pairs, decision_day, price_matches
+from events.pairs import match_pairs, decision_day, quality_counts, quality_rates
 from engine.posterior import PosteriorStore
 from daily import update as update_mod
 from engine import explore
@@ -110,14 +111,13 @@ def guardrail_series(decisions, outcomes, cfg, episodes=None):
     smoothing = cfg["monitoring"]["stop_conditions"]["deterioration_smoothing_days"]
 
     def deterioration(metric, worse_when_higher, smooth, dev_basis):
-        """Deterioration against the trailing mean, positive = worse. Both
-        series are averaged over `smooth` days first, then compared via the
-        shared common.guardrail.deviation -- floor and trigger MUST use the
-        same smoothing AND basis, so the comparison lives in one function."""
-        t = guard.smooth(overall[metric], smooth)
-        c = t.rolling(window, min_periods=window).mean().shift(smooth)
-        dev = guard.deviation(t, c, worse_when_higher, dev_basis)
-        return dev.dropna(), f"trailing_{window}d_mean"     # deviation drops +-inf itself
+        """Deterioration against the trailing mean, positive = worse, from
+        common.guardrail.deterioration_series -- the ONE series the noise
+        floor is measured on (calendar-laid, so a day with no close is a
+        missing reading rather than a seam; same smoothing, same basis)."""
+        dev = guard.deterioration_series(overall[metric], smooth, window,
+                                         worse_when_higher, dev_basis)
+        return dev, f"trailing_{window}d_mean"
 
     out = {"days_observed": int(len(overall)),
            "day_key": "close_day",
@@ -228,9 +228,8 @@ def learning_metrics(decisions, posterior, cfg, outcomes=(), pairs=None):
         "affordable_set_empty_rate": round(float(empty_rate), 4)
             if empty_rate is not None else None,
         "mean_forced_log_price_ratio": round(float(np.mean(
-            [abs(np.log((1 - d["applied_discount"])
-                        / (1 - d["reference_discount"]))) for d in forced])), 4)
-            if forced else None,
+            [explore.log_move(d["reference_discount"], d["applied_discount"])
+             for d in forced])), 4) if forced else None,
         "realised_exploration_cost": round(realised_cost, 1),
         # per-day, from update.finalized_days -- the ONE definition the tau
         # controller and the stop condition both price a day with
@@ -240,7 +239,9 @@ def learning_metrics(decisions, posterior, cfg, outcomes=(), pairs=None):
         # the budget the last decision was priced with: None while
         # exploration is suspended (design 5.12)
         "tau_current": decisions[-1]["tau_current"] if decisions else None,
-        "deff_applied": round(deff_from_episodes(
+        # over EVERY forced decision in the store -- a different quantity
+        # from update's per-batch `deff_applied`, hence a different name
+        "deff_applied_all_time": round(deff_from_episodes(
             cfg["dispersion"]["rho"],
             [d["episode_id"] for d in forced]), 3),
         # std only moves when an update commits, so "std flat for N days" is
@@ -255,14 +256,19 @@ def learning_metrics(decisions, posterior, cfg, outcomes=(), pairs=None):
     }
 
 
-def safety_metrics(store, decisions, outcomes, pairs=None):
-    """`pairs` as in event_frame."""
+def safety_metrics(store, decisions, outcomes, pairs=None, cfg=None):
+    """`pairs` as in event_frame; `cfg` defaults to the store's. The
+    event-quality counts (unmatched, compared, mismatched, the window) are
+    events.pairs.quality_counts -- the SAME windowed counts update's gates
+    read -- spread into this block, so the stop condition compares on
+    counts (never the 4dp rates written for reading) and cannot disagree
+    with update at the boundary."""
+    cfg = store.cfg if cfg is None else cfg
     matched = {o["decision_id"] for o in outcomes}
-    dec = {d["decision_id"]: d for d in decisions}
     if pairs is None:
         pairs = match_pairs(decisions, outcomes)
-    compared = len(pairs)
-    mismatches = sum(1 for d, o in pairs if not price_matches(d, o))
+    quality = quality_counts(decisions, outcomes, cfg, store.duplicate_counts, pairs)
+    rates = quality_rates(quality)
     expected_denom, realised_denom = 0.0, 0.0
     for d, o in pairs:
         expected_denom += d["expected_denominator"]
@@ -272,20 +278,12 @@ def safety_metrics(store, decisions, outcomes, pairs=None):
         "finalized_outcome_count": len(outcomes),
         "matched_decision_count": sum(1 for d in decisions
                                       if d["decision_id"] in matched),
-        "unmatched_outcome_count": sum(1 for o in outcomes
-                                       if o["decision_id"] not in dec),
-        # seen on emit AND on load (a producer writing the JSONL directly)
-        "duplicate_decision_count": store.duplicate_counts["decision"],
-        "duplicate_outcome_count": store.duplicate_counts["outcome"],
-        # a rate over the outcomes that HAVE a decision to compare against;
-        # unmatched outcomes are counted separately and diluted this. The
-        # counts are what the stop condition compares on -- the rounded
-        # rate is for reading, and comparing it disagreed with update's
-        # unrounded gate at the boundary
-        "price_mismatch_count": mismatches,
-        "compared_pair_count": compared,
+        # windowed counts, plus the store's all-time duplicate counts (seen
+        # on emit AND on load -- a producer writing the JSONL directly)
+        **quality,
+        "duplicate_or_unmatched_rate": round(rates["duplicate_or_unmatched_rate"], 4),
         "applied_vs_recommended_price_mismatch": round(
-            mismatches / max(compared, 1), 4),
+            rates["price_mismatch_rate"], 4),
         "zero_sales_rate": round(float(np.mean(
             [o["units_sold"] == 0 for o in outcomes])), 4) if outcomes else None,
         "stockout_rate": round(float(np.mean(
@@ -304,15 +302,14 @@ def stop_conditions(safety, learning, business, guardrail, cfg):
     pricing continues. Owner-null thresholds cannot fire and are reported as
     blocked."""
     sc = cfg["monitoring"]["stop_conditions"]
-    n = max(safety["finalized_outcome_count"], 1)
-    dup_unmatched = (safety["duplicate_decision_count"]
-                     + safety["duplicate_outcome_count"]
-                     + safety["unmatched_outcome_count"]) / n
+    # from the safety block's COUNTS, by the one rate definition update's
+    # gates use (events.pairs.quality_rates) -- windowed, so a fixed
+    # integration clears the stop once the incident ages out
+    rates = quality_rates(safety)
     fired = {}
-    fired["duplicate_or_unmatched"] = dup_unmatched > sc["duplicate_or_unmatched_rate"]
-    fired["price_mismatch"] = (
-        safety["price_mismatch_count"] / max(safety["compared_pair_count"], 1)
-        > sc["price_mismatch_rate"])
+    fired["duplicate_or_unmatched"] = (rates["duplicate_or_unmatched_rate"]
+                                       > sc["duplicate_or_unmatched_rate"])
+    fired["price_mismatch"] = rates["price_mismatch_rate"] > sc["price_mismatch_rate"]
 
     # realised exploration cost vs budget, per priced day, from the same two
     # per-day numbers daily.update's tau controller moves on (design 5.8):
@@ -361,7 +358,7 @@ def build_report(store, posterior, cfg):
     episodes = settled_episodes(decisions, outcomes, pairs)
 
     learning = learning_metrics(decisions, posterior, cfg, outcomes, pairs)
-    safety = safety_metrics(store, decisions, outcomes, pairs)
+    safety = safety_metrics(store, decisions, outcomes, pairs, cfg)
     learning["realised_vs_predicted_sold_ratio"] = \
         safety["realised_vs_predicted_sold_ratio"]
 

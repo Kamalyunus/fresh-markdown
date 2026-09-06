@@ -45,47 +45,65 @@ def economics_failures(original_price, cost):
     return failures
 
 
+def integer(v):
+    """A real integer count. bool is excluded (True is not a quantity of 1);
+    numpy integers count."""
+    return (isinstance(v, (int, np.integer))
+            and not isinstance(v, (bool, np.bool_)))
+
+
 def validate_state(s, tiers, anchor_discount, mu_ref_path):
     """Every check but the economics (economics_failures runs first, because
-    `tiers` is built from its verdict)."""
+    `tiers` is built from its verdict). `anchor_discount` is the caller's
+    `current_discount` AS GIVEN -- judged here, cast only once it passed."""
     failures = []
-    if not (isinstance(s["q"], (int, np.integer)) and s["q"] >= 0):
+    if not (integer(s["q"]) and s["q"] >= 0):
         failures.append("q must be a non-negative integer")
-    if not (isinstance(s["hours_remaining"], (int, np.integer))
-            and s["hours_remaining"] >= 1):
+    if not (integer(s["hours_remaining"]) and s["hours_remaining"] >= 1):
         failures.append("hours_remaining must be an integer >= 1")
-    if anchor_discount is not None and not math.isfinite(anchor_discount):
-        failures.append("p_current must be finite")
+    # the key ingest matches feed rows on: one hour of one trading day
+    if not (integer(s.get("hour_of_day")) and 0 <= s["hour_of_day"] <= 23):
+        failures.append("hour_of_day must be an integer in 0..23")
+    if anchor_discount is not None and not finite_number(anchor_discount):
+        failures.append("p_current must be a finite number")
     # r parameterises every pmf the DP sums: None is a TypeError in the
     # solver and inf a NaN Q, neither of which is a rejection
     if not (finite_number(s["r"]) and s["r"] > 0):
         failures.append("r must be a finite positive number")
     if not tiers:
         failures.append("feasible set is empty")
-    if not all(math.isfinite(m) and m > 0 for m in mu_ref_path):
+    path = list(mu_ref_path) if isinstance(mu_ref_path, (list, tuple, np.ndarray)) else None
+    if path is None or not all(finite_number(m) and m > 0 for m in path):
         failures.append("demand predictions must be finite and positive")
     # the DP plans over len(mu_ref_path) and applies terminal scrap value at
     # the end of it, while the event records hours_remaining. If the caller
     # disagrees with itself the system silently optimises the wrong horizon --
     # exactly what a window truncated at a date boundary looks like. Reject.
-    if len(mu_ref_path) != s["hours_remaining"]:
+    if path is not None and len(path) != s["hours_remaining"]:
         failures.append(
-            f"mu_ref_path has {len(mu_ref_path)} hours but hours_remaining is "
+            f"mu_ref_path has {len(path)} hours but hours_remaining is "
             f"{s['hours_remaining']}: the planning horizon and the recorded "
             "horizon must be the same window")
-    if anchor_discount is not None and tiers \
+    if anchor_discount is not None and finite_number(anchor_discount) and tiers \
             and not any(d >= anchor_discount - dp_mod.TIER_EPS for d in tiers):
         failures.append("no feasible tier at or below the current anchor price")
     return failures
 
 
 def decide(state, posterior_store, event_store, cfg, rng, tau_current,
-           baseline_version, spread_sink=None):
+           baseline_version, spread_sink=None, config_digest=None):
     """Price one decision interval and emit the decision event (design 5.10;
     field contract in docs/event_contract.html). `state` carries the episode
     context (mu_ref_path index 0 = now; current_discount None at entry).
     `spread_sink` receives (costs, log moves, delta_min) over the admissible
     tiers out of band, before the draw, so the record is tau-independent.
+
+    `config_digest` is the digest of `cfg` in force
+    (common.provenance.config_fingerprint(cfg)["digest"]); a caller pricing
+    a batch computes it ONCE and passes it, since the fingerprint snapshots
+    the whole config and costs about as much as the solve. Left None, it is
+    computed here per decision. It is recorded, never verified: pass the
+    digest of the `cfg` you pass, nothing else.
 
     While the posterior store carries an exploration suspension (design
     5.12, set by daily.monitor) the decision is priced with NO budget:
@@ -96,7 +114,7 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
     s = state
     d_ref = reference_discount(cfg, s["category"])
     entry = s["current_discount"] is None
-    anchor = None if entry else float(s["current_discount"])
+    anchor = s["current_discount"]                 # judged as given, cast after
 
     # the contract is REJECT, never crash: a bad price or cost has no tier
     # grid, so judge the economics first and only then build one
@@ -106,6 +124,8 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
     failures += validate_state(s, tiers, anchor, s["mu_ref_path"])
     if failures:
         raise StateRejected("; ".join(failures))
+    if not entry:
+        anchor = float(anchor)
 
     cell = posterior_store.get(s["category"])
     eps = cell["mean"]
@@ -122,8 +142,9 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
     # explorability is judged on the actions allowed AT THIS DECISION
     # (result.q_by_tier), never on the size of the full grid
     explorable = len(result.q_by_tier) >= cfg["exploration"]["min_feasible_tiers"]
-    # the smallest informative move for THIS cell: tiers closer to p* than
-    # this are neither drawn nor priced into tau (explore.admissible)
+    # the smallest informative move for THIS cell: tiers closer to the
+    # REFERENCE discount than this are neither drawn nor priced into tau
+    # (explore.admissible -- cost is measured from p*, information from d_ref)
     dmin = explore.delta_min(cfg, eps, s["category"])
     # one cost table for the ledger and the draw -- the same set, priced once
     costs = explore.admissible_costs(result, dmin)
@@ -184,15 +205,17 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
         # the FULL path and anchor: without them the event cannot be
         # re-solved, and daily.assurance exists to re-solve it
         "mu_ref_path": [float(m) for m in s["mu_ref_path"]],
-        "anchor_discount": None if entry else float(anchor),
+        "anchor_discount": anchor,
         "dispersion_r": float(s["r"]),
         "baseline_model_version": baseline_version,
         "posterior_version": int(cell["version"]),
         "config_version": cfg["meta"]["config_version"],
         # the config this hour was actually priced with: the version label
         # is a human string nobody has to bump, the digest maps the hour to
-        # exactly one audit snapshot (design 5.14a)
-        "config_digest": config_fingerprint(cfg)["digest"],
+        # exactly one audit snapshot (design 5.14a); the caller's per-batch
+        # digest when it passed one
+        "config_digest": (config_fingerprint(cfg)["digest"]
+                          if config_digest is None else str(config_digest)),
         "solver_latency_s": result.solver_latency_s,
         "nb_tail_mass_max": result.tail_mass_max,
         "timestamp": pd.Timestamp.now("UTC").isoformat(),

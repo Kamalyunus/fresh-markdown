@@ -21,6 +21,7 @@ import numpy as np
 from common.config import load_config, reference_discount
 from common.io import read_json
 from common.parallel import map_episodes
+from common.provenance import config_fingerprint
 from engine import dp as dp_mod
 from engine.demand import expected_min_demand_inventory, mu_at
 from engine.posterior import launch_belief
@@ -45,8 +46,10 @@ def beliefs(cfg):
     # a steeper prior shows as it is, not clamped to a display range
     cold = (float(np.mean([launch_belief(v["mean"], v["std"], cfg) for v in per.values()]))
             if per else -1.0)
-    # a learned belief: steeper than launch, inside the posterior's own grid
-    learned = max(cold * 1.4, float(cfg["posterior"]["epsilon_min"]))
+    # a learned belief: one cap-sized update (learning.max_mean_step)
+    # steeper than launch, inside the posterior's own grid
+    learned = max(cold - float(cfg["learning"]["max_mean_step"]),
+                  float(cfg["posterior"]["epsilon_min"]))
     return {"cold": round(cold, 3), "learned": round(learned, 3)}
 
 
@@ -214,7 +217,10 @@ SCENARIOS = [
 def build(cfg, grid, workers=None):
     d_ref = reference_discount(cfg, "_default")
     r_lookup = read_json(cfg["dispersion"]["r_lookup_path"]) or {}
-    r = float(r_lookup.get("global", 0.9))
+    if "global" not in r_lookup:           # never a made-up dispersion
+        raise SystemExit(f"{cfg['dispersion']['r_lookup_path']} carries no "
+                         "global r -- run fit.fit_dispersion first")
+    r = float(r_lookup["global"])
     bel = beliefs(cfg)
     items = [(g, m, name, eps, q, h, d_ref, r)
              for g in grid["gamma"] for m in grid["mu"]
@@ -229,12 +235,15 @@ def build(cfg, grid, workers=None):
             "entry_offsets": cfg["pricing"]["entry_offsets"],
             "epsilon_max": cfg["posterior"]["epsilon_max"],
             "budget_share_of_il": ec["budget_share_of_il"],
-            "delta_min_log_bias": ec.get("delta_min_log_bias"),
-            "delta_min_bias_multiple": ec.get("delta_min_bias_multiple", 1.0),
+            "delta_min_log_bias": ec["delta_min_log_bias"],     # null = no floor
+            "delta_min_bias_multiple": ec["delta_min_bias_multiple"],
             "stop_multiple": sc["exploration_cost_vs_budget"],
             "persistence_days": sc["persistence_days"],
             "tau_adjust_clip": ec["tau_adjust_clip"],
             "config_version": cfg["meta"]["config_version"],
+            # the version string is bumped by hand and rarely; the digest
+            # moves on every paste, so a deck can be traced to its config
+            "config_digest": config_fingerprint(cfg)["digest"],
         },
         "scenarios": SCENARIOS,
         "states": states,
@@ -277,7 +286,7 @@ svg{width:100%;height:auto;display:block}
 @media (max-width:900px){.wrap{grid-template-columns:1fr}nav{display:flex;overflow-x:auto}.grid{grid-template-columns:1fr}}
 </style></head><body>
 <header><h1>Perishable Markdown — how it decides</h1>
-<p>Twelve situations, answered by the production solver. Move the sliders; every number is a real solve on this machine's config (version __CFGV__). The demand forecast is an input, not a prediction about any SKU.</p></header>
+<p>Twelve situations, answered by the production solver. Move the sliders; every number is a real solve on this machine's config (version __CFGV__, digest __CFGD__). The demand forecast is an input, not a prediction about any SKU.</p></header>
 <div class="wrap"><nav id="nav"></nav><main id="main"></main></div>
 <script type="application/json" id="data">__DATA__</script>
 <script>
@@ -369,7 +378,8 @@ def main():
 
 def write_page(data, cfg, out):
     page = (PAGE.replace("__DATA__", json.dumps(data, separators=(",", ":")).replace("</", "<\\/"))
-                .replace("__CFGV__", html.escape(str(cfg["meta"]["config_version"]))))
+                .replace("__CFGV__", html.escape(str(cfg["meta"]["config_version"])))
+                .replace("__CFGD__", html.escape(str(data["config"]["config_digest"]))))
     os.makedirs(os.path.dirname(str(out)) or ".", exist_ok=True)
     with open(out, "w") as f:
         f.write(page)

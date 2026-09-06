@@ -112,13 +112,17 @@ And the standing prohibitions:
     `hour_discrepancy`; COGS at risk — `prepare_data.episode_cogs`
   - outcome reconciliation — `common.episodes.adjustment_reason`
   - scrap, IL, margin at episode grain — `common.metrics.episode_economics`
-    (+ `settled`, `daily_rates`) over `common.episodes.scrap_units`;
-    live events enter it through `daily.monitor.event_frame`. The
-    floors, the live guardrail, the business metrics and
-    shadow's budget base all read this one frame
+    (+ `settled`, `daily_rates`; `scrap_rate` is scrap over SUPPLY,
+    opening + restocked) over `common.episodes.scrap_units`; live events
+    enter it through `daily.monitor.event_frame`. The floors, the live
+    guardrail, the business metrics and shadow's budget base all read
+    this one frame; the floor and the trigger read one deterioration
+    series — `common.guardrail.deterioration_series`
   - decision↔outcome pairing and the trading day —
-    `events.pairs.match_pairs` (`learnable=` excludes failed pushes),
-    `decision_day`, `price_matches`
+    `events.pairs.match_pairs` (`learnable=` excludes failed pushes,
+    `learnable_with_stock` also the hours with nothing to sell),
+    `decision_day`, `price_matches`; the event-quality gates, windowed
+    over `event_quality_window_days` — `quality_counts`, `quality_rates`
   - anchor rows — `common.episodes.is_anchor_row`
   - guardrail deviation and verdicts — `common.guardrail.deviation`,
     `verdict_is_blocking`, `verdict_is_insufficient`
@@ -301,9 +305,8 @@ is dropped (rule 14). Resolve via `prepare_data.population(d, cfg, which)`:
 
 The waterfall (14 rows, `artifacts/split_manifest.json`) records rows,
 episodes and COGS after every stage; `kind: hard_drop` drops, the two
-`population_gate` rows (`eligible`, `dp_eligible`) only flag.
-The chain, the inventory convention, the flow identity and the close rules
-are specified in §5.2 and §12a.
+`population_gate` rows (`eligible`, `dp_eligible`) only flag. The chain,
+the inventory convention, the flow identity and the close rules: §5.2, §12a.
 
 ## MEASURED pastes and launch blockers
 

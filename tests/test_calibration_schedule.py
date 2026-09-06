@@ -60,12 +60,16 @@ def test_both_harnesses_get_point_in_time_factors_without_their_own_code():
     for mod, name in ((replay, "evaluate.backtest"), (shadow, "evaluate.shadow")):
         src = inspect.getsource(mod)
         # `by_week` is deliberately NOT banned: fidelity has its own weekly
-        # series. What must not appear is the calibration schedule's own names
-        for banned in ("calibration_schedule", "_factor_vector",
-                       "calibration_factor_path"):
+        # series. What must not appear is the selection itself or the
+        # artifact path. (Shadow swaps the model's schedule for the table it
+        # fits locally -- rule 16 keeps that table out of the artifact --
+        # and reads BOTH regimes' factors through `level_factors`, the one
+        # selection; that is using the applier, not re-implementing it.)
+        for banned in ("_factor_vector", "calibration_factor_path"):
             assert banned not in src, (
                 f"{name} reaches into the calibration schedule itself -- "
                 "factor selection belongs to BaselineModel alone")
+        assert "level_factors(" in src, f"{name} does not read the applier"
 
 
 def test_a_level_shift_does_not_leak_into_its_own_weeks_factor(tmp_path, cfg):

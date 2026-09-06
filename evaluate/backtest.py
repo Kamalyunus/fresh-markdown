@@ -93,13 +93,19 @@ def _fidelity_metrics(d):
 
 def calibration_window_sweep(d, cfg):
     """Rolling-origin sweep of the calibration fit window: per-category factors
-    fit on weeks [t-W, t-1], applied to week t. When the level trends, longer
-    windows are MORE stale, not more accurate.
+    fit on the CALENDAR weeks [t-W, t), applied to week t. When the level
+    trends, longer windows are MORE stale, not more accurate.
 
     Every row -- `uncalibrated` included -- is scored on the SAME evaluation
-    weeks (the longest window's burn-in). Per-window burn-in would judge a
-    long window on a later, smaller sample than a short one, and the ranking
-    would then read WHICH WEEKS rather than which window.
+    weeks: those with the longest window's span behind them (one burn-in for
+    every row; per-window burn-in would judge a long window on a later,
+    smaller sample than a short one, and the ranking would then read WHICH
+    WEEKS rather than which window) AND past `split.train_end` -- the
+    baseline was fit on the train rows, so a train week grades the model's
+    own residuals. Rows are keyed by the week their EPISODE opened (rule
+    15), and the fit window is calendar weeks, so the first weeks after a
+    gap (data.exclusion_window) are fit on nothing rather than on the weeks
+    before the gap.
 
     `uncalibrated` is ranked with the rest. When no-factors wins, the level
     factors are adding estimation noise instead of removing bias -- a finding
@@ -110,19 +116,27 @@ def calibration_window_sweep(d, cfg):
     band = cfg["baseline_model"]["calibration_gate_band"]
     tier_step = cfg["pricing"]["tier_step"]
     windows = cfg["baseline_model"]["calibration_window_sweep_weeks"]
+    train_end = pd.Timestamp(cfg["data"]["split"]["train_end"])
 
-    a = d[episodes.is_anchor_row(d, tier_step)].copy()
-    if not len(a):
+    anchor = episodes.is_anchor_row(d, tier_step)
+    if not anchor.any():
         return "NOT RUN -- no anchor rows"
-    a["week"] = episodes.week_key(a.date)
+    # the episode's week, never the row's: a row-level week cut puts a
+    # Sunday-opening episode's Monday rows in the next week
+    a = d[anchor].assign(week=episodes.week_key(episodes.opening_dates(d)[anchor]))
     cw = (a.groupby(["category", "week"], observed=True)
           .agg(sold=("units_sold", "sum"), pred=("predicted_units", "sum"))
           .reset_index())
     weeks = sorted(cw.week.unique())
-    start = max(list(windows) + [1])       # common burn-in: one eval set
-    if start >= len(weeks):
-        return (f"NOT RUN -- {len(weeks)} anchor weeks cannot score a common "
-                f"eval set behind the longest window ({start}w)")
+    starts = {w: pd.Timestamp(w) for w in weeks}
+    longest = max(list(windows) + [1])
+    burn_in = starts[weeks[0]] + pd.Timedelta(weeks=longest)
+    eval_weeks = [w for w in weeks
+                  if starts[w] >= burn_in and starts[w] > train_end]
+    if not eval_weeks:
+        return (f"NOT RUN -- {len(weeks)} anchor weeks leave no eval week "
+                f"behind the longest window ({longest}w) and past "
+                f"split.train_end ({train_end.date()})")
 
     def summarise(ratios):
         arr = np.array(ratios)
@@ -138,14 +152,17 @@ def calibration_window_sweep(d, cfg):
         """{week: anchor ratio} -- KEYED, so windows can be compared week by
         week rather than only in aggregate."""
         out = {}
-        for i, t in enumerate(weeks):
-            if i < start:                  # the SAME weeks for every row
-                continue
+        for t in eval_weeks:               # the SAME weeks for every row
             cur = cw[cw.week == t]
             if window == 0:
                 factor = None
             else:
-                fit = (cw[cw.week.isin(weeks[i - window:i])]
+                # CALENDAR weeks behind t, not the `window` weeks that
+                # happen to precede it in the list: across a gap the
+                # latter fits post-gap weeks on pre-gap ones
+                lo = starts[t] - pd.Timedelta(weeks=window)
+                fit_weeks = [w for w in weeks if lo <= starts[w] < starts[t]]
+                fit = (cw[cw.week.isin(fit_weeks)]
                        .groupby("category", observed=True)[["sold", "pred"]].sum())
                 factor = fit.sold / fit.pred.replace(0, np.nan)
             f = (np.ones(len(cur)) if factor is None
@@ -198,7 +215,12 @@ def calibration_window_sweep(d, cfg):
     if candidates:
         best = min(candidates, key=rank)
         result["recommended_fit_window"] = best
-        result["eval_weeks_common_from"] = str(weeks[start])
+        result["eval_weeks"] = list(eval_weeks)
+        result["eval_weeks_common_from"] = eval_weeks[0]
+        # true by construction; stated so a reader of the ranking knows no
+        # in-sample train week is in it
+        result["eval_starts_after_train"] = bool(
+            starts[eval_weeks[0]] > train_end)
         beats = "uncalibrated" in result and rank("uncalibrated") < rank(best)
         result["uncalibrated_beats_all_windows"] = bool(beats)
 
@@ -222,8 +244,10 @@ def calibration_window_sweep(d, cfg):
             "The ranking still names one, but on this many weeks that choice "
             "is a tie-break, not a measurement. Read "
             "paired_vs_uncalibrated.sign_test_p before acting on it.")
-        result["note"] = ("design 9.2 -- rolling-origin sweep, every row "
-                          "scored on the same eval weeks")
+        result["note"] = ("design 9.2 -- rolling-origin sweep over calendar "
+                          "weeks keyed by the episode's opening week; every "
+                          "row scored on the same eval weeks, all past "
+                          f"split.train_end ({train_end.date()})")
         if beats:
             result["verdict"] = (
                 "NO-FACTORS WINS -- `uncalibrated` beats every fit window on "
@@ -275,19 +299,20 @@ def fidelity(d, cfg, model, prior, r_lookup):
     block = _fidelity_metrics(gate_d)
     sold_ratio = block["fidelity_episode_sold_ratio"]
     block["gate_window"] = gate_window
+    # the gate window's own ratio is fidelity_episode_sold_ratio above
     block["by_window"] = {
         name: {"rows": int(len(g)),
                "sold_ratio": round(float(g.units_sold.sum()
                                          / g.predicted_units.sum()), 4)
                if g.predicted_units.sum() > 0 else None}
         for name, g in [("train", splits["train"]), ("calib", splits["calib"]),
-                        ("test", splits["test"]), ("all", d)]}
+                        ("all", d)]}
     # weekly ratios swinging wider than the gate band = week-scale demand
     # volatility, a gate-window/band decision rather than a retraining problem
-    week = pd.to_datetime(d.date).dt.to_period("W").astype(str)
     block["by_week"] = {
         str(w): round(float(g.units_sold.sum() / g.predicted_units.sum()), 4)
-        for w, g in d.groupby(week) if g.predicted_units.sum() > 0}
+        for w, g in d.groupby(episodes.week_key(d.date))
+        if g.predicted_units.sum() > 0}
     block["measurement_10"] = fidelity_decomposition(gate_d, cfg)
 
     # trend triage: an anchor-level climb driven by new-assortment SKUs (no
@@ -372,10 +397,10 @@ def _episode_frame(g):
     known; policy_replay refuses anything else."""
     g = g.sort_values(["date", "hour_of_day"])
     obs = g.is_observed.to_numpy()
-    # uncovered hours hold the last observed discount (legacy ramps to a cap
-    # and holds); both arms must run the same horizon to stay like-for-like
-    disc = pd.Series(g.total_discount.to_numpy()).where(
-        pd.Series(obs)).ffill().to_numpy()
+    # uncovered hours already hold the last observed discount (predict_frame
+    # carries total_discount onto the synthetic tail: legacy ramps to a cap
+    # and holds); both arms run the same horizon to stay like-for-like
+    disc = g.total_discount.to_numpy()
     obs_rows = g[obs]
     # adjustment computed on OBSERVED rows only: the write-off exemption keys
     # on the LAST row, and the extended frame's last row is a synthetic tail
@@ -390,6 +415,9 @@ def _episode_frame(g):
         "q0": int(g.starting_inventory.iloc[0]),
         "hours": len(g),
         "date": str(g.date.iloc[0]),
+        # per-hour dates: the ledger keys a decision's spreads on the ROW's
+        # day (as shadow does), not the episode's opening day
+        "dates": g.date.astype(str).to_numpy(),
         "actual_discounts": disc,
         # synthetic rows carry units_sold = 0 -- extension leaves economics alone
         "actual_sold": g.units_sold.to_numpy(),
@@ -483,7 +511,7 @@ def _dp_price(e, cfg, eps_belief, spread_sink=None):
         except ValueError:
             return None
         if spread_sink is not None and len(res.q_by_tier) >= min_tiers:
-            spread_sink((e["date"], explore.spread_costs(res, dmin)))
+            spread_sink((e["dates"][t], explore.spread_costs(res, dmin)))
         return res.tiers[res.optimal_index]
     return price_at
 
@@ -790,14 +818,15 @@ def derive_tau_initial(ledger, ep, cfg, launch_std):
     a tau EXISTS, not that it is right (AGENTS rule 17)."""
     if not ledger.decisions:
         return None
-    # ONE day count on both sides, and the same one shadow divides by
-    # (episodes.calendar_days over the replayed sample's dates): the budget
-    # is IL per calendar day and the spend is divided by the same days, so
-    # the count cancels in tau; `days`, implied_daily_spend and daily_budget
-    # are on the calendar basis. On the pre-launch frame that span crosses
-    # data.exclusion_window, which lowers both per-day figures equally.
+    # ONE day count on both sides, and the same expression shadow divides
+    # by (episodes.calendar_days over the replayed sample's OPENING dates):
+    # the budget is IL per calendar day and the spend is divided by the
+    # same days, so the count cancels in tau; `days`, implied_daily_spend
+    # and daily_budget are on the calendar basis. On the pre-launch frame
+    # that span crosses data.exclusion_window, which lowers both per-day
+    # figures equally.
     ep = pd.DataFrame(ep)
-    n_days = int(episodes.calendar_days(ep.date))
+    n_days = int(episodes.calendar_days(episodes.opening_dates(ep)))
     # production's own budget rule at the launch posterior width
     budget_per_day = float(explore.budget_today(
         ep.actual_il.sum() / n_days, launch_std, cfg))

@@ -52,14 +52,12 @@ def test_persistence_counts_calendar_days_not_observed_days():
     assert evaluate_guardrail(stale, 0.20, 2)["consecutive_days_over"] == 1
 
 
-def test_overspend_reads_zero_on_a_priced_day_with_no_forced_spend():
+def test_overspend_reads_zero_on_a_priced_day_with_no_forced_spend(cfg):
     """After a stop suspended exploration, the following days have NO forced
     spend. Without a reading for them the streak was still counted from the
     last two over-budget days, and the next --feed re-suspended what a human
     had just resumed. A priced day with nothing spent is a day at 0."""
     from daily.monitor import overspend_series, evaluate_guardrail
-    from common.config import load_config
-    cfg = load_config()
     il = {f"2026-09-{d:02d}": 1000.0 for d in range(1, 8)}
     learning = {"posterior_by_cell": {"GLOBAL": {"std": 0.5}},
                 "cell_of": {"MEAT": "GLOBAL"},
@@ -77,15 +75,13 @@ def test_overspend_reads_zero_on_a_priced_day_with_no_forced_spend():
     assert fired["fired"] and fired["consecutive_days_over"] == 2
 
 
-def test_business_metrics_counts_shrink_like_the_guardrail_and_il_pct_do():
+def test_business_metrics_counts_shrink_like_the_guardrail_and_il_pct_do(cfg):
     """Scrap = leftover + shrink has ONE definition. business_metrics read
     leftover only, so IL, waste_units, sell-through -- the pilot's read and
     production's exploration-budget base -- were all a different IL from the
     one the noise floors are measured on."""
-    from common.config import load_config
     from daily.monitor import business_metrics, guardrail_series
 
-    cfg = load_config()
     hours = [(3, 6, 1, 3),      # 6 - 1 = 5 expected, 3 reported -> shrink 2
              (2, 3, 1, 2),
              (1, 2, 1, 0)]      # write-off row: leftover 1, NOT shrink
@@ -112,15 +108,13 @@ def test_business_metrics_counts_shrink_like_the_guardrail_and_il_pct_do():
     assert b["sell_through"] == pytest.approx(3 / 6)
 
 
-def test_the_guardrail_fires_on_a_catalogue_wide_deterioration(tmp_path):
+def test_the_guardrail_fires_on_a_catalogue_wide_deterioration(cfg):
     """The basis is the trailing mean of the same system-priced episodes:
     there is no control arm, so a catalogue-wide scrap doubling must show as
     a positive deterioration (an arm comparison of two system-priced halves
     once cancelled it to exactly zero)."""
-    from common.config import load_config
     from daily.monitor import guardrail_series
 
-    cfg = load_config()
     # the trailing basis needs guardrail_noise_window_days of history before
     # it produces a comparison at all, plus the smoothing shift
     span = cfg["monitoring"]["guardrail_noise_window_days"] + 20
@@ -149,14 +143,12 @@ def test_the_guardrail_fires_on_a_catalogue_wide_deterioration(tmp_path):
     assert pre["scrap_deterioration"]["latest"] > 0, pre["scrap_deterioration"]
 
 
-def test_the_guardrail_series_is_keyed_on_the_trading_day():
+def test_the_guardrail_series_is_keyed_on_the_trading_day(cfg):
     """An hour-23 decision on day D carries a UTC timestamp that may read as
     D+1. Bucketing on the wall clock split the daily scrap series at
     midnight UTC while IL and the budget were keyed on the trading day."""
-    from common.config import load_config
     from daily.monitor import guardrail_series
 
-    cfg = load_config()
     decisions = [{
         "decision_id": "late", "episode_id": "EP-L", "sku_id": "s", "fc": "f",
         "date": "2026-08-19", "hour_of_day": 23,
@@ -169,7 +161,7 @@ def test_the_guardrail_series_is_keyed_on_the_trading_day():
     assert list(g["daily_scrap_rate"]) == ["2026-08-19"]
 
 
-def test_daily_rates_are_keyed_on_the_close_day_not_the_opening_day():
+def test_daily_rates_are_keyed_on_the_close_day_not_the_opening_day(cfg):
     """Bucketed by OPENING day over settled episodes, the newest days hold
     only the episodes that closed early (sold out: low scrap) -- the
     long-running ones are still open -- so the series read as improving
@@ -197,7 +189,6 @@ def test_daily_rates_are_keyed_on_the_close_day_not_the_opening_day():
     assert day.loc["2026-08-20", "scrap"] == 2 and day.loc["2026-08-20", "opening"] == 4
     assert day.loc["2026-08-20", "scrap_rate"] == pytest.approx(0.5)
     # the monitor's series is the same one, on the same key
-    from common.config import load_config
     from daily.monitor import guardrail_series
     decisions, outcomes = [], []
     for i, row in d.iterrows():
@@ -210,7 +201,7 @@ def test_daily_rates_are_keyed_on_the_close_day_not_the_opening_day():
                          "units_sold": int(row.units_sold),
                          "ending_inventory": int(row.ending_inventory),
                          "applied_price": row.offered_price})
-    g = guardrail_series(decisions, outcomes, load_config())
+    g = guardrail_series(decisions, outcomes, cfg)
     assert g["day_key"] == "close_day"
     assert g["daily_scrap_rate"] == {"2026-08-19": 0.0, "2026-08-20": 0.5}
 
@@ -259,12 +250,17 @@ def test_the_report_pairs_the_events_once_and_reads_one_episode_frame(cfg, tmp_p
     assert report["safety"] == mon.safety_metrics(store, decisions, outcomes)
     assert report["learning"]["priced_days"] == ["2026-08-19"]
     assert report["business"]["waste_units"] == 4
+    # the store-wide deff is named for what it is, apart from update's
+    # per-batch `deff_applied`
+    assert "deff_applied_all_time" in report["learning"]
+    assert "deff_applied" not in report["learning"]
 
 
-def test_price_mismatch_is_a_rate_over_compared_pairs():
+def test_price_mismatch_is_a_rate_over_compared_pairs(cfg):
     """Dividing by every outcome let unmatched outcomes dilute the rate
     below the stop threshold."""
-    from daily.monitor import safety_metrics
+    from daily.monitor import safety_metrics, stop_conditions
+    from events.pairs import quality_rates
 
     class _Store:
         duplicate_counts = {"decision": 0, "outcome": 0}
@@ -272,12 +268,22 @@ def test_price_mismatch_is_a_rate_over_compared_pairs():
         def load_quarantine(self):
             return []
 
-    decisions = [{"decision_id": "D1", "applied_price": 100.0,
+    decisions = [{"decision_id": "D1", "date": "2026-08-19", "applied_price": 100.0,
                   "expected_denominator": 1.0, "original_price": 100.0}]
     outcomes = [{"decision_id": "D1", "applied_price": 90.0, "units_sold": 1,
                  "is_stockout": False}]
+    # undated orphans have no day to age out on: counted in the window
     outcomes += [{"decision_id": f"orphan{i}", "applied_price": 1.0,
                   "units_sold": 0, "is_stockout": False} for i in range(9)]
-    s = safety_metrics(_Store(), decisions, outcomes)
+    s = safety_metrics(_Store(), decisions, outcomes, cfg=cfg)
     assert s["applied_vs_recommended_price_mismatch"] == 1.0
-    assert s["unmatched_outcome_count"] == 9
+    assert s["unmatched_outcome_count"] == 9 and s["outcomes_in_window"] == 10
+    assert s["duplicate_or_unmatched_rate"] == 0.9
+    # the stop condition reads the block's COUNTS through the one rate
+    # definition, so an override of the counts moves the verdict
+    fired = stop_conditions(s, {}, {}, {}, cfg)["fired"]
+    assert fired["price_mismatch"] and fired["duplicate_or_unmatched"]
+    calm = dict(s, price_mismatch_count=0, unmatched_outcome_count=0)
+    assert quality_rates(calm) == {"duplicate_or_unmatched_rate": 0.0,
+                                   "price_mismatch_rate": 0.0}
+    assert not stop_conditions(calm, {}, {}, {}, cfg)["fired"]["price_mismatch"]

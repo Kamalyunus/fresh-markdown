@@ -26,8 +26,10 @@ def test_the_inert_multiple_is_read_from_config(cfg):
     cfg = copy.deepcopy(cfg)
     floor = 0.2
     cfg["monitoring"]["stop_conditions"]["scrap_deterioration_pct"] = floor * 5
+    # the multiple is set HERE (the shipped one is the owner's posture)
+    cfg["tuning"]["guardrail_inert_floor_multiple"] = 3
     rec = dt.recommend_thresholds(_trailing(floor), cfg)["scrap_rate"]
-    assert "LIKELY INERT" in rec["verdict"]                 # shipped multiple 3
+    assert "LIKELY INERT" in rec["verdict"]
     assert "guardrail_inert_floor_multiple" in rec["verdict"]
 
     cfg["tuning"]["guardrail_inert_floor_multiple"] = 10
@@ -59,13 +61,50 @@ def test_the_noise_block_measures_and_points_at_the_one_verdict(cfg):
         assert "verdict" not in block
         assert block["verdict_in"] == f"guardrail_threshold_recommendation.{metric}"
         assert block["config_key"].startswith("monitoring.stop_conditions.")
-        need = (cfg["monitoring"]["guardrail_noise_window_days"]
-                + cfg["monitoring"]["guardrail_noise_min_extra_days"])
-        assert block["note"] == f"needs at least {need} days"
-    # the extra-days margin is config, not `window + 7`
+        need = cfg["monitoring"]["guardrail_noise_min_extra_days"]
+        assert block["note"].startswith(f"needs at least {need} scored days")
+        assert block["days_scored"] == 0
+    # the scored-days floor is config, not a literal
     cfg["monitoring"]["guardrail_noise_min_extra_days"] = 100
-    assert "at least 128 days" in dt.guardrail_noise(d, cfg)["scrap_rate"]["note"]
-    assert "window + 7" not in inspect.getsource(dt.guardrail_noise)
+    assert "at least 100 scored days" in dt.guardrail_noise(d, cfg)["scrap_rate"]["note"]
+
+
+def _short_series(days, start, seed=0):
+    return _daily_frame(days, skus=10, seed=seed, start=start)
+
+
+def test_the_noise_guard_counts_scored_days_not_smoothed_ones(cfg):
+    """`window + min_extra_days` was compared to the count of SMOOTHED days,
+    but scoring consumes `window + smooth` more: with the shipped 28/7 a
+    series with ONE scored reading passed the guard and its sigma was NaN;
+    two segments each shorter than window + smooth passed it with zero
+    scored readings and np.percentile([]) raised. The guard is on what was
+    scored, and a NaN floor is insufficient history, never OK."""
+    cfg = copy.deepcopy(cfg)
+    mon = cfg["monitoring"]
+    mon["guardrail_noise_window_days"] = 28
+    mon["guardrail_noise_min_extra_days"] = 7
+    mon["stop_conditions"]["deterioration_smoothing_days"]["scrap"] = 7
+
+    # 41 close days -> 35 smoothed -> exactly one scored reading
+    one = dt.guardrail_noise(_short_series(41, "2026-01-01"), cfg)["scrap_rate"]
+    assert one["days_scored"] == 1 and "three_sigma" not in one
+    assert one["note"].startswith("needs at least 7 scored days")
+
+    # two 26-day segments: 40 smoothed days on paper, nothing scored
+    two = pd.concat([_short_series(26, "2026-01-01"),
+                     _short_series(26, "2026-03-01", seed=1)], ignore_index=True)
+    block = dt.guardrail_noise(two, cfg)["scrap_rate"]
+    assert block["days_scored"] == 0 and "three_sigma" not in block
+    rec = dt.recommend_thresholds({"scrap_rate": block}, cfg)["scrap_rate"]
+    assert rec["verdict"] == "insufficient history" and rec["trailing_floor"] is None
+
+    # and a floor that IS nan (one reading, ddof=1) can never read OK
+    nan_block = {"three_sigma": float("nan"), "three_sigma_robust": 0.0,
+                 "outlier_dominated": False}
+    rec = dt.recommend_thresholds({"scrap_rate": nan_block}, cfg)["scrap_rate"]
+    assert rec["verdict"] == "insufficient history"
+    assert "binding_floor" not in rec
 
 
 def test_outlier_dominance_uses_the_configured_sigma_ratio():
@@ -98,15 +137,71 @@ def test_the_consistent_band_is_read_from_config(cfg, tmp_path):
     assert "0.7 <=" not in src and "<= 1.4" not in src
 
 
-def test_noise_floor_and_monitor_use_the_same_smoothing():
-    """The floor the owner sets a threshold from and the series the monitor
-    triggers on must be averaged identically, or the threshold is graded
-    against a yardstick nothing uses. (That both sides read the shared
-    comparison and smoothing is asserted where the shared module is.)"""
-    sm = CFG["monitoring"]["stop_conditions"]["deterioration_smoothing_days"]
-    assert set(sm) == {"scrap", "margin"}
-    # both series are averaged over the same week (owner, 2026-09-06)
-    assert sm["scrap"] > 1 and sm["margin"] == sm["scrap"]
+def _events_of(d):
+    """The monitor's view of `d`: one decision/outcome pair per hour row, so
+    the trigger and the floor can be run on the same closes."""
+    decisions, outcomes = [], []
+    for i, row in d.iterrows():
+        decisions.append({"decision_id": f"d{i}", "episode_id": row.episode_id,
+                          "sku_id": str(row.sku_id), "fc": row.fc, "category": "VEG",
+                          "date": str(row.date), "hour_of_day": int(row.hour_of_day),
+                          "cost": float(row.cost),
+                          "original_price": float(row.original_price)})
+        outcomes.append({"decision_id": f"d{i}",
+                         "starting_inventory": int(row.starting_inventory),
+                         "units_sold": int(row.units_sold),
+                         "ending_inventory": int(row.ending_inventory),
+                         "applied_price": float(row.offered_price)})
+    return decisions, outcomes
+
+
+def test_the_floor_and_the_trigger_read_one_deterioration_series(cfg):
+    """The floor lays the series on a calendar (a day with no close is a
+    missing reading); the trigger once rolled over ROWS, so on a day with
+    no closes the two diverged -- the threshold was graded against a
+    yardstick the monitor never used. Both now read
+    common.guardrail.deterioration_series: same scored days, same
+    values, on a series with a missing calendar day."""
+    from daily.monitor import guardrail_series
+    cfg = copy.deepcopy(cfg)
+    sc = cfg["monitoring"]["stop_conditions"]
+    sc["deterioration_smoothing_days"].update(scrap=3, margin=3)
+    cfg["monitoring"]["guardrail_noise_window_days"] = 7
+    cfg["monitoring"]["guardrail_noise_min_extra_days"] = 5
+
+    d = _daily_frame(40, skus=12)
+    d = d[pd.to_datetime(d.date) != pd.Timestamp("2026-01-20")]     # a hole
+    floor = dt.guardrail_noise(d, cfg)
+    trigger = guardrail_series(*_events_of(d), cfg)
+    for metric, key, sign in (("scrap_rate", "scrap", 1), ("margin_rate", "margin", -1)):
+        by_day = trigger[f"{key}_deterioration"]["by_day"]
+        assert floor[metric]["days_scored"] == len(by_day)
+        # no reading spans the hole: the first 7 + 3 days after it score nothing
+        assert not any("2026-01-21" <= day <= "2026-01-30" for day in by_day)
+        # the floor is two-sided; the trigger applies the metric's sign
+        dev = sign * np.array(list(by_day.values()))
+        assert floor[metric]["daily_rel_dev_sigma"] == pytest.approx(
+            dev.std(ddof=1), abs=2e-3)
+        assert floor[metric]["worst_observed_rel_dev"] == pytest.approx(
+            np.abs(dev).max(), abs=2e-3)
+
+
+def test_the_scrap_rate_is_a_share_of_supply_not_of_the_opening_count():
+    """design 12a: supply = opening + arrived. Over the opening count alone a
+    restocked window reads a scrap rate above what it could have scrapped
+    -- the floor and the trigger share this basis through daily_rates."""
+    from common import metrics
+    # opens with 4, sells 1, 4 more ARRIVE in hour 10 (ending 7 > 3), then
+    # 2 sell and 5 are written off at close: scrap 5 of supply 8
+    d = episode_frame(
+        episode_id="r", date="2026-08-19", hour_of_day=[9, 10, 11],
+        starting_inventory=[4, 3, 7], units_sold=[1, 0, 2],
+        ending_inventory=[3, 7, 0], original_price=1000.0,
+        offered_price=800.0, cost=100.0)
+    ep, _ = metrics.settled(metrics.episode_economics(d))
+    assert ep.supply.iloc[0] == 8 and ep.opening.iloc[0] == 4
+    day = metrics.daily_rates(ep)
+    assert day.scrap_rate.iloc[0] == pytest.approx(5 / 8)
 
 
 def _daily_frame(days=70, skus=60, seed=0, start="2026-01-01", dp=True):
@@ -185,7 +280,10 @@ def test_trailing_floor_is_measured_on_the_smoothed_series():
     from evaluate import derive_thresholds as dt
 
     d = _daily_frame()
+    # both smoothings set HERE: the shipped value is the owner's posture
     cfg_smoothed = copy.deepcopy(CFG)
+    cfg_smoothed["monitoring"]["stop_conditions"]["deterioration_smoothing_days"] \
+        ["scrap"] = 7
     cfg_flat = copy.deepcopy(CFG)
     cfg_flat["monitoring"]["stop_conditions"]["deterioration_smoothing_days"] \
         ["scrap"] = 1
@@ -193,8 +291,7 @@ def test_trailing_floor_is_measured_on_the_smoothed_series():
     smoothed = dt.guardrail_noise(d, cfg_smoothed)["scrap_rate"]
     flat = dt.guardrail_noise(d, cfg_flat)["scrap_rate"]
 
-    assert smoothed["smoothing_days"] == \
-        CFG["monitoring"]["stop_conditions"]["deterioration_smoothing_days"]["scrap"]
+    assert smoothed["smoothing_days"] == 7
     assert flat["smoothing_days"] == 1
     assert smoothed["three_sigma"] < flat["three_sigma"]
 
@@ -348,28 +445,28 @@ def test_the_two_bounded_step_rails_are_graded_against_each_other(tmp_path):
 
     # and the shrink cap alone fixes convergence: 25%/update from 1.0 to the
     # 0.05 floor is log(0.05)/log(0.75) updates, nothing to do with the mean
-    assert dt.bounded_step(cfg)["updates_to_min_std_by_category"]["A"] == \
+    out = dt.bounded_step(cfg)
+    assert out["updates_to_min_std_by_category"]["A"] == \
         pytest.approx(np.log(cfg["posterior"]["min_std"]) / np.log(0.75), abs=0.1)
+    # an UPDATE count (one per gated update), named as one; the consistent
+    # step is reported once, under the key tune reads
+    assert out["updates_to_min_std_median"] == out["updates_to_min_std_by_category"]["A"]
+    assert "days_to_min_std_median" not in out
+    assert "mean_move_at_cap_per_prior_std" not in out
 
 
-def test_the_floor_and_the_trigger_compute_the_same_quantity():
-    """`derive_thresholds` measures the floor and `daily.monitor` evaluates
-    the trigger. If they compute different things the threshold is graded
-    against a yardstick nothing uses, and nothing downstream would notice --
-    so both import the comparison from `common.guardrail` rather than keeping
-    two implementations that resemble each other."""
-    import inspect
-    from evaluate import derive_thresholds as dt
-    from daily import monitor
+def test_the_units_note_names_each_metrics_own_basis(cfg):
+    """Margin is graded in percentage points and scrap relatively; a note
+    calling every sigma figure relative had a reader quoting 0.0614 as 6%."""
+    from common import guardrail
+    out = dt.guardrail_noise(_daily_frame(), cfg)
+    assert out["scrap_rate"]["units"] == guardrail.units_of(guardrail.RELATIVE)
+    assert out["margin_rate"]["units"] == guardrail.units_of(guardrail.ABSOLUTE_PP)
+    assert "PERCENTAGE POINTS" in out["units"] and "RELATIVE" in out["units"]
+    assert not out["units"].startswith("all sigma figures are RELATIVE")
 
-    for mod in (dt, monitor):
-        src = inspect.getsource(mod)
-        assert "guardrail.deviation(" in src or "guard.deviation(" in src, \
-            f"{mod.__name__} is not using the shared comparison"
-        assert "guardrail.smooth(" in src or "guard.smooth(" in src \
-            or "_smooth = guardrail.smooth" in src, \
-            f"{mod.__name__} is not using the shared smoothing"
 
+def test_the_deterioration_sign_is_the_callers():
     # the sign convention is the caller's, and it must be opposite per metric
     from common import guardrail
     import pandas as pd

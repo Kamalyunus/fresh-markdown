@@ -23,6 +23,7 @@ import pandas as pd
 from common.config import load_config
 from common.episodes import adjustment_reason, is_censored_hour
 from fit.prepare_data import SOURCE_TO_CANONICAL
+from events.pairs import decision_day
 from events.store import EventStore
 
 
@@ -103,9 +104,9 @@ def build_outcomes(decisions, feed, failures=None):
     feed_range = (feed_days[0], feed_days[-1]) if feed_days else None
 
     outcomes, unmatched, reasons = [], [], {}
-    outside = 0
+    outside, failed_keys = 0, set()
     for dec in decisions:
-        day = str(dec["date"])
+        day = decision_day(dec)
         if feed_range is None or not (feed_range[0] <= day <= feed_range[1]):
             outside += 1         # not this feed's business: no gap, no match
             continue
@@ -124,7 +125,7 @@ def build_outcomes(decisions, feed, failures=None):
             continue
         try:
             start = int(round(float(r.starting_inventory)))
-            sold = int(float(r.units_sold))
+            sold = int(round(float(r.units_sold)))     # rounded, like the stock
             end = int(round(float(r.ending_inventory)))
             base = float(r.original_price)
             disc = float(r.total_discount)
@@ -163,6 +164,7 @@ def build_outcomes(decisions, feed, failures=None):
         if k in failures:
             out["execution_status"] = "failed"
             out["execution_failure_reason"] = failures[k]
+            failed_keys.add(k)
         outcomes.append(out)
 
     report = {
@@ -180,8 +182,11 @@ def build_outcomes(decisions, feed, failures=None):
         "unusable_feed_rows": len(unusable),
         "unusable_examples": unusable[:20],
         "adjustment_reasons": reasons,
-        "push_failures_applied": sum(1 for o in outcomes
-                                     if o["execution_status"] == "failed"),
+        "push_failures_applied": len(failed_keys),
+        # a reported failure naming no outcome built here: a key spelt
+        # differently, an hour with no decision or no feed row. Counted --
+        # a failure that lands nowhere is an integration miss, not silence
+        "push_failures_unmatched": len(set(failures) - failed_keys),
     }
     return outcomes, report
 
@@ -236,6 +241,9 @@ def main():
     if report["push_failures_applied"]:
         print(f"push failures      : {report['push_failures_applied']:,} "
               "marked ineligible for learning")
+    if report["push_failures_unmatched"]:
+        print(f"push failures      : {report['push_failures_unmatched']:,} "
+              "reported for hours that built no outcome (unmatched)")
     return 0
 
 

@@ -123,6 +123,7 @@ def _quarantine_key(evt):
 
 class EventStore:
     def __init__(self, cfg, root=None):
+        self.cfg = cfg
         self.root = root or cfg["events"]["store_dir"]
         os.makedirs(self.root, exist_ok=True)
         self.paths = {k: os.path.join(self.root, f"{k}.jsonl")
@@ -142,7 +143,9 @@ class EventStore:
         for i, parsed, raw in self._lines(self.paths["quarantine"]):
             if parsed is None:
                 continue                  # a torn quarantine line: skipped
-            key = _quarantine_key(parsed.get("event", {}))
+            # a foreign writer's record may carry anything under `event`
+            evt = parsed.get("event")
+            key = _quarantine_key(evt) if isinstance(evt, dict) else None
             if key is not None:
                 self._quarantined_ids.add(key)
         self._terminate_last_line(self.paths["quarantine"])
@@ -156,6 +159,11 @@ class EventStore:
                     torn.append((i, raw))
                     continue
                 ident = parsed.get(f"{kind}_id")
+                if ident is None:
+                    # a foreign line with no id: not an event the matcher
+                    # can pair, and registering None counted every later
+                    # id-less line as a duplicate of it
+                    continue
                 if ident in self._ids[kind]:
                     self.duplicate_counts[kind] += 1
                 self._ids[kind].add(ident)
@@ -174,7 +182,10 @@ class EventStore:
         """(line_no, parsed or None, raw) per non-empty line."""
         if not os.path.exists(path):
             return
-        with open(path) as f:
+        # a torn last line can split a multi-byte character: decoded with a
+        # replacement mark it is one more unparseable line to quarantine,
+        # not a UnicodeDecodeError before the store exists
+        with open(path, errors="replace") as f:
             for i, line in enumerate(f, start=1):
                 raw = line.rstrip("\n")
                 if not raw.strip():

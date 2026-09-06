@@ -76,7 +76,7 @@ def test_the_trace_streak_counts_consecutive_calendar_days(cfg):
     from evaluate.shadow import _controller_trace
 
     sc = cfg["monitoring"]["stop_conditions"]
-    persist = int(sc["persistence_days"])
+    sc["persistence_days"] = 2                    # set here, not read shipped
 
     def trace(days):
         led = SpreadLedger()
@@ -95,7 +95,8 @@ def test_the_trace_streak_counts_consecutive_calendar_days(cfg):
 
     contiguous = trace(["2026-08-10", "2026-08-11"])
     assert [r["days_over"] for r in contiguous["by_day"]] == [1, 2]
-    assert contiguous["by_day"][-1]["stop_condition_fires"] == (2 >= persist)
+    assert contiguous["by_day"][-1]["stop_condition_fires"]
+    assert contiguous["days_stop_condition_fires"] == 1
 
 
 def test_deeper_and_shallower_hours_are_counted_with_their_sign(
@@ -144,20 +145,23 @@ def test_the_budget_base_is_the_trailing_realised_il(cfg):
     day's own IL."""
     from engine.explore import trailing_daily_il
 
-    assert cfg["exploration"]["budget_il_window_days"] == 7
+    window = int(cfg["exploration"]["budget_il_window_days"])
+    days = [str((pd.Timestamp("2026-08-01") + pd.Timedelta(days=i)).date())
+            for i in range(window + 1)]
+    today, trailing = days[-1], days[:-1]
 
-    il = {f"2026-08-{d:02d}": 700.0 for d in range(1, 8)}   # 7 flat days
-    # day 8's base is the mean of days 1-7; day 8's own IL must not enter
-    il["2026-08-08"] = 99_999.0
-    assert trailing_daily_il(il, "2026-08-08", cfg) == pytest.approx(700.0)
+    il = {day: 700.0 for day in trailing}                  # `window` flat days
+    # today's base is the mean of the trailing days; its own IL must not enter
+    il[today] = 99_999.0
+    assert trailing_daily_il(il, today, cfg) == pytest.approx(700.0)
 
     # a zero-IL calendar day inside the window counts as ZERO, not skipped:
     # the budget is a share of the actual run-rate
-    il2 = {"2026-08-01": 700.0, "2026-08-07": 700.0}
-    assert trailing_daily_il(il2, "2026-08-08", cfg) == pytest.approx(200.0)
+    il2 = {trailing[0]: 700.0, trailing[-1]: 700.0}
+    assert trailing_daily_il(il2, today, cfg) == pytest.approx(1400.0 / window)
 
     # no history at all -> no budget. The conservative side to start on.
-    assert trailing_daily_il({}, "2026-08-08", cfg) == 0.0
+    assert trailing_daily_il({}, today, cfg) == 0.0
 
 
 def test_the_first_shadow_day_carries_the_pre_window_trailing_base(cfg):
@@ -237,33 +241,58 @@ def test_shadow_sample_size_defaults_to_config():
     assert cfg["monitoring"]["shadow_gate"]["sample_episodes"] > 0
 
 
-def test_the_learning_yield_reports_the_terms_behind_it():
+def test_the_learning_yield_terms_are_accumulated_on_the_forced_hours(
+        cfg, tmp_path, monkeypatch):
     """A disappointing yield has two causes with OPPOSITE remedies -- too few
     forced decisions, or forced prices sitting too close to the reference --
-    and the per-episode aggregate cannot tell them apart. So the report
-    carries the decomposition, and the identity that makes it checkable:"""
-    import inspect
+    and the per-episode aggregate cannot tell them apart. The terms behind
+    it are tallied on the FORCED hours only, the gap against the REFERENCE
+    (the baseline the log ratio uses), and the report carries them."""
     from evaluate import shadow
 
-    src = inspect.getsource(shadow.run_shadow)
-    for field in ("forced_decisions", "information_per_forced_decision",
-                  "mean_abs_log_price_ratio_forced",
-                  "mean_discount_gap_from_reference_forced_pp",
-                  "mean_mu_on_forced_hours"):
-        assert field in src, f"{field} missing from the learning yield"
+    ref, forced_d, r_ep = 0.30, 0.40, 2.0
 
-    # the components are accumulated on the SAME branch as the information,
-    # or they would describe a different set of hours than they explain
-    one = inspect.getsource(shadow._shadow_one)
-    body = one[one.index('if evt["is_exploration"]'):]
-    for comp in ('out["abs_log_ratio"] +=', 'out["forced_mu"] +=',
-                 'out["forced_discount_gap"] +='):
-        assert comp in body, f"{comp} is not accumulated on forced hours"
-    # and the gap is measured against the REFERENCE, the same baseline the
-    # log ratio uses -- not against the optimum or the anchor
-    gap = body[body.index('out["forced_discount_gap"] +='):]
-    assert 'reference_discount' in gap[:220], \
-        "the discount gap must be measured against the reference discount"
+    def fake_decide(state, posterior, store, cfg, rng, tau, model_version,
+                    spread_sink=None):
+        forced = state["hour_of_day"] == 10               # one forced hour of three
+        d = forced_d if forced else ref
+        evt = {"decision_id": f"d-{state['hour_of_day']}",
+               "applied_discount": d,
+               "applied_price": state["original_price"] * (1 - d),
+               "cost": state["cost"], "is_exploration": forced,
+               "exploration_cost": 12.5 if forced else 0.0,
+               "affordable_set_size": 1, "reference_discount": ref,
+               "epsilon_posterior_mean": -1.0, "dispersion_r": r_ep,
+               "solver_latency_s": 0.0}
+        store.emit_decision(evt)
+        return evt
+
+    monkeypatch.setattr(shadow, "decide", fake_decide)
+    g = _hours("e", "2026-08-10", 3, disc=ref)
+    g["r"], g["mu_ref_hat"], g["is_observed"] = 1.0, 2.0, True
+    ep = dict({c: g[c].to_numpy() for c in shadow.EP_COLS}, episode_id="e")
+    ctx = {"cfg": cfg, "tau": None, "model_version": "x", "seed": 0,
+           "cal_grain": "category", "cells": {"FRUIT": None}}
+    out = shadow._shadow_one(ep, ctx)
+
+    lr = np.log((1 - forced_d) / (1 - ref))
+    mu_rec = 2.0 * np.exp(-1.0 * lr)
+    assert out["n_forced"] == 1 and out["would_be_cost"] == 12.5
+    assert out["abs_log_ratio"] == pytest.approx(abs(lr))
+    assert out["forced_mu"] == pytest.approx(mu_rec)
+    assert out["forced_discount_gap"] == pytest.approx(forced_d - ref)
+    assert out["raw_information"] == pytest.approx(
+        mu_rec * lr ** 2 * r_ep / (r_ep + mu_rec))
+
+    # and the report carries the decomposition beside the aggregate
+    monkeypatch.undo()
+    cfg = _harness_cfg(cfg, tmp_path)
+    ly = _run_shadow(cfg, _shadow_frame(), _Applier(cfg),
+                     monkeypatch)["learning_yield_would_be"]
+    assert {"forced_decisions", "information_per_forced_decision",
+            "mean_abs_log_price_ratio_forced",
+            "mean_discount_gap_from_reference_forced_pp",
+            "mean_mu_on_forced_hours"} <= set(ly)
 
 
 def _shadow_frame():
@@ -327,6 +356,52 @@ def test_every_per_day_figure_divides_by_the_unsampled_unextended_span(
     assert sampled["exploration_budget_would_be"]["days"] == 4
     assert sampled["window"]["days"] == 4
     assert sampled["tau_initial_derivation"]["days"] == 5
+
+
+def _crossing(eid, day, q0=6):
+    """An episode opening `day` at 22:00 whose OBSERVED rows run into the
+    next day (00:00, 01:00)."""
+    first = _hours(eid, day, 2, hour0=22, q0=q0, tail=2)
+    first["ending_inventory"] = first.starting_inventory - first.units_sold
+    second = _hours(eid, str(pd.Timestamp(day).date() + pd.Timedelta(days=1)),
+                    2, hour0=0, q0=int(first.ending_inventory.iloc[-1]))
+    return pd.concat([first, second], ignore_index=True)
+
+
+def test_n_days_is_the_span_of_opening_days_not_of_row_dates(
+        cfg, tmp_path, monkeypatch):
+    """A W-day OPENING window whose last episode opened at 22:00 has rows
+    dated the next day. Counted over row dates, n_days read W+1 and the
+    derived tau overspent by (W+1)/W -- on both the window and the
+    pre-window week. The span is episodes.calendar_days over
+    episodes.opening_dates, and the report's window is that span too."""
+    cfg = _harness_cfg(cfg, tmp_path)
+    frame = pd.concat([_shadow_frame(),
+                       _crossing("p4", "2026-08-08"),      # pre-window, -> 08-09
+                       _crossing("w4", "2026-08-13")],     # window, -> 08-14
+                      ignore_index=True)
+    window = episodes.window_slice(frame, WINDOW_START, WINDOW_END)
+    assert str(window.date.max()) == "2026-08-14", "the fixture must cross"
+    report = _run_shadow(cfg, frame, _Applier(cfg), monkeypatch)
+    b, td, w = (report["exploration_budget_would_be"],
+                report["tau_initial_derivation"], report["window"])
+    assert b["days"] == w["days"] == b["tau_controller_trace"]["window_days"] == 4
+    assert (w["date_min"], w["date_max"]) == ("2026-08-10", "2026-08-13")
+    assert not td["fallback"] and td["days"] == 5
+    assert b["implied_daily_spend"] == pytest.approx(
+        report["exploration_would_be"]["would_be_cost_total"] / 4, abs=0.1)
+
+
+def test_the_report_carries_the_digest_of_the_posterior_it_priced_with(
+        cfg, tmp_path, monkeypatch):
+    """ops.advance re-runs shadow when the posterior FILE moved (a re-init,
+    a rho paste after a retrain); the report has to say which one it read."""
+    from common.provenance import file_digest
+    cfg = _harness_cfg(cfg, tmp_path)
+    report = _run_shadow(cfg, _shadow_frame(), _Applier(cfg), monkeypatch)
+    av = report["artifact_versions"]
+    assert av["posterior_digest"] == file_digest(cfg["posterior"]["path"])
+    assert av["posterior_versions"]
 
 
 def test_the_paste_fallback_is_checked_against_the_runs_own_out_path(
@@ -435,7 +510,9 @@ def test_shadow_grades_every_window_row_on_the_frozen_anchor(
         "the week's schedule factor leaked into the frozen-anchor reading"
     # the re-fit doubles mu on the rescaled rows: the censored ratio falls
     assert ra["weekly_refit"] == rb["weekly_refit"] < ra["frozen_anchor"]
-    assert ra["rows_rescaled"] > 0 and ra["spread"] < 0
+    # every drift row is in the one re-fit week, and the factor reaches it
+    # through the applier (BaselineModel.level_factors), not a lookup copy
+    assert ra["rows_rescaled"] == a["decision_count"] > 0 and ra["spread"] < 0
     for report in (a, b):
         cov = report["artifact_versions"]["calibration_coverage"]
         assert cov["verdict"].startswith("OK"), cov["verdict"]

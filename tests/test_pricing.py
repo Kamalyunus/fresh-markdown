@@ -79,10 +79,16 @@ def test_entry_action_set_matches_offsets_and_cost_floor():
     offsets = CFG["pricing"]["entry_offsets"]
     d_ref = 0.30
 
+    def expected(d_max):
+        """The offsets' targets inside [0, d_max], on the grid -- from the
+        config the solver reads, never a literal that pins the owner's set."""
+        return sorted(round(d_ref + o, 6) for o in offsets
+                      if -1e-9 <= d_ref + o <= d_max + 1e-9)
+
     tiers, d_max = dp_mod.feasible_tiers(10000, 5000, step)      # d_max 0.50
     arms = [tiers[j] for j in dp_mod.entry_action_set(
         tiers, d_ref, d_max, CFG["pricing"])]
-    assert arms == [0.15, 0.20, 0.25, 0.30, 0.35]
+    assert arms == expected(d_max) and len(arms) == len(offsets)
 
     # entry is BOUNDED on the deep side, not open-ended: the DP may open one
     # step past the reference, never a discount the hourly grid would take
@@ -99,7 +105,8 @@ def test_entry_action_set_matches_offsets_and_cost_floor():
     tiers, d_max = dp_mod.feasible_tiers(10000, 7800, step)      # d_max 0.22
     arms = [tiers[j] for j in dp_mod.entry_action_set(
         tiers, d_ref, d_max, CFG["pricing"])]
-    assert arms == [0.15, 0.20] and max(arms) <= d_max + 1e-9
+    assert arms == expected(d_max) and 0 < len(arms) < len(offsets)
+    assert max(arms) <= d_max + 1e-9
 
     # a floor below every requested arm leaves ONE action -- the deepest
     # feasible tier -- not a silent fallback to the whole grid
@@ -174,11 +181,12 @@ def test_explore_affordable_draw_and_cost():
                        epsilon=-1.2, r=1.0, cfg=CFG, entry=True)
     big_tau = 1e12
     choice = explore.select(res, tau=big_tau, rng=FixedRng())
-    if len(res.q_by_tier) > 1:
-        assert choice["is_exploration"]
-        assert choice["chosen_index"] != res.optimal_index
-        expect = res.q_by_tier[res.optimal_index] - res.q_by_tier[choice["chosen_index"]]
-        assert choice["exploration_cost"] == pytest.approx(expect)
+    assert len(res.q_by_tier) > 1, "the fixture must offer something to draw"
+    assert choice["is_exploration"]
+    assert choice["chosen_index"] != res.optimal_index
+    assert choice["affordable_set_size"] == len(res.q_by_tier) - 1
+    expect = res.q_by_tier[res.optimal_index] - res.q_by_tier[choice["chosen_index"]]
+    assert choice["exploration_cost"] == pytest.approx(expect) and expect > 0
 
 
 def test_explore_non_explorable_excluded():
@@ -190,10 +198,12 @@ def test_explore_non_explorable_excluded():
 
 
 def test_bounded_step_clips_mean_and_floors_std():
-    step = CFG["learning"]["max_mean_step"]
-    m, s, clipped = bounded_step(-1.0, 0.5, -2.0, 0.01, CFG)
-    assert m == pytest.approx(-1.0 - step)
-    assert s == pytest.approx(0.5 * (1 - CFG["learning"]["max_std_shrink"]))
+    # the owner's postures are pinned locally: a step of 1.0 would not clip
+    # a move of 1.0, and the test would read as passing without the bound
+    c = dict(CFG, learning=dict(CFG["learning"], max_mean_step=0.3, max_std_shrink=0.1))
+    m, s, clipped = bounded_step(-1.0, 0.5, -2.0, 0.01, c)
+    assert m == pytest.approx(-1.3)
+    assert s == pytest.approx(0.45)
     assert clipped
 
 

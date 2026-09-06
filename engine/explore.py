@@ -5,16 +5,19 @@ constrained selection over those same values:
 
     p_star     = argmax_p Q(p)
     cost(p)    = Q(p_star) - Q(p)          expected IL loss, in currency
-    affordable = { p : cost(p) <= tau, p != p_star }
+    admissible = { p != p_star : |log((1-d_p)/(1-d_ref))| >= delta_min }
+    affordable = { p in admissible : cost(p) <= tau }
 
 If affordable is non-empty, select UNIFORMLY AT RANDOM from it. Uniform
 selection is not a detail -- it is the randomisation that makes the outcome
 clean evidence; any state-dependent choice of forced price reintroduces the
 endogeneity that makes legacy history unusable.
 
-tau is a CURRENCY amount, compared against Q(p_star) - Q(p) in won. There is
-no exploration probability schedule, base rate, floor, ceiling, or cold-start
-std.
+tau is a CURRENCY amount, compared against Q(p_star) - Q(p) in won, and the
+one controller: the forced RATE is whatever the budget affords. There is no
+exploration probability schedule or base rate; delta_min is a floor on the
+MOVE from the reference (derived per cell in `delta_min`, never a second
+knob), and the budget's std scaling has its own floor (`budget_scale`).
 """
 
 import math
@@ -172,6 +175,9 @@ class SpreadLedger:
         inert) and `delta_min` the floor these tiers already cleared."""
         if not len(costs):
             return
+        if moves is not None and len(moves) != len(costs):
+            raise ValueError(f"{len(moves)} moves for {len(costs)} costs: the "
+                             "two are aligned per tier")
         self._buf.extend(costs)
         self._mbuf.extend(moves if moves is not None else [0.0] * len(costs))
         self._lens.append(len(costs))
@@ -237,19 +243,21 @@ class SpreadLedger:
             cnts = np.add.reduceat(m, self._dec_start, dtype=np.int64)
         return np.divide(sums, cnts, out=np.zeros(n_dec), where=cnts > 0), cnts
 
-    def spend_by_day(self, tau, keep=None):
+    def spend_by_day(self, tau, keep=None, per_dec=None):
         """EXPECTED spend per day at `tau`: mean affordable cost per
         decision (uniform draw), empty sets contribute nothing. Expected,
-        not realised -- the trace walks counterfactual taus."""
+        not realised -- the trace walks counterfactual taus. `per_dec` is
+        `_per_decision(tau, keep=keep)[0]` if the caller already has it."""
         self._build()
         n_dec, n_day = len(self._lens), len(self._day_index)
         if not n_dec:
             return np.zeros(n_day)
-        per_dec, _ = self._per_decision(tau, keep=keep)
+        if per_dec is None:
+            per_dec, _ = self._per_decision(tau, keep=keep)
         return np.bincount(self._dec_day, weights=per_dec, minlength=n_day)
 
-    def implied_daily_spend(self, tau, n_days=None, keep=None):
-        by_day = self.spend_by_day(tau, keep)
+    def implied_daily_spend(self, tau, n_days=None, keep=None, per_dec=None):
+        by_day = self.spend_by_day(tau, keep, per_dec)
         return float(by_day.sum()) / max(n_days or len(by_day), 1)
 
     def solve_tau(self, budget_per_day, n_days=None, steps=60, keep=None):
@@ -313,7 +321,9 @@ class SpreadLedger:
             tau = self.solve_tau(budget, n_days, keep=keep)
             if tau is None:
                 return {"note": "no positive tau at this budget"}
-            _, cnts = self._per_decision(tau, keep=keep)
+            # one cost pass serves the count AND the spend; the two weighted
+            # passes are the move statistics
+            per_dec, cnts = self._per_decision(tau, keep=keep)
             forced = int((cnts > 0).sum())
             mean_move, _ = self._per_decision(tau, weights=self._moves, keep=keep)
             e_sq, _ = self._per_decision(tau, weights=move_sq, keep=keep)
@@ -321,7 +331,8 @@ class SpreadLedger:
                 "tau": round(float(tau), 2),
                 "forced_rate": round(forced / n_decisions, 4),
                 "forced_per_day": round(forced / max(n_days, 1), 1),
-                "implied_daily_spend": round(self.implied_daily_spend(tau, n_days, keep), 1),
+                "implied_daily_spend": round(
+                    self.implied_daily_spend(tau, n_days, keep, per_dec), 1),
                 "daily_budget": round(budget, 1),
                 "mean_log_move_forced": round(float(mean_move[cnts > 0].mean()), 4)
                     if forced else None,
@@ -332,7 +343,11 @@ class SpreadLedger:
         for mult in multiples:
             for share in shares:
                 grid[(share, mult)] = cell(share, mult)
-        ref = grid.get((share_in_force, multiple_in_force), {}).get("_info")
+        # the in-force cell by the same closeness test the rows are labelled
+        # with -- an exact-key lookup missed a share rounded on its way in
+        ref = next((c.get("_info") for (share, mult), c in grid.items()
+                    if same(share, share_in_force) and same(mult, multiple_in_force)),
+                   None)
         rows = []
         for (share, mult), c in grid.items():
             info = c.pop("_info", None)
@@ -433,9 +448,8 @@ def trailing_daily_il(il_by_day, day, cfg):
         return 0.0
     # zero-IL calendar days inside the known span count as zero, so the mean
     # is over the window, not over the days that happened to carry IL
-    span = (d0 - pd.Timestamp(min(known))).days
-    denom = min(max(span, 1), window)
-    return float(sum(il_by_day.get(k, 0.0) for k in days) / denom)
+    span = (d0 - pd.Timestamp(min(known))).days      # <= window by construction
+    return float(sum(il_by_day.get(k, 0.0) for k in days) / max(span, 1))
 
 
 def budget_scale(posterior_std, cfg):
@@ -458,24 +472,28 @@ def walk_tau(tau, days, spend_for, il_by_day, widest_std, cfg):
     force) both call it. `spend_for(day, tau)` returns the day's realised
     or expected exploration spend. A ZERO budget (no trailing IL yet) is an
     absence of signal, not an overspend: tau holds that day. Returns
-    (tau_end, rows)."""
+    (tau_end, rows); a row's `clipped` says the step sat on a clip bound."""
     rows = []
     for day in days:
         budget = budget_today(trailing_daily_il(il_by_day, day, cfg),
                               widest_std, cfg)
         spend = float(spend_for(day, tau))
-        after = tau_next(tau, budget, spend, cfg) if budget > 0 else tau
+        after, clipped = tau_next(tau, budget, spend, cfg) if budget > 0 \
+            else (tau, False)
         rows.append({"day": str(day), "tau": round(float(tau), 2),
                      "spend": round(spend, 1), "budget": round(budget, 1),
-                     "tau_after": round(float(after), 2)})
+                     "tau_after": round(float(after), 2), "clipped": clipped})
         tau = after
     return tau, rows
 
 
 def tau_next(tau, budget, realised_cost, cfg):
     """tau * clip(budget/spend, *tau_adjust_clip) -- asymmetric on purpose:
-    cutting is the safety direction, raising is never urgent (config)."""
+    cutting is the safety direction, raising is never urgent (config).
+    Returns (tau_after, clipped): whether the clip, not the ratio, set the
+    step -- read from the ratio here, never inferred from rounded taus."""
     ec = cfg["exploration"]
     lo, hi = ec["tau_adjust_clip"]
     ratio = budget / max(realised_cost, ec["tau_spend_guard"])
-    return tau * min(max(ratio, lo), hi)
+    factor = min(max(ratio, lo), hi)
+    return tau * factor, factor != ratio

@@ -7,6 +7,7 @@ series' own level and was structurally blocked (measured; docs/learnings.md).
 """
 
 import numpy as np
+import pandas as pd
 
 RELATIVE = "relative"
 ABSOLUTE_PP = "absolute_pp"
@@ -33,6 +34,38 @@ def deviation(treatment, control, worse_when_higher, basis):
         ratio = (treatment / control).replace([np.inf, -np.inf], np.nan)
         return (ratio - 1) if worse_when_higher else (1 - ratio)
     raise ValueError(f"unknown deterioration basis {basis!r}, expected one of {BASES}")
+
+
+def smoothed_calendar(series, days):
+    """`smooth` over each contiguous run of close days, laid on the full
+    daily calendar (DatetimeIndex, NaN where no day closed). Rolled over
+    ROWS, the first days after a gap (data.exclusion_window pre-launch, a
+    day with no close live) are averaged with, and graded against, days
+    from before it. On the calendar a gap is NaN on both sides, so a
+    trailing window that spans it reads NaN -- no reading, never a seam."""
+    s = pd.Series(series.to_numpy(), index=pd.to_datetime(series.index)).dropna()
+    if s.empty:
+        return s
+    run = (s.index.to_series().diff() != pd.Timedelta(days=1)).cumsum()
+    out = pd.concat([smooth(g, days) for _, g in s.groupby(run.to_numpy())])
+    return out.asfreq("D") if len(out) else out
+
+
+def deterioration_series(series, smooth_days, window, worse_when_higher, basis):
+    """THE deterioration series both the floor (derive_thresholds) and the
+    trigger (daily.monitor) read, positive = WORSE: `series` (a daily rate
+    keyed by close day) smoothed over `smooth_days` on the calendar, against
+    its trailing `window`-calendar-day mean shifted by the same smoothing so
+    the two windows never overlap. FULL windows only -- min_periods below
+    `window` manufactures deviations that are an estimator artifact. Days
+    with no reading are dropped; the index is the "YYYY-MM-DD" close day."""
+    s = smoothed_calendar(series, smooth_days)
+    if s.empty:
+        return pd.Series(dtype=float)
+    trailing = s.rolling(window, min_periods=window).mean().shift(smooth_days)
+    dev = deviation(s, trailing, worse_when_higher, basis).dropna()
+    dev.index = dev.index.strftime("%Y-%m-%d")
+    return dev
 
 
 BASIS = {"scrap": RELATIVE,        # strictly positive rate

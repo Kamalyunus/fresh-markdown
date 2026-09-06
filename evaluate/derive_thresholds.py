@@ -46,28 +46,18 @@ def _sigma_summary(rel, outlier_ratio):
 
 def _floor_of(block):
     """The floor a threshold must clear: robust where the raw sigma is
-    outlier-dominated, otherwise the raw one. Returns (floor, label)."""
+    outlier-dominated, otherwise the raw one. Returns (floor, label); (None,
+    None) when nothing was measured -- a missing block or a NaN sigma (one
+    scored day has no spread) is insufficient history, never a floor."""
     if "three_sigma" not in block:
         return None, None
     if block.get("outlier_dominated"):
-        return block["three_sigma_robust"], "robust 3-sigma"
-    return block["three_sigma"], "3-sigma"
-
-
-def _smoothed_calendar(series, days):
-    """`guardrail.smooth` (the monitor's smoothing) over each contiguous run
-    of close days, laid on the full daily calendar. The pre-launch series
-    has data.exclusion_window cut out of it: rolled over ROWS, the first
-    post-gap days would be averaged with, and graded against, days six
-    weeks earlier. On the calendar a gap is NaN on both sides, so a
-    trailing window that spans it reads NaN -- no reading, never a seam."""
-    s = pd.Series(series.to_numpy(), index=pd.to_datetime(series.index)).dropna()
-    if s.empty:
-        return s
-    run = (s.index.to_series().diff() != pd.Timedelta(days=1)).cumsum()
-    out = pd.concat([guardrail.smooth(g, days)
-                     for _, g in s.groupby(run.to_numpy())])
-    return out.asfreq("D") if len(out) else out
+        floor, label = block["three_sigma_robust"], "robust 3-sigma"
+    else:
+        floor, label = block["three_sigma"], "3-sigma"
+    if floor is None or not np.isfinite(floor):
+        return None, None
+    return floor, label
 
 
 def recommend_thresholds(trailing, cfg):
@@ -139,13 +129,15 @@ def recommend_thresholds(trailing, cfg):
 
 
 def guardrail_noise(d, cfg):
-    """3-sigma daily noise of scrap rate and realised margin rate, as relative
-    deviation from a trailing-window mean. Measurement only: the verdict per
-    metric lives in `recommend_thresholds` (guardrail_threshold_recommendation
-    in the report), the one place that grades a threshold."""
+    """3-sigma daily noise of scrap rate and realised margin rate, as the
+    deviation from a trailing-window mean on each metric's own basis
+    (common.guardrail.BASIS: relative for scrap, percentage points for
+    margin). Measurement only: the verdict per metric lives in
+    `recommend_thresholds` (guardrail_threshold_recommendation in the
+    report), the one place that grades a threshold."""
     mon = cfg["monitoring"]
     window = mon["guardrail_noise_window_days"]
-    min_days = window + int(mon["guardrail_noise_min_extra_days"])
+    min_scored = int(mon["guardrail_noise_min_extra_days"])
     outlier_ratio = float(mon["guardrail_outlier_sigma_ratio"])
     # the population the trigger runs on: the monitor's series is the
     # system-priced episodes, i.e. the ones the DP could price
@@ -153,19 +145,25 @@ def guardrail_noise(d, cfg):
     day = metrics.daily_rates(metrics.settled(metrics.episode_economics(d))[0])
 
     def noise(series, smooth=1, basis=guardrail.RELATIVE):
-        # average `smooth` days BEFORE comparing; the trailing baseline is
-        # shifted by the same amount so the two windows never overlap
-        s = _smoothed_calendar(series, smooth)
+        s = guardrail.smoothed_calendar(series, smooth)
         n_days = int(s.notna().sum())
-        if n_days < min_days:
-            return {"days": n_days,
-                    "note": f"needs at least {min_days} days"}
-        # FULL trailing window only: min_periods below `window` manufactures
-        # huge deviations that are an estimator artifact, not the series
-        trailing = s.rolling(window, min_periods=window).mean().shift(smooth)
-        # worse_when_higher=True for BOTH metrics: a noise floor is two-sided
-        # (size of swing, not direction); the trigger applies the sign
-        rel_dev = guardrail.deviation(s, trailing, True, basis).dropna()
+        # the ONE series the monitor triggers on (guardrail.deterioration_series):
+        # smoothed on the calendar, against the trailing window shifted by
+        # the same smoothing. worse_when_higher=True for BOTH metrics: a
+        # noise floor is two-sided (size of swing, not direction); the
+        # trigger applies the sign
+        rel_dev = guardrail.deterioration_series(series, smooth, window, True, basis)
+        # scoring consumes window + smooth days per contiguous segment, so
+        # the guard is on what was SCORED, not on the days that went in: a
+        # series long enough on paper can still have one reading (sigma
+        # NaN) or none (two short segments)
+        if len(rel_dev) < min_scored:
+            return {"days": n_days, "days_scored": int(len(rel_dev)),
+                    "note": (f"needs at least {min_scored} scored days "
+                             f"(monitoring.guardrail_noise_min_extra_days); "
+                             f"each contiguous run of close days scores its "
+                             f"length minus the {window}-day window minus "
+                             f"{smooth} smoothing days")}
         # plain std of a ratio series is dominated by low-denominator days --
         # set thresholds from the MAD figure when the two disagree. Units
         # depend on the basis; the report says which (RELATIVE: 0.1336 = 13.36%)
@@ -230,11 +228,13 @@ def guardrail_noise(d, cfg):
         "margin_rate": {**margin,
                         "config_key": "monitoring.stop_conditions.margin_deterioration_pct",
                         "verdict_in": "guardrail_threshold_recommendation.margin_rate"},
-        "units": ("all sigma figures are RELATIVE deviations, not percentage "
-                  "points: 0.1336 = 13.36%, 9.1386 = 914%. Read the magnitude "
-                  "before quoting one -- a floor above 1.0 means the series "
-                  "swings by more than its own level and no useful threshold "
-                  "sits above it."),
+        "units": ("per metric, in its own `units`: scrap_rate sigma figures "
+                  "are RELATIVE deviations (0.1336 = 13.36%; a floor above "
+                  "1.0 means the series swings by more than its own level "
+                  "and no useful threshold sits above it), margin_rate sigma "
+                  "figures are PERCENTAGE POINTS of the rate (0.0614 = 6.14 "
+                  "pp). Read each block's `deterioration_basis` before "
+                  "quoting one."),
         "note": ("A false fire only suspends exploration (design 12), but a "
                  "threshold that fires constantly kills the learning loop. "
                  "Set thresholds at or above the floor the verdict names; add "
@@ -270,10 +270,11 @@ def information_increment(cfg):
         "information_to_saturate_cap_by_category": {
             c: round(v, 3) for c, v in sorted(need.items(), key=lambda kv: kv[1])},
         "recommended": round(median_need, 3),
-        "recommended_basis": ("median across cells of I* at the LAUNCH prior "
-                              "std -- the ceiling above which evidence is "
+        "recommended_basis": ("median across the prior's categories (the "
+                              "launch cells) of I* at the LAUNCH prior std "
+                              "-- the ceiling above which evidence is "
                               "clipped away rather than used"),
-        "range_across_cells": [round(widest, 3), round(narrowest, 3)],
+        "range_across_categories": [round(widest, 3), round(narrowest, 3)],
         "configured": configured,
         "configured_implied_std": round(implied_std, 4) if implied_std else None,
         "wastes_at_launch": round(configured / median_need, 1)
@@ -312,31 +313,34 @@ def bounded_step(cfg):
     if not stds:
         return {"verdict": "NOT RUN -- no per-category prior stds"}
 
+    # median across the prior's CATEGORIES (the launch cells)
     med = float(np.median(list(stds.values())))
-    # what a cap-sized update does to the mean, per prior std of surprise
-    move_per_std = pull_frac * med
-    # ...and therefore the surprise at which the MEAN rail starts clipping
-    clips_at_std = step / move_per_std if move_per_std > 0 else None
-    # convergence the shrink cap allows, at one human-gated update per day
+    # what a cap-sized update does to the mean, per prior std of surprise --
+    # and therefore the max_mean_step at which both rails trip together
+    consistent = pull_frac * med
+    # the surprise at which the MEAN rail starts clipping
+    clips_at_std = step / consistent if consistent > 0 else None
+    # convergence the shrink cap allows, one human-gated UPDATE at a time
+    # (an update count, not days: one per learning.update_cadence_days at
+    # most, and only when a cell crosses the increment)
     updates_to_floor = {
         c: round(float(np.log(min_std / v) / np.log(1.0 - shrink)), 1)
         for c, v in sorted(stds.items())}
 
-    consistent = pull_frac * med
     return {
         "max_std_shrink": shrink,
         "max_mean_step": step,
         "median_launch_std": round(med, 4),
         "mean_move_fraction_of_pull_at_cap": round(pull_frac, 4),
-        "mean_move_at_cap_per_prior_std": round(move_per_std, 4),
         "mean_rail_clips_above_pull_of_std": round(clips_at_std, 3)
             if clips_at_std else None,
         "updates_to_min_std_by_category": updates_to_floor,
-        "days_to_min_std_median": round(float(np.median(
+        "updates_to_min_std_median": round(float(np.median(
             list(updates_to_floor.values()))), 1),
         "consistent_max_mean_step": round(consistent, 3),
         "consistent_basis": ("the mean move a CAP-SIZED update makes on a "
-                             "one-prior-std surprise -- set here, both rails "
+                             "one-prior-std surprise (median across the "
+                             "prior's categories) -- set here, both rails "
                              "trip at the same surprise instead of one "
                              "clipping every batch"),
         "consistent_band_std": [band_lo, band_hi],
@@ -410,13 +414,13 @@ def main():
     if isinstance(ii, dict) and "recommended" in ii:
         print(f"{'info increment':12s}: configured {ii['configured']} | launch "
               f"ceiling {ii['recommended']} "
-              f"(range {ii['range_across_cells']}) -> {ii['verdict']}")
+              f"(range {ii['range_across_categories']}) -> {ii['verdict']}")
     bs = report["bounded_step_recommendation"]
     if isinstance(bs, dict) and "consistent_max_mean_step" in bs:
         print(f"{'bounded step':12s}: mean {bs['max_mean_step']} / shrink "
               f"{bs['max_std_shrink']} | mean rail clips above a "
               f"{bs['mean_rail_clips_above_pull_of_std']}-std surprise | "
-              f"{bs['days_to_min_std_median']} updates to min_std")
+              f"{bs['updates_to_min_std_median']} updates to min_std")
         print(f"{'':12s}  -> {bs['verdict']}")
     print(f"wrote {args.out}")
 

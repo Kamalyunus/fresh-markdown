@@ -621,9 +621,10 @@
       already ship, and a small failed-pushes table (see §05). Going the other way, the agent
       dumps its decision and outcome logs as tables daily (<code>daily.export_events</code>
       — parquet, list fields JSON-encoded; <code>--since</code> cuts both tables on the
-      decision's trading day, so an hour-23 outcome ships with its decision) for loading into
-      the warehouse; those tables are a derived convenience for analytics and joins, never the
-      audit record.
+      decision's trading day, so an hour-23 outcome ships with its decision; an outcome whose
+      decision is not in the store has no trading day and is skipped and counted, never
+      dated by guesswork) for loading into the warehouse; those tables are a derived
+      convenience for analytics and joins, never the audit record.
     </p>
   </div>
 
@@ -792,7 +793,7 @@
         <tr><td class="f">baseline_model_version</td><td class="ex">"baseline-20260811043259"</td><td>Which frozen model produced the forecast.</td></tr>
         <tr><td class="f">posterior_version</td><td class="ex">0</td><td>Which learning state was in force. Increments on every applied update.</td></tr>
         <tr><td class="f">config_version</td><td class="ex">"1.0.0"</td><td>The config's human label. It is not bumped by pastes, so it is a name, not a fingerprint.</td></tr>
-        <tr><td class="f">config_digest</td><td class="ex">"35ab97a15c14aad1"</td><td>SHA-256 prefix of the whole config the decision was priced with. Matches the <code>environment.config_digest</code> of exactly one seal in <code>artifacts/history/</code>, which holds that config verbatim and names the model and library versions in force.</td></tr>
+        <tr><td class="f">config_digest</td><td class="ex">"35ab97a15c14aad1"</td><td>SHA-256 prefix of the whole config the decision was priced with. Matches the <code>environment.config_digest</code> of exactly one seal in <code>artifacts/history/</code>, which holds that config verbatim and names the model and library versions in force. Computed per decision by the engine, or once per batch by the caller and passed in — then recorded exactly as passed, never verified, so it must be the digest of the very config the batch prices with.</td></tr>
       </tbody>
     </table>
   </div>
@@ -809,7 +810,10 @@
       per-hour fact that must come from you is a <strong>failed price push</strong>: one row
       per failed hour — a table (parquet/CSV) or JSONL, your choice — with
       <code>sku_id</code>, <code>fc</code>, <code>date</code>, <code>hour_of_day</code>,
-      <code>reason</code>. No row means the push succeeded.
+      <code>reason</code>. No row means the push succeeded. A failed-push row that matches no
+      decision is counted (<code>push_failures_unmatched</code> in the ingest report) rather than
+      dropped silently — a non-zero count means your table and the agent's decisions disagree on
+      the hour key.
     </p>
   </div>
 
@@ -1159,7 +1163,7 @@
       </thead>
       <tbody>
         <tr><td class="f">event completeness</td><td class="t n">≥ 99%</td><td>Outcomes landing per decision. A priced hour missing from the feed, or a feed hour the ingester cannot interpret, shows up here first.</td></tr>
-        <tr><td class="f">duplicate or unmatched</td><td class="t n">≤ 1%</td><td>Repeated ids plus outcomes with no matching decision, over finalized outcomes.</td></tr>
+        <tr><td class="f">duplicate or unmatched</td><td class="t n">≤ 1%</td><td>Repeated ids plus outcomes with no matching decision, over the finalized outcomes of the trailing <code>event_quality_window_days</code> (14) of trading days — every rate in this table is read on that window, so one incident stops re-firing a lifted stop once history dilutes it.</td></tr>
         <tr><td class="f">price mismatch</td><td class="t n">≤ 1%</td><td>Outcomes whose offered price (from the feed) differs from the decision's by more than <code>1e-6</code>. This is the "did the agent's price actually go live" check — it catches silent push failures your failures table missed.</td></tr>
         <tr><td class="f">missing stockout field</td><td class="t n">exactly 0</td><td>Any outcome at all without <code>is_stockout</code>.</td></tr>
       </tbody>

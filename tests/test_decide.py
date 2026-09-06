@@ -17,7 +17,7 @@ def test_state_rejected_when_planning_horizon_disagrees_with_recorded_one():
     from engine.decide import validate_state
 
     base = {"original_price": 10000.0, "cost": 6000.0, "q": 3,
-            "hours_remaining": 4, "r": 1.0}
+            "hours_remaining": 4, "hour_of_day": 12, "r": 1.0}
     tiers = [0.0, 0.025, 0.05]
 
     assert validate_state(base, tiers, None, [1.0, 1.0, 1.0, 1.0]) == []
@@ -227,3 +227,87 @@ def test_a_finite_positive_state_still_prices(tmp_path):
     evt = decide(_state(original_price=np.float64(10000.0), cost=np.float64(4000.0)),
                  posterior, store, CFG, np.random.default_rng(0), 100.0, "v")
     assert evt["applied_price"] >= evt["cost"]
+
+
+@pytest.mark.parametrize("bad, field", [
+    ({"q": True}, "q"),                              # bool is not a count
+    ({"q": np.bool_(True)}, "q"),
+    ({"hours_remaining": True}, "hours_remaining"),
+    ({"hour_of_day": 24}, "hour_of_day"),
+    ({"hour_of_day": True}, "hour_of_day"),
+    ({"hour_of_day": 12.0}, "hour_of_day"),
+    ({"hour_of_day": None}, "hour_of_day"),
+    ({"current_discount": "0.3"}, "p_current"),      # cast before it was judged
+    ({"current_discount": float("nan")}, "p_current"),
+    ({"current_discount": True}, "p_current"),
+    ({"mu_ref_path": [1.0, None]}, "demand predictions"),   # TypeError before
+    ({"mu_ref_path": None}, "demand predictions"),
+])
+def test_every_malformed_count_hour_anchor_or_path_is_a_state_rejection(bad, field):
+    """The remaining gaps in the REJECT contract: a bool passed as a count,
+    an hour that names no hour, an anchor cast to float before it was
+    validated (a string crashed the loop), a None inside the demand path
+    (math.isfinite raised)."""
+    from engine.decide import decide, StateRejected
+
+    with pytest.raises(StateRejected) as exc:
+        decide(_state(**bad), None, None, CFG, np.random.default_rng(0),
+               100.0, "v")
+    assert field in str(exc.value)
+
+
+def test_the_caller_may_pass_the_config_digest_once_per_batch(tmp_path):
+    """config_fingerprint snapshots the whole config per call -- about half
+    the cost of a decision. A batch caller computes it once and passes it;
+    the event carries exactly what was passed, and the default is unchanged."""
+    from common import provenance
+    from engine.decide import decide
+    from engine.posterior import PosteriorStore
+    from events.store import EventStore
+
+    store = EventStore(CFG, root=str(tmp_path / "events"))
+    posterior = PosteriorStore.initialise(
+        CFG, {"MEAT": {"mean": -1.0, "std": 0.6}}, {"MEAT": 10**6},
+        path=str(tmp_path / "posterior.json"))
+    digest = provenance.config_fingerprint(CFG)["digest"]
+    passed = decide(_state(), posterior, store, CFG, np.random.default_rng(0),
+                    100.0, "v", config_digest=digest)
+    assert passed["config_digest"] == digest
+    # recorded, never verified: the caller owns the digest it passes
+    marked = decide(_state(), posterior, store, CFG, np.random.default_rng(0),
+                    100.0, "v", config_digest="batch-7")
+    assert marked["config_digest"] == "batch-7"
+    # a non-entry decision records its anchor as the float it was judged as
+    later = decide(_state(current_discount=np.float64(0.1)), posterior, store, CFG,
+                   np.random.default_rng(0), 100.0, "v", config_digest=digest)
+    assert later["anchor_discount"] == 0.1 and type(later["anchor_discount"]) is float
+    assert passed["anchor_discount"] is None
+
+
+def test_the_censored_expectation_reads_the_one_pmf_table_bit_for_bit():
+    """expected_min_demand_inventory_vec built its own per-row NB pmf inline;
+    nb_pmf_table now takes one r per row and the vec reads it. Held to the
+    inline arithmetic exactly, on a random probe (the level factors and the
+    calibration gate are solved on these numbers)."""
+    from engine.demand import expected_min_demand_inventory_vec, nb_pmf_table
+
+    rng = np.random.default_rng(21)
+    max_k = CFG["pricing"]["negbin_max_k"]
+    n = 5000
+    mu = rng.uniform(0.01, 40.0, n)
+    r = rng.uniform(0.1, 5.0, n)
+    q = rng.integers(0, 12, n).astype(float)
+    k = np.arange(max_k + 1)
+    # the inline arithmetic the vec carried before
+    p = (r / (r + mu))[:, None]
+    pmf = nbinom.pmf(k[None, :], r[:, None], p)
+    pmf[:, -1] += np.clip(1.0 - pmf.sum(axis=1), 0.0, None)
+    want = np.sum(pmf * np.minimum(k[None, :], q[:, None]), axis=1)
+    got = expected_min_demand_inventory_vec(mu, r, q, max_k, chunk=1234)
+    assert np.array_equal(got, want)
+    table, _ = nb_pmf_table(mu, r, max_k)
+    assert np.array_equal(table, pmf)
+    # and the scalar-r table (the DP's) is the row-wise one at a constant r
+    scalar, _ = nb_pmf_table(mu, 0.7, max_k)
+    rowwise, _ = nb_pmf_table(mu, np.full(n, 0.7), max_k)
+    assert np.array_equal(scalar, rowwise)

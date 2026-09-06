@@ -10,9 +10,11 @@ or above cost. The chosen price becomes the next anchor.
     V(anchor, q, 0)    = -cost * q
 
 The reward is absolute IL per design 2.2: no ratio transform, no outer loop.
-mu(p) uses the posterior MEAN epsilon. State scale is small (tiers ~2-20,
-horizon under twelve hours, inventory under thirty), so evaluation is
-exhaustive.
+mu(p) uses the posterior MEAN epsilon. Evaluation is exhaustive: the state
+is (tiers ~2-40) x (inventory q0 + 1) per stage, the horizon is the episode's
+remaining window (bounded by `data.max_window_hours`, not by any
+assumption here), and each stage is one vectorised gather over
+(tier, inventory, demand).
 """
 
 import time

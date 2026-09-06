@@ -70,7 +70,8 @@ class PosteriorStore:
 
     def reload(self):
         """Re-read the file, dropping every cached view of the old state.
-        Returns self, so `PosteriorStore(cfg).reload()` reads as intended."""
+        Returns self, so `store.reload().get(...)` chains; a fresh
+        `PosteriorStore(cfg)` has already read the file once."""
         with open(self.path) as f:
             self.state = json.load(f)
         self._processed = None
@@ -200,9 +201,9 @@ class PosteriorStore:
         revision consumes it -- a sub-threshold batch stays whole and is
         re-read tomorrow (design 5.11).
         """
-        rec = self.state["cells"][cell]
         if not applied:
             return                       # nothing consumed, nothing persisted
+        rec = self.state["cells"][cell]
         # no information_since_update counter -- the trigger reads the
         # unconsumed batch, never a running total (design 5.11)
         rec["mean"], rec["std"] = float(new_mean), float(new_std)

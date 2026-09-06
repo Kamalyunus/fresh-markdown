@@ -13,16 +13,13 @@ from engine.posterior import PosteriorStore
 
 @pytest.fixture
 def cfg(cfg):
-    c = cfg
-    if c["exploration"]["tau_initial"] is None:      # null until a gate passes
-        c["exploration"]["tau_initial"] = 447.78     # the production paste
     # These tests are about TAU, not about level calibration. Point the factor
     # artifact at a path that does not exist so the calibration-currency gate
     # passes trivially: otherwise they read whichever schedule happens to be
     # in artifacts/ and start failing the week after it was last fitted.
-    c["baseline_model"] = dict(c["baseline_model"],
-                               calibration_factor_path="artifacts/__absent__.json")
-    return c
+    cfg["baseline_model"] = dict(cfg["baseline_model"],
+                                 calibration_factor_path="artifacts/__absent__.json")
+    return cfg
 
 
 def _decision(i, discount, exploration_cost, date="2026-08-19"):
@@ -149,6 +146,7 @@ def test_a_single_overspending_day_is_not_diluted_by_history(cfg, tmp_path):
     for block in (a, b):
         assert block["tau_after"] == pytest.approx(
             block["tau_before"] * lo, abs=0.01), block
+        assert block["clipped"] is True                # the walk reports the bound
     assert a["realised_exploration_cost"] == b["realised_exploration_cost"]
 
 
@@ -391,9 +389,11 @@ def test_dry_run_and_apply_agree_on_tau_because_the_budget_is_sized_before_the_c
     and disagreed with the dry run on the same store."""
     # ref std 1.0 puts a 0.6 -> 0.45 std move inside the budget's linear
     # range (neither at the floor nor capped at 1), so a mis-ordered walk
-    # would price a different budget
+    # would price a different budget; the share is pinned because the
+    # clip-bound assertion below is sized against it, not the owner's paste
     learn = dict(cfg, learning=dict(cfg["learning"], information_increment=1e-6),
-                 exploration=dict(cfg["exploration"], budget_scale_ref_std=1.0))
+                 exploration=dict(cfg["exploration"], budget_scale_ref_std=1.0,
+                                  budget_share_of_il=0.01))
     reports = {}
     for mode in ("dry", "apply"):
         root = tmp_path / mode
@@ -417,6 +417,9 @@ def test_dry_run_and_apply_agree_on_tau_because_the_budget_is_sized_before_the_c
     lo, hi = learn["exploration"]["tau_adjust_clip"]
     ratio = tc["tau_after"] / tc["tau_before"]
     assert lo + 0.01 < ratio < hi - 0.01, "the walk must not sit on a clip bound"
+    # ...and the walk itself says so: the flag is read off each step's
+    # ratio, never inferred from the rounded taus
+    assert tc["clipped"] is False and not any(r["clipped"] for r in tc["by_day"])
 
 
 def test_the_bounded_step_holds_in_the_report_unrounded(cfg, tmp_path):
@@ -480,6 +483,9 @@ def test_a_long_lived_store_sees_another_writer_only_after_reload(cfg, tmp_path)
 # ------------------------------------------------------- exploration suspension
 def _price_once(cfg, posterior, store, tau, seed=0):
     from engine.decide import decide
+    # no delta_min floor: these tests are about the suspension, and the
+    # owner's per-category bias map would decide which tiers are drawable
+    cfg = dict(cfg, exploration=dict(cfg["exploration"], delta_min_log_bias=None))
     state = {"episode_id": "EP-S", "sku_id": "S", "fc": "F", "category": "vegetables",
              "subcategory": "leafy", "date": "2026-08-20", "hour_of_day": 12,
              "hours_remaining": 3, "q": 4, "original_price": P0, "cost": 4000.0,
@@ -620,3 +626,138 @@ def test_the_launch_belief_is_the_prior_pushed_by_k_stds_and_clipped(cfg):
             assert p.launch_stale(prior, {"vegetables": 500})
             p.state[key] = value
             assert not p.launch_stale(prior, {"vegetables": 500})
+
+
+# ------------------------------------------------ windowed event quality
+def _incident_store(cfg, tmp_path, days_back, incident_back, per_day=5):
+    """`days_back` + 1 clean trading days ending 2026-08-19, except the day
+    `incident_back` days before it, whose every outcome sold at a price
+    we did not set (the price-mismatch incident)."""
+    store = EventStore(cfg, root=str(tmp_path / "events"))
+    i = 0
+    for back in range(days_back, -1, -1):
+        day = str(pd.Timestamp("2026-08-19") - pd.Timedelta(days=back))[:10]
+        for _ in range(per_day):
+            store.emit_decision(_decision(i, 0.30, 0.5, day))
+            o = _outcome(i, 1, day)
+            if back == incident_back:
+                o["applied_price"] = P0 * 0.5                # not our price
+            store.emit_outcome(o)
+            i += 1
+    return store
+
+
+def _with_window(cfg, days):
+    sc = dict(cfg["monitoring"]["stop_conditions"], event_quality_window_days=days)
+    return dict(cfg, monitoring=dict(cfg["monitoring"], stop_conditions=sc))
+
+
+def test_a_resumed_pilot_is_not_re_suspended_by_an_incident_outside_the_window(cfg, tmp_path):
+    """All-time rates re-fired the price-mismatch stop the morning after a
+    human resumed exploration, until enough clean history diluted the one
+    incident -- and update refused --calibrate-tau / --apply for as long.
+    The rates are over the trailing event_quality_window_days of TRADING
+    days: a fixed integration clears both once the incident ages out."""
+    window = 7
+    narrow = _with_window(cfg, window)
+    store = _incident_store(narrow, tmp_path, days_back=window + 2,
+                            incident_back=window)          # one day outside
+    posterior = _posterior(narrow, tmp_path)
+    posterior.suspend_exploration(["price_mismatch"], "2026-08-12")
+    assert posterior.resume_exploration()["reasons"] == ["price_mismatch"]
+
+    report = mon.build_report(store, posterior, narrow)
+    assert report["stop_conditions"]["fired"]["price_mismatch"] is False
+    assert report["exploration_suspended"] is None          # NOT re-suspended
+    safety = report["safety"]
+    assert safety["event_quality_window_days"] == window
+    assert safety["event_quality_window_start"] == "2026-08-13"
+    assert safety["compared_pair_count"] == 5 * window
+    assert safety["price_mismatch_count"] == 0
+    upd_report = upd.run(narrow, calibrate_tau=True,
+                         events_root=str(tmp_path / "events"),
+                         posterior_path=str(tmp_path / "posterior.json"))
+    assert "refused" not in upd_report and upd_report["tau_committed"]
+    gate = upd_report["event_quality_gates"]["price_mismatch_rate"]
+    assert gate["pass"] and gate["value"] == 0.0 and gate["window_days"] == window
+
+    # the same store under a window that still holds the incident: the
+    # stop fires, update refuses, and both read ONE rate
+    wide = _with_window(cfg, window + 3)
+    fired = mon.build_report(store, posterior, wide)
+    assert fired["stop_conditions"]["fired"]["price_mismatch"] is True
+    assert fired["exploration_suspended"]["reasons"] == ["price_mismatch"]
+    refused = upd.run(wide, calibrate_tau=True,
+                      events_root=str(tmp_path / "events"),
+                      posterior_path=str(tmp_path / "posterior.json"))
+    assert "price_mismatch_rate" in refused["refused"]
+    from events.pairs import quality_rates
+    batch = upd.collect_batch(store, posterior, wide)
+    assert quality_rates(batch["event_quality"]) == quality_rates(fired["safety"])
+    assert refused["event_quality_gates"]["price_mismatch_rate"]["value"] == \
+        fired["safety"]["applied_vs_recommended_price_mismatch"] == \
+        round(5 / (5 * (window + 3)), 4)
+    # duplicates stay all-time on both sides (the store counts them on load)
+    assert fired["safety"]["duplicate_outcome_count"] == \
+        batch["event_quality"]["duplicate_outcome_count"] == 0
+
+
+# --------------------------------------------------- the learnable batch
+def test_the_learner_refuses_hours_that_opened_empty_or_restocked(cfg, tmp_path):
+    """An hour that opened with nothing on the shelf sold nothing whatever
+    demand was -- its censored term is log P(D >= 0) = 0, and the update
+    read it as P(D >= 1). A restocked hour has no single q to empty. Both
+    are what assurance already excluded; the learner now reads the same
+    rule (events.pairs.learnable_with_stock) and counts what it refused."""
+    from events.pairs import learnable_with_stock, match_pairs
+    store = _store(cfg, tmp_path, 3, cost_each=0.0, history_days=2)   # IL base
+    base = len(store.load_decisions())
+    shelves = [(9, 1, 8, None),                       # learnable
+               (0, 0, 0, None),                       # opened empty
+               (2, 1, 6, "intraday_restock"),         # stock arrived
+               (4, 1, 3, None)]                       # learnable
+    for j, (start, sold, end, why) in enumerate(shelves):
+        i = base + j
+        store.emit_decision(_decision(i, 0.45, 40.0))
+        o = outcome_event(outcome_id=f"O{i}", decision_id=f"D{i}", units_sold=sold,
+                          starting_inventory=start, ending_inventory=end,
+                          applied_price=P0 * 0.55, finalized_at="2026-08-19T18:00:00+00:00")
+        if why:
+            o["adjustment_reason"] = why
+        assert store.emit_outcome(o)
+    posterior = _posterior(cfg, tmp_path)
+    batch = upd.collect_batch(store, posterior, cfg)
+    learned = [o["outcome_id"] for _, o, _ in batch["per_cell"]["vegetables"]]
+    assert learned == [f"O{base}", f"O{base + 3}"]
+    assert (batch["excluded_no_stock"], batch["excluded_restock"]) == (1, 1)
+    # the SAME population assurance grades r on, minus the restock it
+    # leaves out of the dispersion check
+    decisions, outcomes = store.load_decisions(), store.load_outcomes()
+    with_stock = {o["outcome_id"] for _, o in learnable_with_stock(decisions, outcomes)}
+    assert f"O{base + 1}" not in with_stock and f"O{base + 2}" in with_stock
+    assert len(with_stock) == len(match_pairs(decisions, outcomes)) - 1
+    # and the report carries the counts
+    rep = upd.run(cfg, events_root=str(tmp_path / "events"),
+                  posterior_path=str(tmp_path / "posterior.json"))
+    assert rep["batch"] == {"excluded_no_stock": 1, "excluded_restock": 1}
+    assert rep["cells"]["vegetables"]["forced_outcomes"] == 2
+
+
+def test_calibration_currency_is_judged_on_the_latest_trading_day(cfg, tmp_path):
+    """The schedule check read the UTC wall clock: a store whose latest
+    priced day sits inside the last fitted week read as stale the moment
+    the clock rolled into the next week. It reads the latest TRADING day
+    (events.pairs.decision_day); the clock only while nothing is priced."""
+    import json
+    cal = tmp_path / "calibration.json"
+    cal.write_text(json.dumps({"schedule": {"by_week": {"2026-08-17": {"FRUIT": 1.0}}}}))
+    c = dict(cfg, baseline_model=dict(cfg["baseline_model"],
+                                      calibration_factor_path=str(cal)))
+    _store(c, tmp_path, 4, cost_each=1.0)             # latest priced day 08-19
+    _posterior(c, tmp_path)
+    rep = upd.run(c, events_root=str(tmp_path / "events"),
+                  posterior_path=str(tmp_path / "posterior.json"))
+    gate = rep["event_quality_gates"]["calibration_schedule_current"]
+    assert gate["pass"] and gate["value"] == "2026-08-17"
+    # the wall clock is long past that week, and would have refused
+    assert not upd.calibration_current(c)["pass"]

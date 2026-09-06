@@ -50,7 +50,7 @@ def test_duplicate_ids_written_by_a_foreign_producer_are_counted_on_load(cfg, tm
     posterior = PosteriorStore.initialise(
         cfg, {"vegetables": {"mean": -1.0, "std": 0.6}}, {"vegetables": 10**6},
         path=str(tmp_path / "posterior.json"))
-    _, gates, _, _ = upd.collect_batch(store, posterior, cfg)
+    gates = upd.collect_batch(store, posterior, cfg)["gates"]
     assert gates["duplicate_or_unmatched_rate"]["value"] > 0
     assert not gates["duplicate_or_unmatched_rate"]["pass"]
 
@@ -166,3 +166,57 @@ def test_a_torn_quarantine_line_does_not_take_the_store_down(cfg, tmp_path):
     assert not store.emit_outcome(_outcome(outcome_id="O-bad", ending_inventory=99))
     q = store.load_quarantine()
     assert [r["event"].get("outcome_id") for r in q] == ["O-bad"]
+
+
+# ------------------------------------------------------ foreign JSONL lines
+def test_id_less_foreign_lines_are_not_duplicates_of_each_other(cfg, tmp_path):
+    """A foreign writer's line with no <kind>_id registered None, and every
+    later id-less line then counted as a duplicate of it -- a fake
+    duplicate gate failure from lines the matcher never pairs anyway."""
+    root = tmp_path / "events"
+    root.mkdir()
+    with open(root / "decisions.jsonl", "w") as f:
+        f.write(json.dumps(decision_event(decision_id="D1")) + "\n")
+        f.write(json.dumps({"note": "a marker line"}) + "\n")
+        f.write(json.dumps({"note": "another"}) + "\n")
+    store = EventStore(cfg, root=str(root))
+    assert store.duplicate_counts == {"decision": 0, "outcome": 0}
+    assert [d.get("decision_id") for d in store.load_decisions()] == ["D1", None, None]
+    # a real repeat is still one
+    with open(root / "decisions.jsonl", "a") as f:
+        f.write(json.dumps(decision_event(decision_id="D1")) + "\n")
+    assert EventStore(cfg, root=str(root)).duplicate_counts["decision"] == 1
+
+
+def test_a_quarantine_record_whose_event_is_not_an_object_is_tolerated(cfg, tmp_path):
+    root = tmp_path / "events"
+    root.mkdir()
+    (root / "quarantine.jsonl").write_text(
+        json.dumps({"event": "not an object", "problems": ["x"]}) + "\n"
+        + json.dumps({"event": None}) + "\n"
+        + json.dumps({"event": {"outcome_id": "O-seen"}}) + "\n")
+    store = EventStore(cfg, root=str(root))
+    assert len(store.load_quarantine()) == 3
+    # dedup still keyed on the one record that carries an id
+    assert not store.emit_outcome(_outcome(outcome_id="O-seen", ending_inventory=99))
+    assert store.quarantined_this_run == 0
+
+
+def test_a_torn_line_split_inside_a_multibyte_character_is_quarantined(cfg, tmp_path):
+    """A power loss can cut the last line between the bytes of one UTF-8
+    character. Decoding that raised UnicodeDecodeError before the store
+    existed -- outside the per-line try -- so the whole store was down."""
+    root = tmp_path / "events"
+    root.mkdir()
+    good = json.dumps(decision_event(decision_id="D-good")) + "\n"
+    torn = json.dumps(decision_event(decision_id="D-café", category="légumes"),
+                      ensure_ascii=False).encode("utf-8")
+    cut = torn.index("é".encode("utf-8")) + 1         # between the two bytes
+    with open(root / "decisions.jsonl", "wb") as f:
+        f.write(good.encode("utf-8") + torn[:cut])
+    store = EventStore(cfg, root=str(root))
+    assert [d["decision_id"] for d in store.load_decisions()] == ["D-good"]
+    assert store.quarantined_this_run == 1
+    assert "unparseable" in store.load_quarantine()[0]["problems"][0]
+    assert store.emit_decision(decision_event(decision_id="D-next"))
+    assert [d["decision_id"] for d in store.load_decisions()] == ["D-good", "D-next"]

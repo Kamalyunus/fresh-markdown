@@ -4,11 +4,12 @@ Runs the full production decision path against observed data; NO prices are
 applied. Outcomes are stamped execution_status="shadow_not_applied" and are
 ineligible for daily.update. Runs on `data.holdout` BY DEFAULT -- frozen
 artifacts are fit up to split.test_end, so `--all` is partly in-sample and
-the report says so. Exit gate: event completeness, matched decision rate,
-and ZERO cost-floor violations."""
+the report says so. Exit gate: event completeness and ZERO cost-floor
+violations."""
 
 import argparse
 import hashlib
+import os
 
 import numpy as np
 import pandas as pd
@@ -18,9 +19,9 @@ from common import episodes
 from common import metrics
 from common.io import read_json, write_json
 from common.parallel import map_episodes
-from common.provenance import config_fingerprint
+from common.provenance import config_fingerprint, file_digest
 from common.episodes import adjustment_reason
-from evaluate.backtest import predict_frame
+from evaluate.backtest import predict_frame, _coverage_preserved
 from fit.prepare_data import population
 from fit.train_baseline import BaselineModel
 from events.store import EventStore
@@ -70,6 +71,14 @@ def pre_window_il_history(d, cfg, before):
     window = int(cfg["exploration"]["budget_il_window_days"])
     lo = (start - pd.Timedelta(days=window)).strftime("%Y-%m-%d")
     hi = start.strftime("%Y-%m-%d")
+    # only episodes that OPENED within max_window_hours before `lo` can
+    # close in [lo, hi): cut those out whole (episode-scoped, rule 15)
+    # rather than settle the entire extract for one week of closes
+    lo_open = (start - pd.Timedelta(days=window)
+               - pd.Timedelta(hours=int(cfg["data"]["max_window_hours"])))
+    d = episodes.window_slice(d, lo_open.strftime("%Y-%m-%d"), hi)
+    if d.empty:
+        return {}
     econ, _ = metrics.settled(metrics.episode_economics(d))
     close = econ.close_day.astype(str)
     econ = econ[(close >= lo) & (close < hi)]
@@ -108,6 +117,8 @@ def weekly_refit_schedule(d_full, cfg, model, r_lookup, start, end):
     wk = dates.dt.to_period("W")
     lo_w = pd.Timestamp(start).to_period("W").start_time
     hi_w = pd.Timestamp(end).to_period("W").start_time
+    # the episode's date key, computed ONCE for every week's cut
+    opened = episodes.opening_dates(scope)
 
     out, coverage = {}, []
     for w in sorted(wk.unique()):
@@ -116,7 +127,8 @@ def weekly_refit_schedule(d_full, cfg, model, r_lookup, start, end):
             continue
         # STRICTLY BEFORE this week: no look-ahead inside the replay; the
         # same whole-episode cut the artifact schedule uses
-        window, weeks_seen = episodes.trailing_weeks_window(scope, w0, weeks_back)
+        window, weeks_seen = episodes.trailing_weeks_window(
+            scope, w0, weeks_back, opened=opened)
         fitted = _solve_level_factors(
             window.copy(), model, bm["calibration_shrinkage_units"],
             bm["calibration_min_anchor_rows"], cfg["pricing"]["tier_step"],
@@ -208,9 +220,11 @@ def derive_tau0(d_full, cfg, start, model, posterior, r_lookup, il_history,
 
     pre_ids = pre.episode_id.unique()
     n_pop = len(pre_ids)
-    # the span the spend is divided by: the POPULATION's, unextended (a
-    # sample can shrink it; extend_to_window's synthetic tail can add a day)
-    n_days = episodes.calendar_days(pre.date)
+    # the span the spend is divided by: the POPULATION's OPENING days,
+    # unextended (a sample can shrink it; extend_to_window's synthetic tail
+    # can add a day; and an episode opened at 22:00 on the last day has
+    # rows dated the next day, which would read a W-day window as W+1)
+    n_days = episodes.calendar_days(episodes.opening_dates(pre))
     # decoupled from the window's sample draw, same reproducibility contract
     rng = np.random.default_rng([int(seed), 1])
     if max_episodes and n_pop > max_episodes:
@@ -546,13 +560,17 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     # and sampling after the predict step costs a full run for sample evidence
     population_ids = d.episode_id.unique()
     n_population = len(population_ids)
-    # the span every "per day" figure divides by: the WINDOW's, on the
-    # unsampled, unextended frame (a sample can shrink it; extend_to_window's
-    # synthetic tail can add a day). Both sides -- spend and budget -- cover
-    # the same episodes over the same days. The report's window is this
-    # frame's too, so a reader dividing by its dates gets the same span.
-    n_days = episodes.calendar_days(d.date)
-    date_min, date_max = str(d.date.min()), str(d.date.max())
+    # the span every "per day" figure divides by: the WINDOW's OPENING days,
+    # on the unsampled, unextended frame (a sample can shrink it;
+    # extend_to_window's synthetic tail can add a day; an episode opened at
+    # 22:00 on the window's last day has rows dated the next day, which
+    # would read a W-day opening window as W+1 and overspend tau by
+    # (W+1)/W). Both sides -- spend and budget -- cover the same episodes
+    # over the same days. The report's window is this frame's too, so a
+    # reader dividing by its dates gets the same span.
+    opened = episodes.opening_dates(d)
+    n_days = episodes.calendar_days(opened)
+    date_min, date_max = str(opened.min()), str(opened.max())
     sampled = bool(max_episodes) and n_population > max_episodes
     if sampled:
         keep = rng.choice(population_ids, max_episodes, replace=False)
@@ -628,17 +646,24 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         except Exception as exc:                          # noqa: BLE001
             refit, refit_cov = {}, [{"error": str(exc)}]
     if refit:
-        anchor_f = model.calibration
-        weeks = episodes.week_key(pd.Series(drift["date"]))
-        scale = np.ones(len(mu_arr))
-        for i, (wkey, cell) in enumerate(zip(weeks.to_numpy(),
-                                             drift["cell"])):
-            table = refit.get(wkey)
-            if table is None:
-                continue                       # unfitted week keeps the anchor
-            base = float(anchor_f.get(cell, 1.0)) or 1.0
-            scale[i] = float(table.get(cell, base)) / base
-            refit_applied += 1
+        # production's own applier over the drift rows: the anchor factor
+        # each row was priced with (frozen at the window start) and the
+        # factor the weekly re-fit would give it (an unfitted week keeps
+        # the anchor, as the schedule does) -- the backtest's weekly_refit
+        # reads the same way, and neither carries a copy of the lookup
+        rows = pd.DataFrame({"date": drift["date"],
+                             model.calibration_grain: drift["cell"]})
+        with _coverage_preserved(model):
+            anchor_f = model.level_factors(rows)
+            schedule = model.calibration_schedule
+            model.calibration_schedule = refit
+            model.freeze_calibration_from(None)
+            try:
+                refit_f = model.level_factors(rows)
+            finally:
+                model.calibration_schedule = schedule
+        scale = refit_f / np.where(anchor_f > 0, anchor_f, 1.0)
+        refit_applied = int(episodes.week_key(rows.date).isin(refit).sum())
         refit_ratio = _ratio(mu_arr * scale)
 
     # weeks-to-convergence input: evidence bought -> bounded posterior steps;
@@ -807,9 +832,9 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         gate["in_sample_caveat"] = (
             f"run on '{window_basis}', NOT the hold-out: the drift ratio, "
             "tau_recommended and the learning yield are flattered by "
-            "in-sample rows. The completeness, matched-rate and cost-floor "
-            "checks test plumbing, not fit, and are unaffected. Re-run "
-            "without --all for the launch record.")
+            "in-sample rows. The completeness and cost-floor checks test "
+            "plumbing, not fit, and are unaffected. Re-run without --all "
+            "for the launch record.")
     gate["verdict"] = ("PASS -- proceed to exploit-only pilot (design 9.4, 10)"
                        if all(g["pass"] for g in gate.values()
                               if isinstance(g, dict))
@@ -821,6 +846,11 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             "baseline_model_version": model.version,
             "posterior_versions": {c: r["version"]
                                    for c, r in posterior.state["cells"].items()},
+            # the posterior FILE this run priced with: ops.advance re-runs
+            # shadow when it moves (a re-init, a rho paste after a retrain)
+            "posterior_digest": (file_digest(cfg["posterior"]["path"])
+                                 if os.path.exists(cfg["posterior"]["path"])
+                                 else None),
             "config_version": cfg["meta"]["config_version"],
             # every window row is frozen at the anchor ON PURPOSE (above), so
             # this reads OK; STALE here means a pre-window row ran past the
