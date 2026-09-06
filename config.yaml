@@ -125,7 +125,7 @@ learning:
   update_cadence_days: 1               # SET BY OWNER  days between operator-gated posterior updates (daily.update --apply). DAILY: each cell triggers on its own batch, so a fast category updates the day it has the evidence and a slow one waits -- a longer cadence only delays the fast ones and discards their surplus (learning_yield_would_be.bounded_updates_worth_per_period). tau is walked daily regardless (--calibrate-tau)
   information_increment: 0.237  # MEASURED  deff-deflated NB info per bounded update
   max_mean_step: 0.796                 # SET BY OWNER, gated  cap on one update's mean move (pasted inside its gate, owner, 2026-09-06)
-  max_std_shrink: 0.25                 # SET BY OWNER  the PRIMARY rate limit on learning
+  max_std_shrink: 0.10                 # SET BY OWNER  the PRIMARY rate limit on learning; 0.25 -> 0.10 (owner, 2026-09-06, conservative launch). information_increment derives from it: tune re-pastes it on the next advance
 
 events:
   store_dir: "events_store"            # SET  decision/outcome event log location
@@ -162,8 +162,8 @@ monitoring:
     price_mismatch_rate: 0.01          # SET
     exploration_cost_vs_budget: 2.0    # SET
     deterioration_smoothing_days:      # SET  days averaged BEFORE comparing
-      scrap: 7                         # per metric, chosen from measured noise
-      margin: 1
+      scrap: 7                         # per metric; both 7 (owner, 2026-09-06) -- the margin floor re-derives on the next advance
+      margin: 7
     persistence_days: 2                # SET  consecutive days before a stop fires
     scrap_deterioration_pct: 0.3217    # MEASURED  3-sigma of the trailing noise, pasted by tune --apply from reports/thresholds.json (owner, 2026-09-06)
     margin_deterioration_pct: 0.0614   # MEASURED  3-sigma of the trailing noise, pasted by tune --apply from reports/thresholds.json (owner, 2026-09-06)

@@ -105,8 +105,8 @@ def test_noise_floor_and_monitor_use_the_same_smoothing():
     comparison and smoothing is asserted where the shared module is.)"""
     sm = CFG["monitoring"]["stop_conditions"]["deterioration_smoothing_days"]
     assert set(sm) == {"scrap", "margin"}
-    # scrap is a low-base series and needs averaging; margin does not
-    assert sm["scrap"] > 1 and sm["margin"] == 1
+    # both series are averaged over the same week (owner, 2026-09-06)
+    assert sm["scrap"] > 1 and sm["margin"] == sm["scrap"]
 
 
 def _daily_frame(days=70, skus=60, seed=0, start="2026-01-01", dp=True):
