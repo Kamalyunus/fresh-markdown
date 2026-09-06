@@ -1510,7 +1510,9 @@ shop — and `dispersion` is excused under a gate fault: it bins by
 predicted `mu`, so a belief that `--apply` was never allowed to correct
 reads as a shape problem. A guardrail test needs the run to outlast the trailing window plus
 smoothing plus persistence, and the shock by smoothing plus persistence
-(`demand_shock:30:0.5 --days 45`); shorter runs read NOT MEASURED there. Every number is the
+(`demand_shock:30:0.5 --days 45`); shorter runs read NOT MEASURED there,
+as does a shock the scrap series saw but that stays under the owner's
+floor — the reach of that world, reported with the reading. Every number is the
 simulated world's (rule 19): a PASS says the machinery does what it claims
 on a shop with that elasticity, never that the shop has it. Its first runs
 found two defects the unit tests could not: the `--apply` gate and

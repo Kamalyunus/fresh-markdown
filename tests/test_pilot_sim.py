@@ -137,6 +137,7 @@ def _report(days=8, **over):
                 "assurance": {"reproduction": "PASS", "dispersion": "PASS",
                               "correlation": "INSUFFICIENT", "exploration": "PASS"},
                 "assurance_detail": {"rho_live": 0.4},
+                "guardrails": {"scrap_deterioration_pct": {"latest": 0.01, "threshold": 0.3}},
                 "learning": {"forced_decision_count": 30 * k,
                              "affordable_set_empty_rate": 0.2},
                 "suspended": None,
@@ -195,6 +196,17 @@ def test_a_fault_turns_its_expectation_around(cfg):
         d["suspended"] = {"reasons": ["price_mismatch"]}
     assert {x["name"]: x["verdict"] for x in pilot_sim.grade(off, cfg)}[
         "exploration_never_starves"] == "PASS"
+
+    # a shock the scrap series saw but that stays under the owner's floor is
+    # the world's reach, reported and not graded
+    seen = copy.deepcopy(_report(days=40))
+    seen["world"]["faults"] = {"demand_shock": (20, 0.5)}
+    seen["days"][-1]["guardrails"]["scrap_deterioration_pct"]["latest"] = 0.17
+    v = {x["name"]: x for x in pilot_sim.grade(seen, cfg)}["stops_only_on_faults"]
+    assert v["verdict"] == "NOT MEASURED" and v["observed"]["shock_seen_but_under_the_floor"]
+    seen["days"][-1]["guardrails"]["scrap_deterioration_pct"]["latest"] = 0.0
+    assert {x["name"]: x["verdict"] for x in pilot_sim.grade(seen, cfg)}[
+        "stops_only_on_faults"] == "FAIL"
 
     # and a stop with no fault behind it is the defect the sim exists to find
     stray = copy.deepcopy(_report())

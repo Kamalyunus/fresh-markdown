@@ -394,6 +394,10 @@ class PilotSim:
         mon = monitor.build_report(EventStore(cfg), PosteriorStore(cfg), cfg)
         write_json(os.path.join(self.sim_dir, "reports", "monitor.json"), mon)
         lane["stops"] = {n: v for n, v in mon["stop_conditions"]["fired"].items()}
+        lane["guardrails"] = {n: {"latest": g.get("latest"),
+                                  "threshold": g.get("threshold"),
+                                  "consecutive_days_over": g.get("consecutive_days_over")}
+                              for n, g in mon["stop_conditions"]["guardrails"].items()}
         lane["suspended"] = mon["exploration_suspended"]
         lane["business"] = {n: mon["business"].get(n) for n in
                             ("il_pct_aggregate", "sell_through", "waste_units")}
@@ -634,10 +638,22 @@ def grade(rep, cfg):
                         if any(f in faults for f in fs) and n not in fired
                         and (n in ("duplicate_or_unmatched", "price_mismatch")
                              or (n == "scrap_deterioration_pct" and guardrail_ready))]
+    # a shock the series SAW (the scrap deviation moved worse) that still
+    # sits under the owner's floor is this world's reach, not a silent
+    # stop: reported with the reading, not graded
+    scrap = (days[-1].get("guardrails") or {}).get("scrap_deterioration_pct") or {} if days else {}
+    under_floor = ("scrap_deterioration_pct" in expected_missing
+                   and scrap.get("latest") is not None and scrap.get("threshold") is not None
+                   and 0 < scrap["latest"] < scrap["threshold"])
+    if under_floor:
+        expected_missing.remove("scrap_deterioration_pct")
     add("stops_only_on_faults", not unexpected and not expected_missing,
         {"fired": fired, "unexpected": unexpected, "expected_but_silent": expected_missing,
-         "guardrail_window_reached": guardrail_ready if shock_day is not None else None},
-        measured=bool(days) and (shock_day is None or guardrail_ready or bool(unexpected)))
+         "guardrail_window_reached": guardrail_ready if shock_day is not None else None,
+         "scrap_deviation_latest": scrap.get("latest"), "scrap_floor": scrap.get("threshold"),
+         "shock_seen_but_under_the_floor": under_floor},
+        measured=bool(days) and (shock_day is None or guardrail_ready or bool(unexpected))
+        and not under_floor)
 
     # forced per day from the monitor's cumulative count; a day with a tau
     # in force (not suspended) and no forced decision is exploration off
