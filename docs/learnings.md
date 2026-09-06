@@ -504,6 +504,15 @@ now. Dates are owner sign-off, 2026-08.
     whole at `null_key_rows_dropped` (a row drop left a fragment opening
     mid-window); the templates refuse a null rather than skip it, and the
     fixture injects the dirt so the path stays exercised.
+  - on the owner's rehearsal the overspend stop fired on day three and
+    suspended exploration for the run: the budget is a share of trailing
+    closed-episode IL, and two days after launch that base is a handful
+    of early closers. A base shorter than `budget_il_window_days` is now
+    an absence of signal like a zero budget (`explore.budget_base_ready`):
+    the controller holds, the stop takes no reading. The same run showed
+    the simulator overlapping a template's two arms on multi-day windows
+    (two feed states for one hour, a completeness gap with no fault); the
+    twin now opens the day after the first run closes.
   Also learned: the sim's `hold the current price` fallback opened an
   episode at a bare `d_max` off the tier grid, and the next decision had
   no feasible tier at or below its anchor — the same trap Lane B's

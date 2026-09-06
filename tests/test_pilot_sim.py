@@ -155,6 +155,8 @@ def _report(days=8, **over):
         "learning": {"GLOBAL": {"version": 2, "abs_error_at_launch": 0.8,
                                 "abs_error_now": 0.3, "launch_std": 2.0, "std": 1.5}},
         "lane_c": [{"schedule_end": "2026-09-07"}],
+        "level_tracking": {"2026-08-31": {"hours": 300, "mean_log_ratio": 0.02,
+                                          "p10_p90": [-0.1, 0.15]}},
         "days": [day(k) for k in range(1, days + 1)],
     }
     rep.update(over)
@@ -295,3 +297,20 @@ def test_the_sim_config_is_the_home_of_the_settings_and_flags_override(tmp_path)
     broken.write_text("run: {days: 2}\nworld: {}\npaths: {}\n")
     with pytest.raises(ValueError, match="lacks"):
         pilot_sim.load_sim_config(str(broken))
+
+
+def test_a_level_error_of_the_agent_is_named_not_read_as_learning(cfg):
+    """The learner has no level term: a weekly re-fit that misses the
+    world's level by more than the gate band is read as elasticity, so the
+    report names the week rather than letting the learning row take the
+    blame alone."""
+    cfg["learning"]["update_cadence_days"] = 1
+    rep = _report()
+    rep["level_tracking"]["2026-09-07"] = {"hours": 280, "mean_log_ratio": 0.31,
+                                          "p10_p90": [0.1, 0.5]}
+    x = {e["name"]: e for e in pilot_sim.grade(rep, cfg)}["agent_level_tracks_world"]
+    assert x["verdict"] == "FAIL" and "2026-09-07" in x["observed"]["weeks_outside_band"]
+    assert "2026-08-31" not in x["observed"]["weeks_outside_band"]
+    rep["level_tracking"] = {}
+    assert {e["name"]: e["verdict"] for e in pilot_sim.grade(rep, cfg)}[
+        "agent_level_tracks_world"] == "NOT MEASURED"

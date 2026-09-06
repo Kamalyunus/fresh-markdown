@@ -281,7 +281,9 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
         il_by_day, widest_std, cfg)
     rows, first_within, suspend_days, streak, prev = [], None, 0, 0, None
     for rank, r in enumerate(walked):
-        over = (r["spend"] / r["budget"]) if r["budget"] > 0 else None
+        # a held day (no base yet, or one shorter than its window) is no
+        # reading, exactly as the monitor's overspend series takes none
+        over = (r["spend"] / r["budget"]) if r["budget"] > 0 and not r.get("held") else None
         # the monitor's rule (daily.monitor.evaluate_guardrail): over the
         # multiple on persistence_days CONSECUTIVE CALENDAR days -- a
         # calendar day with no decision breaks the streak, as does a

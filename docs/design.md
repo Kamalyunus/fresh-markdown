@@ -631,7 +631,15 @@ each side, both keyed by the decision's TRADING day
 which for an hour-23 decision is D+1 and put the controller a day ahead of
 the IL side. Zero realised spend on a priced day is under-spend, not
 absence of signal: nothing was affordable, τ rises by the clip, and that is
-the only way a τ cut below the smallest spread recovers. `evaluate.shadow`'s
+the only way a τ cut below the smallest spread recovers. A base that does
+not yet reach back a whole `budget_il_window_days` — the first mornings
+after launch, when a handful of early closers is all the IL there is — is
+an absence of signal like a zero budget: the controller holds τ (the row
+says `held`) and the overspend stop takes no reading
+(`explore.budget_base_ready`, the one rule both read). The owner's
+rehearsal showed why: a budget priced from day two's closers was tiny, the
+stop fired on day three and exploration stayed suspended for the run.
+`evaluate.shadow`'s
 controller trace walks the same arithmetic, so "would the pilot survive its
 first week" grades the controller production actually runs — literally:
 both call `explore.walk_tau`, one clipped step per closed day since the
@@ -1507,8 +1515,9 @@ its noise NB at the agent's own `r`, with a log-normal shock every hour of
 an episode shares (`--episode-shock-sd`, the reason `deff` exists) and an
 optional level drift. Episodes are templates sampled from the hold-out's
 DP-eligible population, re-dated onto simulated days; each runs once under
-the pilot and once under its own legacy path on consecutive days, so the
-IL read is like-for-like. Every hour with stock goes through the real
+the pilot and once under its own legacy path the day after the first run
+closes (never while its SKU × FC is still open, or the feed would hold two
+states for one hour), so the IL read is like-for-like. Every hour with stock goes through the real
 `engine.decide` against a real posterior and event store; the shelf gets
 the price (or the fault: `missing`, `duplicate`, `mismatch`, `push_fail`,
 `discount_rounding`, `demand_shock`); the world writes the feed row the
@@ -1527,7 +1536,12 @@ cost, outcome completeness, the event-quality gates, the posterior moving
 toward `epsilon_true` and narrowing, tau walking to its budget, stops
 firing only under the fault that causes them (and firing under it), the
 assurance checks, the schedule covering every priced week, `--apply` on
-cadence. A fault turns its expectation around: with `mismatch` injected
+cadence, and the agent's level tracking the world's: per week, the mean
+log ratio of the agent's `mu_ref` (its own weekly re-fit) to the world's
+over the pilot's hours must sit inside the calibration gate band, because
+the elasticity learner carries no level term and reads a level error as
+elasticity — on the fixture a thin week's re-fit moved the level by a
+third and the posterior followed it away from the truth it had reached. A fault turns its expectation around: with `mismatch` injected
 the gate MUST fail and the stop MUST fire. `correlation` is reported, not
 graded — the world's within-episode shock is a knob, not a claim about the
 shop — and `dispersion` is excused under a gate fault: it bins by

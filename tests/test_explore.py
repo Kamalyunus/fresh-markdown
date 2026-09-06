@@ -100,8 +100,9 @@ def test_tau_next_clipped():
     assert explore.tau_next(100.0, inside * 500.0, 500.0, CFG) == \
         (pytest.approx(100.0 * inside), False)
     # and the walk carries it per row
+    base = {"2026-07-26": 1e9}                 # a full window behind the day
     _, rows = explore.walk_tau(100.0, ["2026-08-02"], lambda d, t: 1.0,
-                               {"2026-08-01": 1e9}, 1.0, CFG)
+                               base, 1.0, CFG)
     assert rows[0]["clipped"] is True and rows[0]["tau_after"] == pytest.approx(100.0 * hi)
 
 
@@ -324,3 +325,30 @@ def test_the_sweep_finds_the_in_force_cell_by_closeness_not_exact_key():
     assert rows[share * (1 + 1e-12)]["in_force"]
     assert rows[share * (1 + 1e-12)]["information_rel"] == 1.0
     assert 0 < rows[0.005]["information_rel"] < 1.0
+
+
+def test_the_controller_holds_tau_until_the_il_base_spans_its_window(cfg):
+    """A pilot's first mornings hold a handful of early closers, not the
+    shop's IL: a budget priced from them is tiny, and on the owner's
+    rehearsal the overspend stop fired on day three. Until the base reaches
+    back a whole budget_il_window_days the day is held (an absence of
+    signal, like a zero budget), and the row says why."""
+    from engine.explore import budget_base_ready, walk_tau
+
+    cfg["exploration"]["budget_il_window_days"] = 3
+    il = {"2026-09-01": 1000.0, "2026-09-02": 1000.0, "2026-09-03": 1000.0,
+          "2026-09-04": 1000.0}
+    assert not budget_base_ready({}, "2026-09-02", cfg)
+    assert not budget_base_ready(il, "2026-09-03", cfg)       # 2 days back
+    assert budget_base_ready(il, "2026-09-04", cfg)           # 3 days back
+    tau, rows = walk_tau(100.0, ["2026-09-02", "2026-09-03", "2026-09-04"],
+                         lambda day, t: 1e6, il, 1.0, cfg)     # wildly over budget
+    assert [r["held"] for r in rows] == [
+        "IL base shorter than budget_il_window_days",
+        "IL base shorter than budget_il_window_days", None]
+    assert rows[0]["budget"] > 0 and rows[0]["tau_after"] == 100.0
+    assert rows[2]["tau_after"] == pytest.approx(50.0) and not rows[2]["held"]
+    assert tau == pytest.approx(50.0)
+    # a zero budget still holds, and says so
+    _, empty = walk_tau(100.0, ["2026-09-02"], lambda d, t: 5.0, {}, 1.0, cfg)
+    assert empty[0]["held"] == "no trailing IL" and empty[0]["tau_after"] == 100.0

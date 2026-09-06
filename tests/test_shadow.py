@@ -82,8 +82,10 @@ def test_the_trace_streak_counts_consecutive_calendar_days(cfg):
         led = SpreadLedger()
         for day in days:
             led.add(day, [10.0, 20.0])
-        # a thin trailing IL base: every day's expected spend is over budget
-        return _controller_trace(led, {"2026-08-09": 100.0}, tau0=1000.0,
+        # a thin trailing IL base spanning a whole window: every day's
+        # expected spend is over budget
+        base = {f"2026-08-{d:02d}": 100.0 for d in range(2, 10)}
+        return _controller_trace(led, base, tau0=1000.0,
                                  widest_std=1.0, cfg=cfg, window_days=3)
 
     gapped = trace(["2026-08-10", "2026-08-12"])

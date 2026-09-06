@@ -452,6 +452,22 @@ def trailing_daily_il(il_by_day, day, cfg):
     return float(sum(il_by_day.get(k, 0.0) for k in days) / max(span, 1))
 
 
+def budget_base_ready(il_by_day, day, cfg):
+    """Does the trailing IL base reach back a whole `budget_il_window_days`
+    before `day`? A pilot's first mornings hold a handful of early closers,
+    not the shop's IL: a budget priced from them is tiny, and on the
+    owner's rehearsal the overspend stop fired on day three and suspended
+    exploration for the rest of the run. Until the base spans its window
+    the budget is an absence of signal (like a zero one): the controller
+    holds tau and the stop takes no reading. The ONE rule both read."""
+    if not il_by_day:
+        return False
+    window = int(cfg["exploration"]["budget_il_window_days"])
+    d0 = pd.Timestamp(str(day))
+    earliest = pd.Timestamp(min(str(k) for k in il_by_day))
+    return (d0 - earliest).days >= window
+
+
 def budget_scale(posterior_std, cfg):
     """The budget's posterior-width factor: 1 at the reference std, shrinking
     with the widest routed std, never below budget_scale_floor."""
@@ -470,19 +486,26 @@ def walk_tau(tau, days, spend_for, il_by_day, widest_std, cfg):
     closed day since the last calibration -- a weekly batch is seven
     steps, never one) and shadow's trace (expected spend at the tau in
     force) both call it. `spend_for(day, tau)` returns the day's realised
-    or expected exploration spend. A ZERO budget (no trailing IL yet) is an
-    absence of signal, not an overspend: tau holds that day. Returns
-    (tau_end, rows); a row's `clipped` says the step sat on a clip bound."""
+    or expected exploration spend. A ZERO budget (no trailing IL yet) and a
+    base shorter than its window (budget_base_ready) are an absence of
+    signal, not an overspend: tau holds that day. Returns (tau_end, rows);
+    a row's `clipped` says the step sat on a clip bound, `held` why it
+    did not move."""
     rows = []
     for day in days:
         budget = budget_today(trailing_daily_il(il_by_day, day, cfg),
                               widest_std, cfg)
         spend = float(spend_for(day, tau))
-        after, clipped = tau_next(tau, budget, spend, cfg) if budget > 0 \
-            else (tau, False)
+        held = ("no trailing IL" if budget <= 0 else
+                None if budget_base_ready(il_by_day, day, cfg) else
+                "IL base shorter than budget_il_window_days")
+        after, clipped = (tau, False) if held else tau_next(tau, budget, spend, cfg)
         rows.append({"day": str(day), "tau": round(float(tau), 2),
                      "spend": round(spend, 1), "budget": round(budget, 1),
-                     "tau_after": round(float(after), 2), "clipped": clipped})
+                     "tau_after": round(float(after), 2), "clipped": clipped,
+                     # why the step did not move, or None: the overspend
+                     # stop and shadow's trace take no reading on a held day
+                     "held": held})
         tau = after
     return tau, rows
 

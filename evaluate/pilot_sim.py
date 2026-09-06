@@ -14,7 +14,8 @@ own functions -- ingest, tau walk, monitor, assurance, export, status,
 workspace that never touches a production artifact. Demand comes from
 evaluate.pilot_world: the frozen model's level, an ASSUMED elasticity, NB
 noise. Each template runs once under the pilot and once under the legacy
-ramp (on consecutive days), so the economics read like-for-like.
+ramp (the day after its first run closes), so the economics read
+like-for-like.
 
 The report grades a fixed list of expectations (`EXPECTATIONS`) and reads
 the posterior against the truth it was learning. Every number is about the
@@ -72,6 +73,7 @@ EXPECTATIONS = (
     ("tau_walks_on_spend", "tau moved and the last week's spend sits within the clip band of its budget"),
     ("stops_only_on_faults", "no stop condition fires without the fault that causes it; with it, the stop fires"),
     ("exploration_never_starves", "no three consecutive days with a budget in force and nothing forced (an empty affordable set is exploration off without a stop)"),
+    ("agent_level_tracks_world", "every week's mean log(agent mu_ref / world mu_ref) over the pilot's hours sits inside the calibration gate band (the weekly re-fit reproduces the world's level; the learner has no level term and reads any error as elasticity)"),
     ("assurance_holds", "reproduction and exploration never FAIL; dispersion never FAILs with the world's marginal untouched (correlation is reported: the world's rho is a knob)"),
     ("lane_c_keeps_the_schedule_current", "the weekly re-fit reaches every week priced, so --apply is never refused on calibration_schedule_current"),
     ("apply_ran_on_cadence", "--apply ran every learning.update_cadence_days and was refused only under a fault"),
@@ -169,7 +171,7 @@ class PilotSim:
                              "total_discount"]]
         self.sim_history = []
         self.open, self.pending, self.busy = [], {}, set()
-        self.previous_sets = None
+        self.twins_due = {}                  # date -> [(arm, template)]
         self.feed_by_day, self.failures_by_day = {}, {}
         self.truth = []
         self.days = []
@@ -200,25 +202,39 @@ class PilotSim:
         return self.report()
 
     def _sample_day(self, k, date):
-        """2E templates a day, split into the two arms; the split swaps the
-        next day so every template runs once under each policy."""
-        if self.previous_sets is not None and k % 2 == 1:
-            pilot, legacy = self.previous_sets[1], self.previous_sets[0]
-        else:
-            pool = [t for t in self.world.templates
-                    if (t["sku_id"], t["fc"]) not in self.busy]
-            keys, picked = set(), []
-            for i in self.rng.permutation(len(pool)):
-                t = pool[i]
-                key = (t["sku_id"], t["fc"])
-                if key in keys:
-                    continue
-                keys.add(key)
-                picked.append(t)
-                if len(picked) == 2 * self.per_day:
-                    break
-            pilot, legacy = picked[:self.per_day], picked[self.per_day:]
-            self.previous_sets = (pilot, legacy)
+        """Each arm opens `per_day` episodes a day: the twins due (a
+        template runs under the OTHER arm the day after its first run
+        closes -- never while its sku x fc is still open, or the feed would
+        hold two states for one hour) plus fresh templates to fill up. Every
+        fresh pick gets a twin, so each template runs once under each
+        policy on the same world."""
+        pilot, legacy = [], []
+        for arm, t in self.twins_due.pop(date, []):
+            if (t["sku_id"], t["fc"]) in self.busy:          # still open: tomorrow
+                self._schedule_twin(arm, t, date)
+                continue
+            (pilot if arm == "pilot" else legacy).append(t)
+            self.busy.add((t["sku_id"], t["fc"]))
+        reserved = {(t["sku_id"], t["fc"]) for due in self.twins_due.values()
+                    for _, t in due}
+        pool = [t for t in self.world.templates
+                if (t["sku_id"], t["fc"]) not in self.busy | reserved]
+        need = {"pilot": max(self.per_day - len(pilot), 0),
+                "legacy": max(self.per_day - len(legacy), 0)}
+        for i in self.rng.permutation(len(pool)):
+            if not need["pilot"] and not need["legacy"]:
+                break
+            t = pool[i]
+            key = (t["sku_id"], t["fc"])
+            if key in self.busy:
+                continue
+            arm = "pilot" if need["pilot"] >= need["legacy"] else "legacy"
+            need[arm] -= 1
+            (pilot if arm == "pilot" else legacy).append(t)
+            self.busy.add(key)
+            t_twin = "legacy" if arm == "pilot" else "pilot"
+            self._twin_of = getattr(self, "_twin_of", {})
+            self._twin_of[(arm, t["template_id"], date)] = t_twin
         openings = []
         for arm, temps in (("pilot", pilot), ("legacy", legacy)):
             for t in temps:
@@ -226,7 +242,8 @@ class PilotSim:
                 openings.append({"arm": arm, "episode_id": eid, "template": t,
                                  "grid": hour_grid(date, t["opening_hour"], t["n_hours"]),
                                  "t": 0, "q": t["q0"], "anchor": None, "day": k,
-                                 "shock": self.world.episode_shock()})
+                                 "shock": self.world.episode_shock(),
+                                 "twin": self._twin_of.pop((arm, t["template_id"], date), None)})
         # the two demand-rate features, point-in-time, by the one home
         stub = pd.DataFrame([{
             "episode_id": o["episode_id"], "sku_id": o["template"]["sku_id"],
@@ -248,12 +265,15 @@ class PilotSim:
                                                        o["features"], model=self.model)
         self.pending[date] = openings
 
+    def _schedule_twin(self, arm, template, after_date):
+        day = (pd.Timestamp(after_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        self.twins_due.setdefault(day, []).append((arm, template))
+
     def _open_due(self, k, date, hour):
         for o in list(self.pending.get(date, [])):
             if o["template"]["opening_hour"] == hour:
                 self.pending[date].remove(o)
                 self.open.append(o)
-                self.busy.add((o["template"]["sku_id"], o["template"]["fc"]))
 
     # ------------------------------------------------------------ hours
 
@@ -335,6 +355,11 @@ class PilotSim:
             "offered_price": tpl["original_price"] * (1 - shelf), "cost": tpl["cost"],
             "category": tpl["category"], "fc": tpl["fc"], "sku_id": tpl["sku_id"],
             "dp_eligible": True, "shelf_discount": shelf, "mu_true": mu,
+            # the two levels at the reference: the world's, and the agent's
+            # (its own re-fit factors) -- their log ratio is the level error
+            # the elasticity learner, which has no level term, absorbs
+            "mu_ref_world": ep["mu_world"][t],
+            "mu_ref_agent": ep["mu_agent"][t] if ep["arm"] == "pilot" else None,
         })
         self.sim_history.append({
             "episode_id": ep["episode_id"], "sku_id": tpl["sku_id"], "fc": tpl["fc"],
@@ -344,6 +369,8 @@ class PilotSim:
         if close:
             self.open.remove(ep)
             self.busy.discard((tpl["sku_id"], tpl["fc"]))
+            if ep.get("twin"):
+                self._schedule_twin(ep["twin"], tpl, date)
 
     # ------------------------------------------------------- daily lane
 
@@ -514,6 +541,27 @@ class PilotSim:
                       "accumulated_information": round(rec["accumulated_information"], 3)}
         return out
 
+    def level_tracking(self):
+        """Per ISO week, the mean log ratio of the agent's mu_ref to the
+        world's over the pilot's priced hours: 0 when the weekly re-fit
+        reproduces the world's level, off by the re-fit's error otherwise.
+        The elasticity learner reads every outcome against the agent's
+        mu_ref and carries no level term, so a level error this size is
+        read as elasticity -- the diagnostic that tells a learning FAIL
+        from a re-fit artefact."""
+        df = pd.DataFrame([r for r in self.truth if r["arm"] == "pilot"])
+        if df.empty:
+            return {}
+        df["log_ratio"] = np.log(df.mu_ref_agent / df.mu_ref_world)
+        df["week"] = episodes.week_key(df.date)
+        out = {}
+        for wk, g in df.groupby("week"):
+            out[wk] = {"hours": int(len(g)),
+                       "mean_log_ratio": round(float(g.log_ratio.mean()), 4),
+                       "p10_p90": [round(float(g.log_ratio.quantile(q)), 4)
+                                   for q in (0.1, 0.9)]}
+        return out
+
     def report(self):
         decisions = self.store.load_decisions()
         n_dec = len(decisions)
@@ -541,6 +589,7 @@ class PilotSim:
             "learning": self.learning(),
             "economics": self.economics(),
             "lane_c": self.lane_c_runs,
+            "level_tracking": self.level_tracking(),
             "days": self.days,
         }
         rep["expectations"] = grade(rep, self.cfg)
@@ -601,20 +650,37 @@ def grade(rep, cfg):
         {c: {"launch_std": r["launch_std"], "std": r["std"]}
          for c, r in rep["learning"].items()}, measured=bool(learned))
 
+    band = cfg["baseline_model"]["calibration_gate_band"]
+    tol = max(abs(np.log(band[0])), abs(np.log(band[1])))
+    level = rep.get("level_tracking") or {}
+    off = {wk: v["mean_log_ratio"] for wk, v in level.items()
+           if abs(v["mean_log_ratio"]) > tol}
+    add("agent_level_tracks_world", not off,
+        {"weeks_outside_band": off, "tolerance_log": round(float(tol), 4),
+         "by_week": {wk: v["mean_log_ratio"] for wk, v in level.items()}},
+        measured=bool(level))
+
     # the controller moves tau by at most the clip per day, so a launch tau
     # far from this world's budget needs a week or more to arrive: graded
     # on the last seven walked days, and only once there are seven
     walked = [d["tau"]["last_day"] for d in days
               if d["tau"].get("last_day") and d["tau"].get("committed")]
     lo, hi = cfg["exploration"]["tau_adjust_clip"]
-    week = walked[-7:]
+    # held days (no base yet) are not walks: the week graded is the last
+    # seven days the controller actually moved on
+    live = [w for w in walked if not w.get("held")]
+    week = live[-7:]
     ratios = [w["spend"] / w["budget"] for w in week if w["budget"] > 0]
     ratio = float(np.mean(ratios)) if ratios else None
     moved = eng["tau_now"] != eng["tau_at_launch"]
+    held = [w["day"] for w in walked if w.get("held")]
+    suspended = [d["date"] for d in days if d.get("suspended")]
     add("tau_walks_on_spend", moved and ratio is not None and lo <= ratio <= hi,
         {"tau_at_launch": eng["tau_at_launch"], "tau_now": eng["tau_now"],
          "last_week_spend_over_budget": round(ratio, 3) if ratio is not None else None,
-         "band": [lo, hi], "days_walked": len(walked)}, measured=len(walked) >= 7)
+         "band": [lo, hi], "days_walked": len(live), "days_held": held,
+         "days_exploration_suspended": suspended},
+        measured=len(live) >= 7)
 
     fired = {}
     for d in days:

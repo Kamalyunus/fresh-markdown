@@ -145,7 +145,8 @@ def overspend_series(learning, business, cfg):
     """spend / budget_today per priced day, through the day the controller
     prices (update.finalized_days -- the last day with a closed episode is
     a different day whenever the latest day's episodes are still open). A
-    zero-budget day has no reading and breaks a streak."""
+    zero-budget day, or one whose IL base is shorter than its window, has
+    no reading and breaks a streak."""
     il_by_day = business.get("il_by_close_day") or {}
     cells = learning.get("posterior_by_cell") or {}
     last = learning.get("latest_priced_day")
@@ -160,7 +161,9 @@ def overspend_series(learning, business, cfg):
     for day in learning.get("priced_days") or sorted(spend_by_day):
         budget = explore.budget_today(
             explore.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
-        if budget > 0:
+        # the controller's own rule (explore.budget_base_ready): a base
+        # shorter than its window is no signal -- no reading, no streak
+        if budget > 0 and explore.budget_base_ready(il_by_day, day, cfg):
             by_day[day] = round(float(spend_by_day.get(day, 0.0)) / budget, 4)
     return {"basis": "spend / budget_today", "by_day": by_day,
             "latest": by_day.get(last)}

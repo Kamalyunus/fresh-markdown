@@ -58,6 +58,7 @@ def test_overspend_reads_zero_on_a_priced_day_with_no_forced_spend(cfg):
     last two over-budget days, and the next --feed re-suspended what a human
     had just resumed. A priced day with nothing spent is a day at 0."""
     from daily.monitor import overspend_series, evaluate_guardrail
+    cfg["exploration"]["budget_il_window_days"] = 1      # a one-day base reads
     il = {f"2026-09-{d:02d}": 1000.0 for d in range(1, 8)}
     learning = {"posterior_by_cell": {"GLOBAL": {"std": 0.5}},
                 "cell_of": {"MEAT": "GLOBAL"},
@@ -287,3 +288,27 @@ def test_price_mismatch_is_a_rate_over_compared_pairs(cfg):
     assert quality_rates(calm) == {"duplicate_or_unmatched_rate": 0.0,
                                    "price_mismatch_rate": 0.0}
     assert not stop_conditions(calm, {}, {}, {}, cfg)["fired"]["price_mismatch"]
+
+
+def test_the_overspend_stop_takes_no_reading_while_the_il_base_is_short(cfg):
+    """The stop compares the same budget the controller prices from, by the
+    same rule (explore.budget_base_ready): a base shorter than its window
+    is no reading, so a launch's first over-budget mornings cannot fire it
+    -- the owner's rehearsal lost the whole pilot to that on day three."""
+    from daily.monitor import overspend_series, evaluate_guardrail
+
+    cfg["exploration"]["budget_il_window_days"] = 7
+    il = {f"2026-09-{d:02d}": 1000.0 for d in range(1, 12)}
+    learning = {"posterior_by_cell": {"GLOBAL": {"std": 0.5}},
+                "cell_of": {"MEAT": "GLOBAL"},
+                "exploration_cost_by_day": {f"2026-09-{d:02d}": 1e6 for d in range(2, 12)},
+                "priced_days": [f"2026-09-{d:02d}" for d in range(2, 12)],
+                "latest_priced_day": "2026-09-11"}
+    series = overspend_series(learning, {"il_by_close_day": il}, cfg)
+    # 09-02 .. 09-07 have a base shorter than seven days: no reading
+    assert sorted(series["by_day"]) == [f"2026-09-{d:02d}" for d in range(8, 12)]
+    assert evaluate_guardrail(series, 2.0, 2)["fired"]        # once it can read, it does
+    learning["priced_days"] = learning["priced_days"][:4]
+    learning["latest_priced_day"] = "2026-09-05"
+    early = overspend_series(learning, {"il_by_close_day": il}, cfg)
+    assert early["by_day"] == {} and not evaluate_guardrail(early, 2.0, 2)["fired"]

@@ -47,6 +47,10 @@ def _store(cfg, tmp_path, n, cost_each, date="2026-08-19", history_days=3,
     """`history_days` of prior closed episodes before `date`, because the
     budget is a share of TRAILING realised IL -- a single-day store has no
     trailing base and the controller correctly holds tau still."""
+    # these fixtures carry a few days of history: the base must reach back
+    # a whole budget_il_window_days before the controller reads it
+    # (explore.budget_base_ready), so the window here is one day
+    cfg["exploration"]["budget_il_window_days"] = 1
     store = EventStore(cfg, root=str(tmp_path / "events"))
     i = 0
     for back in range(history_days, 0, -1):
