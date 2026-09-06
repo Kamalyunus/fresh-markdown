@@ -914,13 +914,39 @@ that model, the prior was estimated from its predictions and that
 describing the same world. **The bundle id is the baseline model version.**
 Each artifact carries a `provenance` block; `ops.seal` writes
 `artifacts/bundle.json` with a SHA-256 of every file and refuses an
-inconsistent set. Re-run `seal` after `--fit-calibration`. **Every seal
+inconsistent set. Re-run `seal` after `--fit-calibration`.
+
+**The seal covers the environment, not only the artifacts.** Four things
+change what an hour is priced with without moving a sealed byte, and the
+seal records all four (`environment`, `config_snapshot`, `launch_posterior`
+in `bundle.json` and every `MANIFEST.json`): the **config** (digest and the
+full snapshot — a runtime-only key such as the budget share or a stop
+threshold is read live by `decide` and `monitor`, and used to take effect
+with no record beyond a `config_version` label nobody bumps); the **code**
+(git commit and a dirty flag — a deploy is a solver change);
+the **libraries** (Python, numpy, scipy, pandas, LightGBM, pyarrow — an
+upgrade can move predictions and the pmf with every artifact intact); and
+the **posterior as it stands** (digest, each cell's launch and current
+mean, outcomes consumed — recorded, never verified, because learning moves
+it by design; it is what a later cell is traced back to). `verify` reads a
+moved config key, commit or library version as a problem on the same
+`artifact bundle` row as an edited artifact, with the remedy named: a
+deliberate `ops.seal --reason config|deploy|libraries`. `advance` does that
+itself once nothing is left to paste, so every environment the bundle ran
+in has its own snapshot; the daily lane does not price on a red row. Every
+decision event carries `config_digest` and `code_commit` beside the
+version label, so any priced hour maps to exactly one snapshot in
+`artifacts/history/`, and `assurance.reproduction` counts the recent
+decisions priced under another config or commit than the one running.
+Deliberately outside the seal: the extract and prepared parquet (too large
+to hash per seal; the sealed split manifest is the data provenance) and
+the event store (it is the record). **Every seal
 also leaves an audit snapshot**: `artifacts/history/<bundle>/<sealed_at>/`
 (the stamp to the microsecond, so two seals in one second are two folders)
 holds a copy of every present artifact, the config in force, the posterior
 state and a `MANIFEST.json` (bundle, time, reason — `bootstrap`,
-`check-only`, `retrain` (what `advance --retrain` seals as), `weekly-refit`
-— config digest, hashes); each copy is re-hashed against the seal and a
+`check-only`, `retrain` (what `advance --retrain` seals as), `weekly-refit`,
+`config`, `deploy`, `libraries` — the environment record, hashes); each copy is re-hashed against the seal and a
 mismatch refuses the snapshot rather than recording one that disagrees with
 its own manifest. Every `advance` stop copies the reports as they then stand
 into the bundle's latest snapshot. Snapshots order by `sealed_at`, never by

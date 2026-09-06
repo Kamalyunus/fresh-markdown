@@ -32,7 +32,8 @@ def test_export_events_writes_warehouse_safe_tables(tmp_path):
             "reference_mu": 0.8, "mu_ref_path": [0.8, 0.7],
             "anchor_discount": None, "dispersion_r": 0.9,
             "baseline_model_version": "b", "posterior_version": 0,
-            "config_version": "1.0.0", "timestamp": f"{day}T17:00:00+00:00"})
+            "config_version": "1.0.0", "config_digest": "0123456789abcdef",
+            "code_commit": None, "timestamp": f"{day}T17:00:00+00:00"})
     written = export(store, str(tmp_path / "exports"))
     path, n = written["decisions"]
     assert n == 2

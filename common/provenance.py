@@ -7,15 +7,24 @@ artifact is fitted AGAINST a model. ops.seal adds per-file hashes so a
 hand-edited artifact is detectable too, which stamps alone cannot catch.
 """
 
+import functools
 import glob
 import hashlib
+import importlib.metadata
 import json
 import os
+import platform
 import shutil
+import subprocess
 from datetime import datetime, timezone
 
 from common.config import config_get
 from common.io import read_json
+
+# the libraries whose numerics reach a price: a version move changes
+# predictions (LightGBM), the pmf and the DP's arithmetic (scipy, numpy) or
+# the frame semantics every fit reads (pandas) with no artifact byte moving
+LIBRARIES = ("numpy", "scipy", "pandas", "lightgbm", "pyarrow")
 
 # Every frozen artifact, and the config key holding its path. Order is fitting
 # order, which is also the order a mismatch propagates in.
@@ -75,6 +84,87 @@ def config_diff(snapshot, cfg, prefix=""):
             out.extend(config_diff(a, b, path + "."))
         elif a != b:
             out.append(f"{path}: {a!r} -> {b!r}")
+    return out
+
+
+@functools.lru_cache(maxsize=1)
+def code_version():
+    """The commit the running code is at, and whether the tree is dirty --
+    once per process (a subprocess per decision would price the hour in
+    git). None outside a checkout: the seal records that too."""
+    try:
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                                text=True, timeout=5).stdout.strip() or None
+        dirty = bool(subprocess.run(["git", "status", "--porcelain"], capture_output=True,
+                                    text=True, timeout=5).stdout.strip()) if commit else None
+    except (OSError, subprocess.SubprocessError):
+        commit, dirty = None, None
+    return {"commit": commit, "dirty": dirty}
+
+
+def library_versions():
+    return {"python": platform.python_version(),
+            **{lib: _version_of(lib) for lib in LIBRARIES}}
+
+
+def _version_of(lib):
+    try:
+        return importlib.metadata.version(lib)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def environment(cfg):
+    """Everything a priced hour depends on that is NOT a frozen artifact:
+    the config (its digest), the code (commit, dirty) and the libraries.
+    Sealed beside the artifacts, compared by verify(), stamped on events."""
+    return {"config_digest": config_fingerprint(cfg)["digest"],
+            "code": code_version(), "libraries": library_versions()}
+
+
+def launch_posterior(cfg):
+    """The posterior file as it stands at seal time: its digest, what each
+    cell launched from and where it is now, and how much it has consumed.
+    RECORDED, never verified -- the file is learning state and moves by
+    design; the record is what a later cell is traced back to."""
+    path = cfg["posterior"]["path"]
+    state = read_json(path) if os.path.exists(path) else None
+    if not state:
+        return None
+    return {"digest": file_digest(path),
+            "cells": {c: {"launch_mean": r.get("mean") if not r.get("n_obs") else None,
+                          "prior_mean": r.get("prior_mean"), "mean": r.get("mean"),
+                          "std": r.get("std"), "version": r.get("version")}
+                      for c, r in (state.get("cells") or {}).items()},
+            "cell_of": state.get("cell_of"),
+            "cold_start_shift_std": state.get("cold_start_shift_std"),
+            "outcomes_consumed": len(state.get("processed_outcome_ids") or []),
+            "tau": state.get("tau")}
+
+
+def environment_drift(cfg, sealed):
+    """What moved since the seal, outside the artifacts: config keys, the
+    code commit, library versions. [] when nothing did or the seal predates
+    the environment record."""
+    env = (sealed or {}).get("environment")
+    if not env:
+        return []
+    out = []
+    if env.get("config_digest") != config_fingerprint(cfg)["digest"]:
+        snap = (sealed.get("config_snapshot") or {})
+        moved = [d.split(":")[0] for d in config_diff(snap, cfg)] if snap else []
+        out.append("config moved since sealing"
+                   + (": " + ", ".join(moved[:8]) + (" ..." if len(moved) > 8 else "")
+                      if moved else ""))
+    now = code_version()
+    then = env.get("code") or {}
+    if then.get("commit") and now.get("commit") and then["commit"] != now["commit"]:
+        out.append(f"code moved since sealing: {then['commit'][:10]} -> {now['commit'][:10]}")
+    libs_then, libs_now = env.get("libraries") or {}, library_versions()
+    moved = [f"{k} {libs_then[k]} -> {libs_now.get(k)}" for k in libs_then
+             if libs_then[k] and libs_now.get(k) != libs_then[k]]
+    if moved:
+        out.append("libraries moved since sealing: " + ", ".join(moved))
     return out
 
 
@@ -157,6 +247,10 @@ def verify(cfg, sealed=None):
     if sealed and bundles and sealed.get("bundle") not in bundles:
         problems.append(f"sealed bundle {sealed.get('bundle')} "
                         f"is not on disk ({', '.join(bundles)})")
+    # the environment is part of the seal: a config edit, a deploy or a
+    # library upgrade changes what an hour is priced with as surely as an
+    # edited artifact, and reads the same way -- re-seal, on purpose
+    problems.extend(environment_drift(cfg, sealed))
 
     return {
         "bundle": bundles[0] if len(bundles) == 1 else None,
@@ -220,6 +314,8 @@ def archive(cfg, sealed, config_path="config.yaml", reason=None):
     manifest = {"bundle": sealed["bundle"], "sealed_at": sealed["sealed_at"],
                 "reason": reason, "config_version": sealed.get("config_version"),
                 "config_digest": config_fingerprint(cfg)["digest"],
+                "environment": sealed.get("environment"),
+                "launch_posterior": sealed.get("launch_posterior"),
                 "sha256": sealed["sha256"], "files": files}
     with open(os.path.join(out, "MANIFEST.json"), "w") as f:
         json.dump(manifest, f, indent=2)

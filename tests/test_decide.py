@@ -79,6 +79,24 @@ def test_a_bad_dispersion_is_a_state_rejection_never_a_nan_q(bad_r):
     assert "r must be" in str(exc.value)
 
 
+def test_the_decision_event_names_the_config_and_code_it_was_priced_with(tmp_path):
+    """config_version is a label nobody bumps; the digest and the commit
+    map the hour to exactly one audit snapshot (design 5.14a)."""
+    from common import provenance
+    from engine.decide import decide
+    from engine.posterior import PosteriorStore
+    from events.store import EventStore
+
+    store = EventStore(CFG, root=str(tmp_path / "events"))
+    posterior = PosteriorStore.initialise(
+        CFG, {"MEAT": {"mean": -1.0, "std": 0.6}}, {"MEAT": 10**6},
+        path=str(tmp_path / "posterior.json"))
+    evt = decide(_state(), posterior, store, CFG, np.random.default_rng(0), 100.0, "v")
+    assert evt["config_digest"] == provenance.config_fingerprint(CFG)["digest"]
+    assert evt["code_commit"] == provenance.code_version()["commit"]
+    assert store.load_decisions()[0]["config_digest"] == evt["config_digest"]
+
+
 def test_the_finiteness_test_has_one_home():
     """events.store quarantines a non-finite applied_price and engine.decide
     rejects a non-finite state by the SAME predicate -- a second copy is

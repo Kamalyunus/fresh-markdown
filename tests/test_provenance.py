@@ -106,6 +106,71 @@ def test_sealing_then_editing_an_artifact_is_caught(cfg):
     assert any("changed since sealing: rho" in p for p in state["problems"])
 
 
+def test_the_seal_covers_the_environment_not_only_the_artifacts(cfg, tmp_path, monkeypatch):
+    """A config edit, a deploy or a library upgrade changes what an hour is
+    priced with as surely as an edited artifact, and none of them moved a
+    sealed byte. The seal records all three (and the posterior as it
+    stands); verify reads a move as a problem, the same row, on purpose."""
+    import copy
+    _full_bundle(cfg)
+    cfg["posterior"]["path"] = str(tmp_path / "posterior.json")
+    _write(tmp_path, "posterior", {"cells": {"GLOBAL": {"mean": -1.2, "prior_mean": -1.0,
+                                                          "std": 0.4, "n_obs": 0, "version": 0}},
+                                   "cell_of": {"MEAT": "GLOBAL"}, "processed_outcome_ids": [],
+                                   "cold_start_shift_std": 0.5})
+    sealed = seal_mod.seal(cfg)
+    env = sealed["environment"]
+    assert env["config_digest"] == provenance.config_fingerprint(cfg)["digest"]
+    assert set(env["libraries"]) >= {"python", "numpy", "scipy", "pandas", "lightgbm"}
+    assert set(env["code"]) == {"commit", "dirty"}
+    lp = sealed["launch_posterior"]
+    assert lp["cells"]["GLOBAL"]["launch_mean"] == -1.2 and lp["outcomes_consumed"] == 0
+    assert sealed["config_snapshot"]["meta"] == cfg["meta"]
+    assert provenance.verify(cfg, sealed)["verdict"] == "PASS"
+
+    # config moved: named by key, and the row is FAIL until a deliberate re-seal
+    edited = copy.deepcopy(cfg)
+    edited["exploration"]["budget_share_of_il"] = 0.5
+    state = provenance.verify(edited, sealed)
+    assert state["verdict"] == "FAIL"
+    assert any(p.startswith("config moved since sealing") and "exploration.budget_share_of_il" in p
+               for p in state["problems"])
+
+    # code moved: a deploy is a solver change
+    monkeypatch.setattr(provenance, "code_version",
+                        lambda: {"commit": "f" * 40, "dirty": False})
+    sealed_code = dict(sealed, environment=dict(env, code={"commit": "a" * 40, "dirty": False}))
+    assert any("code moved since sealing: aaaaaaaaaa -> ffffffffff" in p
+               for p in provenance.verify(cfg, sealed_code)["problems"])
+    # no checkout on either side is not a move
+    monkeypatch.setattr(provenance, "code_version", lambda: {"commit": None, "dirty": None})
+    assert provenance.verify(cfg, sealed_code)["verdict"] == "PASS"
+
+    # a library moved
+    libs = dict(env["libraries"], numpy="0.0.1")
+    sealed_lib = dict(sealed, environment=dict(env, libraries=libs))
+    assert any("libraries moved since sealing: numpy 0.0.1 ->" in p
+               for p in provenance.verify(cfg, sealed_lib)["problems"])
+
+    # the posterior is recorded, never verified: learning moves it by design
+    _write(tmp_path, "posterior", {"cells": {"GLOBAL": {"mean": -1.5, "std": 0.3, "n_obs": 9,
+                                                          "version": 3}},
+                                   "cell_of": {"MEAT": "GLOBAL"}, "processed_outcome_ids": ["x"]})
+    assert provenance.verify(cfg, sealed)["verdict"] == "PASS"
+    assert seal_mod.seal(cfg)["launch_posterior"]["cells"]["GLOBAL"]["launch_mean"] is None
+
+    # a seal from before the environment record verifies as it always did
+    legacy = {k: v for k, v in sealed.items() if k not in ("environment", "config_snapshot")}
+    assert provenance.verify(edited, legacy)["verdict"] == "PASS"
+
+    # and the audit MANIFEST carries the record
+    cfg["artifacts"]["history_dir"] = str(tmp_path / "history")
+    conf = tmp_path / "config.yaml"; conf.write_text("meta: {config_version: t}\n")
+    snap = provenance.archive(cfg, sealed, config_path=str(conf), reason="config")
+    manifest = json.load(open(pathlib.Path(snap, "MANIFEST.json")))
+    assert manifest["environment"] == env and manifest["launch_posterior"] == lp
+
+
 def test_seal_refuses_an_inconsistent_set(cfg):
     """A sealed mixed bundle is worse than an unsealed one: it looks decided."""
     _full_bundle(cfg)

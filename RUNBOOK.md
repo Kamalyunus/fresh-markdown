@@ -110,6 +110,17 @@ each decision.
    schedule past `split.test_end`; never move `split.test_end` for this.
    `advance` then re-fits, re-seals, and `status` must be green.
 
+**What the live run reads, and what pins it.** `engine.decide` reads the
+model, factors, `r_lookup` and `rho` from the paths in `config.yaml`, the
+runtime knobs from `config.yaml` itself, and cells plus tau from
+`artifacts/posterior.json`; nothing reads a report. The seal pins all of
+it: the artifact hashes, the config (digest and snapshot), the code commit
+and the library versions — `status`'s `artifact bundle` row is red when any
+of them moved, and every decision event carries `config_digest` and
+`code_commit`, so an hour maps to one `artifacts/history/<bundle>/<sealed_at>/`
+snapshot. `artifacts/` and `config.yaml` are not in git: production runs
+from the directory `advance` ran in, or ships the latest snapshot whole.
+
 **The daily `--apply` gate.** One human approves at most one posterior step
 per cell per day; each cell triggers on its own batch. Before approving:
 
@@ -175,7 +186,8 @@ in the caller.
 | stop condition fired (overspend >2× on `persistence_days` consecutive days, mismatch, duplicates, guardrail) | the monitor suspends exploration in the posterior state; `decide` stops drawing and **exploitation pricing continues**; `status` shows `exploration SUSPENDED since …`. Investigate, then a human resumes with `python3 -m daily.update --resume-exploration` — never restart blindly. A resumed pilot is not re-suspended by the days it spent suspended (they read as zero spend); a fresh fire is a fresh two-day streak. The posterior file is production state from the first walked τ: `advance` never re-initialises it after launch |
 | `config mirrors reports` FAIL | a MEASURED paste disagrees with the report that derives it, or the report could not measure it (NOT RUN). `python3 -m ops.tune` prints the reason; `advance` re-pastes what it can |
 | `guardrail floors` WARN | "insufficient history" — nobody measured the floor, so the stop was not checked. Not a pass: more closed-episode history, then re-run `derive_thresholds` |
-| `assurance · reproduction` FAIL | something moved under the solver (config edit, artifact swap, deploy, library). Diff the bundle first: `artifact bundle` line, then `artifact mirrors`, then the live `artifacts/` against the latest `artifacts/history/<bundle>/<sealed_at>/` snapshot (every seal leaves one, with the config and posterior of the moment; its `MANIFEST.json` names the reason — `bootstrap`, `check-only`, `retrain`, `weekly-refit` — and every copy was re-hashed against the seal when written) |
+| `assurance · reproduction` FAIL | something moved under the solver (config edit, artifact swap, deploy, library). Diff the bundle first: `artifact bundle` line, then `artifact mirrors`, then the live `artifacts/` against the latest `artifacts/history/<bundle>/<sealed_at>/` snapshot (every seal leaves one, with the config and posterior of the moment; its `MANIFEST.json` names the reason — `bootstrap`, `check-only`, `retrain`, `weekly-refit`, `config`, `deploy`, `libraries` — the config, commit and library versions in force, and every copy was re-hashed against the seal when written). The failing decisions name their own `config_digest` and `code_commit` |
+| `artifact bundle` FAIL — `config moved` / `code moved` / `libraries moved since sealing` | the seal covers the environment too. A config edit, a deploy or a library upgrade changed what the next hour is priced with; nothing prices on it until it is sealed. If the change was deliberate: `python3 -m ops.seal --reason config|deploy|libraries` (`advance` does it once nothing is left to paste) — the snapshot it leaves is the record. If it was not, the `MANIFEST.json` of the latest snapshot holds the config and versions that were in force |
 | `artifact mirrors` FAIL | config paste and its source disagree (rho). Read the **bundle** line before re-pasting — the stale side is not always config |
 | `report vintages` FAIL | a report was produced against a model no longer on disk — its gate rows grade a ghost. `advance` re-runs it; do not launch on it |
 | `calibration_coverage` says `STALE FACTORS IN USE` | the weekly re-fit was missed: rows were priced on frozen factors. `advance` re-fits and re-seals; re-run the report |

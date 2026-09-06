@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from common.config import reference_discount
+from common.provenance import code_version, config_fingerprint
 from engine import dp as dp_mod
 from engine import explore
 from engine.demand import mu_at, expected_min_demand_inventory
@@ -188,6 +189,11 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
         "baseline_model_version": baseline_version,
         "posterior_version": int(cell["version"]),
         "config_version": cfg["meta"]["config_version"],
+        # the config and code this hour was actually priced with: the
+        # version label is a human string nobody has to bump, the digest and
+        # commit map the hour to exactly one audit snapshot (design 5.14a)
+        "config_digest": config_fingerprint(cfg)["digest"],
+        "code_commit": code_version()["commit"],
         "solver_latency_s": result.solver_latency_s,
         "nb_tail_mass_max": result.tail_mass_max,
         "timestamp": pd.Timestamp.now("UTC").isoformat(),

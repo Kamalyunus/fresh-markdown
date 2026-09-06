@@ -393,6 +393,18 @@ now. Dates are owner sign-off, 2026-08.
   run order, `ops/` drives and gates. One package per REVIEW_GUIDE tier
   and `advance` phase; the tests mirror the modules.
 
+- **`config_version` label → the environment sealed (2026-09-06).** The
+  seal hashed six artifacts and nothing else. A runtime-only key (budget
+  share, δ_min multiple, a stop threshold) took effect on the next hour with
+  no record beyond a `config_version` string nobody bumps; a deploy or a
+  LightGBM upgrade moved predictions with every artifact byte intact. The
+  seal now records the config (digest + snapshot), the code commit, the
+  library versions and the posterior as it stands; `verify` reads a move
+  as a problem on the bundle row; `advance` re-seals under `config` /
+  `deploy` / `libraries`; every decision event carries `config_digest` and
+  `code_commit`. The extract and the event store stay out: one is too
+  large to hash per seal (the split manifest is its provenance), the other
+  is the record itself.
 - **The second review after the move (2026-09-06).** Re-reading every
   package with the new layout found defects the first review's structure
   had hidden, most of them "two homes for one fact":

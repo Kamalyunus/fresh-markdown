@@ -124,6 +124,18 @@ def test_a_report_without_a_fingerprint_warns_whatever_its_version_string(cfg):
         assert row["verdict"] == status.WARN and "no config fingerprint" in row["detail"]
 
 
+def test_a_moved_environment_fails_the_bundle_row_with_the_reseal_remedy(cfg):
+    """An unsealed config, commit or library is the same row as an edited
+    artifact, but the remedy differs: a deliberate re-seal, not a bootstrap."""
+    state = {"bundle": "b", "sealed_bundle": "b", "missing": [], "verdict": "FAIL",
+             "problems": ["config moved since sealing: exploration.budget_share_of_il"]}
+    row = status._bundle(cfg, state)
+    assert row["verdict"] == status.FAIL and "budget_share_of_il" in row["detail"]
+    assert "ops.seal --reason config|deploy|libraries" in row["where"]
+    state["problems"].append("changed since sealing: rho")
+    assert "bootstrap" in status._bundle(cfg, state)["where"]
+
+
 def test_vintages_without_a_bundle_read_not_run_never_pass(cfg):
     row = status._vintages(cfg, {"bundle": None}, {})
     assert row["verdict"] == status.NONE

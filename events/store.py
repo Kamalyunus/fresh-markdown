@@ -30,6 +30,9 @@ DECISION_REQUIRED = [
     "reference_discount", "reference_mu", "mu_ref_path", "anchor_discount",
     "dispersion_r",
     "baseline_model_version", "posterior_version", "config_version",
+    # the digest of the config in force and the code commit (None outside a
+    # checkout): what maps a priced hour to one audit snapshot
+    "config_digest", "code_commit",
     "timestamp",
 ]
 

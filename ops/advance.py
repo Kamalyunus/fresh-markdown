@@ -110,6 +110,9 @@ def probe(cfg, root="reports", feed=None, retrain=False):
         "have": {n for n, r in reports.items() if r},
         "tune": tune.collect(cfg, root, reports=reports),
         "posterior": os.path.exists(cfg["posterior"]["path"]),
+        # the seal covers the environment too: what moved outside the
+        # artifacts since the last seal (config, code, libraries)
+        "environment_drift": provenance.environment_drift(cfg, provenance.load_seal(cfg)),
         # unlearned posterior whose cells differ from what init would write
         # now (the launch belief or the prior moved): re-init is safe and due
         "posterior_stale": _posterior_stale(cfg),
@@ -221,6 +224,16 @@ def plan(st):
         steps.append({"kind": "paste", "label": "tune --apply",
                       "phase": phases.pop() if len(phases) == 1 else "tune",
                       "reevaluate": True, "keys": keys})
+        return steps
+    # 3b. the seal covers config, code and libraries: once nothing is left
+    #     to paste, a moved one is re-sealed under its own reason so the
+    #     audit trail records every environment the bundle ran in
+    if st.get("environment_drift"):
+        what = st["environment_drift"][0].split(" moved")[0]
+        reason = {"config": "config", "code": "deploy"}.get(what, "libraries")
+        steps.append(_run(f"re-seal ({'; '.join(st['environment_drift'])})",
+                          ["ops.seal", "--reason", reason],
+                          phase="tune", reevaluate=True))
         return steps
 
     # 4. posterior, once -- re-initialised only BEFORE launch, while it holds
@@ -495,7 +508,9 @@ def main():
         # the same expensive step a third time in one invocation is a loop,
         # not progress: stop and name it rather than run shadow for a day
         for s in steps:
-            if s["kind"] == "run":
+            # a seal is cheap and follows every paste round; only the
+            # expensive steps count toward the loop guard
+            if s["kind"] == "run" and s["args"][0] != "ops.seal":
                 mod = s["args"][0]
                 seen[mod] = seen.get(mod, 0) + 1
                 if seen[mod] > 2:

@@ -16,7 +16,7 @@ def _state(**over):
         "have": {"backtest", "thresholds", "shadow"},
         "tune": {"findings": [], "blocked": False, "to_paste": [],
                  "owner_decisions": []},
-        "posterior": True,
+        "posterior": True, "environment_drift": [],
         "shadow_gate": "PASS -- proceed to exploit-only pilot (section 19)",
         "nulls": [], "launched": True,
         "schedule_scope": "production -- launch_date 2026-09-01",
@@ -257,6 +257,39 @@ def test_only_the_invalidated_report_is_re_run():
     # and the deliberate retrain seals under its own reason
     steps = advance.plan(_state(retrain=True))
     assert steps[0]["args"][-2:] == ["--seal-reason", "retrain"]
+
+
+def test_a_moved_environment_is_resealed_once_nothing_is_left_to_paste(monkeypatch, tmp_path):
+    """The seal covers config, code and libraries. After a paste round the
+    config has moved: advance re-seals under `config` (a deploy under
+    `deploy`) so every environment the bundle ran in has a snapshot, and
+    the cheap seal never counts toward the loop guard."""
+    drift = ["config moved since sealing: exploration.tau_initial"]
+    steps = advance.plan(_state(environment_drift=drift))
+    assert steps[0]["args"] == ["ops.seal", "--reason", "config"] and steps[0]["reevaluate"]
+    steps = advance.plan(_state(environment_drift=["code moved since sealing: a -> b"]))
+    assert steps[0]["args"] == ["ops.seal", "--reason", "deploy"]
+    # a paste comes first: the seal records the settled config, not a draft
+    st = _state(environment_drift=drift,
+                tune={"findings": [], "blocked": False, "owner_decisions": [],
+                      "to_paste": [{"key": "dispersion.rho"}]})
+    assert advance.plan(st)[0]["kind"] == "paste"
+    # three seals in one invocation are a normal chain (bootstrap, tau paste,
+    # thresholds paste), never "looping"
+    import sys
+    calls = {"n": 0}
+
+    def fake_execute(steps, *a):
+        calls["n"] += 1
+        return (calls["n"] < 4, False)
+    monkeypatch.setattr(advance, "load_config", lambda p: {})
+    monkeypatch.setattr(advance, "probe", lambda *a, **k: {})
+    monkeypatch.setattr(advance, "plan", lambda st: [advance._run("re-seal", ["ops.seal", "--reason", "config"], phase="tune", reevaluate=True)])
+    monkeypatch.setattr(advance, "render_plan", lambda s: "")
+    monkeypatch.setattr(advance, "execute", fake_execute)
+    monkeypatch.setattr(advance, "_write_readiness", lambda *a: None)
+    monkeypatch.setattr(sys, "argv", ["advance", "--reports", str(tmp_path)])
+    assert advance.main() == 0 and calls["n"] == 4
 
 
 def test_a_measured_value_the_report_could_not_derive_is_not_an_owner_stop():

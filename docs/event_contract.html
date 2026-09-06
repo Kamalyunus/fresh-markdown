@@ -788,10 +788,12 @@
         <tr><td class="f">anchor_discount</td><td class="ex null">null</td><td>The price in force, which fixed the action set. <code>null</code> at entry; a fraction thereafter.</td></tr>
         <tr><td class="f">dispersion_r</td><td class="ex">0.919</td><td>Demand variance parameter used.</td></tr>
 
-        <tr class="grouphead"><td colspan="3">Versions — 3</td></tr>
+        <tr class="grouphead"><td colspan="3">Versions — 5</td></tr>
         <tr><td class="f">baseline_model_version</td><td class="ex">"baseline-20260811043259"</td><td>Which frozen model produced the forecast.</td></tr>
         <tr><td class="f">posterior_version</td><td class="ex">0</td><td>Which learning state was in force. Increments on every applied update.</td></tr>
-        <tr><td class="f">config_version</td><td class="ex">"1.0.0"</td><td>Which config the decision ran under.</td></tr>
+        <tr><td class="f">config_version</td><td class="ex">"1.0.0"</td><td>The config's human label. It is not bumped by pastes, so it is a name, not a fingerprint.</td></tr>
+        <tr><td class="f">config_digest</td><td class="ex">"35ab97a15c14aad1"</td><td>SHA-256 prefix of the whole config the decision was priced with. Matches the <code>environment.config_digest</code> of exactly one seal in <code>artifacts/history/</code>, which holds that config verbatim.</td></tr>
+        <tr><td class="f">code_commit</td><td class="ex">"8aec8b0…"</td><td>The git commit of the pricing code, <code>null</code> when the service does not run from a checkout. With the digest, it maps the hour to the audit snapshot that names the model, config, code and library versions in force.</td></tr>
       </tbody>
     </table>
   </div>
@@ -937,6 +939,8 @@
   "baseline_model_version": "baseline-20260811043259",
   "posterior_version": 0,
   "config_version": "1.0.0",
+  "config_digest": "35ab97a15c14aad1",
+  "code_commit": "8aec8b0f3c1d9e2b7a6c5d4e3f2a1b0c9d8e7f6a",
   "solver_latency_s": 0.008332459000030212,
   "nb_tail_mass_max": 1.563900841383692e-06,
   "timestamp": "2026-08-19T02:25:12.932987+00:00"

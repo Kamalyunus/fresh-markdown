@@ -19,7 +19,7 @@ from common.config import (design_effect, intraclass_correlation,
 from events.store import EventStore
 from events.pairs import match_pairs
 from common.io import write_json
-from common.provenance import config_fingerprint
+from common.provenance import config_fingerprint, environment
 from engine import dp as dp_mod
 from engine.explore import affordable_set
 from engine.demand import mu_at
@@ -63,6 +63,13 @@ def reproduction(decisions, cfg):
     checked = mismatches = 0
     worst_il = 0.0
     failures = []
+    # decisions priced under another config or commit than the one running
+    # now: a re-solve that still matches is fine, but the hours are named
+    env = environment(cfg)
+    other_config = sum(1 for e in sample if e.get("config_digest")
+                       and e["config_digest"] != env["config_digest"])
+    other_code = sum(1 for e in sample if e.get("code_commit") and env["code"]["commit"]
+                     and e["code_commit"] != env["code"]["commit"])
     for evt in sample:
         checked += 1
         try:
@@ -98,6 +105,8 @@ def reproduction(decisions, cfg):
                                              if il_re is not None else None),
                     "baseline_model_version": evt.get("baseline_model_version"),
                     "config_version": evt.get("config_version"),
+                    "config_digest": evt.get("config_digest"),
+                    "code_commit": evt.get("code_commit"),
                 })
 
     return {
@@ -108,6 +117,9 @@ def reproduction(decisions, cfg):
                           if checked else None),
         "worst_expected_il_delta": round(worst_il, 6),
         "failures": failures,
+        "priced_under_another_config": other_config,
+        "priced_under_another_commit": other_code,
+        "environment": env,
         # a deterministic solver that does not reproduce is never benign
         "verdict": ("PASS" if checked and not mismatches
                     else "INSUFFICIENT" if not checked else "FAIL"),
