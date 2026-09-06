@@ -103,7 +103,9 @@ And the standing prohibitions:
   - population filter — `fit.prepare_data.population`
   - episode-scoped cuts — `common.episodes.window_slice`,
     `trailing_weeks_window` (both factor-fit schedules), `week_key`,
-    `calendar_days` (the one `n_days`)
+    `opening_dates` (the episode's date key: folds, drift windows, the
+    schedule), `calendar_days` (the one `n_days`); the hour arithmetic —
+    `hour_discrepancy`; COGS at risk — `prepare_data.episode_cogs`
   - outcome reconciliation — `common.episodes.adjustment_reason`
   - scrap, IL, margin at episode grain — `common.metrics.episode_economics`
     (+ `settled`, `daily_rates`) over `common.episodes.scrap_units`;
@@ -118,7 +120,11 @@ And the standing prohibitions:
     `verdict_is_blocking`, `verdict_is_insufficient`
   - the tiers a forced move may land on — `engine.explore.admissible`
     (`affordable_set`, `spread_costs` and the assurance uniformity check
-    all read it; `delta_min` is derived there, never a second knob)
+    all read it; `delta_min` is derived there, never a second knob); their
+    costs — `admissible_costs`, priced once per decision
+  - the finiteness test — `engine.decide.finite_number`; the NB pmf table
+    — `engine.demand.nb_pmf_table`; the live episode frame —
+    `daily.monitor.settled_episodes` (built once per monitor run)
   - spread accounting — `engine.explore.SpreadLedger`; the tau controller
     walk — `engine.explore.walk_tau` (production and shadow's trace);
     the backtest's forward simulation — `evaluate.backtest._simulate_arm`
@@ -139,7 +145,7 @@ And the standing prohibitions:
   are how the next agent re-derives what already has a home.
 - Quote the sampling caveat with any sampled-run count — a zero over a
   sample is not a proof over the window.
-- `python3 -m pytest tests/` must pass before any push (~5.5 min; the
+- `python3 -m pytest tests/` must pass before any push (a couple of minutes; the
   end-to-end module runs the bootstrap chain in subprocesses).
 
 ## Setup
@@ -174,9 +180,10 @@ phase — what runs, which config keys move, and who moves them:
 
 | phase | runs | config keys | moved by |
 | --- | --- | --- | --- |
-| bootstrap | `ops.bootstrap_loop` (train ONCE, loop to the fixed point, backtest, thresholds, seal) | none | — |
-| tune | `tune --apply`, then `ops.bootstrap_loop --check-only` / `derive_thresholds` / shadow as the pasted keys demand (`tune.stale_keys`), until nothing is left to paste | `rho`, `calibration_fit_trailing_weeks`, `calibration_gate_band`, `information_increment`, `delta_min_log_bias`, `scrap/margin_deterioration_pct` (the 3σ trailing floor), `max_mean_step` (inside its price-consequence gate) | the process, from the report that derives each |
-| posterior | `init_posterior`, once — re-run with `--force` by the process only while the file holds no consumed outcome and its cells differ from what init would write now (the launch belief or the prior moved) | none | — |
+| data | `fit.download_flc` over `split.train_start` → the hold-out's end, only when no extract is on disk | none | — |
+| bootstrap | `ops.bootstrap_loop` (train ONCE, loop to the fixed point, backtest, thresholds, seal). A moved TRAINING input (`data.split`, `exclusion_window`, the LightGBM keys) is a STOP: a retrain is a new bundle and only `--retrain` runs one | none | — |
+| tune | `tune --apply`, then `ops.bootstrap_loop --check-only` / `evaluate.backtest` / `derive_thresholds` / shadow as the moved keys demand (`tune.stale_keys`; `READ_BY` routes unpasted keys to the one report or fit that reads them), until nothing is left to paste. A MEASURED value a report ran and still could not derive is a STOP naming that report, never an owner decision | `rho`, `calibration_fit_trailing_weeks`, `calibration_gate_band`, `information_increment`, `delta_min_log_bias`, `scrap/margin_deterioration_pct` (the 3σ trailing floor), `max_mean_step` (inside its price-consequence gate) | the process, from the report that derives each |
+| posterior | `init_posterior`, once — re-run with `--force` by the process only BEFORE launch, while the file holds no production state (no consumed outcome, no walked τ, no suspension) and its cells differ from what init would write now (the launch belief or the prior moved) | none | — |
 | shadow | `evaluate.shadow` on the hold-out, every episode; then `tune --apply` | `tau_initial` | the process, from `shadow.tau_initial_derivation`. The forced rate is the budget's: to change it the owner reads `shadow.exploration_budget_sweep` (forced rate, spend, move, `information_rel` per `budget_share_of_il` × `delta_min_bias_multiple`), sets the pair, and shadow re-runs once |
 | owner | STOP | `max_std_shrink`; `max_mean_step` when its re-price EXCEEDS the gate; a stop threshold only when its floor is `BLOCKED`, `TOO TIGHT`, `LIKELY INERT` or `insufficient history`; `posterior.cold_start_shift_std` never stops (it ships 0.5) but is yours — `tune` reports it with the backtest evidence | you, from `thresholds.json` (advance prints floor, verdict, source) |
 | launch | STOP, then `--fit-calibration` + `seal` | `data.launch_date` | you, on launch day |
@@ -190,9 +197,11 @@ decision log, never from memory. It never retrains unless the model is
 absent or `--retrain` is given; it re-grades a report only when its bundle
 moved or a config key that report READS moved (`tune.stale_keys`, the one
 routing `status`'s `report vintages` line also uses: W turns the loop,
-`delta_min` re-runs shadow, a stop threshold re-derives thresholds, judged
-per key — pasted together, both re-run; a MEASURED paste that writes back
-what a report measured invalidates nothing); it refuses to run the same step a third time in one
+`delta_min` re-runs shadow, a stop threshold re-derives thresholds, the
+launch belief re-runs the backtest alone, a training input STOPS for
+`--retrain`, judged per key — pasted together, both re-run; a MEASURED
+paste that writes back what a report measured invalidates nothing; a
+bundle-stale shadow is re-run before tune can BLOCK on it); it refuses to run the same step a third time in one
 invocation; and it stops on every SET BY OWNER null with the evidence. Its daily lane walks tau
 (`daily.update --calibrate-tau`, no operator) and stops at
 `daily.update --apply`, which it never runs: learning is gated daily
@@ -261,7 +270,7 @@ step                                          writes
 4. fit.estimate_prior --input prepared  artifacts/prior.json           │ ONE TURN
 5. fit.fit_dispersion --input prepared  artifacts/r_lookup.json, rho.json │ of a loop —
 5b. fit.train_baseline --check-convergence  (dry run: did it settle?)  ┘ 8-9 of these
-6. backtest --input prepared                  reports/backtest.json
+6. evaluate.backtest --input prepared         reports/backtest.json
 6b. evaluate.derive_thresholds               reports/thresholds.json  (ops.tune reads it)
 8. ops.init_posterior                   artifacts/posterior.json       (once; --force to overwrite)
 9. evaluate.shadow --input prepared           reports/shadow.json            (holdout by default)
@@ -347,7 +356,9 @@ Every paste has one source and one checker:
   order-independent by design.
 - Tests: shared builders live in `tests/conftest.py` (`cfg`,
   `decision_event`/`outcome_event`, `episode_frame`, `_reports`,
-  `reports_dir`) — extend those, never add a per-file copy. Test a
+  `reports_dir`, `synth_flc` — the synthetic extract, generated once per
+  session when `data/` is empty, so a fresh clone's `pytest` passes) —
+  extend those, never add a per-file copy. Test a
   behaviour by calling the function; an `inspect.getsource` assertion is
   reserved for an architecture ban (no second copy of X, no shared state in
   a worker) that no behavioural test can express.

@@ -620,8 +620,10 @@
       write or read JSON. Your two deliverables are both tables: the production table you
       already ship, and a small failed-pushes table (see §05). Going the other way, the agent
       dumps its decision and outcome logs as tables daily (<code>daily.export_events</code>
-      — parquet, list fields JSON-encoded) for loading into the warehouse; those tables are a
-      derived convenience for analytics and joins, never the audit record.
+      — parquet, list fields JSON-encoded; <code>--since</code> cuts both tables on the
+      decision's trading day, so an hour-23 outcome ships with its decision) for loading into
+      the warehouse; those tables are a derived convenience for analytics and joins, never the
+      audit record.
     </p>
   </div>
 
@@ -775,7 +777,7 @@
         <tr><td class="f">is_exploration</td><td class="ex">true</td><td>Whether this hour was a deliberate experiment.</td></tr>
         <tr><td class="f">exploration_cost</td><td class="ex">2385.0286259173663</td><td>Expected IL given up to run it. Zero when not exploring.</td></tr>
         <tr><td class="f">affordable_set_size</td><td class="ex">3</td><td>How many alternatives were within budget.</td></tr>
-        <tr><td class="f">tau_current</td><td class="ex">3202.33</td><td>The exploration budget in force, in won. <code>null</code> while exploration is suspended by a stop condition: the decision was priced at the optimum with no draw.</td></tr>
+        <tr><td class="f">tau_current</td><td class="ex">3202.33</td><td>The exploration budget in force, in won. <code>null</code> while exploration is suspended by a stop condition: the decision was priced at the optimum with no draw. A long-lived caller holds one <code>PosteriorStore</code> and calls <code>reload()</code> once per decision batch, before its first <code>decide()</code>: the monitor's suspension and <code>daily.update</code>'s cells and tau are written to the same file by other processes and are invisible to the handle until then; <code>decide()</code> itself never re-reads the file.</td></tr>
         <tr><td class="f">delta_min</td><td class="ex">0.2124</td><td>The smallest distance from the reference discount, in log price, a forced tier may sit at (level-bias scale over |ε|); tiers closer to the reference were neither drawn nor budgeted — the learner reads outcomes against <code>reference_mu</code>. 0 before the scale is measured.</td></tr>
 
         <tr class="grouphead"><td colspan="3">Inputs that make it reproducible — 7</td></tr>
@@ -827,7 +829,7 @@
         <tr><td class="f">execution_status</td><td><span class="tag you">you</span></td><td class="t">string</td><td class="ex">"ok"</td><td><code>"ok"</code> unless the hour appears in your failures file — then <code>"failed"</code>, and the outcome is stored but excluded from learning, which is the correct handling of an hour where the price never went live.</td></tr>
         <tr><td class="f">finalized_at</td><td><span class="tag">derived</span></td><td class="t">timestamp</td><td class="ex">"2026-08-19T19:00:00+00:00"</td><td>The hour's close, UTC.</td></tr>
         <tr class="groupsep"><td class="f">adjustment_reason</td><td><span class="tag">derived</span></td><td class="t">string</td><td class="ex">"episode_close_write_off"</td><td>Derived by <code>common.episodes.adjustment_reason</code> whenever inventory does not reconcile — omitted otherwise. Exactly three values; see the box below for what they mean in the feed.</td></tr>
-        <tr><td class="f">execution_failure_reason</td><td><span class="tag cond">conditional</span></td><td class="t">string</td><td class="ex">"price_push_timeout"</td><td>Your failures file's <code>reason</code>, when the push failed.</td></tr>
+        <tr><td class="f">execution_failure_reason</td><td><span class="tag cond">conditional</span></td><td class="t">string</td><td class="ex">"price_push_timeout"</td><td>Your failures file's <code>reason</code>, when the push failed. The failures row is keyed like the feed — <code>sku_id</code>, <code>fc</code>, <code>date</code>, <code>hour_of_day</code> — and every key is normalised on read: a datetime <code>date</code> column, or an integer id read back as <code>7.0</code>, matches the same hour as the text spelling.</td></tr>
       </tbody>
     </table>
   </div>

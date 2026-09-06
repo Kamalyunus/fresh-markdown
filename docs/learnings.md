@@ -393,6 +393,42 @@ now. Dates are owner sign-off, 2026-08.
   run order, `ops/` drives and gates. One package per REVIEW_GUIDE tier
   and `advance` phase; the tests mirror the modules.
 
+- **The second review after the move (2026-09-06).** Re-reading every
+  package with the new layout found defects the first review's structure
+  had hidden, most of them "two homes for one fact":
+  - the overspend stop read its streak from the days with *spend*, so a
+    pilot resumed after a suspension was re-suspended by the next `--feed`
+    (the suspended days had no reading and the over-budget days stayed
+    "latest"); every priced day now reads, 0 where nothing was forced;
+  - a duplicated event line was *counted* on load and still *loaded*
+    twice; a failed-push table with a datetime `date` matched nothing and
+    every failed push was learned from; the quarantine file's torn last
+    line was never closed; the SQL exclusion cut episodes at the window's
+    edges and fed their remnants to the prior as entry rows (the interior
+    only is skipped now — step 1 drops the straddlers whole);
+  - `advance --retrain` could not finish: the retrained backtest and the
+    old shadow tripped tune's one-model BLOCK before the step that re-runs
+    shadow; and a launch-belief re-init after launch would have erased the
+    τ walk and a standing suspension (production state of any kind ends
+    `launch_stale` now);
+  - routing: unknown keys fell to `calibration`, so `data.split` and the
+    LightGBM keys re-fit factors against the OLD model instead of stopping
+    for a retrain; `tuning.` and `assurance.` were "inert" while three
+    reports and two fits read them; a status row went "not run" before its
+    drift check and hid a stale paste;
+  - the prior's wide lattice and fit grid shared no points, so the "one
+    grid step" boundary tolerance was dead; `fold_spread` and
+    `drift_by_window` cut by row date (rule 15); the deff mixed rho over
+    recurring units with `m` over all; the global level factor's
+    `at_bound` was discarded; snapshot folders were keyed to the second and
+    ordered by name; shadow's "deeper than legacy" share counted shallower
+    hours; its stop streak ignored calendar gaps the monitor honours; the
+    guardrail floor rolled across the exclusion gap on row order.
+  Dead code removed: the level-mix decomposition and its config key, the
+  prediction-basis rows, the second `__main__` guard, `information_pending`,
+  the `_dp_arm` re-solve, the `latest_priced_day`/`daily_exploration_spend`
+  wrappers. Hard-coded `sample=300` and `max_days=60` became `tuning.` keys.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,

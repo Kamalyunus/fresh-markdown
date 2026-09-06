@@ -362,6 +362,12 @@ list indicts the NB family for the extract). An `r` within
 `r_bound_tolerance_rel` of either search bound is stored but flagged in
 `r_lookup.at_bound` (rule 3) and excluded from the clamp percentile, so a
 thin extract with many pinned groups cannot talk the clamp up to the ceiling.
+The artifact records the elasticity the residuals were actually formed at
+(`working_elasticity_by_category`; `working_elasticity_fallback` is the
+constant used where no prior existed). Both `rho` and the cluster size `m`
+in `deff` are measured over the same units — those with at least
+`rho_min_hours_per_episode` rows — never rho over the recurring units and
+`m` over all of them.
 
 `rho` is one global scalar fitted against the model's own residuals **on
 the calib window** (in-train rows understate it — the model fits its own
@@ -418,8 +424,10 @@ for the mean whatever the true dispersion — no `r` enters, so the prior
 runs before the dispersion fit with nothing circular between them.
 
 **No fallback constant.** A flat likelihood degrades to the uniform on the
-support; a wrong-signed one (unconstrained peak at or above zero, searched
-*past* the sign bounds) is discarded for the pooled density and named in
+support; a wrong-signed one (unconstrained peak at or above zero — within
+one grid step of it, the lattice has no exact zero — searched *past* the sign
+bounds on the FIT grid's own step, so the two lattices share every point) is
+discarded for the pooled density and named in
 `wrong_sign_categories`; a **lower-pinned** one (the search extends
 `unconstrained_search_below` past `epsilon_min` too, and a peak at or below
 the bound that strictly beats every interior point means the likelihood ran
@@ -526,7 +534,10 @@ DP's episode *mean* deeper than legacy's — and reads zero whenever the agent
 is shallower on average, whatever it does within the episode. Shadow cannot
 measure the agent's own steps: it re-anchors every hour on the legacy price
 in force, so its `share_hours_recommending_deeper_than_legacy_price` is the
-share of hours it would cut below the shelf's actual price.
+share of hours it would cut below the shelf's actual price, the
+`…shallower…` twin is the share it would hold above it (the DP opens
+shallower and holds while legacy ramps, so this is the larger one), and
+`share_hours_differing` is their sum.
 
 Enter-and-hold does not starve the learner — the opposite. Information is
 `mu · L² · r/(r+mu)` with `L` the log price ratio **against the
@@ -545,7 +556,10 @@ V(·, q, 0)         = −cost × q                       ← terminal scrap valu
 Exact DP because the state space is tiny (≤ ~20 tiers × ≤ 30 units × ≤ 12
 hours) and exploration requires the full Q vector per tier. The demand
 distribution is truncated at `negbin_max_k` with tail mass folded in and
-emitted as a diagnostic.
+emitted as a diagnostic. The stage update is one broadcast gather over
+(tier, inventory, demand) from a pmf table built once per solve
+(`demand.nb_pmf_table`); a test keeps the scalar loop it replaced and
+asserts bit-identical results, so the vectorisation is a speed-up only.
 
 ### 5.8 Exploration — a P&L line item, uniformly randomized
 
@@ -658,9 +672,11 @@ back at up to `max_mean_step` per update if outcomes disagree. The cell
 keeps `prior_mean` for audit. The same function sets the backtest's DP-arm
 belief (§5.14), so the launch record grades the policy that will run, and
 the deck's cold-start belief. The key is read at `init_posterior` only:
-`advance` re-initialises the file while it holds no consumed outcome and its
-cells differ from what init would write now (`launch_stale`); once an
-outcome is consumed the learner owns the mean and the key is inert. The ledger
+`advance` re-initialises the file before launch while it holds no production
+state — no consumed outcome, no walked τ, no standing suspension — and its
+cells differ from what init would write now (`launch_stale`); after launch,
+or once any of those exist, the process never re-initialises it (a re-init
+would silently lift a suspension and reset τ), and the key is inert. The ledger
 lives inside the posterior file because exactly-once learning requires
 "revision applied" and "outcomes consumed" to commit together — one file
 renames atomically, two cannot.
@@ -718,7 +734,9 @@ takes moments.
 - **Bounded steps, human-gated.** An update applies when effective
   information crosses `learning.information_increment`; each step moves the
   mean at most `max_mean_step` and shrinks the std at most
-  `max_std_shrink` (floored at `min_std`), clipped bounds flagged. **The
+  `max_std_shrink` (floored at `min_std`; the mean is clipped to the
+  epsilon range, so the sign constraint holds structurally on the stored
+  belief), clipped bounds flagged. **The
   increment is MEASURED**: Fisher information adds to precision, so
   `I* = (1/s₀²)·[1/(1−max_std_shrink)² − 1]` saturates the cap — a ceiling,
   not a target (excess is discarded). Derive it at the launch stds; it
@@ -762,7 +780,10 @@ continuation of the calibration diagnostic. Stop conditions (cost-floor
 violation, event-quality breach, mismatch, realised spend > 2× the day's
 budget, scrap/margin deterioration — the last three over `persistence_days`
 consecutive priced days, because one day over is a thin-IL day or two
-expensive draws and the τ controller halves τ on it the next morning) **suspend
+expensive draws and the τ controller halves τ on it the next morning; the
+spend series reads every PRICED day, 0 where nothing was forced, so a day
+under suspension ends the streak instead of leaving the over-budget days as
+the latest reading and re-firing the stop a human had just lifted) **suspend
 exploration — exploitation pricing continues**: the monitor writes
 `exploration_suspended` into the posterior state, `decide` selects with no
 budget (no draw) while it is set, `status` reads WARN with the reason, and
@@ -830,8 +851,10 @@ window extension adds a next-day row with no decisions). Shadow freezes the
 calibration at the window start (`freeze_calibration_from`) before
 predicting, so `calibration_regimes.frozen_anchor` is the anchor by
 construction on any window, and `calibration_coverage` reads the deliberate
-freeze as OK rather than STALE. `tau_initial_derivation.days` is the count
-of trading days the ledger and the IL mean share.
+freeze as OK rather than STALE. `window.days` is that span and
+`tau_initial_derivation.days` is the same `calendar_days` in both shadow
+and the backtest (τ itself does not depend on it — n cancels in the solve —
+but the reported daily spend and budget must sit on one basis).
 
 **The forced rate is the budget's, and the sweep says what a change
 buys.** The chooser explores whenever τ affords an admissible tier, so
@@ -893,13 +916,18 @@ Each artifact carries a `provenance` block; `ops.seal` writes
 `artifacts/bundle.json` with a SHA-256 of every file and refuses an
 inconsistent set. Re-run `seal` after `--fit-calibration`. **Every seal
 also leaves an audit snapshot**: `artifacts/history/<bundle>/<sealed_at>/`
+(the stamp to the microsecond, so two seals in one second are two folders)
 holds a copy of every present artifact, the config in force, the posterior
 state and a `MANIFEST.json` (bundle, time, reason — `bootstrap`,
-`check-only`, `retrain`, `weekly-refit` — config digest, hashes); every
-`advance` stop copies the reports as they then stand into the bundle's
-latest snapshot. A retrain overwrites `artifacts/` in place, so the history
-folder is the only place two bundles can be compared side by side, and the
-process never prunes it. `status`'s bundle row counts the snapshots.
+`check-only`, `retrain` (what `advance --retrain` seals as), `weekly-refit`
+— config digest, hashes); each copy is re-hashed against the seal and a
+mismatch refuses the snapshot rather than recording one that disagrees with
+its own manifest. Every `advance` stop copies the reports as they then stand
+into the bundle's latest snapshot. Snapshots order by `sealed_at`, never by
+folder name, so a re-sealed older bundle does not read as the latest. A
+retrain overwrites `artifacts/` in place, so the history folder is the only
+place two bundles can be compared side by side, and the process never
+prunes it. `status`'s bundle row counts the snapshots.
 
 Stale *reports* are the other half: after a retrain, yesterday's
 `backtest.json` still parses and silently grades a ghost model. Every
@@ -912,11 +940,20 @@ fingerprint** — the phase it belongs to (`backtest` / `shadow` /
 `advance` re-runs by the same table: W turns the loop; `delta_min` re-runs
 shadow; a stop threshold, `max_std_shrink` or `information_increment`
 re-derives thresholds; `max_mean_step` re-derives thresholds AND re-runs
-shadow; keys tune does not paste but one report reads are routed by prefix
-(`tune.READ_BY`: the budget and controller knobs to shadow, the guardrail
-window/smoothing/persistence to thresholds); runtime-only knobs are inert;
-an unclassified edit re-grades everything; a MEASURED paste that writes
-back what a report measured is inert. The classes do not nest, so a paste
+shadow; keys tune does not paste but one report or fit reads are routed by
+prefix (`tune.READ_BY`: the budget and controller knobs to shadow, the
+guardrail window/smoothing/persistence and the `tuning.` floor multiples to
+thresholds, the launch belief and the backtest's own tables to a
+`backtest`-only class that re-runs `evaluate.backtest` and nothing else,
+the `assurance.` keys `fit_dispersion` reads to the loop, and the TRAINING
+inputs — `data.split`, `exclusion_window`, the LightGBM keys — to `retrain`,
+on which `advance` STOPS: a retrain is a new bundle and only `--retrain`
+runs one); runtime-only knobs are inert; an unclassified edit re-grades
+everything; a MEASURED paste that writes back what a report measured is
+inert. A shadow graded on a bundle no longer on disk is re-run before
+`tune` is consulted, or its one-model invariant would BLOCK the chain with
+no exit. Production reports (`monitor`, `assurance`) read the live config
+every run and are never re-graded by a paste. The classes do not nest, so a paste
 of several keys re-runs the union, and a per-category mapping is matched on
 the LONGEST `KEYS` prefix — a category re-round of `delta_min_log_bias`
 diffs as `…delta_min_log_bias.MEAT` and is shadow's, not the loop's. The
@@ -1036,7 +1073,13 @@ Rules, in order:
 After any split move: check rows-per-subcategory in the new calib vs
 `dispersion.min_rows_per_group`, re-read the sweep, and get
 `--check-convergence` green. A split change moves `train_end`, so it is a
-full retrain — nothing from the old split is comparable (rule 1).
+full retrain — nothing from the old split is comparable (rule 1); `advance`
+routes every training input to `retrain` and stops until `--retrain` is
+given. The extract itself pulls the exclusion window's INTERIOR out in SQL
+only: both edge days come down, because an episode straddling an edge always
+has a row on the edge day and step 1 drops it whole from that row — cut at
+the edge in SQL, its remnant would enter the prior's entry-only fit as a
+fresh entry row mid-window (rule 7).
 
 **Synthetic validation:** `tools.make_dummy_flc` reproduces the schema with
 known ground-truth elasticity in two modes — `legacy` (the clock confound;
@@ -1192,13 +1235,16 @@ computes bit-for-bit what turn *k+1*'s `--fit-calibration` would, so 3b
 runs on turn 1 only. The artifact gets a full prior once settled, and the
 default `--check-convergence` stays a dry run.
 
-`train_baseline --check-convergence` re-solves the factors with the
+`fit.train_baseline --check-convergence` re-solves the factors with the
 prior/`r` now on disk, compares per cell and per schedule week in log space
 against `calibration_convergence_tol_log`, then restores the artifact (a
 dry run — committing while prior and dispersion lag it would create the
 inconsistency being tested for; `convergence.method` names which of the
 two ran). A cell whose bisection pinned at `calibration_factor_search_bounds`
-carries `detail[cell].at_bound` (rule 3); thin cells are shrunk toward the
+carries `detail[cell].at_bound` (rule 3), and the GLOBAL solve every thin
+cell shrinks toward carries `global_factor_at_bound` (per schedule week,
+`schedule.weeks_global_at_bound`) — a pinned parent is not a solve either;
+thin cells are shrunk toward the
 parent by `calibration_shrinkage_units`, never "left at 1.0" — only a whole
 window under `calibration_min_anchor_rows` is. A failing `--check-convergence`
 stops `ops.bootstrap_loop`'s loop with its own message rather than iterating to
@@ -1244,8 +1290,9 @@ market judgment).
 **`--apply` names the MINIMUM sufficient re-run**: `none` for values read
 at runtime or mirroring an artifact; `calibration` for
 `calibration_fit_trailing_weeks` (the loop turns — `ops.bootstrap_loop
---check-only`, **no retrain**); `retrain` only for `data.split`, which is
-OWNER, so `--apply` never writes one. It backs up the config and appends
+--check-only`, **no retrain**); `retrain` only for a training input
+(`data.split` and the model's own keys), which are SET / OWNER, so `--apply`
+never writes one. It backs up the config and appends
 what was written, its source field, and outstanding owner decisions to
 `artifacts/config_decisions.json`. Edits are targeted line replacements —
 the comment beside each value is the reasoning and a YAML round-trip drops
@@ -1337,10 +1384,16 @@ thresholds.
 
 **Guardrail stop thresholds.** The floor a threshold must clear is 3σ of
 the series' own noise **on the basis the monitor compares against**: the
-trailing mean of the same system-priced episodes, each day smoothed over
+trailing mean of the same system-priced episodes (the `dp_eligible`
+population the trigger will run on), each day smoothed over
 `deterioration_smoothing_days` before the comparison, the monitor's own
 order (`guardrail_threshold_recommendation` reports the floor and the
-verdict). The comparison itself lives once, in `common.guardrail.deviation`.
+verdict). The pre-launch series is laid on a full calendar first, so the
+trailing window and the smoothing never straddle the exclusion gap — a
+28-day window over close-day ROWS graded the first post-gap days against
+days six weeks earlier. The comparison itself lives once, in
+`common.guardrail.deviation`, which also drops the ±inf a zero baseline
+produces, so floor and trigger see the same finite series.
 
 Bases are per metric in `common.guardrail.BASIS`: `scrap: relative`
 (strictly positive), `margin: absolute_pp` — `margin_rate` **crosses
@@ -1469,7 +1522,9 @@ business: when a listing ends with stock on hand, those units are disposed
 of and counted as scrap, whatever the counter says.
 
 Unclosed episodes are **flagged, not dropped** (`edge_truncated` splits the
-extract-boundary cases from the residue): their observed hours are ordinary
+extract-boundary cases from the residue; its manifest detail carries
+`write_off_convention_in_force`, and `episode_universe`'s carries the
+`censoring` check): their observed hours are ordinary
 priced demand, only the ending is missing, and every consumer of an ending
 already excludes it on its own (`scrap_units` NaN, replay's
 `outcome_known`, shadow via `metrics.settled`). They are also the largest,
@@ -1555,10 +1610,10 @@ step                                          writes
 0. fit.download_flc                     data/flc_raw.parquet   (Redshift; REDSHIFT_* from ~/.env)
 1. fit.prepare_data --input <raw>       data/prepared.parquet, artifacts/split_manifest.json
 3. fit.train_baseline --input prepared  artifacts/baseline_model.txt, feature_schema.json
-3b. train_baseline --fit-calibration          artifacts/calibration.json    ┐
+3b. fit.train_baseline --fit-calibration      artifacts/calibration.json    ┐
 4. fit.estimate_prior --input prepared  artifacts/prior.json          │ ONE TURN of the
 5. fit.fit_dispersion --input prepared  artifacts/r_lookup.json, rho.json │ f<->r loop
-5b. train_baseline --check-convergence        (dry run: settled?)           ┘
+5b. fit.train_baseline --check-convergence    (dry run: settled?)           ┘
 6. evaluate.backtest --input prepared         reports/backtest.json
 6b. evaluate.derive_thresholds               reports/thresholds.json
 8. ops.init_posterior                   artifacts/posterior.json      (once; --force to overwrite)

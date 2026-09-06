@@ -43,9 +43,13 @@ python3 -m ops.advance --report     # regenerate reports/launch_readiness.md
 
 `advance` recomputes the state from disk every run, so running it again
 after any action is always safe. It never retrains unless the model is
-absent or `--retrain` is given; it re-runs a report only when its bundle
-moved or a config key that report reads moved (a paste of what the report
-itself measured invalidates nothing); it never invents a value. Every stop writes
+absent or `--retrain` is given — a moved training input (`data.split`,
+`exclusion_window`, the model's own keys) is a STOP naming `--retrain`, and
+that retrain re-runs the stale shadow itself before reading any report; it
+re-runs a report only when its bundle moved or a config key that report
+reads moved (a paste of what the report itself measured invalidates
+nothing; a key only the backtest reads re-runs the backtest alone); it
+never invents a value. Every stop writes
 `reports/launch_readiness.md` — what ran per phase, every config value the
 process changed (before, after, why, source), the config in force, status,
 and what is waited on. Its stops, in order: a tune BLOCK · a failed shadow
@@ -134,7 +138,12 @@ contract:
   the mismatch rate is gated at 1%);
 - reporting **failed price pushes** — one row per failed hour, as a table
   (parquet/CSV) or JSONL (`sku_id`, `fc`, `date`, `hour_of_day`, `reason`);
-  no row means the push succeeded;
+  no row means the push succeeded; keys are normalised on read (a datetime
+  `date`, an id read back as a float);
+- holding ONE `PosteriorStore` per process is fine, but **reload it once
+  per decision batch** (`store.reload()`): the monitor writes a suspension
+  and `--apply` writes updates into the same file from another process, and
+  a handle that never reloads keeps drawing on a suspended pilot;
 - a defined fallback for `StateRejected` (hold the current price; alert on
   rate);
 - the daily cron: `advance --feed <yesterday's hourly parquet>`, which
@@ -161,10 +170,10 @@ in the caller.
 
 | Line | Response |
 | --- | --- |
-| stop condition fired (overspend >2× on `persistence_days` consecutive days, mismatch, duplicates, guardrail) | the monitor suspends exploration in the posterior state; `decide` stops drawing and **exploitation pricing continues**; `status` shows `exploration SUSPENDED since …`. Investigate, then a human resumes with `python3 -m daily.update --resume-exploration` — never restart blindly |
+| stop condition fired (overspend >2× on `persistence_days` consecutive days, mismatch, duplicates, guardrail) | the monitor suspends exploration in the posterior state; `decide` stops drawing and **exploitation pricing continues**; `status` shows `exploration SUSPENDED since …`. Investigate, then a human resumes with `python3 -m daily.update --resume-exploration` — never restart blindly. A resumed pilot is not re-suspended by the days it spent suspended (they read as zero spend); a fresh fire is a fresh two-day streak. The posterior file is production state from the first walked τ: `advance` never re-initialises it after launch |
 | `config mirrors reports` FAIL | a MEASURED paste disagrees with the report that derives it, or the report could not measure it (NOT RUN). `python3 -m ops.tune` prints the reason; `advance` re-pastes what it can |
 | `guardrail floors` WARN | "insufficient history" — nobody measured the floor, so the stop was not checked. Not a pass: more closed-episode history, then re-run `derive_thresholds` |
-| `assurance · reproduction` FAIL | something moved under the solver (config edit, artifact swap, deploy, library). Diff the bundle first: `artifact bundle` line, then `artifact mirrors`, then the live `artifacts/` against the latest `artifacts/history/<bundle>/<sealed_at>/` snapshot (every seal leaves one, with the config and posterior of the moment) |
+| `assurance · reproduction` FAIL | something moved under the solver (config edit, artifact swap, deploy, library). Diff the bundle first: `artifact bundle` line, then `artifact mirrors`, then the live `artifacts/` against the latest `artifacts/history/<bundle>/<sealed_at>/` snapshot (every seal leaves one, with the config and posterior of the moment; its `MANIFEST.json` names the reason — `bootstrap`, `check-only`, `retrain`, `weekly-refit` — and every copy was re-hashed against the seal when written) |
 | `artifact mirrors` FAIL | config paste and its source disagree (rho). Read the **bundle** line before re-pasting — the stale side is not always config |
 | `report vintages` FAIL | a report was produced against a model no longer on disk — its gate rows grade a ghost. `advance` re-runs it; do not launch on it |
 | `calibration_coverage` says `STALE FACTORS IN USE` | the weekly re-fit was missed: rows were priced on frozen factors. `advance` re-fits and re-seals; re-run the report |
