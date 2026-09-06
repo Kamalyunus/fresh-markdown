@@ -1382,6 +1382,28 @@ The second row is the case this design makes most likely.
 
 ## 12. Open owner decisions — recommendations and tooling
 
+**Settings in force (owner, 2026-09-06).** `config.yaml` ships these as
+the defaults — the readings of the owner's own `ops.advance` run on their
+production extract (bundle `baseline-20260906040908`: 16.5M rows, 964K
+episodes, 804K DP-eligible; the fixed point in 9 turns; shadow PASS on the
+hold-out), plus the postures they chose on top. Every MEASURED value is
+re-derived on the next `advance`; `status` names any drift.
+
+| key | value | who | note |
+| --- | --- | --- | --- |
+| `dispersion.rho` | 0.6364 | measured | mirrors `artifacts/rho.json` |
+| `learning.information_increment` | 0.237 | measured | derives from `max_std_shrink`, so the next `advance` re-pastes it lower for the 0.10 shrink |
+| `exploration.tau_initial` | 348.93 | measured | shadow's derivation on the pre-window week |
+| `exploration.delta_min_log_bias` | 17-category map, `_default` 0.1459 | measured | BABY_FOOD 0.3389, MEAL 0.2862, DRIED_&_FROZEN_PRODUCE 0.2446, the rest at the catalogue floor |
+| `scrap_deterioration_pct` | 0.3217 | measured | 3σ trailing floor, scrap smoothed 7 days |
+| `margin_deterioration_pct` | 0.0614 | measured | derived at 1-day smoothing; re-derives lower now that margin is smoothed 7 days |
+| `learning.max_std_shrink` | 0.10 | owner | 0.25 → 0.10: a conservative launch rail |
+| `learning.max_mean_step` | 0.796 | owner, gated | pasted by `tune` inside the price-consequence gate; still the owner's posture |
+| `deterioration_smoothing_days` | scrap 7, margin 7 | owner | one week for both series |
+| `posterior.cold_start_shift_std` | 0.5 | owner | launch belief = prior mean − 0.5·std |
+| `exploration.budget_share_of_il` | 0.01 | owner | the forced rate is its consequence (§5.13 sweep) |
+| `data.launch_date` | null | owner | set on launch day |
+
 `evaluate.derive_thresholds` produces the evidence for the SET BY OWNER
 thresholds.
 

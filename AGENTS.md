@@ -310,8 +310,7 @@ are specified in §5.2 and §12a.
 ## MEASURED pastes and launch blockers
 
 `load_config(strict=True)` refuses while any RUNTIME_REQUIRED value is null.
-**`config.yaml` ships the OWNER's production readings** (their
-`ops.advance` run of 2026-09-06) as the defaults; a local run on the
+**`config.yaml` ships the OWNER's production readings** (their `ops.advance` run of 2026-09-06: `rho` 0.6364, `information_increment` 0.237, `tau_initial` 348.93, the 17-category `delta_min_log_bias` map, scrap/margin stops 0.3217/0.0614) **and their postures** (`max_std_shrink` 0.10 — conservative launch; `max_mean_step` 0.796, pasted inside its gate; both guardrail series smoothed over 7 days; `cold_start_shift_std` 0.5) as the defaults — the table in design §12 is the record; a local run on the
 fixture re-derives fixture values — read them, never commit them
 (`git checkout config.yaml` afterwards). Every paste has one source and one checker:
 

@@ -89,7 +89,9 @@ each decision.
    `information_rel` — and set the pair, then re-run shadow once. A
    smaller share forces less at the same depth; a larger multiple forces
    less but deeper.
-4. **The owner keys** (`advance` stops here): `max_std_shrink` first
+4. **The owner keys** (`advance` stops here; the values in force are the
+   table in design §12 — shrink 0.10, step 0.796, both guardrail series
+   smoothed 7 days, k 0.5, set 2026-09-06): `max_std_shrink` first
    (`information_increment` derives from it), then `max_mean_step` when
    `backtest.step_sensitivity` says the re-price exceeds the auto-apply
    gate (inside it, `tune` pastes it). The stop thresholds
