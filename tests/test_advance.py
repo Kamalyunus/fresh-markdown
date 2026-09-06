@@ -261,14 +261,14 @@ def test_only_the_invalidated_report_is_re_run():
 
 def test_a_moved_environment_is_resealed_once_nothing_is_left_to_paste(monkeypatch, tmp_path):
     """The seal covers config, code and libraries. After a paste round the
-    config has moved: advance re-seals under `config` (a deploy under
-    `deploy`) so every environment the bundle ran in has a snapshot, and
-    the cheap seal never counts toward the loop guard."""
+    config has moved: advance re-seals under `config` (a library upgrade
+    under `libraries`) so every environment the bundle ran in has a
+    snapshot, and the cheap seal never counts toward the loop guard."""
     drift = ["config moved since sealing: exploration.tau_initial"]
     steps = advance.plan(_state(environment_drift=drift))
     assert steps[0]["args"] == ["ops.seal", "--reason", "config"] and steps[0]["reevaluate"]
-    steps = advance.plan(_state(environment_drift=["code moved since sealing: a -> b"]))
-    assert steps[0]["args"] == ["ops.seal", "--reason", "deploy"]
+    steps = advance.plan(_state(environment_drift=["libraries moved since sealing: numpy 1 -> 2"]))
+    assert steps[0]["args"] == ["ops.seal", "--reason", "libraries"]
     # a paste comes first: the seal records the settled config, not a draft
     st = _state(environment_drift=drift,
                 tune={"findings": [], "blocked": False, "owner_decisions": [],

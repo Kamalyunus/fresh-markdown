@@ -78,7 +78,7 @@ def test_reproduction_passes_on_untouched_events(cfg):
     assert out["decisions_checked"] == 12 and out["mismatch_count"] == 0
 
 
-def test_reproduction_names_the_hours_priced_under_another_config_or_commit(cfg):
+def test_reproduction_names_the_hours_priced_under_another_config(cfg):
     """A re-solve that still matches after a config edit is fine -- the
     edited key did not reach the solver -- but the hours are counted, so
     the operator knows which snapshot each was priced under."""
@@ -88,12 +88,9 @@ def test_reproduction_names_the_hours_priced_under_another_config_or_commit(cfg)
     for d in decs[:3]:
         d["config_digest"] = env["config_digest"]
     decs[3]["config_digest"] = "ffffffffffffffff"
-    for d in decs:
-        d["code_commit"] = env["code"]["commit"]
     out = assurance.reproduction(decs, cfg)
     assert out["verdict"] == "PASS"
     assert out["priced_under_another_config"] == 1
-    assert out["priced_under_another_commit"] == 0
     assert out["environment"]["config_digest"] == env["config_digest"]
 
 

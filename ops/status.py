@@ -70,11 +70,11 @@ def _bundle(cfg, state):
         return _row("artifact bundle", NONE, "no stamped artifacts",
                     "run the bootstrap, then python3 -m ops.seal")
     if state["problems"]:
-        env_only = all(p.split(" moved since sealing")[0] in ("config", "code", "libraries")
+        env_only = all(p.split(" moved since sealing")[0] in ("config", "libraries")
                        for p in state["problems"])
         return _row("artifact bundle", FAIL, "; ".join(state["problems"]),
                     "a deliberate change: python3 -m ops.seal --reason "
-                    "config|deploy|libraries (advance does)" if env_only else
+                    "config|libraries (advance does)" if env_only else
                     "python3 -m ops.seal after re-running the bootstrap")
     detail = f"{state['bundle']}"
     if not state["sealed_bundle"]:

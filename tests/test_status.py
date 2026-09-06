@@ -131,7 +131,7 @@ def test_a_moved_environment_fails_the_bundle_row_with_the_reseal_remedy(cfg):
              "problems": ["config moved since sealing: exploration.budget_share_of_il"]}
     row = status._bundle(cfg, state)
     assert row["verdict"] == status.FAIL and "budget_share_of_il" in row["detail"]
-    assert "ops.seal --reason config|deploy|libraries" in row["where"]
+    assert "ops.seal --reason config|libraries" in row["where"]
     state["problems"].append("changed since sealing: rho")
     assert "bootstrap" in status._bundle(cfg, state)["where"]
 

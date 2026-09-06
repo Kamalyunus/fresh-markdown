@@ -80,9 +80,9 @@ statement and the incident that created the rule.
     `python3 -m ops.status` before quoting or pasting from any report
     and before ending a session that touched artifacts, config or reports;
     never use a report the `artifact bundle` / `artifact mirrors` /
-    `report vintages` lines call stale. The seal covers the CONFIG, CODE
-    COMMIT and LIBRARY versions too: a move in any is a red bundle row until
-    a deliberate re-seal; events carry `config_digest` + `code_commit`. (§5.14a)
+    `report vintages` lines call stale. The seal covers the CONFIG and the
+    LIBRARY versions too: a move in either is a red bundle row until a
+    deliberate re-seal; every decision event carries `config_digest`. (§5.14a)
 19. **The repo's data is SYNTHETIC; the owner's is real** — every number a
     local run prints is a fixture number and is evidence about the fixture
     only. Never state one as a finding about the owner's extract, and never
@@ -186,7 +186,7 @@ phase — what runs, which config keys move, and who moves them:
 | --- | --- | --- | --- |
 | data | `fit.download_flc` over `split.train_start` → the hold-out's end, only when no extract is on disk | none | — |
 | bootstrap | `ops.bootstrap_loop` (train ONCE, loop to the fixed point, backtest, thresholds, seal). A moved TRAINING input (`data.split`, `exclusion_window`, the LightGBM keys) is a STOP: a retrain is a new bundle and only `--retrain` runs one | none | — |
-| tune | `tune --apply`, then `ops.bootstrap_loop --check-only` / `evaluate.backtest` / `derive_thresholds` / shadow as the moved keys demand (`tune.stale_keys`; `READ_BY` routes unpasted keys to the one report or fit that reads them), until nothing is left to paste. A MEASURED value a report ran and still could not derive is a STOP naming that report, never an owner decision; then `ops.seal --reason config` (or `deploy` / `libraries`) whenever the environment moved since the last seal | `rho`, `calibration_fit_trailing_weeks`, `calibration_gate_band`, `information_increment`, `delta_min_log_bias`, `scrap/margin_deterioration_pct` (the 3σ trailing floor), `max_mean_step` (inside its price-consequence gate) | the process, from the report that derives each |
+| tune | `tune --apply`, then `ops.bootstrap_loop --check-only` / `evaluate.backtest` / `derive_thresholds` / shadow as the moved keys demand (`tune.stale_keys`; `READ_BY` routes unpasted keys to the one report or fit that reads them), until nothing is left to paste. A MEASURED value a report ran and still could not derive is a STOP naming that report, never an owner decision; then `ops.seal --reason config` (or `libraries`) whenever the environment moved since the last seal | `rho`, `calibration_fit_trailing_weeks`, `calibration_gate_band`, `information_increment`, `delta_min_log_bias`, `scrap/margin_deterioration_pct` (the 3σ trailing floor), `max_mean_step` (inside its price-consequence gate) | the process, from the report that derives each |
 | posterior | `init_posterior`, once — re-run with `--force` by the process only BEFORE launch, while the file holds no production state (no consumed outcome, no walked τ, no suspension) and its cells differ from what init would write now (the launch belief or the prior moved) | none | — |
 | shadow | `evaluate.shadow` on the hold-out, every episode; then `tune --apply` | `tau_initial` | the process, from `shadow.tau_initial_derivation`. The forced rate is the budget's: to change it the owner reads `shadow.exploration_budget_sweep` (forced rate, spend, move, `information_rel` per `budget_share_of_il` × `delta_min_bias_multiple`), sets the pair, and shadow re-runs once |
 | owner | STOP | `max_std_shrink`; `max_mean_step` when its re-price EXCEEDS the gate; a stop threshold only when its floor is `BLOCKED`, `TOO TIGHT`, `LIKELY INERT` or `insufficient history`; `posterior.cold_start_shift_std` never stops (it ships 0.5) but is yours — `tune` reports it with the backtest evidence | you, from `thresholds.json` (advance prints floor, verdict, source) |

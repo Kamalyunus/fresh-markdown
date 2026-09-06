@@ -5,12 +5,12 @@ stamp intact); sealing records per-file hashes beside the agreed bundle id so
 both failures are detectable and distinguishable. Refuses an inconsistent set
 -- a sealed mixed bundle looks decided. The seal also records the ENVIRONMENT
 a priced hour depends on beyond the artifacts -- the config (digest and
-snapshot), the code commit, the library versions -- and the posterior as it
-stands (recorded, never verified: it is learning state). verify() reads a
-moved config, commit or library as a problem exactly like an edited
-artifact; the remedy is a deliberate re-seal. Every seal also copies the
+snapshot) and the library versions -- and the posterior as it stands
+(recorded, never verified: it is learning state). verify() reads a moved
+config or library as a problem exactly like an edited artifact; the remedy
+is a deliberate re-seal. Every seal also copies the
 bundle, config and posterior into artifacts/history/<bundle>/<sealed_at>/.
-Run: python3 -m ops.seal [--reason bootstrap|retrain|check-only|weekly-refit|config|deploy|libraries]
+Run: python3 -m ops.seal [--reason bootstrap|retrain|check-only|weekly-refit|config|libraries]
 """
 
 import argparse
@@ -45,7 +45,7 @@ def main():
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--reason", default=None,
                     help="why this seal happened (bootstrap, retrain, "
-                         "check-only, weekly-refit, config, deploy, "
+                         "check-only, weekly-refit, config, "
                          "libraries); recorded in the history MANIFEST")
     args = ap.parse_args()
 
@@ -60,8 +60,6 @@ def main():
         print(f"  {name:16s} {digest[:12]}")
     env = payload["environment"]
     print(f"  {'config':16s} {env['config_digest']}")
-    print(f"  {'code':16s} {(env['code']['commit'] or 'no checkout')[:12]}"
-          + (" (dirty)" if env["code"]["dirty"] else ""))
     print(f"  {'libraries':16s} " + ", ".join(f"{k} {v}" for k, v in env["libraries"].items()))
     lp = payload["launch_posterior"]
     print(f"  {'posterior':16s} " + (f"{lp['digest'][:12]}, {len(lp['cells'])} cells, "

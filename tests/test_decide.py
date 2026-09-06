@@ -79,9 +79,9 @@ def test_a_bad_dispersion_is_a_state_rejection_never_a_nan_q(bad_r):
     assert "r must be" in str(exc.value)
 
 
-def test_the_decision_event_names_the_config_and_code_it_was_priced_with(tmp_path):
-    """config_version is a label nobody bumps; the digest and the commit
-    map the hour to exactly one audit snapshot (design 5.14a)."""
+def test_the_decision_event_names_the_config_it_was_priced_with(tmp_path):
+    """config_version is a label nobody bumps; the digest maps the hour to
+    exactly one audit snapshot (design 5.14a)."""
     from common import provenance
     from engine.decide import decide
     from engine.posterior import PosteriorStore
@@ -93,7 +93,6 @@ def test_the_decision_event_names_the_config_and_code_it_was_priced_with(tmp_pat
         path=str(tmp_path / "posterior.json"))
     evt = decide(_state(), posterior, store, CFG, np.random.default_rng(0), 100.0, "v")
     assert evt["config_digest"] == provenance.config_fingerprint(CFG)["digest"]
-    assert evt["code_commit"] == provenance.code_version()["commit"]
     assert store.load_decisions()[0]["config_digest"] == evt["config_digest"]
 
 

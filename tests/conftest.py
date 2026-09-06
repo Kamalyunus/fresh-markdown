@@ -74,7 +74,7 @@ def decision_event(**over):
         "anchor_discount": None, "dispersion_r": 0.919,
         "baseline_model_version": "b", "posterior_version": 0,
         "config_version": "1.0.0", "config_digest": "0123456789abcdef",
-        "code_commit": None, "timestamp": "2026-08-19T17:00:00+00:00",
+        "timestamp": "2026-08-19T17:00:00+00:00",
     }
     evt.update(over)
     return evt

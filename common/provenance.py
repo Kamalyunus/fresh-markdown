@@ -7,7 +7,6 @@ artifact is fitted AGAINST a model. ops.seal adds per-file hashes so a
 hand-edited artifact is detectable too, which stamps alone cannot catch.
 """
 
-import functools
 import glob
 import hashlib
 import importlib.metadata
@@ -15,7 +14,6 @@ import json
 import os
 import platform
 import shutil
-import subprocess
 from datetime import datetime, timezone
 
 from common.config import config_get
@@ -87,21 +85,6 @@ def config_diff(snapshot, cfg, prefix=""):
     return out
 
 
-@functools.lru_cache(maxsize=1)
-def code_version():
-    """The commit the running code is at, and whether the tree is dirty --
-    once per process (a subprocess per decision would price the hour in
-    git). None outside a checkout: the seal records that too."""
-    try:
-        commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
-                                text=True, timeout=5).stdout.strip() or None
-        dirty = bool(subprocess.run(["git", "status", "--porcelain"], capture_output=True,
-                                    text=True, timeout=5).stdout.strip()) if commit else None
-    except (OSError, subprocess.SubprocessError):
-        commit, dirty = None, None
-    return {"commit": commit, "dirty": dirty}
-
-
 def library_versions():
     return {"python": platform.python_version(),
             **{lib: _version_of(lib) for lib in LIBRARIES}}
@@ -116,10 +99,10 @@ def _version_of(lib):
 
 def environment(cfg):
     """Everything a priced hour depends on that is NOT a frozen artifact:
-    the config (its digest), the code (commit, dirty) and the libraries.
-    Sealed beside the artifacts, compared by verify(), stamped on events."""
+    the config (its digest) and the libraries. Sealed beside the artifacts,
+    compared by verify(); the config digest is stamped on every event."""
     return {"config_digest": config_fingerprint(cfg)["digest"],
-            "code": code_version(), "libraries": library_versions()}
+            "libraries": library_versions()}
 
 
 def launch_posterior(cfg):
@@ -143,9 +126,9 @@ def launch_posterior(cfg):
 
 
 def environment_drift(cfg, sealed):
-    """What moved since the seal, outside the artifacts: config keys, the
-    code commit, library versions. [] when nothing did or the seal predates
-    the environment record."""
+    """What moved since the seal, outside the artifacts: config keys and
+    library versions. [] when nothing did or the seal predates the
+    environment record."""
     env = (sealed or {}).get("environment")
     if not env:
         return []
@@ -156,10 +139,6 @@ def environment_drift(cfg, sealed):
         out.append("config moved since sealing"
                    + (": " + ", ".join(moved[:8]) + (" ..." if len(moved) > 8 else "")
                       if moved else ""))
-    now = code_version()
-    then = env.get("code") or {}
-    if then.get("commit") and now.get("commit") and then["commit"] != now["commit"]:
-        out.append(f"code moved since sealing: {then['commit'][:10]} -> {now['commit'][:10]}")
     libs_then, libs_now = env.get("libraries") or {}, library_versions()
     moved = [f"{k} {libs_then[k]} -> {libs_now.get(k)}" for k in libs_then
              if libs_then[k] and libs_now.get(k) != libs_then[k]]
@@ -247,9 +226,9 @@ def verify(cfg, sealed=None):
     if sealed and bundles and sealed.get("bundle") not in bundles:
         problems.append(f"sealed bundle {sealed.get('bundle')} "
                         f"is not on disk ({', '.join(bundles)})")
-    # the environment is part of the seal: a config edit, a deploy or a
-    # library upgrade changes what an hour is priced with as surely as an
-    # edited artifact, and reads the same way -- re-seal, on purpose
+    # the environment is part of the seal: a config edit or a library
+    # upgrade changes what an hour is priced with as surely as an edited
+    # artifact, and reads the same way -- re-seal, on purpose
     problems.extend(environment_drift(cfg, sealed))
 
     return {

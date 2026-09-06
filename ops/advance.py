@@ -230,7 +230,7 @@ def plan(st):
     #     audit trail records every environment the bundle ran in
     if st.get("environment_drift"):
         what = st["environment_drift"][0].split(" moved")[0]
-        reason = {"config": "config", "code": "deploy"}.get(what, "libraries")
+        reason = "config" if what == "config" else "libraries"
         steps.append(_run(f"re-seal ({'; '.join(st['environment_drift'])})",
                           ["ops.seal", "--reason", reason],
                           phase="tune", reevaluate=True))
