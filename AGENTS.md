@@ -52,7 +52,8 @@ statement and the incident that created the rule.
    cross-episode variation, never within-episode. (§5.6)
 8. **`config.yaml` is the single source of every tunable** — no numeric
    literals for tunables in code; a tunable without a config key is a review
-   failure. (§5.1)
+   failure. The pilot simulator's world and run live in `pilot_sim.yaml`,
+   never here: nothing the system reads. (§5.1, §11.3)
 9. **IL% is always a ratio of sums, with its denominator and absolute IL
    alongside** — per-episode IL% is undefined and must never be averaged.
    (§2.3)
@@ -246,8 +247,7 @@ iteration: the factor solve consumes `r`, while `r`, `rho` and the prior are
 fitted against *calibrated* `mu_ref`. One pass of the list is one turn —
 artifacts that disagree and a `--check-convergence` that says NOT CONVERGED
 (the owner measures 8–9 turns on production, the fixture 3–4 — rule 19).
-Re-running the list restarts at 3, RETRAINS THE BASELINE and breaks rule 1;
-`ops.bootstrap_loop` trains once, outside the loop.
+Re-running the list restarts at 3 and RETRAINS THE BASELINE (rule 1).
 
 After a **config paste**, settle without retraining:
 

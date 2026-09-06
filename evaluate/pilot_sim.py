@@ -21,8 +21,11 @@ the posterior against the truth it was learning. Every number is about the
 WORLD it simulated (rule 19): a PASS says the machinery does what it claims
 on a shop with that elasticity, never that the shop has it.
 
-Run: python3 -m evaluate.pilot_sim --days 21 [--epsilon-true -1.2]
-        [--fault mismatch:0.03 --fault demand_shock:10:0.6 ...]
+Settings live in pilot_sim.yaml at the repo root (the world, the run, the
+faults, the paths) -- apart from config.yaml on purpose, which the sim
+rehearses unchanged; every flag overrides its key for one run.
+Run: python3 -m evaluate.pilot_sim [--days 21] [--epsilon-true -1.2]
+        [--fault mismatch:0.03 --fault demand_shock:30:0.5 ...]
 """
 
 import argparse
@@ -54,8 +57,6 @@ from fit.train_baseline import BaselineModel, fit_level_calibration, schedule_re
 from ops import seal as seal_mod
 from ops import status
 
-SIM_DIR = "sim/pilot"
-OUT = "reports/pilot_sim.json"
 LANE_HOUR = 6                      # the daily cron's hour, after yesterday closed
 
 # what a healthy run shows, each graded in `grade()`; the fault that turns
@@ -738,58 +739,94 @@ def _print(rep, out_path):
     print(f"wrote {out_path}")
 
 
+SIM_CONFIG = "pilot_sim.yaml"
+
+# the sim config's sections and keys, with the CLI flag that overrides each
+SIM_KEYS = {
+    "run": ("days", "launch_date", "episodes_per_day", "seed", "templates_from"),
+    "world": ("epsilon_true", "epsilon_true_map", "r_scale", "episode_shock_sd",
+              "level_drift_per_day"),
+    "paths": ("config", "input", "raw", "sim_dir", "out"),
+}
+
+
+def load_sim_config(path=SIM_CONFIG, overrides=None):
+    """pilot_sim.yaml, flattened to one dict of settings, with every
+    non-None entry of `overrides` (the CLI flags) replacing its key. The
+    file must carry every key: a missing one is a typo, never a default
+    hidden in code."""
+    with open(path) as f:
+        raw = yaml.safe_load(f) or {}
+    out = {}
+    for section, keys in SIM_KEYS.items():
+        block = raw.get(section) or {}
+        missing = [k for k in keys if k not in block]
+        if missing:
+            raise ValueError(f"{path}: `{section}` lacks {missing}")
+        out.update({k: block[k] for k in keys})
+    out["faults"] = list(raw.get("faults") or [])
+    known = set(out) | {"faults"}
+    for k, v in (overrides or {}).items():
+        if k in known and v is not None and (k != "faults" or v):
+            out[k] = v
+    if out["epsilon_true_map"] is not None and not isinstance(out["epsilon_true_map"], dict):
+        out["epsilon_true_map"] = json.loads(out["epsilon_true_map"])
+    out["_source"] = path
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="evaluate.pilot_sim", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--config", default="config.yaml")
-    ap.add_argument("--input", default="data/prepared.parquet",
-                    help="the prepared extract: episode templates and the "
-                         "feature service's history")
-    ap.add_argument("--raw", default="data/flc_raw.parquet",
-                    help="the raw extract Lane C's weekly re-fit extends")
-    ap.add_argument("--days", type=int, default=21)
-    ap.add_argument("--launch-date", default=None,
-                    help="default: the day after the extract's last day")
-    ap.add_argument("--episodes-per-day", type=int, default=40,
-                    help="per arm; each template runs once under each")
-    ap.add_argument("--epsilon-true", type=float, default=-1.2,
-                    help="the world's elasticity, every category")
-    ap.add_argument("--epsilon-true-map", default=None,
-                    help='JSON {category: epsilon}, overrides --epsilon-true')
-    ap.add_argument("--r-scale", type=float, default=1.0)
-    ap.add_argument("--episode-shock-sd", type=float, default=0.0,
-                    help="log-sd of a demand shock every hour of an episode "
-                         "shares (0: independent hours, rho ~ 0; above 0 the "
-                         "world is over-dispersed against the frozen r, which "
-                         "was fitted without it)")
-    ap.add_argument("--level-drift", type=float, default=1.0,
-                    help="world demand multiplier per day (0.99: 1%%/day decay)")
-    ap.add_argument("--fault", action="append", default=[],
-                    help="name[:arg]; one of " + ", ".join(sorted(FAULTS)))
-    ap.add_argument("--templates-from", default=None,
-                    help="opening date the templates are sampled from "
-                         "(default: the hold-out start)")
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--sim-dir", default=SIM_DIR)
-    ap.add_argument("--out", default=OUT)
+    ap.add_argument("--sim-config", default=SIM_CONFIG,
+                    help="the simulator's settings; every flag below overrides "
+                         "its key there for one run")
+    ap.add_argument("--config", default=None, help="the production config rehearsed")
+    ap.add_argument("--input", default=None, help="the prepared extract")
+    ap.add_argument("--raw", default=None, help="the raw extract Lane C extends")
+    ap.add_argument("--days", type=int, default=None)
+    ap.add_argument("--launch-date", default=None)
+    ap.add_argument("--episodes-per-day", type=int, default=None, help="per arm")
+    ap.add_argument("--epsilon-true", type=float, default=None)
+    ap.add_argument("--epsilon-true-map", default=None, help="JSON {category: epsilon}")
+    ap.add_argument("--r-scale", type=float, default=None)
+    ap.add_argument("--episode-shock-sd", type=float, default=None)
+    ap.add_argument("--level-drift", type=float, default=None, dest="level_drift_per_day")
+    ap.add_argument("--fault", action="append", default=[], dest="faults",
+                    help="name[:arg], repeatable; one of " + ", ".join(sorted(FAULTS))
+                         + " (replaces the file's list)")
+    ap.add_argument("--templates-from", default=None)
+    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--sim-dir", default=None)
+    ap.add_argument("--out", default=None)
     args = ap.parse_args(argv)
+    settings = load_sim_config(args.sim_config, vars(args))
+    return run_from_settings(settings)
 
-    cfg = load_config(args.config)
-    prepared = pd.read_parquet(args.input)
-    launch = args.launch_date or (pd.Timestamp(prepared.date.astype(str).max())
-                                  + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-    eps = json.loads(args.epsilon_true_map) if args.epsilon_true_map else args.epsilon_true
-    world = World(cfg, prepared, eps, seed=args.seed, opened_from=args.templates_from,
-                  r_scale=args.r_scale, level_drift_per_day=args.level_drift,
-                  faults=parse_faults(args.fault),
-                  episode_shock_sd=args.episode_shock_sd)
-    cfg_sim, config_path = build_workspace(cfg, args.sim_dir, launch)
-    sim = PilotSim(cfg_sim, world, args.sim_dir, config_path, args.days,
-                   args.episodes_per_day, seed=args.seed, raw_path=args.raw,
+
+def run_from_settings(st):
+    cfg = load_config(st["config"])
+    prepared = pd.read_parquet(st["input"])
+    launch = st["launch_date"] or (pd.Timestamp(prepared.date.astype(str).max())
+                                   + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    eps = st["epsilon_true_map"] if st["epsilon_true_map"] else st["epsilon_true"]
+    world = World(cfg, prepared, eps, seed=st["seed"], opened_from=st["templates_from"],
+                  r_scale=st["r_scale"], level_drift_per_day=st["level_drift_per_day"],
+                  faults=parse_faults(st["faults"]),
+                  episode_shock_sd=st["episode_shock_sd"])
+    cfg_sim, config_path = build_workspace(cfg, st["sim_dir"], launch)
+    # the settings this run used, beside the sim config, for the record
+    with open(os.path.join(st["sim_dir"], "pilot_sim.yaml"), "w") as f:
+        yaml.safe_dump({k: v for k, v in st.items() if not k.startswith("_")}, f,
+                       sort_keys=False)
+    sim = PilotSim(cfg_sim, world, st["sim_dir"], config_path, int(st["days"]),
+                   st["episodes_per_day"], seed=st["seed"], raw_path=st["raw"],
                    prepared=prepared)
     rep = sim.run()
-    write_json(args.out, rep)
-    _print(rep, args.out)
+    rep["sim_config"] = {k: v for k, v in st.items() if not k.startswith("_")}
+    rep["sim_config"]["source"] = st["_source"]
+    write_json(st["out"], rep)
+    _print(rep, st["out"])
     return 0
 
 

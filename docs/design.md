@@ -1476,7 +1476,12 @@ the decision path on history, but nothing before this ran them **together
 for weeks on a shop that answers back**. `evaluate.pilot_sim` does: it
 plays engineering and the shop against a demand world of its own
 (`evaluate.pilot_world`), in a workspace under `sim/` that never touches a
-production artifact. The world's level at the reference price is the
+production artifact. Its settings — the world, the run, the faults, the
+paths — live in `pilot_sim.yaml` at the repo root, deliberately apart
+from `config.yaml`: the system's tuning surface is rehearsed exactly as
+it stands, and nothing in the sim file is read by the engine, the lane or
+a fit; a flag overrides a key for one run, and the run's settings are
+written beside the report (`sim_config`) and into the workspace. The world's level at the reference price is the
 frozen model as sealed (production calibration, frozen at the start), its
 price response an **assumed** elasticity per category (`--epsilon-true`),
 its noise NB at the agent's own `r`, with a log-normal shock every hour of

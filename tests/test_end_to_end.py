@@ -1165,7 +1165,8 @@ def test_the_pilot_simulator_walks_past_launch_date(workspace, tmp_path):
         cfg["dispersion"]["r_lookup_path"], cfg["posterior"]["prior"]["path"])}
 
     sim_dir, out = str(tmp_path / "sim"), str(tmp_path / "pilot_sim.json")
-    rc = pilot_sim.main(["--config", "sim_config.yaml", "--input", "data/prepared.parquet",
+    rc = pilot_sim.main(["--sim-config", os.path.join(ROOT, "pilot_sim.yaml"),
+                         "--config", "sim_config.yaml", "--input", "data/prepared.parquet",
                          "--raw", "data/flc.parquet", "--days", "2",
                          "--episodes-per-day", "4", "--sim-dir", sim_dir, "--out", out,
                          "--fault", "push_fail:0.2"])

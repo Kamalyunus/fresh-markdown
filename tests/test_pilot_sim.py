@@ -268,3 +268,26 @@ def test_the_apply_gate_passes_a_held_week_and_says_so(tmp_path, cfg):
     assert "anchor" in held["note"]
     missed = calibration_current(cfg, today="2026-09-08")
     assert not missed["pass"] and not missed["held_at_anchor"]
+
+
+def test_the_sim_config_is_the_home_of_the_settings_and_flags_override(tmp_path):
+    """pilot_sim.yaml carries every setting; a missing key is an error, not
+    a default hidden in code; a flag overrides its key for one run; the
+    faults list is replaced, never merged."""
+    import os
+    from conftest import ROOT
+
+    st = pilot_sim.load_sim_config(os.path.join(ROOT, "pilot_sim.yaml"))
+    for k in ("days", "epsilon_true", "r_scale", "sim_dir", "config", "faults"):
+        assert k in st
+    assert st["config"] == "config.yaml" and st["faults"] == []
+    over = pilot_sim.load_sim_config(
+        os.path.join(ROOT, "pilot_sim.yaml"),
+        {"days": 3, "faults": ["mismatch:0.1"], "epsilon_true_map": '{"MEAT": -0.9}',
+         "seed": None})
+    assert over["days"] == 3 and over["faults"] == ["mismatch:0.1"]
+    assert over["epsilon_true_map"] == {"MEAT": -0.9} and over["seed"] == st["seed"]
+    broken = tmp_path / "sim.yaml"
+    broken.write_text("run: {days: 2}\nworld: {}\npaths: {}\n")
+    with pytest.raises(ValueError, match="lacks"):
+        pilot_sim.load_sim_config(str(broken))

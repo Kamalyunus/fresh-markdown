@@ -1,0 +1,35 @@
+# pilot_sim.yaml -- the pilot SIMULATOR's own settings (evaluate.pilot_sim).
+#
+# Kept apart from config.yaml on purpose: config.yaml is the system's single
+# tuning surface and the simulator rehearses it AS IT STANDS -- nothing here
+# is read by the engine, the daily lane or any fit. What lives here is the
+# WORLD the rehearsal runs against (assumed elasticity, noise, shocks, faults)
+# and the shape of the run. Every command-line flag of the same name
+# overrides its key here for one run.
+#
+# Every number a run prints is the simulated world's (AGENTS rule 19).
+
+run:
+  days: 21                       # simulated days after launch
+  launch_date: null              # null: the day after the extract's last day
+  episodes_per_day: 40           # per arm; each template runs once under the pilot, once under legacy
+  seed: 0                        # the world's and the agent's draws
+  templates_from: null           # opening date templates are sampled from; null: the hold-out start
+
+world:
+  epsilon_true: -1.2             # the world's elasticity, every category (negative)
+  epsilon_true_map: null         # {CATEGORY: epsilon} per category, overrides epsilon_true
+  r_scale: 1.0                   # multiplies the agent's r in the world's NB draws (dispersion-check test)
+  episode_shock_sd: 0.0          # log-sd of the shock every hour of an episode shares (rho ~ 0 at 0)
+  level_drift_per_day: 1.0       # world demand multiplier per day (0.99: 1%/day decay)
+
+# faults, injected where the defect would arise (evaluate.pilot_world.FAULTS):
+#   missing:p  duplicate:p  mismatch:p  push_fail:p  discount_rounding  demand_shock:DAY:FACTOR
+faults: []
+
+paths:
+  config: config.yaml            # the production config rehearsed, unchanged
+  input: data/prepared.parquet   # episode templates and the feature service's history
+  raw: data/flc_raw.parquet      # the raw extract Lane C's weekly re-fit extends
+  sim_dir: sim/pilot             # the workspace (ignored by git)
+  out: reports/pilot_sim.json

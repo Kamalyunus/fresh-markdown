@@ -28,10 +28,12 @@ All commands run from the repo root. `data/`, `reports/`, `artifacts/`,
   learning, refusals) answered by the production solver on the config in
   force. Demand there is a slider, not a forecast; the pilot's own
   outcomes are the evidence. Before launch day, rehearse the weeks after
-  it: `python3 -m evaluate.pilot_sim --days 21` walks the hourly engine
-  and this whole daily lane against a simulated shop (design §11.3) in a
-  workspace under `sim/`, and `reports/pilot_sim.json` grades what a
-  healthy launch shows; `--fault mismatch:0.05` and friends check that the
+  it: `python3 -m evaluate.pilot_sim` walks the hourly engine and this
+  whole daily lane against a simulated shop (design §11.3) in a workspace
+  under `sim/`, and `reports/pilot_sim.json` grades what a healthy launch
+  shows. The shop and the run are set in `pilot_sim.yaml` (never in
+  `config.yaml`, which the sim rehearses as it stands); `--fault
+  mismatch:0.05` and friends override it for one run to check that the
   gates and stops fire when they should.
 - **Engineering** — build Lane B (below) against the event contract,
   choose the pilot episodes (**spanning FCs and categories** — several of

@@ -16,6 +16,7 @@ One package per responsibility; each maps to one REVIEW_GUIDE tier and one
 | Package | Design | What lives there |
 | --- | --- | --- |
 | `config.yaml` | 5.1 | Every tunable. Single source of truth; no numeric literals in code. |
+| `pilot_sim.yaml` | 11.3 | The pilot simulator's world, run, faults and paths — nothing the system reads. |
 | `engine/` | 5.7–5.10 | What prices a shelf and learns: `demand.py` (mu(d), censored expectation), `dp.py` (monotone DP, absolute-IL reward), `explore.py` (uniform draw from the admissible, tau-affordable set; `delta_min`; budget, `walk_tau`, `SpreadLedger.sweep`), `posterior.py` (launch belief, bounded step, atomic exactly-once commit, exploration suspension), `decide.py` (state validation — reject, never an unsafe price — and the decision event). |
 | `events/` | 5.10 | `store.py` (append-only JSONL: dedup, quarantine with reasons, torn-line safe), `pairs.py` (the one decision↔outcome pairing and trading-day key). |
 | `common/` | 5.1, 5.2, 2.3 | Shared definitions: `config.py` (loader, strict mode), `episodes.py` (endings, leftover, censoring, flow identity, window extension), `metrics.py` (`episode_economics`, `fidelity_decomposition`), `guardrail.py`, `provenance.py` (stamps, seal, config fingerprint), `io.py`, `parallel.py`. |
@@ -88,15 +89,17 @@ non-zero, or the fixture is not exercising the code that reads them.
 Everything a repo-local run prints is a FIXTURE number (AGENTS rule 19).
 
 ```bash
-python3 -m evaluate.pilot_sim --days 21                 # the weeks AFTER launch,
-python3 -m evaluate.pilot_sim --days 10 --fault mismatch:0.05   # against a simulated shop
+python3 -m evaluate.pilot_sim                           # the weeks AFTER launch, per pilot_sim.yaml
+python3 -m evaluate.pilot_sim --days 10 --fault mismatch:0.05   # one run's overrides
 ```
 
 The simulator (design §11.3) prices every hour through the real engine
 and runs the real daily lane in a workspace under `sim/`, against a demand
 world built on the frozen model with an assumed elasticity;
 `reports/pilot_sim.json` grades what a healthy launch shows and whether
-the gates fire under an injected fault.
+the gates fire under an injected fault. Its settings — the world, the
+run, the faults, the paths — live in `pilot_sim.yaml` beside
+`config.yaml`, which it rehearses unchanged.
 
 ## Design invariants worth knowing
 
