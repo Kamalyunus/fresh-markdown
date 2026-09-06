@@ -473,6 +473,37 @@ now. Dates are owner sign-off, 2026-08.
     hour and cast `current_discount` before validating it.
   Renamed for what they are: `deff_applied_all_time`,
   `updates_to_min_std_median`, `range_across_categories`.
+- **The first weeks after launch had never been run (2026-09-06).** Every
+  production piece was unit-tested and shadow rehearsed the decision path
+  on history, but nothing ran the hourly engine, the ingester, the tau
+  walk, the monitor, assurance, the weekly re-fit and `--apply` together
+  on a shop that answers back. `evaluate.pilot_sim` (design §11.3) does,
+  against a demand world built on the frozen model with an assumed
+  elasticity, and its first two runs found what the tests could not:
+  - a week the weekly re-fit judged too thin is held at the frozen anchor
+    on purpose (`weeks_unfitted_held_at_1`), but the `--apply` gate and
+    `advance`'s re-fit trigger read `by_week` alone, so the held week
+    looked like a missed cron: every `--apply` of that week was refused
+    and `advance` re-fit every morning. One reading now
+    (`train_baseline.schedule_reaches`); the gate says `held_at_anchor`;
+  - the uniformity check mapped the applied tier's rank to `(rank +
+    0.5) / n`, so a two-tier set only ever landed on 0.25 and 0.75 and an
+    honest uniform chooser FAILed once small sets dominated (p = 0 on
+    578 draws). Rank plus a jitter from the decision id is exactly U(0, 1)
+    at every set size.
+  - a push engineering REPORTED as failed was counted as a price
+    mismatch, so a fifth of pushes failing — every one reported — refused
+    every `--apply` and suspended exploration; the gate now counts the
+    reported ones apart (`push_failures_reported`) and catches only the
+    silent ones, as the contract always said.
+  Also learned: the sim's `hold the current price` fallback opened an
+  episode at a bare `d_max` off the tier grid, and the next decision had
+  no feasible tier at or below its anchor — the same trap Lane B's
+  fallback must avoid (open at a tier). And a dynamic worth the owner's
+  eye (design §11.3): a posterior mean stepping toward zero inflates
+  `delta_min` until few action sets hold an admissible tier, exploration
+  starves with no stop fired, and tau climbs by the clip every zero-spend
+  day — `exploration_never_starves` grades it.
 
 ## The lesson under all of it
 

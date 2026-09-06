@@ -24,6 +24,7 @@ from events.pairs import (match_pairs, decision_day, is_learnable, has_stock,
                           is_restocked, quality_counts, quality_rates)
 from engine import explore
 from engine.posterior import PosteriorStore, bounded_step
+from fit.train_baseline import schedule_reaches
 
 
 def collect_batch(store, posterior, cfg):
@@ -280,8 +281,9 @@ def calibration_current(cfg, today=None):
     if not os.path.exists(path):
         return {"value": "none", "threshold": "schedule covers today",
                 "pass": True, "note": "no calibration artifact; factors are 1.0"}
-    sched = (read_json(path).get("schedule") or {}).get("by_week") or {}
-    if not sched:
+    sched = read_json(path).get("schedule") or {}
+    last = schedule_reaches(sched)
+    if last is None:
         return {"value": "static", "threshold": "schedule covers today",
                 "pass": True,
                 "note": "artifact carries no schedule -- one frozen factor "
@@ -289,13 +291,20 @@ def calibration_current(cfg, today=None):
     now = pd.Timestamp(today) if today is not None else pd.Timestamp.now("UTC")
     week = pd.Timestamp(now).tz_localize(None) if now.tzinfo else now
     week = episodes.week_start(week).strftime("%Y-%m-%d")
-    last = max(sched)
     ok = week <= last
+    held = week in (sched.get("weeks_unfitted_held_at_1") or [])
     return {
         "value": week,
-        "threshold": f"<= {last} (last fitted week)",
+        "threshold": f"<= {last} (last week the schedule covers)",
         "pass": bool(ok),
-        "note": ("schedule covers this week" if ok else
+        # a covered-but-thin week prices on the frozen anchor BY DECISION
+        # of the re-fit (below calibration_min_anchor_rows): not a missed
+        # cron, so not a refusal -- but said, since the factors are stale
+        "held_at_anchor": held,
+        "note": (("schedule covers this week" if not held else
+                  f"the re-fit ran but held week {week} at the frozen anchor "
+                  "(too few anchor rows in its trailing window); production "
+                  "is pricing on the anchor factors this week") if ok else
                  f"THE WEEKLY RE-FIT WAS MISSED: pricing is in week {week} but "
                  f"the schedule stops at {last}, so production is running on "
                  "the frozen fallback factors. Run `fit.train_baseline "

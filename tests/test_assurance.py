@@ -549,3 +549,28 @@ def test_reproduction_caps_listed_exception_failures_like_mismatches(cfg, monkey
         decs, dict(cfg, assurance=dict(cfg["assurance"], reproduction_report_max=2)))
     assert out["mismatch_count"] == 5 and out["mismatch_rate"] == 1.0
     assert len(out["failures"]) == 2
+
+
+def test_uniformity_pools_small_affordable_sets_without_bias(cfg):
+    """A two-tier set drawn uniformly lands on rank 0 or 1 -- mapped by the
+    old midpoint to 0.25 or 0.75 only, so every honest small set piled
+    into two of five bins and the check FAILed a uniform chooser (found by
+    the pilot simulator). Rank plus a jitter from the decision id is
+    exactly U(0,1) at every set size."""
+    rng = np.random.default_rng(11)
+    decs = []
+    for i in range(400):
+        # a tight tau affords two or three tiers only (the two cheapest
+        # admissible moves of this state cost ~67 and ~137; the third ~208)
+        d = _decision(cfg, q=1, path=[0.8], tau=(150.0, 220.0)[i % 2],
+                      rng=rng, episode=f"s{i}")
+        if d["is_exploration"]:
+            decs.append(d)
+    sizes = {d["affordable_set_size"] for d in decs}
+    assert sizes and max(sizes) <= 3, sizes
+    out = assurance.exploration_uniformity(decs, cfg)
+    assert out["exploration_draws"] >= cfg["assurance"]["uniformity_min_draws"], out
+    assert out["verdict"] == "PASS", out
+    # and the jitter is a property of the id, not of the run
+    assert assurance._jitter("abc") == assurance._jitter("abc")
+    assert 0 <= assurance._jitter("abc") < 1

@@ -1133,3 +1133,66 @@ def test_advance_reads_the_workspace_and_names_the_phase(workspace):
     assert r.stdout.startswith("phase   ")
     assert "[" in r.stdout.splitlines()[0]            # a phase is marked
     assert {p: os.path.getmtime(ws / p) for p in before} == before
+
+
+def test_the_pilot_simulator_walks_past_launch_date(workspace, tmp_path):
+    """Two simulated days after launch through the real engine and the real
+    daily lane, in a workspace of its own: decisions priced and ingested,
+    the tau walk committed, Lane C re-fit and re-sealed under sim/, the
+    expectations graded -- and not one production artifact touched."""
+    from evaluate import pilot_sim
+    from common.provenance import file_digest
+
+    ws = workspace
+    _chdir(ws)
+    with open("config.yaml") as f:
+        cfg = yaml.safe_load(f)
+    # the RUNTIME_REQUIRED values a launch needs; the sim sets launch_date
+    cfg["dispersion"]["rho"] = json.load(open(cfg["dispersion"]["rho_path"]))["rho"]
+    cfg["exploration"]["tau_initial"] = 500.0
+    cfg["monitoring"]["stop_conditions"]["scrap_deterioration_pct"] = 0.5
+    cfg["monitoring"]["stop_conditions"]["margin_deterioration_pct"] = 0.1
+    (ws / "sim_config.yaml").write_text(yaml.safe_dump(cfg))
+    if not os.path.exists(cfg["baseline_model"]["calibration_factor_path"]):
+        subprocess.run([sys.executable, "-m", "fit.train_baseline", "--input",
+                        "data/prepared.parquet", "--fit-calibration",
+                        "--config", "sim_config.yaml"], check=True,
+                       cwd=ws, env={**os.environ, "PYTHONPATH": ROOT})
+    if os.path.exists(cfg["posterior"]["path"]):
+        os.remove(cfg["posterior"]["path"])          # the sim initialises one
+    frozen = {p: file_digest(p) for p in (
+        cfg["baseline_model"]["model_path"], cfg["baseline_model"]["calibration_factor_path"],
+        cfg["dispersion"]["r_lookup_path"], cfg["posterior"]["prior"]["path"])}
+
+    sim_dir, out = str(tmp_path / "sim"), str(tmp_path / "pilot_sim.json")
+    rc = pilot_sim.main(["--config", "sim_config.yaml", "--input", "data/prepared.parquet",
+                         "--raw", "data/flc.parquet", "--days", "2",
+                         "--episodes-per-day", "4", "--sim-dir", sim_dir, "--out", out,
+                         "--fault", "push_fail:0.2"])
+    assert rc == 0
+    rep = json.load(open(out))
+
+    assert rep["engine"]["decisions"] > 0 and rep["engine"]["rejected_total"] == 0
+    assert rep["engine"]["violations"] == {"price_rose_within_episode": 0, "below_cost": 0}
+    day = rep["days"][0]
+    assert day["ingest"]["outcomes_built"] > 0 and day["ingest"]["emitted"] > 0
+    assert day["ingest"]["push_failures_applied"] >= 0
+    # the walk commits once an episode has closed; a day with none says so
+    assert day["tau"]["committed"] or day["tau"]["skipped"]
+    assert rep["days"][-1]["tau"]["committed"], rep["days"][-1]["tau"]
+    assert day["lane_c"] and day["lane_c"]["scope"].startswith("production")
+    assert day["assurance"]["reproduction"] in ("PASS", "INSUFFICIENT")
+    assert "apply" in day and day["apply"]["calibration_schedule_current"]
+    assert {x["name"] for x in rep["expectations"]} == {n for n, _ in pilot_sim.EXPECTATIONS}
+    assert {"pilot", "legacy"} <= set(rep["economics"])
+    # the world's truth and the store agree on what was priced
+    assert rep["engine"]["pilot_hours"] >= rep["engine"]["decisions"]
+
+    # every write went under sim_dir; production is byte-identical
+    assert {p: file_digest(p) for p in frozen} == frozen
+    assert not os.path.exists(cfg["posterior"]["path"])
+    assert os.path.exists(os.path.join(sim_dir, "events_store", "decisions.jsonl"))
+    assert os.path.exists(os.path.join(sim_dir, "events_store", "outcomes.jsonl"))
+    assert os.path.exists(os.path.join(sim_dir, "posterior.json"))
+    assert os.path.exists(os.path.join(sim_dir, "bundle.json"))
+    assert len(os.listdir(os.path.join(sim_dir, "history"))) == 1      # one bundle

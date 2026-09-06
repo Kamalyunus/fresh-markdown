@@ -28,6 +28,7 @@ from ops.bootstrap_loop import PREPARED, step
 from common import episodes, provenance
 from common.config import load_config
 from common.io import read_json, write_json
+from fit.train_baseline import schedule_reaches
 from ops import status, tune
 
 RAW = "data/flc_raw.parquet"
@@ -131,7 +132,9 @@ def probe(cfg, root="reports", feed=None, retrain=False):
         "nulls": status.runtime_nulls(cfg),
         "launched": launched,
         "schedule_scope": str(sched.get("scope") or ""),
-        "schedule_end": max(sched["by_week"]) if sched.get("by_week") else None,
+        # the last week the schedule COVERS -- fitted, or deliberately held
+        # at the anchor as too thin (one reading with update's gate)
+        "schedule_end": schedule_reaches(sched),
         "expected_schedule_end": expected_end,
         "this_week": this_week,
         "events": os.path.isdir(events_dir) and bool(os.listdir(events_dir)),

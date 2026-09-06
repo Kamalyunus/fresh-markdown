@@ -104,11 +104,17 @@ def quality_counts(decisions, outcomes, cfg, duplicate_counts=None, pairs=None):
     def in_window(day):
         return start is None or day is None or day >= start
 
-    compared = mismatches = 0
+    compared = mismatches = reported = 0
     for d, o in pairs:
         if not in_window(decision_day(d)):
             continue
         compared += 1
+        # a push engineering REPORTED as failed is not a silent mismatch:
+        # the gate catches the failures the failures table missed
+        # (docs/event_contract.html); the reported ones are counted apart
+        if not is_learnable(o):
+            reported += 1
+            continue
         mismatches += not price_matches(d, o)
     unmatched = sum(
         1 for o in outcomes if o.get("decision_id") not in known
@@ -122,6 +128,7 @@ def quality_counts(decisions, outcomes, cfg, duplicate_counts=None, pairs=None):
         "unmatched_outcome_count": unmatched,
         "compared_pair_count": compared,
         "price_mismatch_count": mismatches,
+        "push_failures_reported": reported,
         # all-time, from the store (see above)
         "duplicate_decision_count": int(dup.get("decision", 0)),
         "duplicate_outcome_count": int(dup.get("outcome", 0)),

@@ -764,7 +764,12 @@ takes moments.
   counts, never the rounded rate the report prints) or when
   `calibration_current` finds the factor schedule no longer reaches the
   week being priced (a missed weekly re-fit silently reverts production to
-  stale factors).
+  stale factors). "Reaches" is `train_baseline.schedule_reaches`, shared
+  with `advance`'s re-fit trigger: a week the re-fit judged too thin and
+  holds at the frozen anchor (`weeks_unfitted_held_at_1`) is COVERED —
+  the cron ran and decided — and the gate passes it with `held_at_anchor`
+  set; read from `by_week` alone it looked like a missed cron and refused
+  every `--apply` of that week (§11.3).
 - **No `information_since_update` counter — re-adding one is a bug.** The
   trigger reads the UNCONSUMED BATCH; a counter double-counts outcomes that
   are re-read next run.
@@ -784,7 +789,9 @@ mismatch rates, quarantine, latency). A posterior std flat for 21 days
 alerts directly; `affordable_set_empty_rate` is the leading indicator of a
 non-explorable catalogue; `realised_vs_predicted_sold_ratio` is the daily
 continuation of the calibration diagnostic. Stop conditions (an
-event-quality breach — duplicates, unmatched outcomes, price mismatches,
+event-quality breach — duplicates, unmatched outcomes, price mismatches
+on the pushes engineering did NOT report failed (a reported failure is
+the old price by definition, counted apart as `push_failures_reported`),
 measured over the trailing `event_quality_window_days` so one incident
 does not re-fire a resumed stop until history dilutes it — realised spend
 > 2× the day's budget, scrap/margin deterioration — the last three over
@@ -1073,7 +1080,14 @@ and carries the meaning; the p-value only stops noise being called bias.
 The check re-solves each forced decision's admissible set, so it reads
 the newest `assurance.uniformity_sample` forced decisions (reported as
 `exploration.forced_decisions` / `resolve_sample_cap`), and one re-solve
-per event is shared with `reproduction` rather than done twice.
+per event is shared with `reproduction` rather than done twice. Sets of
+every size pool into one test because the applied tier's rank is mapped to
+[0, 1) as `(rank + jitter) / n` with a jitter drawn from the decision's own
+id: a uniform rank plus an independent U(0, 1) is exactly U(0, 1) for every
+`n`. The midpoint `(rank + 0.5) / n` it replaced was not — a two-tier set
+only ever landed on 0.25 and 0.75, so honest draws from small sets piled
+into two of five bins and the check FAILed a uniform chooser (found by the
+pilot simulator, §11.3).
 
 Details that carry the value: the decision event carries `mu_ref_path` and
 `anchor_discount` so it is *sufficient* to re-solve (never remove an event
@@ -1454,6 +1468,66 @@ of how the pilot's IL is read.
 | flat or worse | flat or worse | do not ship |
 
 The second row is the case this design makes most likely.
+
+### 11.3 Rehearsing the weeks after launch — `evaluate.pilot_sim`
+
+Every piece of the production loop is tested alone and shadow rehearses
+the decision path on history, but nothing before this ran them **together
+for weeks on a shop that answers back**. `evaluate.pilot_sim` does: it
+plays engineering and the shop against a demand world of its own
+(`evaluate.pilot_world`), in a workspace under `sim/` that never touches a
+production artifact. The world's level at the reference price is the
+frozen model as sealed (production calibration, frozen at the start), its
+price response an **assumed** elasticity per category (`--epsilon-true`),
+its noise NB at the agent's own `r`, with a log-normal shock every hour of
+an episode shares (`--episode-shock-sd`, the reason `deff` exists) and an
+optional level drift. Episodes are templates sampled from the hold-out's
+DP-eligible population, re-dated onto simulated days; each runs once under
+the pilot and once under its own legacy path on consecutive days, so the
+IL read is like-for-like. Every hour with stock goes through the real
+`engine.decide` against a real posterior and event store; the shelf gets
+the price (or the fault: `missing`, `duplicate`, `mismatch`, `push_fail`,
+`discount_rounding`, `demand_shock`); the world writes the feed row the
+source would (percent discount, write-off sentinel); every morning the
+daily lane's own functions run in `advance --feed` order — ingest, tau
+walk, monitor, assurance, export, status, `--apply` on the cadence — and
+Lane C re-fits and re-seals on `advance`'s rule (the schedule must reach
+one week past the latest data's week). The two demand-rate features are
+computed point-in-time by `prepare_data.add_ref_rate_features` over the
+live history — the one home, and the thing Lane B's pricing service must
+do the same way.
+
+`reports/pilot_sim.json` grades a fixed list (`EXPECTATIONS`): every hour
+priced and none rejected, prices never rising within an episode or below
+cost, outcome completeness, the event-quality gates, the posterior moving
+toward `epsilon_true` and narrowing, tau walking to its budget, stops
+firing only under the fault that causes them (and firing under it), the
+assurance checks, the schedule covering every priced week, `--apply` on
+cadence. A fault turns its expectation around: with `mismatch` injected
+the gate MUST fail and the stop MUST fire. `correlation` is reported, not
+graded — the world's within-episode shock is a knob, not a claim about the
+shop — and `dispersion` is excused under a gate fault: it bins by
+predicted `mu`, so a belief that `--apply` was never allowed to correct
+reads as a shape problem. A guardrail test needs the run to outlast the trailing window plus
+smoothing plus persistence, and the shock by smoothing plus persistence
+(`demand_shock:30:0.5 --days 45`); shorter runs read NOT MEASURED there. Every number is the
+simulated world's (rule 19): a PASS says the machinery does what it claims
+on a shop with that elasticity, never that the shop has it. Its first runs
+found two defects the unit tests could not: the `--apply` gate and
+`advance` read a week the re-fit deliberately held at the anchor (too few
+anchor rows) as a missed cron, refusing every `--apply` of that week —
+`train_baseline.schedule_reaches` is now the one reading; the
+uniformity check's rank-to-[0, 1) midpoint mapping FAILed an honest draw
+from two- and three-tier sets (§5.15); and a push engineering REPORTED
+failed was counted as a price mismatch, so a fifth of pushes failing —
+every one reported — refused every `--apply`. It also shows a dynamic no
+unit test can: a posterior mean that steps toward zero inflates
+`delta_min` (k·bias/|ε|) until few action sets hold an admissible tier,
+the affordable-set-empty rate climbs, nothing is forced, no evidence
+arrives to correct the mean, and the controller raises tau by the clip
+every zero-spend day until exploration resumes and overspends. The
+`exploration_never_starves` expectation names it; the owner reads it
+against `max_mean_step` and the bias multiple (§12).
 
 ## 12. Open owner decisions — recommendations and tooling
 

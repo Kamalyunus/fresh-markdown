@@ -1164,7 +1164,7 @@
       <tbody>
         <tr><td class="f">event completeness</td><td class="t n">≥ 99%</td><td>Outcomes landing per decision. A priced hour missing from the feed, or a feed hour the ingester cannot interpret, shows up here first.</td></tr>
         <tr><td class="f">duplicate or unmatched</td><td class="t n">≤ 1%</td><td>Repeated ids plus outcomes with no matching decision, over the finalized outcomes of the trailing <code>event_quality_window_days</code> (14) of trading days — every rate in this table is read on that window, so one incident stops re-firing a lifted stop once history dilutes it.</td></tr>
-        <tr><td class="f">price mismatch</td><td class="t n">≤ 1%</td><td>Outcomes whose offered price (from the feed) differs from the decision's by more than <code>1e-6</code>. This is the "did the agent's price actually go live" check — it catches silent push failures your failures table missed.</td></tr>
+        <tr><td class="f">price mismatch</td><td class="t n">≤ 1%</td><td>Outcomes whose offered price (from the feed) differs from the decision's by more than <code>1e-6</code>. This is the "did the agent's price actually go live" check — it catches silent push failures your failures table missed; a failure you reported shows the old price by definition and is counted apart (<code>push_failures_reported</code>), never as a mismatch.</td></tr>
         <tr><td class="f">missing stockout field</td><td class="t n">exactly 0</td><td>Any outcome at all without <code>is_stockout</code>.</td></tr>
       </tbody>
     </table>

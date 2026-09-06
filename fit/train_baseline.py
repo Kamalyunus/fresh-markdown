@@ -267,6 +267,21 @@ def attach_fit_basis(frame, model, r_lookup):
     return frame
 
 
+def schedule_reaches(schedule):
+    """The last week the factor schedule COVERS: a week it fitted, or one it
+    judged too thin and deliberately holds at the frozen anchor
+    (`weeks_unfitted_held_at_1`; `level_factors` applies the anchor there).
+    None when there is no schedule. The ONE reading `daily.update`'s
+    calibration_current gate and `ops.advance`'s re-fit trigger share --
+    reading `by_week` alone made a thin week look like a missed cron: the
+    gate refused every --apply and advance re-fit every morning."""
+    if not schedule:
+        return None
+    weeks = list(schedule.get("by_week") or {}) + list(
+        schedule.get("weeks_unfitted_held_at_1") or [])
+    return max(weeks) if weeks else None
+
+
 def pinned_cells(detail):
     """{cell: bracket end} for every cell of a detail table whose own solve
     pinned (rule 3)."""

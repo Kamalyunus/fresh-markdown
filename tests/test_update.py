@@ -761,3 +761,26 @@ def test_calibration_currency_is_judged_on_the_latest_trading_day(cfg, tmp_path)
     assert gate["pass"] and gate["value"] == "2026-08-17"
     # the wall clock is long past that week, and would have refused
     assert not upd.calibration_current(c)["pass"]
+
+
+def test_a_reported_push_failure_is_not_a_price_mismatch(cfg):
+    """The mismatch gate catches the silent failures the failures table
+    missed (event contract): a push engineering REPORTED as failed shows
+    the old price on the shelf by definition and is counted apart. The
+    pilot simulator, with a fifth of pushes failing and every one reported,
+    had the gate refuse every --apply."""
+    from events.pairs import quality_counts, quality_rates
+
+    decisions = [{"decision_id": f"D{i}", "date": "2026-08-19", "applied_price": 100.0}
+                 for i in range(10)]
+    outcomes = [{"decision_id": f"D{i}", "applied_price": 100.0,
+                 "execution_status": "ok"} for i in range(8)]
+    outcomes += [{"decision_id": "D8", "applied_price": 90.0,
+                  "execution_status": "failed"},           # reported: not a mismatch
+                 {"decision_id": "D9", "applied_price": 90.0,
+                  "execution_status": "ok"}]               # silent: a mismatch
+    counts = quality_counts(decisions, outcomes, cfg)
+    assert counts["compared_pair_count"] == 10
+    assert counts["push_failures_reported"] == 1
+    assert counts["price_mismatch_count"] == 1
+    assert quality_rates(counts)["price_mismatch_rate"] == 0.1

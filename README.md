@@ -20,7 +20,7 @@ One package per responsibility; each maps to one REVIEW_GUIDE tier and one
 | `events/` | 5.10 | `store.py` (append-only JSONL: dedup, quarantine with reasons, torn-line safe), `pairs.py` (the one decision↔outcome pairing and trading-day key). |
 | `common/` | 5.1, 5.2, 2.3 | Shared definitions: `config.py` (loader, strict mode), `episodes.py` (endings, leftover, censoring, flow identity, window extension), `metrics.py` (`episode_economics`, `fidelity_decomposition`), `guardrail.py`, `provenance.py` (stamps, seal, config fingerprint), `io.py`, `parallel.py`. |
 | `fit/` | 5.2–5.6 | The frozen artifacts: `download_flc.py` (Redshift extract, `REDSHIFT_*` from `~/.env`), `prepare_data.py` (filter chain, eligibility flags, episodes, waterfall, split manifest), `train_baseline.py` (LightGBM/Tweedie `mu_ref`, level calibration, convergence check), `estimate_prior.py` + `prior_density.py` (the elasticity prior as a profile-likelihood density), `fit_dispersion.py` (NB `r`, `rho`). |
-| `evaluate/` | 5.13, 5.14, 12 | Grades the artifacts before launch: `backtest.py` (like-for-like replay, fidelity, tau derivation, step sensitivity, within-episode moves), `shadow.py` (the full decision path on the hold-out, no prices applied), `derive_thresholds.py` (guardrail floors, learning-rail checks). |
+| `evaluate/` | 5.13, 5.14, 11.3, 12 | Grades the artifacts before launch: `backtest.py` (like-for-like replay, fidelity, tau derivation, step sensitivity, within-episode moves), `shadow.py` (the full decision path on the hold-out, no prices applied), `pilot_sim.py` + `pilot_world.py` (the weeks after launch against a simulated shop: real engine, real daily lane, injected faults, graded expectations), `derive_thresholds.py` (guardrail floors, learning-rail checks). |
 | `daily/` | 5.11, 5.12, 5.15 | The production lane, in run order: `ingest_outcomes.py` (outcome events from the hourly feed), `update.py` (censored NB grid update; `--calibrate-tau` daily; `--apply` and `--resume-exploration` are the human gates), `monitor.py` (business, learning, safety; stop conditions), `assurance.py` (frozen artifacts vs the live world), `export_events.py` (warehouse tables — derived, never the record). |
 | `ops/` | 9, App. A | Drivers and gates: `advance.py` (the order of operations as code; `--plan`, `--feed`, `--report`), `bootstrap_loop.py` (train ONCE, iterate the calibration ↔ dispersion loop to convergence, backtest, thresholds, seal), `tune.py` (the config loop as code), `status.py` (the checks that gate a decision; exit 1 on FAIL), `init_posterior.py`, `seal.py` (every seal also writes an audit snapshot to `artifacts/history/<bundle>/<sealed_at>/`; every `advance` stop adds the reports). |
 | `tools/` | 6, 5.7 | `make_dummy_flc.py` (synthetic FLC generator, legacy + randomized policies), `scenario_deck.py` (the leadership deck: twelve scenarios answered by `dp.solve` → `reports/scenarios.html`). |
@@ -86,6 +86,17 @@ python3 -m pytest tests/
 generator prints** — `write-off rows` and `shrink rows` must both be
 non-zero, or the fixture is not exercising the code that reads them.
 Everything a repo-local run prints is a FIXTURE number (AGENTS rule 19).
+
+```bash
+python3 -m evaluate.pilot_sim --days 21                 # the weeks AFTER launch,
+python3 -m evaluate.pilot_sim --days 10 --fault mismatch:0.05   # against a simulated shop
+```
+
+The simulator (design §11.3) prices every hour through the real engine
+and runs the real daily lane in a workspace under `sim/`, against a demand
+world built on the frozen model with an assumed elasticity;
+`reports/pilot_sim.json` grades what a healthy launch shows and whether
+the gates fire under an injected fault.
 
 ## Design invariants worth knowing
 

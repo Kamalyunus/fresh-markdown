@@ -34,7 +34,9 @@ the exactly-once tests in `test_end_to_end.py` are the pinned answers.
 ## Tier 3 — skim; the gates and suite carry it (~9,800 lines, offline)
 
 `fit/` (data preparation, model/prior/dispersion fits), `evaluate/`
-(backtest, shadow, thresholds) and `ops/` (`advance.py` is the phase order
+(backtest, shadow, thresholds; `pilot_sim.py`/`pilot_world.py` rehearse
+the weeks after launch against a simulated shop — they call the reviewed
+engine and lane, never price a shelf) and `ops/` (`advance.py` is the phase order
 as code; its `plan()` is pure and unit-tested per stop) run before launch,
 produce frozen artifacts, and sit behind human gate readings plus the test
 suite. `daily/monitor.py`, `assurance.py`, `ingest_outcomes.py` and

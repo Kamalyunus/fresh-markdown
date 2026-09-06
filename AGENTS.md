@@ -132,7 +132,10 @@ And the standing prohibitions:
     costs — `admissible_costs`, priced once per decision
   - the finiteness test — `engine.decide.finite_number`; the NB pmf table
     — `engine.demand.nb_pmf_table`; the live episode frame —
-    `daily.monitor.settled_episodes` (built once per monitor run)
+    `daily.monitor.settled_episodes` (built once per monitor run); the
+    week the factor schedule reaches (a held week counts) —
+    `fit.train_baseline.schedule_reaches` (the `--apply` gate and
+    `advance`'s re-fit trigger)
   - spread accounting — `engine.explore.SpreadLedger`; the tau controller
     walk — `engine.explore.walk_tau` (production and shadow's trace);
     the backtest's forward simulation — `evaluate.backtest._simulate_arm`
@@ -241,19 +244,15 @@ pilot (RUNBOOK), never the bootstrap.
 **Why this is not optional.** Steps 3b–5 are one TURN of a fixed-point
 iteration: the factor solve consumes `r`, while `r`, `rho` and the prior are
 fitted against *calibrated* `mu_ref`. One pass of the list is one turn —
-artifacts that disagree and a `--check-convergence` that says NOT CONVERGED.
-**The owner measures 8–9 turns on the production extract** (the fixture
-3–4 — rule 19). The obvious repair is the wrong one: re-running the list
-restarts at 3, RETRAINS THE BASELINE, moves every artifact and breaks rule
-1. `ops.bootstrap_loop` trains once, outside the loop, and is the only
-supported way to reach a converged chain.
+artifacts that disagree and a `--check-convergence` that says NOT CONVERGED
+(the owner measures 8–9 turns on production, the fixture 3–4 — rule 19).
+Re-running the list restarts at 3, RETRAINS THE BASELINE and breaks rule 1;
+`ops.bootstrap_loop` trains once, outside the loop.
 
 After a **config paste**, settle without retraining:
 
 ```bash
-python3 -m ops.bootstrap_loop --check-only      # loop against the artifacts on
-                                           # disk, NO retrain. What
-                                           # ops.tune tells you to run.
+python3 -m ops.bootstrap_loop --check-only   # settle on the artifacts on disk, NO retrain
 ```
 
 `--max-turns` (default 20) is a runaway guard, not a budget — the STALL test
@@ -336,6 +335,7 @@ fixture re-derives fixture values — read them, never commit them
 | backtest, replay, tau derivation | §5.14, §9; rule 17 |
 | "does the agent move after entry?" | §5.7 `intra_episode_moves` (steps on the DP arm's own path, by cost band) — NOT `pct_dp_deepened`, which compares episode means with legacy; shadow re-anchors on legacy's price and cannot measure it |
 | shadow phase | §5.13 (holdout default, sampling caveats, tau₀ derivation) |
+| the weeks after launch, before launch (`evaluate.pilot_sim`: real engine + daily lane vs a simulated shop, faults, graded expectations) | §11.3 |
 | posterior, update, operator gate | §5.9, §5.11 |
 | monitoring, guardrails, stop conditions, the pilot read | §5.12, §11, §12 |
 | events, integration, quarantine | `docs/event_contract.html`; `events/store.py` |

@@ -8,6 +8,7 @@ Run: python3 -m daily.assurance --out reports/assurance.json
 """
 
 import argparse
+import hashlib
 
 import numpy as np
 from scipy.stats import chi2 as chi2_dist
@@ -42,6 +43,13 @@ def _resolve(evt, cfg, cache=None):
     if cache is not None and key is not None:
         cache[key] = res
     return res
+
+
+def _jitter(decision_id):
+    """A deterministic U(0,1) from the decision id (blake2b), independent
+    of the rank it is added to; reproducible across runs."""
+    h = hashlib.blake2b(str(decision_id).encode(), digest_size=8).digest()
+    return int.from_bytes(h, "big") / float(1 << 64)
 
 
 def _tier_index(tiers, discount, step):
@@ -302,7 +310,14 @@ def exploration_uniformity(decisions, cfg, cache=None):
             if j_applied is not None and j_applied not in affordable:
                 unreconstructed += 1
             continue
-        u.append((affordable.index(j_applied) + 0.5) / len(affordable))
+        # rank -> [0, 1) with a jitter drawn from the decision's own id: a
+        # uniform rank over n positions plus an independent U(0,1) is exactly
+        # U(0,1) for EVERY n, so sets of every size pool into one test. The
+        # midpoint (rank + 0.5)/n it replaced was not: a two-tier set only
+        # ever lands on 0.25 and 0.75, so honest draws from small sets
+        # piled into two bins and the check FAILed a uniform chooser
+        u.append((affordable.index(j_applied) + _jitter(evt.get("decision_id")))
+                 / len(affordable))
 
     n = len(u)
     if n < ac["uniformity_min_draws"]:

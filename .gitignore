@@ -9,3 +9,4 @@ events_store*/
 .env.*
 .venv/
 venv/
+sim/

@@ -27,7 +27,12 @@ All commands run from the repo root. `data/`, `reports/`, `artifacts/`,
   COGS, exploration cost, legacy ramp, demand shock, restock, dead stock,
   learning, refusals) answered by the production solver on the config in
   force. Demand there is a slider, not a forecast; the pilot's own
-  outcomes are the evidence.
+  outcomes are the evidence. Before launch day, rehearse the weeks after
+  it: `python3 -m evaluate.pilot_sim --days 21` walks the hourly engine
+  and this whole daily lane against a simulated shop (design §11.3) in a
+  workspace under `sim/`, and `reports/pilot_sim.json` grades what a
+  healthy launch shows; `--fault mismatch:0.05` and friends check that the
+  gates and stops fire when they should.
 - **Engineering** — build Lane B (below) against the event contract,
   choose the pilot episodes (**spanning FCs and categories** — several of
   each, so no single site or category carries the read and exploration is
@@ -148,7 +153,12 @@ validate. Engineering owns everything on the other side of the event
 contract:
 
 - the hourly scheduler and transport that call `decide` per SKU × FC
-  (the 12-field request in `docs/event_contract.html` §03);
+  (the 12-field request in `docs/event_contract.html` §03), and the
+  service that turns a request into the engine's state: the frozen
+  model's `mu_ref_path` over the remaining hours, whose two demand-rate
+  features are computed point-in-time from the trailing feed by
+  `fit.prepare_data.add_ref_rate_features` — never re-derived;
+  `evaluate.pilot_world.ref_rate_features` is the worked example;
 - applying the returned price (the applied price must be the returned one —
   the mismatch rate is gated at 1%);
 - reporting **failed price pushes** — one row per failed hour, as a table
