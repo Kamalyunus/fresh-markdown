@@ -31,9 +31,11 @@ Run: python3 -m evaluate.pilot_sim [--days 21] [--epsilon-true -1.2]
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import shutil
+from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -54,6 +56,8 @@ from engine.posterior import PosteriorStore
 from events.store import EventStore
 from evaluate.pilot_world import (FEED_SCHEMA, FAULTS, World, hour_grid, parse_faults,
                                   ref_rate_features)
+from evaluate.shadow import _BufferStore
+from common.parallel import resolve_workers
 from fit import prepare_data
 from fit.train_baseline import BaselineModel, fit_level_calibration, schedule_reaches
 from ops import seal as seal_mod
@@ -145,19 +149,79 @@ def _write_feed(rows, path):
     return df
 
 
+# ------------------------------------------------------------ the worker
+
+# the hourly truth, columnar (a dict per hour was the memory at 5k a day)
+TRUTH_COLS = ("episode_id", "arm", "date", "hour_of_day", "starting_inventory",
+              "units_sold", "ending_inventory", "original_price", "offered_price",
+              "cost", "category", "fc", "sku_id", "dp_eligible", "shelf_discount",
+              "mu_true", "mu_ref_world", "mu_ref_agent")
+HIST_COLS = ("episode_id", "sku_id", "fc", "category", "date", "hour_of_day",
+             "starting_inventory", "units_sold", "total_discount")
+
+
+class _SimCells:
+    """The posterior as the worker sees it: the cells resolved in the
+    parent for this tick, and the suspension in force (unlike shadow's
+    rehearsal, a simulated pilot IS suspended when the monitor says so)."""
+
+    def __init__(self, by_category, suspended):
+        self._by_category, self._suspended = by_category, suspended
+
+    def get(self, category):
+        return self._by_category[str(category)]
+
+    def exploration_suspended(self):
+        return self._suspended
+
+
+def _decision_rng(seed, episode_id, t):
+    """One generator per (episode, hour), from the ids alone: the draw does
+    not depend on which worker prices it or in what order."""
+    h = hashlib.blake2b(str(episode_id).encode(), digest_size=8).digest()
+    return np.random.default_rng([int(seed), int.from_bytes(h, "big"), int(t)])
+
+
+def _price_one(item, ctx):
+    """One decision in a worker: pure -- the state, the tick's posterior
+    snapshot and tau, a generator seeded from the episode and the hour, so
+    serial and parallel runs price identically. Returns the event or the
+    rejection; the parent commits the event and runs the shop."""
+    state, (episode_id, t) = item
+    rng = _decision_rng(ctx["seed"], episode_id, t)
+    store = _BufferStore()
+    try:
+        evt = decide(state, _SimCells(ctx["cells"], ctx["suspended"]), store,
+                     ctx["cfg"], rng, ctx["tau"], ctx["model_version"],
+                     config_digest=ctx["digest"])
+    except StateRejected as e:
+        return {"evt": None, "rejected": str(e)}
+    return {"evt": evt, "rejected": None}
+
+
+def _price_chunk(args):
+    items, ctx = args
+    return [_price_one(it, ctx) for it in items]
+
+
 # ---------------------------------------------------------------- simulator
 
 class PilotSim:
     def __init__(self, cfg, world, sim_dir, config_path, days, episodes_per_day,
-                 seed=0, lane_hour=LANE_HOUR, raw_path=None, prepared=None):
+                 seed=0, lane_hour=LANE_HOUR, raw_path=None, prepared=None,
+                 workers=None):
         self.cfg, self.world, self.sim_dir = cfg, world, sim_dir
         self.config_path, self.lane_hour = config_path, lane_hour
         self.raw_path = raw_path
         self.dates = [(pd.Timestamp(cfg["data"]["launch_date"]) + pd.Timedelta(days=k))
                       .strftime("%Y-%m-%d") for k in range(days)]
-        self.per_day = int(episodes_per_day)
+        # `episodes_per_day` is the day's total, split across the two arms
+        self.per_day = max(int(episodes_per_day) // 2, 1)
+        self.workers = resolve_workers(workers)
+        self.pool = None
+        self.seed = int(seed)
         self.rng = np.random.default_rng([int(seed), 1])       # engineering's draws
-        self.agent_rng = np.random.default_rng([int(seed), 2])  # the agent's draws
+        self.opened_by_day = {}
         self.model = BaselineModel(cfg)
         self.posterior = PosteriorStore(cfg)
         self.store = EventStore(cfg)
@@ -185,22 +249,57 @@ class PilotSim:
     # ------------------------------------------------------------- days
 
     def run(self):
-        for k, date in enumerate(self.dates):
-            self._sample_day(k, date)
-            for hour in range(24):
-                if hour == self.lane_hour and k > 0:
-                    self.days.append(self.daily_lane(k))
-                self._open_due(k, date, hour)
-                self.posterior.reload()                # once per batch, as Lane B must
-                tau = self.posterior.tau(self.cfg)
-                for ep in list(self.open):
-                    if ep["grid"][ep["t"]] != (date, hour):
-                        continue
-                    if ep["arm"] == "pilot":
-                        self._pilot_hour(ep, k, tau)
-                    else:
-                        self._legacy_hour(ep, k)
+        try:
+            if self.workers > 1:
+                self.pool = ProcessPoolExecutor(max_workers=self.workers)
+            for k, date in enumerate(self.dates):
+                self._sample_day(k, date)
+                for hour in range(24):
+                    if hour == self.lane_hour and k > 0:
+                        self.days.append(self.daily_lane(k))
+                    self._open_due(k, date, hour)
+                    self._tick(k, date, hour)
+                print(f"  day {k + 1}/{len(self.dates)} {date}: "
+                      f"{self.opened_by_day.get(date, 0)} episodes opened, "
+                      f"{len(self.open)} open", flush=True)
+        finally:
+            if self.pool is not None:
+                self.pool.shutdown()
         return self.report()
+
+    def _tick(self, k, date, hour):
+        """One hour: every open pilot episode due now is priced in one batch
+        (across the workers) against one posterior snapshot and one tau --
+        the batch Lane B reloads the store for -- then the shop sells."""
+        self.posterior.reload()                    # once per batch, as Lane B must
+        due = [ep for ep in self.open if ep["grid"][ep["t"]] == (date, hour)]
+        pilot = [ep for ep in due if ep["arm"] == "pilot"]
+        if pilot:
+            cats = {ep["template"]["category"] for ep in pilot}
+            ctx = {"cfg": self.cfg, "tau": self.posterior.tau(self.cfg),
+                   "cells": {c: self.posterior.get(c) for c in cats},
+                   "suspended": self.posterior.exploration_suspended(),
+                   "model_version": self.model.version, "digest": self.digest,
+                   "seed": self.seed}
+            items = [(self._pilot_state(ep), (ep["episode_id"], ep["t"])) for ep in pilot]
+            for ep, res in zip(pilot, self._map(items, ctx)):
+                self._pilot_hour(ep, k, res)
+        for ep in due:
+            if ep["arm"] == "legacy":
+                self._legacy_hour(ep, k)
+
+    def _map(self, items, ctx):
+        """`[_price_one(it, ctx) for it in items]`, chunked across the pool
+        held for the run (one executor per hour would fork 500 times a
+        run); results in submission order."""
+        if self.pool is None or len(items) < 2 * self.workers:
+            return [_price_one(it, ctx) for it in items]
+        size = max(len(items) // (self.workers * 4), 1)
+        batches = [items[i:i + size] for i in range(0, len(items), size)]
+        out = []
+        for got in self.pool.map(_price_chunk, [(b, ctx) for b in batches]):
+            out.extend(got)
+        return out
 
     def _sample_day(self, k, date):
         """Each arm opens `per_day` episodes a day: the twins due (a
@@ -253,18 +352,22 @@ class PilotSim:
             "starting_inventory": o["q"]} for o in openings])
         hist = self.history
         if self.sim_history:
-            hist = pd.concat([hist, pd.DataFrame(self.sim_history)], ignore_index=True)
+            hist = pd.concat([hist, pd.DataFrame(self.sim_history, columns=HIST_COLS)],
+                             ignore_index=True)
         since = (pd.Timestamp(date) - pd.Timedelta(
             days=self.cfg["baseline_model"]["ref_rate_window_days"] + 14)
         ).strftime("%Y-%m-%d")
         feats = ref_rate_features(hist[hist.date >= since], stub, self.cfg)
         for o in openings:
             o["features"] = feats[o["episode_id"]]
-            o["mu_world"] = self.world.mu_ref_path(o["template"], o["grid"], o["features"])
-            if o["arm"] == "pilot":
-                o["mu_agent"] = self.world.mu_ref_path(o["template"], o["grid"],
-                                                       o["features"], model=self.model)
+        # one prediction per model for the whole day's openings
+        for o, path in zip(openings, self.world.mu_ref_paths(openings)):
+            o["mu_world"] = path
+        pilot_open = [o for o in openings if o["arm"] == "pilot"]
+        for o, path in zip(pilot_open, self.world.mu_ref_paths(pilot_open, model=self.model)):
+            o["mu_agent"] = path
         self.pending[date] = openings
+        self.opened_by_day[date] = len(openings)
 
     def _schedule_twin(self, arm, template, after_date):
         day = (pd.Timestamp(after_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
@@ -278,31 +381,36 @@ class PilotSim:
 
     # ------------------------------------------------------------ hours
 
-    def _pilot_hour(self, ep, k, tau):
+    def _pilot_state(self, ep):
         t, tpl = ep["t"], ep["template"]
         date, hour = ep["grid"][t]
-        n = tpl["n_hours"]
-        d_ref = reference_discount(self.cfg, tpl["category"])
-        state = {
+        return {
             "episode_id": ep["episode_id"], "sku_id": tpl["sku_id"], "fc": tpl["fc"],
             "category": tpl["category"], "subcategory": tpl["subcategory"],
-            "date": date, "hour_of_day": hour, "hours_remaining": n - t,
+            "date": date, "hour_of_day": hour, "hours_remaining": tpl["n_hours"] - t,
             "q": int(ep["q"]), "original_price": tpl["original_price"],
             "cost": tpl["cost"], "r": self.world.r_of(tpl) / self.world.r_scale,
             "mu_ref_path": list(ep["mu_agent"][t:]),
             "current_discount": ep["anchor"],
         }
+
+    def _pilot_hour(self, ep, k, res):
+        """Engineering's side of one priced hour, after the worker's
+        decision: commit the event, apply the price (or the fault), sell."""
+        t, tpl = ep["t"], ep["template"]
+        date, hour = ep["grid"][t]
+        d_ref = reference_discount(self.cfg, tpl["category"])
         applied = None
-        try:
-            evt = decide(state, self.posterior, self.store, self.cfg, self.agent_rng,
-                         tau, self.model.version, config_digest=self.digest)
+        if res["evt"] is not None:
+            evt = res["evt"]
+            self.store.emit_decision(evt)
             applied = float(evt["applied_discount"])
             if ep["anchor"] is not None and applied < ep["anchor"] - dp_mod.TIER_EPS:
                 self.violations["price_rose_within_episode"] += 1
             if evt["applied_price"] < tpl["cost"] - 1e-6:
                 self.violations["below_cost"] += 1
-        except StateRejected as e:
-            self.rejected[str(e)] = self.rejected.get(str(e), 0) + 1
+        else:
+            self.rejected[res["rejected"]] = self.rejected.get(res["rejected"], 0) + 1
         # engineering applies it -- or fails to. The defined fallback holds
         # the shelf; at entry the shelf opens at the legacy anchor, on the
         # tier grid at or above cost (a bare d_max off the grid would leave
@@ -349,23 +457,17 @@ class PilotSim:
             self.feed_by_day.setdefault(date, []).append(row)
             if self.world.draw_fault("duplicate"):
                 self.feed_by_day[date].append(dict(row))
-        self.truth.append({
-            "episode_id": ep["episode_id"], "arm": ep["arm"], "date": date,
-            "hour_of_day": hour, "starting_inventory": q, "units_sold": sold,
-            "ending_inventory": ending, "original_price": tpl["original_price"],
-            "offered_price": tpl["original_price"] * (1 - shelf), "cost": tpl["cost"],
-            "category": tpl["category"], "fc": tpl["fc"], "sku_id": tpl["sku_id"],
-            "dp_eligible": True, "shelf_discount": shelf, "mu_true": mu,
-            # the two levels at the reference: the world's, and the agent's
-            # (its own re-fit factors) -- their log ratio is the level error
-            # the elasticity learner, which has no level term, absorbs
-            "mu_ref_world": ep["mu_world"][t],
-            "mu_ref_agent": ep["mu_agent"][t] if ep["arm"] == "pilot" else None,
-        })
-        self.sim_history.append({
-            "episode_id": ep["episode_id"], "sku_id": tpl["sku_id"], "fc": tpl["fc"],
-            "category": tpl["category"], "date": date, "hour_of_day": hour,
-            "starting_inventory": q, "units_sold": sold, "total_discount": shelf})
+        # TRUTH_COLS order; the two levels at the reference -- the world's
+        # and the agent's (its own re-fit factors) -- are the level error
+        # the elasticity learner, which has no level term, absorbs
+        self.truth.append((
+            ep["episode_id"], ep["arm"], date, hour, q, sold, ending,
+            tpl["original_price"], tpl["original_price"] * (1 - shelf), tpl["cost"],
+            tpl["category"], tpl["fc"], tpl["sku_id"], True, shelf, mu,
+            ep["mu_world"][t], ep["mu_agent"][t] if ep["arm"] == "pilot" else None))
+        self.sim_history.append((                    # HIST_COLS order
+            ep["episode_id"], tpl["sku_id"], tpl["fc"], tpl["category"], date, hour,
+            q, sold, shelf))
         ep["q"], ep["anchor"], ep["t"] = left, shelf, t + 1
         if close:
             self.open.remove(ep)
@@ -503,7 +605,7 @@ class PilotSim:
     def economics(self):
         """Both arms through the one episode frame (metrics.episode_economics
         over metrics.settled), like-for-like: same templates, same world."""
-        df = pd.DataFrame(self.truth)
+        df = pd.DataFrame(self.truth, columns=TRUTH_COLS)
         out = {}
         for arm, g in df.groupby("arm"):
             ep, excluded = metrics.settled(metrics.episode_economics(g))
@@ -550,7 +652,8 @@ class PilotSim:
         mu_ref and carries no level term, so a level error this size is
         read as elasticity -- the diagnostic that tells a learning FAIL
         from a re-fit artefact."""
-        df = pd.DataFrame([r for r in self.truth if r["arm"] == "pilot"])
+        df = pd.DataFrame(self.truth, columns=TRUTH_COLS)
+        df = df[df.arm == "pilot"]
         if df.empty:
             return {}
         df["log_ratio"] = np.log(df.mu_ref_agent / df.mu_ref_world)
@@ -590,7 +693,11 @@ class PilotSim:
                 "episode_shock_sd": self.world.episode_shock_sd,
                 "templates": len(self.world.templates),
                 "launch_date": self.cfg["data"]["launch_date"],
-                "days": len(self.dates), "episodes_per_day_per_arm": self.per_day,
+                "days": len(self.dates), "episodes_per_day": 2 * self.per_day,
+                # what the template pool and the open sku x fc keys allowed
+                "episodes_opened_per_day_mean": round(float(np.mean(
+                    list(self.opened_by_day.values()))), 1) if self.opened_by_day else 0,
+                "workers": self.workers,
                 "seed_note": "every figure is the simulated world's, not the shop's (rule 19)",
             },
             "config": provenance.config_fingerprint(self.cfg, "pilot_sim"),
@@ -600,7 +707,7 @@ class PilotSim:
                 "rejected": self.rejected,
                 "rejected_total": int(sum(self.rejected.values())),
                 "violations": self.violations,
-                "pilot_hours": int(sum(1 for r in self.truth if r["arm"] == "pilot")),
+                "pilot_hours": int(sum(1 for r in self.truth if r[1] == "pilot")),
                 "tau_at_launch": self.launch_tau, "tau_now": self.posterior.tau(self.cfg),
             },
             "learning": self.learning(),
@@ -819,8 +926,9 @@ def _print(rep, out_path):
     print(f"world: epsilon_true {w['epsilon_true']}  r_scale {w['r_scale']}  "
           f"episode shock sd {w['episode_shock_sd']}  drift/day {w['level_drift_per_day']}  "
           f"faults {w['faults'] or 'none'}")
-    print(f"{w['days']} days from {w['launch_date']}, {w['episodes_per_day_per_arm']} "
-          f"episodes/day/arm from {w['templates']} templates")
+    print(f"{w['days']} days from {w['launch_date']}, {w['episodes_per_day']} episodes/day "
+          f"asked ({w['episodes_opened_per_day_mean']} opened, both arms) from "
+          f"{w['templates']} templates, {w['workers']} worker(s)")
     print(f"engine: {e['decisions']:,} decisions, {e['forced']:,} forced "
           f"({e['forced_share']}), {e['rejected_total']} rejected; "
           f"tau {e['tau_at_launch']} -> {e['tau_now']}")
@@ -841,7 +949,8 @@ SIM_CONFIG = "pilot_sim.yaml"
 
 # the sim config's sections and keys, with the CLI flag that overrides each
 SIM_KEYS = {
-    "run": ("days", "launch_date", "episodes_per_day", "seed", "templates_from"),
+    "run": ("days", "launch_date", "episodes_per_day", "seed", "templates_from",
+            "workers"),
     "world": ("epsilon_true", "epsilon_true_map", "r_scale", "episode_shock_sd",
               "level_drift_per_day"),
     "paths": ("config", "input", "raw", "sim_dir", "out"),
@@ -895,6 +1004,9 @@ def main(argv=None):
                          + " (replaces the file's list)")
     ap.add_argument("--templates-from", default=None)
     ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--workers", type=int, default=None,
+                    help="processes pricing the hour's batch; 0 = every core but "
+                         "one, 1 = serial (same answer either way)")
     ap.add_argument("--sim-dir", default=None)
     ap.add_argument("--out", default=None)
     args = ap.parse_args(argv)
@@ -919,7 +1031,7 @@ def run_from_settings(st):
                        sort_keys=False)
     sim = PilotSim(cfg_sim, world, st["sim_dir"], config_path, int(st["days"]),
                    st["episodes_per_day"], seed=st["seed"], raw_path=st["raw"],
-                   prepared=prepared)
+                   prepared=prepared, workers=st["workers"])
     rep = sim.run()
     rep["sim_config"] = {k: v for k, v in st.items() if not k.startswith("_")}
     rep["sim_config"]["source"] = st["_source"]

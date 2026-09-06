@@ -12,7 +12,9 @@
 run:
   days: 21                       # simulated days after launch
   launch_date: null              # null: the day after the extract's last day
-  episodes_per_day: 40           # per arm; each template runs once under the pilot, once under legacy
+  episodes_per_day: 5000         # a day's total, split across the two arms (each template runs once
+                                 # under the pilot, once under legacy); the template pool caps it
+  workers: 0                     # processes pricing each hour's batch: 0 = every core but one, 1 = serial
   seed: 0                        # the world's and the agent's draws
   templates_from: null           # opening date templates are sampled from; null: the hold-out start
 

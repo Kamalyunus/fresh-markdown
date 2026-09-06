@@ -172,29 +172,37 @@ class World:
         return float(lookup_r(self.r_lookup, template["subcategory"],
                               template["category"])) * self.r_scale
 
-    def mu_ref_path(self, template, grid, features, model=None):
-        """mu_ref for every hour of `grid` under `model` (default: the
-        world's frozen one; the simulator passes the agent's for the
-        DP's path). Same frame, same features -- the two models differ
-        only in their level factors."""
-        model = model or self.model
-        rate30, prior_rate = features
-        frame = pd.DataFrame({
-            "date": [g[0] for g in grid], "hour_of_day": [g[1] for g in grid],
-            "category": template["category"], "subcategory": template["subcategory"],
-            "fc": template["fc"], "original_price": template["original_price"],
-            "sku_ref_sales_rate_30d": rate30,
-            "prior_episode_ref_sales_rate": prior_rate,
-            "total_discount": np.nan,
-        })
-        return [float(m) for m in model.predict_mu_ref(frame)]
-
     def episode_shock(self):
         """The multiplier one episode's hours all carry."""
         if self.episode_shock_sd <= 0:
             return 1.0
         return float(np.exp(self.rng.normal(-0.5 * self.episode_shock_sd ** 2,
                                             self.episode_shock_sd)))
+
+    def mu_ref_paths(self, openings, model=None):
+        """`mu_ref_path` for many openings in ONE prediction: a frame of
+        every (opening, hour) row, predicted once, split back. Per-episode
+        prediction spent 30 ms of pandas per episode -- at 5,000 a day
+        that was the run. Returns a list aligned with `openings`; each
+        opening carries `template`, `grid`, `features`."""
+        model = model or self.model
+        if not openings:
+            return []
+        rows = []
+        for i, o in enumerate(openings):
+            tpl, (rate30, prior_rate) = o["template"], o["features"]
+            for date, hour in o["grid"]:
+                rows.append((i, date, hour, tpl["category"], tpl["subcategory"],
+                             tpl["fc"], tpl["original_price"], rate30, prior_rate))
+        frame = pd.DataFrame(rows, columns=[
+            "_i", "date", "hour_of_day", "category", "subcategory", "fc",
+            "original_price", "sku_ref_sales_rate_30d", "prior_episode_ref_sales_rate"])
+        frame["total_discount"] = np.nan
+        mu = model.predict_mu_ref(frame)
+        out = [[] for _ in openings]
+        for i, m in zip(frame["_i"].to_numpy(), mu):
+            out[i].append(float(m))
+        return out
 
     def demand(self, template, mu_ref, shelf_discount, day_index, episode_shock=1.0):
         """One hour's demand draw at the SHELF price: the world's level,

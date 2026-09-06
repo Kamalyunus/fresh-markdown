@@ -330,3 +330,35 @@ def test_a_level_error_of_the_agent_is_named_not_read_as_learning(cfg):
     rep["level_tracking"] = {}
     assert {e["name"]: e["verdict"] for e in pilot_sim.grade(rep, cfg)}[
         "agent_level_tracks_world"] == "NOT MEASURED"
+
+
+def test_a_decision_draws_from_its_own_episode_and_hour():
+    """Serial and parallel runs must price identically: the generator comes
+    from the ids, never from a shared stream or the worker."""
+    a = pilot_sim._decision_rng(0, "sim|pilot|7|F|2026-09-01T10", 3)
+    b = pilot_sim._decision_rng(0, "sim|pilot|7|F|2026-09-01T10", 3)
+    c = pilot_sim._decision_rng(0, "sim|pilot|7|F|2026-09-01T10", 4)
+    d = pilot_sim._decision_rng(1, "sim|pilot|7|F|2026-09-01T10", 3)
+    assert a.random() == b.random()
+    assert a.random() != c.random() and a.random() != d.random()
+
+
+def test_the_worker_prices_against_the_ticks_snapshot_and_reports_a_rejection(cfg):
+    from engine.posterior import launch_belief
+    state = {"episode_id": "e", "sku_id": 7, "fc": "F", "category": "FRUIT",
+             "subcategory": "BERRY", "date": "2026-09-01", "hour_of_day": 10,
+             "hours_remaining": 3, "q": 4, "original_price": 10_000.0,
+             "cost": 4_000.0, "r": 2.0, "mu_ref_path": [1.0, 1.0, 1.0],
+             "current_discount": None}
+    ctx = {"cfg": cfg, "tau": 1e9,
+           "cells": {"FRUIT": {"mean": -1.2, "std": 0.5, "version": 0}},
+           "suspended": None, "model_version": "m", "digest": "d", "seed": 0}
+    res = pilot_sim._price_one((state, ("e", 0)), ctx)
+    assert res["rejected"] is None and res["evt"]["config_digest"] == "d"
+    assert res["evt"]["tau_current"] == 1e9
+    # a suspension in force prices with no budget, as production does
+    held = pilot_sim._price_one((state, ("e", 0)), dict(ctx, suspended={"since": "x", "reasons": ["y"]}))
+    assert held["evt"]["tau_current"] is None and not held["evt"]["is_exploration"]
+    bad = pilot_sim._price_one((dict(state, q=-1), ("e", 0)), ctx)
+    assert bad["evt"] is None and bad["rejected"]
+    assert launch_belief(-1.2, 0.5, cfg) < 0

@@ -1497,7 +1497,8 @@ table against the file):
 | --- | --- | --- | --- |
 | `run` | `days` | 21 | simulated days after launch; a guardrail test needs the trailing window + smoothing + persistence past the shock day |
 | `run` | `launch_date` | null | the `data.launch_date` the sim config carries; null = the day after the extract's last day |
-| `run` | `episodes_per_day` | 40 | per arm — each template runs once under the pilot and once under its legacy path |
+| `run` | `episodes_per_day` | 5000 | the day's total, split across the two arms — each template runs once under the pilot and once under its legacy path; the template pool and the open SKU × FC keys cap it (`episodes_opened_per_day_mean` says what ran) |
+| `run` | `workers` | 0 | processes pricing each hour's batch of decisions (0 = every core but one, 1 = serial); every decision draws from a generator seeded by its episode and hour, so the answer is the same either way |
 | `run` | `seed` | 0 | the world's draws and the agent's, so a run reproduces |
 | `run` | `templates_from` | null | opening date the templates are sampled from; null = the hold-out start |
 | `world` | `epsilon_true` | −1.2 | the shop's elasticity, every category (negative; §5.6) |

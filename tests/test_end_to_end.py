@@ -1168,7 +1168,8 @@ def test_the_pilot_simulator_walks_past_launch_date(workspace, tmp_path):
     rc = pilot_sim.main(["--sim-config", os.path.join(ROOT, "pilot_sim.yaml"),
                          "--config", "sim_config.yaml", "--input", "data/prepared.parquet",
                          "--raw", "data/flc.parquet", "--days", "2",
-                         "--episodes-per-day", "4", "--sim-dir", sim_dir, "--out", out,
+                         "--episodes-per-day", "8", "--workers", "2",
+                         "--sim-dir", sim_dir, "--out", out,
                          "--fault", "push_fail:0.2"])
     assert rc == 0
     rep = json.load(open(out))
