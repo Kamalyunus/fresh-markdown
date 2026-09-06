@@ -190,7 +190,8 @@ phase — what runs, which config keys move, and who moves them:
 | daily | ingest, `update --calibrate-tau`, monitor, assurance, export, status; STOP at `update --apply` | none | you approve each update. A fired stop condition SUSPENDS exploration (the monitor writes it into the posterior state; `decide` stops drawing; exploitation continues) until a human runs `update --resume-exploration` |
 
 Every stop writes `reports/launch_readiness.md` (`--report` regenerates
-it): what ran per phase, every value the process changed with before,
+it), a failed step included — that stop is journaled with the step's own
+exit message and `advance` exits 1: what ran per phase, every value the process changed with before,
 after, why and source, the config in force, status, and what is still
 waited on — the handover document, assembled from the journal and tune's
 decision log, never from memory. It never retrains unless the model is

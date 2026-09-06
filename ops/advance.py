@@ -60,6 +60,10 @@ def stale_reports(cfg, bundle, reports):
             continue
         fp = rep.get("config") or {}
         if not fp.get("snapshot"):
+            # written before the fingerprint existed (or by another producer):
+            # nothing says which config it graded, so it grades nothing now
+            if name in tune.ROUTED_REPORTS:
+                out[name] = "no config fingerprint -- re-run under the config in force"
             continue
         moved = [m.split(":")[0] for m in
                  provenance.config_diff(fp["snapshot"], cfg)]
@@ -320,15 +324,25 @@ def render_plan(steps):
 
 
 def execute(steps, config_path, root="reports", journal=JOURNAL):
-    """Run the plan's steps, journal what ran; True when the caller should
-    re-probe."""
+    """Run the plan's steps, journal what ran. Returns (again, failed):
+    `again` when the caller should re-probe, `failed` when a step exited
+    non-zero -- that is a STOP too, journaled and reported like any other,
+    never a traceback with no readiness report behind it."""
     entry = {"at": pd.Timestamp.now("UTC").isoformat(),
              "phase": current_phase(steps), "ran": [], "stop": None}
-    again = False
+    again = failed = False
     for s in steps:
         if s["kind"] == "run":
-            step(s["label"], s["args"] + ["--config", config_path],
-                 fatal=s.get("fatal", True))
+            try:
+                step(s["label"], s["args"] + ["--config", config_path],
+                     fatal=s.get("fatal", True))
+            except SystemExit as exc:
+                print(f"\nSTOP [{s['phase']}] {s['label']} FAILED")
+                entry["stop"] = {"phase": s["phase"],
+                                 "why": f"{s['label']} FAILED -- read its output above",
+                                 "detail": [str(exc).strip()]}
+                failed = True
+                break
             entry["ran"].append({"label": s["label"],
                                  "command": "python3 -m " + " ".join(s["args"])})
         elif s["kind"] == "paste":
@@ -354,7 +368,7 @@ def execute(steps, config_path, root="reports", journal=JOURNAL):
     log = read_json(journal) or {"runs": []}
     log["runs"].append(entry)
     write_json(journal, log)
-    return again
+    return again, failed
 
 
 # ---------------------------------------------------------------- report
@@ -495,11 +509,13 @@ def main():
         if steps and steps[0]["kind"] != "stop" and rounds > 2 * MAX_TUNE_ROUNDS:
             raise SystemExit("advance did not settle -- a step keeps "
                              "invalidating another; read the plan above")
-        if not execute(steps, args.config, args.reports):
-            # every stop leaves the readiness report behind it
+        again, failed = execute(steps, args.config, args.reports)
+        if not again:
+            # every stop leaves the readiness report behind it, a failed
+            # step's included -- and that one exits non-zero
             _write_readiness(args.config, args.reports)
             print(f"\nreport      {os.path.join(args.reports, READINESS)}")
-            return 0
+            return 1 if failed else 0
 
 
 if __name__ == "__main__":

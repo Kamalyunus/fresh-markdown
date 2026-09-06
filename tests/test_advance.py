@@ -233,6 +233,10 @@ def test_a_measured_paste_does_not_stale_the_report_that_derived_it(cfg):
     # and a bundle mismatch always
     reps["backtest"]["artifact_versions"]["baseline_model_version"] = "old"
     assert "backtest" in advance.stale_reports(cfg, "b", reps)
+    # a report with no fingerprint is stale: it cannot say what it graded
+    reps["shadow"].pop("config")
+    assert "shadow" in advance.stale_reports(cfg, "b", reps)
+    assert "fingerprint" in advance.stale_reports(cfg, "b", reps)["shadow"]
 
 
 def test_only_the_invalidated_report_is_re_run():
@@ -274,11 +278,39 @@ def test_the_round_budget_counts_work_not_stops(monkeypatch, tmp_path):
     monkeypatch.setattr(advance, "probe", lambda *a, **k: {})
     monkeypatch.setattr(advance, "plan", lambda st: stop)
     monkeypatch.setattr(advance, "render_plan", lambda s: "")
-    monkeypatch.setattr(advance, "execute", lambda *a: False)
+    monkeypatch.setattr(advance, "execute", lambda *a: (False, False))
     monkeypatch.setattr(advance, "_write_readiness", lambda *a: calls.__setitem__("n", calls["n"] + 1))
     monkeypatch.setattr(advance, "MAX_TUNE_ROUNDS", 0)   # budget exhausted at once
     monkeypatch.setattr(sys, "argv", ["advance", "--reports", str(tmp_path)])
     assert advance.main() == 0 and calls["n"] == 1
+
+
+def test_a_failed_step_is_a_journaled_stop_with_a_readiness_report(monkeypatch, tmp_path):
+    """shadow refused (a thin pre-window week, no tau to derive) and advance
+    died on the subprocess's SystemExit: no journal entry, no readiness
+    report, the previous stop still on disk as if current. A failed step is
+    a STOP like any other -- journaled, reported, and exit 1."""
+    def boom(label, args, fatal=True):
+        raise SystemExit(f"\n{label} FAILED (exit 1) -- stopping here")
+    monkeypatch.setattr(advance, "step", boom)
+    steps = [advance._run("shadow (hold-out)", ["evaluate.shadow"], phase="shadow",
+                          reevaluate=True)]
+    journal = tmp_path / "journal.json"
+    again, failed = advance.execute(steps, "config.yaml", str(tmp_path), journal=str(journal))
+    assert (again, failed) == (False, True)
+    entry = json.loads(journal.read_text())["runs"][-1]
+    assert entry["ran"] == [] and entry["stop"]["phase"] == "shadow"
+    assert "FAILED" in entry["stop"]["why"] and "exit 1" in entry["stop"]["detail"][0]
+    # and main writes the report and exits non-zero on it
+    calls = {"n": 0}
+    monkeypatch.setattr(advance, "load_config", lambda p: {})
+    monkeypatch.setattr(advance, "probe", lambda *a, **k: {})
+    monkeypatch.setattr(advance, "plan", lambda st: steps)
+    monkeypatch.setattr(advance, "render_plan", lambda s: "")
+    monkeypatch.setattr(advance, "execute", lambda *a: (False, True))
+    monkeypatch.setattr(advance, "_write_readiness", lambda *a: calls.__setitem__("n", calls["n"] + 1))
+    monkeypatch.setattr(sys, "argv", ["advance", "--reports", str(tmp_path)])
+    assert advance.main() == 1 and calls["n"] == 1
 
 
 def test_the_tau_paste_is_journaled_under_the_shadow_phase():

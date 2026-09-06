@@ -934,7 +934,10 @@ Stale *reports* are the other half: after a retrain, yesterday's
 gate-feeding report stamps `artifact_versions` **and a `config`
 fingerprint** — the phase it belongs to (`backtest` / `shadow` /
 `production`), a digest of the whole config it read, and the full snapshot.
-`status` compares them against disk: model mismatch is FAIL; a config key
+`status` compares them against disk: model mismatch is FAIL; a report with
+no fingerprint at all (an older producer) is WARN and `advance` re-runs it,
+because nothing says which config it graded — read as current, a shadow from
+an older code version once stood as the launch record; a config key
 **the report reads** that has moved since is WARN and names it
 (`tune.stale_keys` routes moved keys to the reports they invalidate, and
 `advance` re-runs by the same table: W turns the loop; `delta_min` re-runs

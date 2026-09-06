@@ -303,12 +303,11 @@ def _vintages(cfg, state, reports):
                     checked.append(f"{name}={fp.get('phase')} (pastes since, none it reads)")
             else:
                 checked.append(f"{name}={fp.get('phase')}")
-        elif av:                    # a report from before fingerprints
-            if av.get("config_version") != cfg["meta"]["config_version"]:
-                moved.setdefault((f"config_version {av.get('config_version')}",
-                                  "pre-fingerprint"), []).append(name)
-            else:
-                checked.append(f"{name}=unfingerprinted")
+        else:
+            # no fingerprint: nothing says which config it graded, so it is
+            # re-run (advance does) -- reading it as current let a shadow from
+            # an older code version stand in for the launch record
+            moved.setdefault(("none", "no config fingerprint"), []).append(name)
     if stale:
         return _row("report vintages", FAIL,
                     "; ".join(stale) + f" -- artifacts on disk are {bundle}",

@@ -108,18 +108,20 @@ def test_a_stale_report_vintage_fails_rather_than_grading_a_ghost_model(cfg):
     row = status._vintages(cfg, state, {"backtest": old})
     assert row["verdict"] == status.FAIL and "bundle-OLD" in row["detail"]
 
-    fresh = {"artifact_versions": {
-        "baseline_model_version": "bundle-NEW",
-        "config_version": cfg["meta"]["config_version"]}}
+    fresh = {"artifact_versions": {"baseline_model_version": "bundle-NEW"},
+             "config": config_fingerprint(cfg, "backtest")}
     assert status._vintages(cfg, state, {"backtest": fresh, "shadow": fresh})["verdict"] == status.PASS
 
 
-def test_a_report_from_an_edited_config_warns(cfg):
+def test_a_report_without_a_fingerprint_warns_whatever_its_version_string(cfg):
+    """meta.config_version is a human label nobody has to bump; a report
+    that carries only it says nothing about the config it graded."""
     state = {"bundle": "b"}
-    rep = {"artifact_versions": {"baseline_model_version": "b",
-                                 "config_version": "0.0.0-old"}}
-    row = status._vintages(cfg, state, {"shadow": rep})
-    assert row["verdict"] == status.WARN and "0.0.0-old" in row["detail"]
+    for version in ("0.0.0-old", cfg["meta"]["config_version"]):
+        rep = {"artifact_versions": {"baseline_model_version": "b",
+                                     "config_version": version}}
+        row = status._vintages(cfg, state, {"shadow": rep})
+        assert row["verdict"] == status.WARN and "no config fingerprint" in row["detail"]
 
 
 def test_vintages_without_a_bundle_read_not_run_never_pass(cfg):
@@ -371,12 +373,15 @@ def test_report_vintages_names_the_config_values_that_moved(cfg, tmp_path):
     row = status._vintages(cfg, state, {"backtest": other, "shadow": same})
     assert row["verdict"] == status.FAIL and "m0" in row["detail"]
 
-    # reports without a config key (monitor before this change) fall back to
-    # the version string rather than crashing or passing silently
-    legacy = {"artifact_versions": {"baseline_model_version": bundle,
-                                    "config_version": "0.0.1"}}
-    row = status._vintages(cfg, state, {"backtest": legacy})
-    assert row["verdict"] == status.WARN and "pre-fingerprint" in row["detail"]
+    # a report with no config fingerprint says nothing about the config it
+    # graded, whatever its version string: WARN, re-run -- reading it as
+    # current let a shadow from an older code version stand as the launch
+    # record and advance never re-ran it
+    for version in ("0.0.1", cfg["meta"]["config_version"]):
+        legacy = {"artifact_versions": {"baseline_model_version": bundle,
+                                        "config_version": version}}
+        row = status._vintages(cfg, state, {"shadow": legacy})
+        assert row["verdict"] == status.WARN and "no config fingerprint" in row["detail"]
 
 
 def test_a_null_tau_derivation_is_reported_not_crashed(cfg):
