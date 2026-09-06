@@ -1481,7 +1481,26 @@ paths — live in `pilot_sim.yaml` at the repo root, deliberately apart
 from `config.yaml`: the system's tuning surface is rehearsed exactly as
 it stands, and nothing in the sim file is read by the engine, the lane or
 a fit; a flag overrides a key for one run, and the run's settings are
-written beside the report (`sim_config`) and into the workspace. The world's level at the reference price is the
+written beside the report (`sim_config`) and into the workspace. Its
+keys (every one must be present; `test_docs_match_the_code` checks this
+table against the file):
+
+| section | key | default | meaning |
+| --- | --- | --- | --- |
+| `run` | `days` | 21 | simulated days after launch; a guardrail test needs the trailing window + smoothing + persistence past the shock day |
+| `run` | `launch_date` | null | the `data.launch_date` the sim config carries; null = the day after the extract's last day |
+| `run` | `episodes_per_day` | 40 | per arm — each template runs once under the pilot and once under its legacy path |
+| `run` | `seed` | 0 | the world's draws and the agent's, so a run reproduces |
+| `run` | `templates_from` | null | opening date the templates are sampled from; null = the hold-out start |
+| `world` | `epsilon_true` | −1.2 | the shop's elasticity, every category (negative; §5.6) |
+| `world` | `epsilon_true_map` | null | `{CATEGORY: ε}`, overrides `epsilon_true` per category |
+| `world` | `r_scale` | 1.0 | multiplies the agent's `r` in the world's NB draws — the dispersion check should notice a move |
+| `world` | `episode_shock_sd` | 0.0 | log-sd of the shock every hour of an episode shares (`rho` ≈ 0 at 0; above 0 the world is over-dispersed against a frozen `r` fitted without it) |
+| `world` | `level_drift_per_day` | 1.0 | demand multiplier per day — the weekly re-fit and the calibration diagnostic should track it |
+| — | `faults` | `[]` | `name[:arg]` list: `missing:p`, `duplicate:p`, `mismatch:p`, `push_fail:p`, `discount_rounding`, `demand_shock:DAY:FACTOR` (`pilot_world.FAULTS`) |
+| `paths` | `config` | `config.yaml` | the production config rehearsed, unchanged |
+| `paths` | `input`, `raw` | `data/prepared.parquet`, `data/flc_raw.parquet` | templates and the feature service's history; the extract Lane C extends |
+| `paths` | `sim_dir`, `out` | `sim/pilot`, `reports/pilot_sim.json` | the workspace (git-ignored) and the report | The world's level at the reference price is the
 frozen model as sealed (production calibration, frozen at the start), its
 price response an **assumed** elasticity per category (`--epsilon-true`),
 its noise NB at the agent's own `r`, with a log-normal shock every hour of

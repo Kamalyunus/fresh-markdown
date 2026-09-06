@@ -132,3 +132,23 @@ def test_agents_md_stays_a_router_not_a_reference():
     assert text.index("## Non-negotiables") < text.index("## Setup")
 
 
+
+
+def test_every_sim_config_key_is_in_the_design_table():
+    """pilot_sim.yaml is the simulator's settings file; design 11.3 carries
+    the key table an operator reads. A key in the file the table does not
+    name is an undocumented knob."""
+    import yaml
+    from conftest import ROOT
+
+    with open(os.path.join(ROOT, "pilot_sim.yaml")) as f:
+        sim = yaml.safe_load(f)
+    with open(os.path.join(ROOT, "docs", "design.md")) as f:
+        design = f.read()
+    table = design[design.index("### 11.3"):design.index("## 12.")]
+    keys = [k for section in ("run", "world", "paths") for k in sim[section]] + ["faults"]
+    missing = [k for k in keys if f"`{k}`" not in table]
+    assert not missing, missing
+    # and the loader's own key list is the file's
+    from evaluate.pilot_sim import SIM_KEYS
+    assert {k for ks in SIM_KEYS.values() for k in ks} == set(keys) - {"faults"}

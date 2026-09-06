@@ -221,8 +221,7 @@ invocation; and it stops on every SET BY OWNER null with the evidence. Its daily
 (`daily.update --calibrate-tau`, no operator) and stops at
 `daily.update --apply`, which it never runs: learning is gated daily
 and per cell — a fast category updates the day its batch has the evidence.
-Read its stop before doing anything by hand; the sections below explain
-the steps it runs.
+Read its stop before doing anything by hand; the sections below explain the steps it runs.
 
 ## Running the bootstrap — use `ops.bootstrap_loop`, not the step list
 
@@ -335,7 +334,7 @@ fixture re-derives fixture values — read them, never commit them
 | backtest, replay, tau derivation | §5.14, §9; rule 17 |
 | "does the agent move after entry?" | §5.7 `intra_episode_moves` (steps on the DP arm's own path, by cost band) — NOT `pct_dp_deepened`, which compares episode means with legacy; shadow re-anchors on legacy's price and cannot measure it |
 | shadow phase | §5.13 (holdout default, sampling caveats, tau₀ derivation) |
-| the weeks after launch, before launch (`evaluate.pilot_sim`: real engine + daily lane vs a simulated shop, faults, graded expectations) | §11.3 |
+| the weeks after launch, before launch (`evaluate.pilot_sim`: real engine + daily lane vs a simulated shop; its world, run and faults in `pilot_sim.yaml`, key table in §11.3) | §11.3 |
 | posterior, update, operator gate | §5.9, §5.11 |
 | monitoring, guardrails, stop conditions, the pilot read | §5.12, §11, §12 |
 | events, integration, quarantine | `docs/event_contract.html`; `events/store.py` |
@@ -391,8 +390,9 @@ solver output, regenerate it rather than hand-patch numbers).
 
 **A code change ships with its doc change in the same commit**: this
 file's one-home list and paste table, the RUNBOOK step it touches, the
-design section, the event contract for any event field, and a learnings
-entry when a design was superseded. This file is a router, not a
+design section (a simulator setting: its `pilot_sim.yaml` comment and the
+§11.3 key table, test-guarded), the event contract for any event field,
+and a learnings entry when a design was superseded. This file is a router, not a
 reference — a 400-line budget, enforced by test; new material goes to
 design.md or learnings.md with a one-liner and a pointer here. Quote only
 from a gate-passing run, never invent a figure, and never present a
