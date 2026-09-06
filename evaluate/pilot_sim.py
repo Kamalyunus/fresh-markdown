@@ -48,6 +48,7 @@ from daily import assurance, export_events, monitor
 from daily import ingest_outcomes as ingest
 from daily import update
 from engine import dp as dp_mod
+from engine import explore
 from engine.decide import StateRejected, decide
 from engine.posterior import PosteriorStore
 from events.store import EventStore
@@ -73,7 +74,7 @@ EXPECTATIONS = (
     ("tau_walks_on_spend", "tau moved and the last week's spend sits within the clip band of its budget"),
     ("stops_only_on_faults", "no stop condition fires without the fault that causes it; with it, the stop fires"),
     ("exploration_never_starves", "no three consecutive days with a budget in force and nothing forced (an empty affordable set is exploration off without a stop)"),
-    ("agent_level_tracks_world", "every week's mean log(agent mu_ref / world mu_ref) over the pilot's hours sits inside the calibration gate band (the weekly re-fit reproduces the world's level; the learner has no level term and reads any error as elasticity)"),
+    ("agent_level_tracks_world", "every week's mean log(agent mu_ref / world mu_ref) over the pilot's hours sits inside the calibration gate band AND the elasticity bias it implies (level error / mean forced move) inside the posterior's std (the learner has no level term and reads a level error as elasticity)"),
     ("assurance_holds", "reproduction and exploration never FAIL; dispersion never FAILs with the world's marginal untouched (correlation is reported: the world's rho is a knob)"),
     ("lane_c_keeps_the_schedule_current", "the weekly re-fit reaches every week priced, so --apply is never refused on calibration_schedule_current"),
     ("apply_ran_on_cadence", "--apply ran every learning.update_cadence_days and was refused only under a fault"),
@@ -554,12 +555,28 @@ class PilotSim:
             return {}
         df["log_ratio"] = np.log(df.mu_ref_agent / df.mu_ref_world)
         df["week"] = episodes.week_key(df.date)
+        # the lever the learner identifies elasticity with: the forced
+        # moves' log price ratio. A level error of e read against moves of
+        # mean L is an elasticity error of about e / L -- small moves make
+        # the learner hypersensitive to the level
+        forced = pd.DataFrame([{"week": episodes.week_key(pd.Series([d["date"]]))[0],
+                                "move": explore.log_move(d["reference_discount"],
+                                                         d["applied_discount"])}
+                               for d in self.store.load_decisions()
+                               if d["is_exploration"]])
+        moves = forced.groupby("week").move.mean() if len(forced) else pd.Series(dtype=float)
         out = {}
         for wk, g in df.groupby("week"):
+            e = float(g.log_ratio.mean())
+            move = float(moves.get(wk, np.nan))
             out[wk] = {"hours": int(len(g)),
-                       "mean_log_ratio": round(float(g.log_ratio.mean()), 4),
+                       "mean_log_ratio": round(e, 4),
                        "p10_p90": [round(float(g.log_ratio.quantile(q)), 4)
-                                   for q in (0.1, 0.9)]}
+                                   for q in (0.1, 0.9)],
+                       "mean_forced_log_move": round(move, 4) if np.isfinite(move) else None,
+                       "implied_elasticity_bias": (round(-e / move, 3)
+                                                   if np.isfinite(move) and move != 0
+                                                   else None)}
         return out
 
     def report(self):
@@ -650,14 +667,29 @@ def grade(rep, cfg):
         {c: {"launch_std": r["launch_std"], "std": r["std"]}
          for c, r in rep["learning"].items()}, measured=bool(learned))
 
+    # the level error is graded by what it does to the learner: the
+    # elasticity bias it implies (level error / mean forced move) must stay
+    # inside the posterior's own uncertainty at that week's end, or the
+    # re-fit is steering the belief. The gate band bounds the level itself
     band = cfg["baseline_model"]["calibration_gate_band"]
     tol = max(abs(np.log(band[0])), abs(np.log(band[1])))
     level = rep.get("level_tracking") or {}
-    off = {wk: v["mean_log_ratio"] for wk, v in level.items()
-           if abs(v["mean_log_ratio"]) > tol}
+    std_by_week = {}
+    for d in days:
+        wk = episodes.week_key(pd.Series([d["date"]]))[0]
+        std_by_week[wk] = max(r["std"] for r in d["posterior"].values())
+    off = {}
+    for wk, v in level.items():
+        bias, std = v.get("implied_elasticity_bias"), std_by_week.get(wk)
+        if abs(v["mean_log_ratio"]) > tol or (
+                bias is not None and std is not None and abs(bias) > std):
+            off[wk] = {"mean_log_ratio": v["mean_log_ratio"],
+                       "implied_elasticity_bias": bias, "posterior_std": std}
     add("agent_level_tracks_world", not off,
-        {"weeks_outside_band": off, "tolerance_log": round(float(tol), 4),
-         "by_week": {wk: v["mean_log_ratio"] for wk, v in level.items()}},
+        {"weeks_off": off, "band_tolerance_log": round(float(tol), 4),
+         "by_week": {wk: {"mean_log_ratio": v["mean_log_ratio"],
+                          "implied_elasticity_bias": v.get("implied_elasticity_bias")}
+                     for wk, v in level.items()}},
         measured=bool(level))
 
     # the controller moves tau by at most the clip per day, so a launch tau

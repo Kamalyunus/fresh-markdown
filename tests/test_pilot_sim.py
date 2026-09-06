@@ -125,7 +125,8 @@ def test_the_sim_config_moves_only_the_state_paths(cfg):
 def _report(days=8, **over):
     """A clean run's record, small: every expectation should PASS."""
     def day(k):
-        return {"day": k, "date": f"2026-09-{k:02d}", "lane_c": None,
+        return {"day": k, "lane_c": None,
+                "date": (pd.Timestamp("2026-08-31") + pd.Timedelta(days=k)).strftime("%Y-%m-%d"),
                 "calibration_current": {"pass": True, "held_at_anchor": False},
                 "ingest": {"decisions": 50, "decisions_outside_feed_range": 10,
                            "outcomes_built": 40, "decisions_without_feed_row": 0},
@@ -144,6 +145,7 @@ def _report(days=8, **over):
                 "guardrails": {"scrap_deterioration_pct": {"latest": 0.01, "threshold": 0.3}},
                 "learning": {"forced_decision_count": 30 * k,
                              "affordable_set_empty_rate": 0.2},
+                "posterior": {"GLOBAL": {"mean": -1.2, "std": 1.5}},
                 "suspended": None,
                 "apply": {"applied": True, "refused": None,
                           "calibration_schedule_current": True}}
@@ -156,7 +158,9 @@ def _report(days=8, **over):
                                 "abs_error_now": 0.3, "launch_std": 2.0, "std": 1.5}},
         "lane_c": [{"schedule_end": "2026-09-07"}],
         "level_tracking": {"2026-08-31": {"hours": 300, "mean_log_ratio": 0.02,
-                                          "p10_p90": [-0.1, 0.15]}},
+                                          "p10_p90": [-0.1, 0.15],
+                                          "mean_forced_log_move": -0.15,
+                                          "implied_elasticity_bias": 0.133}},
         "days": [day(k) for k in range(1, days + 1)],
     }
     rep.update(over)
@@ -307,10 +311,22 @@ def test_a_level_error_of_the_agent_is_named_not_read_as_learning(cfg):
     cfg["learning"]["update_cadence_days"] = 1
     rep = _report()
     rep["level_tracking"]["2026-09-07"] = {"hours": 280, "mean_log_ratio": 0.31,
-                                          "p10_p90": [0.1, 0.5]}
+                                          "p10_p90": [0.1, 0.5],
+                                          "mean_forced_log_move": -0.15,
+                                          "implied_elasticity_bias": 2.07}
     x = {e["name"]: e for e in pilot_sim.grade(rep, cfg)}["agent_level_tracks_world"]
-    assert x["verdict"] == "FAIL" and "2026-09-07" in x["observed"]["weeks_outside_band"]
-    assert "2026-08-31" not in x["observed"]["weeks_outside_band"]
+    assert x["verdict"] == "FAIL" and "2026-09-07" in x["observed"]["weeks_off"]
+    assert "2026-08-31" not in x["observed"]["weeks_off"]
+    # a level error inside the band still fails when the elasticity bias it
+    # implies exceeds what the posterior admits (small forced moves)
+    rep["level_tracking"] = {"2026-09-07": {"hours": 280, "mean_log_ratio": 0.08,
+                                            "p10_p90": [0, 0.2],
+                                            "mean_forced_log_move": -0.04,
+                                            "implied_elasticity_bias": 2.0}}
+    for d in rep["days"]:
+        d["posterior"] = {"GLOBAL": {"std": 0.4}}
+    x = {e["name"]: e for e in pilot_sim.grade(rep, cfg)}["agent_level_tracks_world"]
+    assert x["verdict"] == "FAIL" and x["observed"]["weeks_off"]["2026-09-07"]["posterior_std"] == 0.4
     rep["level_tracking"] = {}
     assert {e["name"]: e["verdict"] for e in pilot_sim.grade(rep, cfg)}[
         "agent_level_tracks_world"] == "NOT MEASURED"

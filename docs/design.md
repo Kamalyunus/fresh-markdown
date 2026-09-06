@@ -1538,10 +1538,16 @@ firing only under the fault that causes them (and firing under it), the
 assurance checks, the schedule covering every priced week, `--apply` on
 cadence, and the agent's level tracking the world's: per week, the mean
 log ratio of the agent's `mu_ref` (its own weekly re-fit) to the world's
-over the pilot's hours must sit inside the calibration gate band, because
-the elasticity learner carries no level term and reads a level error as
-elasticity — on the fixture a thin week's re-fit moved the level by a
-third and the posterior followed it away from the truth it had reached. A fault turns its expectation around: with `mismatch` injected
+over the pilot's hours must sit inside the calibration gate band, and the
+elasticity bias it implies — level error over the mean forced log move —
+inside the posterior's std, because the elasticity learner carries no
+level term and reads a level error as elasticity, magnified by the small
+moves it identifies from: on the fixture an 8% level error from a thin
+week's re-fit, inside the band, implied a bias of half a unit of
+elasticity and the posterior followed it away from the truth it had
+reached. The lever is `delta_min` (§5.8): moves below the level-error
+scale teach nothing, and a bias scale pasted from another extract
+admits moves the re-fit's noise swamps. A fault turns its expectation around: with `mismatch` injected
 the gate MUST fail and the stop MUST fire. `correlation` is reported, not
 graded — the world's within-episode shock is a knob, not a claim about the
 shop — and `dispersion` is excused under a gate fault: it bins by

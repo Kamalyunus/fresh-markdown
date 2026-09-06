@@ -513,6 +513,14 @@ now. Dates are owner sign-off, 2026-08.
     the simulator overlapping a template's two arms on multi-day windows
     (two feed states for one hour, a completeness gap with no fault); the
     twin now opens the day after the first run closes.
+  - the learner's sensitivity to the level: it reads every forced outcome
+    against the agent's `mu_ref` with no level term, so a level error `e`
+    identified from moves of mean log ratio `L` is an elasticity error of
+    about `e / L`. On the fixture a thin week's re-fit moved the level by
+    8% (inside the 10% gate band) against forced moves near −0.15 and
+    the posterior walked from the truth it had reached (−1.2) to −2.2
+    with a std of 0.39. The simulator's `agent_level_tracks_world` grades
+    the implied bias against the posterior's std, not the band alone.
   Also learned: the sim's `hold the current price` fallback opened an
   episode at a bare `d_max` off the tier grid, and the next decision had
   no feasible tier at or below its anchor — the same trap Lane B's
