@@ -226,7 +226,7 @@ report beats a silent removal upstream.
 
 | Step | Drops |
 | --- | --- |
-| `null_key_rows_dropped` | any row with a null sku_id, fc, date or hour — it belongs to no episode and collapsed into one NaN episode id (integrity; row-scoped by construction) |
+| `null_key_rows_dropped` | any row with a null sku_id, fc, date or hour — it belongs to no episode and collapsed into one NaN episode id (integrity; row-scoped by construction); and the WHOLE clock-contiguous run holding a null window counter — the counter the ids derive from: kept, the null opened a one-row "episode" that closed on its own zero and read DP-eligible; dropped alone, it left a fragment opening mid-window (rule 15) |
 | `duplicate_hour_rows_dropped` | both copies of any repeated (SKU, FC, hour) — no principled way to choose, and they collide two runs into one episode id |
 | `gap_split_windows_dropped` | **every fragment** of a source window a missing hour split in two — the second fragment opens mid-window and its first row would read as an ENTRY row in the elasticity fit. Detected from the counter falling in step with the clock |
 | `exclusion_window_removed` | any episode with any hour in the known bad-data window (scope, not integrity) |

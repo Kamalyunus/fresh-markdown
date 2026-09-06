@@ -894,6 +894,13 @@ def test_a_row_with_no_episode_key_is_dropped_and_counted(cfg, synth_flc, tmp_pa
     dirty.loc[dirty.index[:3], "skuseq"] = None
     dirty.loc[dirty.index[5:7], "fc"] = None
     dirty.loc[dirty.index[5], "hour"] = None
+    # a null window counter mid-episode: NaN != -1 opened a NEW episode on
+    # that row, a one-row window that closed on its own zero and read
+    # DP-eligible (the owner's extract; the pilot simulator's templates).
+    # The WHOLE clock-contiguous run drops, not the row (rule 15)
+    dirty.loc[dirty.index[40], "flc_window"] = None
+    run = _clock_run_of(raw, raw.index[40])
+    assert len(run) > 1, "pick a row inside a multi-hour window"
     path = tmp_path / "dirty.parquet"
     dirty.to_parquet(path, index=False)
 
@@ -902,11 +909,19 @@ def test_a_row_with_no_episode_key_is_dropped_and_counted(cfg, synth_flc, tmp_pa
     assert labels[:3] == ["raw", "null_key_rows_dropped",
                           "duplicate_hour_rows_dropped"]
     stage = wf[1]
-    assert stage[1] == len(raw) - 5 and stage[4]["rows_dropped"] == 5
+    dropped = 5 + len(run)
+    assert stage[1] == len(raw) - dropped and stage[4]["rows_dropped"] == dropped
     assert stage[4]["nulls_by_column"] == {"sku_id": 3, "fc": 2, "date": 0,
                                            "hour_of_day": 1}
+    assert stage[4]["null_counter_rows"] == len(run)
+    assert stage[4]["null_counter_windows_dropped"] == 1
     assert not d.episode_id.isna().any()
     assert not d.episode_id.astype(str).str.contains("nan").any()
+    assert not d.hours_remaining.isna().any()
+    # none of the run's other hours survives as a fragment
+    keys = set(zip(run.skuseq, run.fc, run.date.astype(str), run.hour))
+    assert not any((r.sku_id, r.fc, str(r.date), r.hour_of_day) in keys
+                   for r in d.itertuples())
     assert EPISODE_KEY == ("sku_id", "fc", "date", "hour_of_day")
     # the clean extract loses nothing to this stage
     _, clean = load_and_filter(synth_flc, cfg)
@@ -914,3 +929,29 @@ def test_a_row_with_no_episode_key_is_dropped_and_counted(cfg, synth_flc, tmp_pa
     mask, by_col = null_key_rows(pd.DataFrame({"sku_id": [1, None], "fc": ["F", "F"],
                                                "date": ["d", "d"], "hour_of_day": [1, 1]}))
     assert list(mask) == [False, True] and by_col["sku_id"] == 1
+
+
+def _clock_run_of(raw, idx):
+    """The rows of `raw` in the same sku x fc clock-contiguous run as `idx`."""
+    r = raw.loc[idx]
+    g = raw[(raw.skuseq == r.skuseq) & (raw.fc == r.fc)].copy()
+    ts = pd.to_datetime(g.date.astype(str)) + pd.to_timedelta(g.hour, unit="h")
+    g = g.assign(_ts=ts).sort_values("_ts")
+    breaks = g._ts.diff().dt.total_seconds().div(3600).ne(1.0).cumsum()
+    return g[breaks == breaks[idx]].drop(columns="_ts")
+
+
+def test_a_null_counter_drops_its_whole_window_not_a_fragment():
+    """Rule 15 at the null-counter stage: the run the null sits in goes
+    whole, and a back-to-back neighbour with its own clock break stays."""
+    from fit.prepare_data import null_counter_windows
+
+    df = pd.DataFrame({
+        "sku_id": [7] * 6, "fc": ["F"] * 6,
+        "date": ["2026-08-01"] * 6,
+        "hour_of_day": [9, 10, 11, 14, 15, 16],       # a break between 11 and 14
+        "hours_remaining": [2.0, np.nan, 0.0, 2.0, 1.0, 0.0]})
+    mask, runs = null_counter_windows(df)
+    assert list(mask) == [True, True, True, False, False, False] and runs == 1
+    clean, runs = null_counter_windows(df.assign(hours_remaining=[2.0, 1, 0, 2, 1, 0]))
+    assert not clean.any() and runs == 0

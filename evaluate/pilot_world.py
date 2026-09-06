@@ -77,6 +77,15 @@ def episode_templates(prepared, cfg, opened_from=None):
         or cfg["data"]["split"]["test_start"]
     opened = d.groupby("episode_id")["date"].transform("min")
     d = d[opened >= str(start)].sort_values(["episode_id", "date", "hour_of_day"])
+    if d.hours_remaining.isna().any():
+        # never skipped here: a prepared frame with a null counter is an
+        # extract the chain let through (prepare_data's null_key_rows_dropped
+        # owns it), and a template built around it would be a window of
+        # unknown length priced as real
+        bad = sorted(d.loc[d.hours_remaining.isna(), "episode_id"].unique())[:5]
+        raise ValueError(f"prepared frame carries a null hours_remaining on "
+                         f"{len(bad)}+ DP-eligible episodes ({bad}); re-run "
+                         "fit.prepare_data (null_key_rows_dropped)")
     out = []
     for eid, g in d.groupby("episode_id", sort=False):
         first = g.iloc[0]

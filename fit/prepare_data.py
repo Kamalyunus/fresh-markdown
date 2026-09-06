@@ -176,9 +176,31 @@ EPISODE_KEY = ("sku_id", "fc", "date", "hour_of_day")
 
 def null_key_rows(df):
     """Mask of rows with a null in any EPISODE_KEY column, and a per-column
-    count for the waterfall detail."""
+    count for the waterfall detail. Such a row can be placed in no window
+    at all; row-scoped by construction."""
     nulls = df[list(EPISODE_KEY)].isna()
     return nulls.any(axis=1), {c: int(nulls[c].sum()) for c in EPISODE_KEY}
+
+
+def null_counter_windows(df):
+    """Mask of every row of a clock-contiguous run (same sku x fc, hours one
+    apart) that holds a null `hours_remaining`, and a count of such runs.
+    The counter is the field the ids derive from: a null one made
+    assign_episode_ids open a NEW episode on that row (NaN != -1), so one
+    bad hour became a one-row "episode" that closed on its own zero and
+    read DP-eligible -- found on the owner's extract by the pilot
+    simulator, whose templates then carried a NaN window length. The row
+    itself can be placed (its key is whole), so the drop is the WHOLE run
+    it sits in (rule 15): a row-scoped drop would leave a fragment opening
+    mid-window that no later stage can tell from a real entry."""
+    if not df.hours_remaining.isna().any():
+        return pd.Series(False, index=df.index), 0
+    ts = pd.to_datetime(df.date) + pd.to_timedelta(df.hour_of_day, unit="h")
+    grp = [df.sku_id, df.fc]
+    dt_h = ts.groupby(grp).diff().dt.total_seconds() / 3600.0
+    run = dt_h.ne(1.0).fillna(True).cumsum()          # a new run per clock break
+    bad_runs = set(run[df.hours_remaining.isna()])
+    return run.isin(bad_runs), len(bad_runs)
 
 
 def recover_negative_windows(d, cap):
@@ -244,13 +266,20 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     # would otherwise read every null-keyed hour as a duplicate of the rest
     null_key, null_by_col = null_key_rows(df)
     df = df[~null_key]
+    null_counter, null_runs = null_counter_windows(df)
+    df = df[~null_counter]
     step(df, "null_key_rows_dropped", {
-        "rows_dropped": int(null_key.sum()),
+        "rows_dropped": int(null_key.sum() + null_counter.sum()),
         "nulls_by_column": null_by_col,
+        "null_counter_rows": int(null_counter.sum()),
+        "null_counter_windows_dropped": int(null_runs),
         "note": ("a row with no sku_id, fc, date or hour belongs to no "
                  "episode; kept, it collapsed into one NaN episode id "
-                 "(INTEGRITY: drop, rule 14). Row-scoped by construction "
-                 "-- there is no episode to scope it to.")})
+                 "(INTEGRITY: drop, rule 14; row-scoped by construction -- "
+                 "there is no episode to scope it to). A null window "
+                 "counter drops the whole clock-contiguous run it sits in: "
+                 "kept, it opened a one-row episode that read DP-eligible; "
+                 "dropped alone, it left a fragment opening mid-window.")})
     # Two states for one sku x fc x hour is unresolvable -- keep neither;
     # left in, they also collide two runs into one episode id.
     dup = df.duplicated(subset=list(EPISODE_KEY), keep=False)

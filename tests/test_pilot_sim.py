@@ -45,6 +45,10 @@ def test_templates_keep_the_real_context_and_hold_the_last_legacy_price(cfg):
     assert hour_grid("2026-09-01", t["opening_hour"], t["n_hours"])[-1] == ("2026-09-02", 0)
     with pytest.raises(ValueError):
         episode_templates(d, cfg, opened_from="2027-01-01")
+    # a null counter is refused, never skipped: the chain owns that drop
+    d.loc[d.episode_id == "A", "hours_remaining"] = np.nan
+    with pytest.raises(ValueError, match="null_key_rows_dropped"):
+        episode_templates(d, cfg)
 
 
 def _world(cfg, eps=-1.2, faults=None, r=2.0):

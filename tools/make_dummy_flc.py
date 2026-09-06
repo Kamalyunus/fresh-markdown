@@ -279,12 +279,13 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
     n = len(df)
     if n and dirty_frac > 0:
         k = max(1, int(n * dirty_frac))
-        idx = rng.choice(n, size=k * 4, replace=False)
-        a, b, c, e = np.array_split(idx, 4)
+        idx = rng.choice(n, size=k * 5, replace=False)
+        a, b, c, e, g = np.array_split(idx, 5)
         df.loc[a, "category"] = None                      # null category
         df.loc[b, "subcategory"] = None                   # null subcategory
         df.loc[c, "normal_asp"] = 0.0                     # zero base price
         df.loc[e, "units_sold"] = df.loc[e, "inventory"].astype(int) + 3  # multi-lot
+        df.loc[g, "flc_window"] = np.nan                  # null window counter
 
         # NEGATIVE WINDOW -- injected on WHOLE WINDOWS, from the first hour
         # (a single mid-window bad value reads as a window boundary to

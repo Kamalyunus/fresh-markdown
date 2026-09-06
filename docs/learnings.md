@@ -496,6 +496,14 @@ now. Dates are owner sign-off, 2026-08.
     every `--apply` and suspended exploration; the gate now counts the
     reported ones apart (`push_failures_reported`) and catches only the
     silent ones, as the contract always said.
+  - on the owner's extract the simulator's templates carried a NaN window
+    length: rows with a null `flc_window` reached the DP-eligible
+    population as one-row episodes, because `assign_episode_ids` reads a
+    NaN counter as a new window (NaN ≠ −1) and the negative-window flag
+    reads NaN < 0 as False. The run holding a null counter now drops
+    whole at `null_key_rows_dropped` (a row drop left a fragment opening
+    mid-window); the templates refuse a null rather than skip it, and the
+    fixture injects the dirt so the path stays exercised.
   Also learned: the sim's `hold the current price` fallback opened an
   episode at a bare `d_max` off the tier grid, and the next decision had
   no feasible tier at or below its anchor — the same trap Lane B's
