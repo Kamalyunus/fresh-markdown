@@ -7,3 +7,5 @@ artifacts/
 events_store*/
 .env
 .env.*
+.venv/
+venv/
