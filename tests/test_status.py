@@ -248,6 +248,7 @@ def test_a_measured_value_that_disagrees_with_its_report_fails(cfg, tmp_path):
     # thing left disagreeing is the one downgraded to OWNER
     infeasible["learning"]["information_increment"] = 0.341
     infeasible["exploration"]["tau_initial"] = 1234.5
+    infeasible["exploration"]["delta_min_log_bias"] = None
     infeasible["baseline_model"]["calibration_gate_band"] = [0.997, 1.003]
     infeasible["baseline_model"]["calibration_fit_trailing_weeks"] = 1
     infeasible["data"]["split"] = dict(infeasible["data"]["split"],
@@ -350,7 +351,8 @@ def test_report_vintages_names_the_config_values_that_moved(cfg, tmp_path):
     bt = {"artifact_versions": {"baseline_model_version": bundle},
           "config": config_fingerprint(cfg, "thresholds")}
     pasted = _copy.deepcopy(cfg)
-    pasted["exploration"]["delta_min_log_bias"] = {"_default": 0.15}
+    pasted["exploration"]["delta_min_log_bias"] = dict(
+        cfg["exploration"]["delta_min_log_bias"], _default=0.15)
     pasted["monitoring"]["stop_conditions"]["scrap_deterioration_pct"] = 0.43
     row = status._vintages(pasted, state, {"backtest": bt, "thresholds": bt, "shadow": same})
     assert row["verdict"] == status.WARN
@@ -513,7 +515,7 @@ def test_a_measured_key_no_report_measures_is_unverified_not_green(cfg, tmp_path
     c = _cfg_with(cfg, tmp_path, rho={"rho": cfg["dispersion"]["rho"]})
     c["baseline_model"] = dict(c["baseline_model"], calibration_gate_band=[0.997, 1.003],
                                calibration_fit_trailing_weeks=1)
-    c["exploration"] = dict(c["exploration"], tau_initial=1234.5)
+    c["exploration"] = dict(c["exploration"], tau_initial=1234.5, delta_min_log_bias=None)
     row = status._config_vs_reports(c, str(reports_dir))
     assert row["verdict"] == status.NONE, row
     assert "information_increment" in row["detail"]
