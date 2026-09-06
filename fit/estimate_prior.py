@@ -32,9 +32,11 @@ def _episodes_per_week(d, cfg):
     return {str(k): round(float(v), 1) for k, v in per.items()}
 
 
-def estimate_prior(d, cfg, fast=False):
-    """The prior as a density per category, with its own evidence attached."""
-    model = BaselineModel(cfg)
+def estimate_prior(d, cfg, fast=False, model=None):
+    """The prior as a density per category, with its own evidence attached.
+    `model` is the BaselineModel when the caller already holds one (main
+    stamps with its version); built here otherwise."""
+    model = model or BaselineModel(cfg)
     grid, per_category, densities, pooled = prior_density.estimate(
         d, cfg, model, fast=fast)
 
@@ -79,16 +81,6 @@ def estimate_prior(d, cfg, fast=False):
         "no_price_variation_categories": sorted(
             c for c, v in per_category.items() if "no_price_variation" in v),
         "holdout_comparison": comparison,
-        "acceptance": {
-            "passed": True,
-            "failures": [],
-            "note": ("this method has no reject path: a category that fails "
-                     "to identify epsilon widens instead of being replaced, "
-                     "which is what removes the constant. Read "
-                     "`holdout_comparison`, `wrong_sign_categories` and "
-                     "`own_information_weight` instead of an accept/reject "
-                     "flag."),
-        },
     }
 
 
@@ -147,9 +139,10 @@ def main():
 
     cfg = load_config(args.config)
     d = pd.read_parquet(args.input)
-    prior = estimate_prior(d, cfg, fast=args.fast)
+    model = BaselineModel(cfg)                 # once: the fit and the stamp
+    prior = estimate_prior(d, cfg, fast=args.fast, model=model)
 
-    stamp(prior, cfg, BaselineModel(cfg).version, "fit.estimate_prior")
+    stamp(prior, cfg, model.version, "fit.estimate_prior")
     path = cfg["posterior"]["prior"]["path"]
     write_json(path, prior)
 

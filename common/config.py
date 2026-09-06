@@ -113,10 +113,11 @@ def intraclass_correlation(residuals, groups, clip_max=0.95):
 
     `var(group means) / var(all)` estimates `rho + (1 - rho)/m`, not rho:
     a group mean of m independent draws still varies by sigma^2/m, and that
-    term is read as shared signal. On INDEPENDENT hours it returns 1/m
-    (measured: 0.164 at m=6), so deff deflated every posterior step by ~1.8x
-    of pure estimator artifact. The ANOVA form subtracts MSW, which is
-    exactly that term, and recovers rho at every m.
+    term is read as shared signal. On INDEPENDENT hours it returns 1/m, so
+    deff deflated every posterior step by a factor that was pure estimator
+    artifact (on the repo FIXTURE, 0.164 at m=6 -- a fixture reading, rule
+    19). The ANOVA form subtracts MSW, which is exactly that term, and
+    recovers rho at every m.
     """
     s = pd.Series(np.asarray(residuals, dtype=float)).reset_index(drop=True)
     g = pd.Series(np.asarray(groups)).reset_index(drop=True)

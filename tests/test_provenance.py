@@ -148,9 +148,16 @@ def test_the_seal_covers_the_environment_not_only_the_artifacts(cfg, tmp_path):
     assert provenance.verify(cfg, sealed)["verdict"] == "PASS"
     assert seal_mod.seal(cfg)["launch_posterior"]["cells"]["GLOBAL"]["launch_mean"] is None
 
-    # a seal from before the environment record verifies as it always did
+    # a seal from before the environment record is ONE problem -- read as
+    # "no drift" it would never be re-sealed with the record; no seal at all
+    # is still silence (nothing to compare against yet)
     legacy = {k: v for k, v in sealed.items() if k not in ("environment", "config_snapshot")}
-    assert provenance.verify(edited, legacy)["verdict"] == "PASS"
+    state = provenance.verify(edited, legacy)
+    assert state["verdict"] == "FAIL"
+    assert state["problems"] == [
+        "environment not sealed -- re-seal once to record config and libraries"]
+    assert provenance.environment_drift(cfg, None) == []
+    assert provenance.environment_drift(cfg, {}) == []
 
     # and the audit MANIFEST carries the record
     cfg["artifacts"]["history_dir"] = str(tmp_path / "history")
@@ -319,3 +326,22 @@ def test_archive_refuses_a_copy_that_does_not_match_the_seal(cfg, tmp_path):
     _artifact(cfg, ("baseline_model", "calibration_factor_path"), {"factors": {}})
     with pytest.raises(RuntimeError, match="calibration on disk does not match its seal"):
         provenance.archive(cfg, sealed, config_path=str(conf))
+
+
+def test_a_numpy_bool_is_written_as_a_json_bool(tmp_path):
+    """`json_safe` let np.bool_ through to `default=str`, so an artifact flag
+    computed with numpy comparison read back as the STRING "False" -- which
+    is truthy. One home for JSON out (AGENTS): the fix is there."""
+    import numpy as np
+
+    from common.io import json_safe, read_json, write_json
+
+    payload = {"flag": np.bool_(False), "nested": [np.bool_(True), np.int64(3),
+                                                  np.float64("nan"), True]}
+    safe = json_safe(payload)
+    assert safe["flag"] is False and safe["nested"] == [True, 3, None, True]
+    path = tmp_path / "a.json"
+    write_json(str(path), payload)
+    back = read_json(str(path))
+    assert back["flag"] is False and back["nested"][0] is True
+    assert '"False"' not in path.read_text()

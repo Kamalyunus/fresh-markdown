@@ -117,19 +117,15 @@ def cogs_at_risk(d, per_episode=None):
     return float(per_episode.reindex(pd.unique(d.episode_id)).to_numpy().sum())
 
 
-def edge_truncated_episodes(d, flow=None):
+def edge_truncated_episodes(d, flow):
     """Split unclosed episodes into EDGE (window still running when the
     extract was cut -- not a defect) vs NOT EDGE (ended inside the data with
     no sentinel -- a feed problem). Neither is removed: returns
     (edge_episode_ids, detail) and the caller flags, never filters. `flow`
-    is `episode_flow(d)` when the caller already holds it."""
+    is `episode_flow(d)`, which the one caller already holds."""
     last = episodes.last_rows(d)
     ids = last.episode_id.to_numpy()
-    if flow is None:
-        kind = episodes.classify_last(last)
-        unknown = kind.index[kind == episodes.NOT_CLOSED]
-    else:                                 # NOT_CLOSED is exactly ~closed
-        unknown = flow.index[~flow.closed]
+    unknown = flow.index[~flow.closed]    # NOT_CLOSED is exactly ~closed
 
     ts = pd.Series(
         (pd.to_datetime(last.date) + pd.to_timedelta(last.hour_of_day, unit="h")
@@ -170,6 +166,37 @@ def edge_truncated_episodes(d, flow=None):
     return at_edge, detail
 
 
+# The columns an episode id is built from. A null in any of them has no
+# episode to belong to: `assign_episode_ids` groups on sku_id x fc (a NaN key
+# falls out of every groupby) and stamps the window start from date x hour,
+# so such rows collapsed into one NaN "episode" that later stages then read
+# as a window. INTEGRITY, so it DROPS (rule 14) -- counted, never silent.
+EPISODE_KEY = ("sku_id", "fc", "date", "hour_of_day")
+
+
+def null_key_rows(df):
+    """Mask of rows with a null in any EPISODE_KEY column, and a per-column
+    count for the waterfall detail."""
+    nulls = df[list(EPISODE_KEY)].isna()
+    return nulls.any(axis=1), {c: int(nulls[c].sum()) for c in EPISODE_KEY}
+
+
+def recover_negative_windows(d, cap):
+    """`hours_remaining` rewritten as a synthetic countdown `(cap-1) -
+    position` on episodes that ENTER negative and fit inside `cap` hours
+    (manufacturing SKUs). Returns (frame, mask of rewritten rows). The ONE
+    step that mutates the counter the ids derive from: it must run AFTER the
+    re-segmentation check, and the ids are never re-derived from it."""
+    entry = d.groupby("episode_id")["hours_remaining"].transform("first")
+    length = d.groupby("episode_id")["hours_remaining"].transform("size")
+    recoverable = (entry < 0) & (length <= cap)
+    if recoverable.any():
+        d = d.copy()
+        position = d.groupby("episode_id").cumcount()
+        d.loc[recoverable, "hours_remaining"] = (cap - 1) - position[recoverable]
+    return d, recoverable
+
+
 def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     """Source mapping (design 6) + the filter chain (design 5.2, episodes per
     12a). Returns (df, waterfall).
@@ -186,11 +213,7 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     df["starting_inventory"] = df["starting_inventory"].round().astype("int64")
     df["ending_inventory"] = df["ending_inventory"].round().astype("int64")
 
-    # Two states for one sku x fc x hour is unresolvable -- keep neither;
-    # left in, they also collide two runs into one episode id.
-    df = df.sort_values(["sku_id", "fc", "date", "hour_of_day"])
-    dup = df.duplicated(subset=["sku_id", "fc", "date", "hour_of_day"],
-                        keep=False)
+    df = df.sort_values(list(EPISODE_KEY))
     # the `raw` row counts rows, episodes and COGS on ONE basis: the frame as
     # read, duplicates included (their ids collide -- that is the defect)
     df["episode_id"] = assign_episode_ids(df)
@@ -217,6 +240,20 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
         return d
 
     step(df, "raw", gate=True)
+    # no episode key, no episode: dropped before the duplicate test, which
+    # would otherwise read every null-keyed hour as a duplicate of the rest
+    null_key, null_by_col = null_key_rows(df)
+    df = df[~null_key]
+    step(df, "null_key_rows_dropped", {
+        "rows_dropped": int(null_key.sum()),
+        "nulls_by_column": null_by_col,
+        "note": ("a row with no sku_id, fc, date or hour belongs to no "
+                 "episode; kept, it collapsed into one NaN episode id "
+                 "(INTEGRITY: drop, rule 14). Row-scoped by construction "
+                 "-- there is no episode to scope it to.")})
+    # Two states for one sku x fc x hour is unresolvable -- keep neither;
+    # left in, they also collide two runs into one episode id.
+    dup = df.duplicated(subset=list(EPISODE_KEY), keep=False)
     df = df[~dup]
     df["episode_id"] = assign_episode_ids(df)
     per_ep["cogs"] = episode_cogs(df)
@@ -317,19 +354,13 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     # re-segmentation check -- this is the one step that mutates the counter.
     cap = int(cfg["data"]["manufacturing_window_hours"])
     entry = d.groupby("episode_id")["hours_remaining"].transform("first")
-    length = d.groupby("episode_id")["hours_remaining"].transform("size")
-    recoverable = (entry < 0) & (length <= cap)
-    n_recovered_ep = int(d.loc[recoverable, "episode_id"].nunique())
-    if n_recovered_ep:
-        d = d.copy()
-        position = d.groupby("episode_id").cumcount()
-        d.loc[recoverable, "hours_remaining"] = (cap - 1) - position[recoverable]
+    d, recoverable = recover_negative_windows(d, cap)
     d = step(d, "negative_window_recovered", {
-        "episodes_recovered": n_recovered_ep,
+        "episodes_recovered": int(d.loc[recoverable, "episode_id"].nunique()),
         "rows_recovered": int(recoverable.sum()),
         "window_hours_assumed": cap,
         "episodes_entering_negative_but_longer_than_cap":
-            int(d.loc[(entry < 0) & (length > cap), "episode_id"].nunique())})
+            int(d.loc[(entry < 0) & ~recoverable, "episode_id"].nunique())})
 
     # A counter still negative after recovery gates dp_eligible as
     # `negative_window` (see DP_INELIGIBLE). Restock and edge-truncation flags
@@ -391,12 +422,14 @@ def add_ref_rate_features(d, cfg):
         .groupby(["sku_id", "fc", "date"], as_index=False).sum())
 
     def trailing_rate(frame, keys):
-        """Trailing [t-W, t-1] anchor rate per key group; rolling includes the
-        current day, so the day's own totals are subtracted back out."""
+        """Trailing [t-W, t-1] anchor rate per key group (design 5.4): the
+        W prior days, the day itself excluded. `closed="left"` is exactly
+        that window; the default right-closed one is [t-W+1, t], and
+        subtracting the day back out left W-1 prior days."""
         g = frame.sort_values(keys + ["date"]).set_index("date")
         grouped = g.groupby(keys)
-        sold = grouped.a_sold.rolling(f"{window}D").sum() - g.a_sold.to_numpy()
-        hours = grouped.a_hours.rolling(f"{window}D").sum() - g.a_hours.to_numpy()
+        sold = grouped.a_sold.rolling(f"{window}D", closed="left").sum()
+        hours = grouped.a_hours.rolling(f"{window}D", closed="left").sum()
         rate = (sold / hours.replace(0, np.nan)).rename("rate")
         return rate.reset_index()
 

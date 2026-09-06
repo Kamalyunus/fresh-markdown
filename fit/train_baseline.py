@@ -109,14 +109,11 @@ class BaselineModel:
         return self
 
     def level_factors(self, d):
-        """The per-row level factor `predict_mu_ref` applies -- for a caller
-        that needs the factor itself (a rescale between two freezes is exact,
-        so the backtest's weekly-refit reading never predicts twice)."""
-        return self._factor_vector(d)
-
-    def _factor_vector(self, d):
-        """Per-row level factor: each row takes the factors in force for ITS
-        week; unfitted weeks fall back to the frozen anchor, never forward."""
+        """Per-row level factor, the one `predict_mu_ref` applies: each row
+        takes the factors in force for ITS week; unfitted weeks fall back to
+        the frozen anchor, never forward. Public because a caller may need
+        the factor itself (a rescale between two freezes is exact, so the
+        backtest's weekly-refit reading never predicts twice)."""
         keys = d[self.calibration_grain].astype(str)
         anchor = keys.map(lambda key: self.calibration.get(key, 1.0)).to_numpy()
         if self.calibration_schedule is None:
@@ -139,6 +136,9 @@ class BaselineModel:
             self._cal_rows_scheduled += int(rows.sum())
             out[rows] = keys[rows].map(lambda key: table.get(key, 1.0)).to_numpy()
         return out
+
+    # the pre-rename name: tests/conftest.py's applier still calls it
+    _factor_vector = level_factors
 
     def calibration_coverage(self):
         """Which priced rows got a point-in-time factor. Three anchor cases,
@@ -211,7 +211,7 @@ class BaselineModel:
         mu = self.booster.predict(self._matrix(d))
         mu = np.clip(mu, self.cfg["pricing"]["demand_floor"], None)
         if not raw:
-            mu = mu * self._factor_vector(d)
+            mu = mu * self.level_factors(d)
         return mu
 
 
@@ -254,26 +254,45 @@ def train(d, cfg):
     return schema
 
 
-def _solve_level_factors(calib, model, k_shrink, min_anchor,
-                         tier_step, max_k, r_lookup):
-    """Factors for one fit window (shared by the anchor fit and every schedule
-    week). Returns (factors, detail, global_factor, global_at_bound), or
-    None when the window holds too few anchor rows -- the caller holds those
-    weeks at 1.0. Cells ABOVE that floor are shrunk toward their parent
-    (category, then global) by `k_shrink` pseudo-units; a cell whose
-    bisection ran off the bracket carries `at_bound` in its detail, and
-    `global_at_bound` names the bracket end the GLOBAL solve pinned to (None
-    when it converged) -- a bound is not a solve, at any level (rule 3)."""
+def attach_fit_basis(frame, model, r_lookup):
+    """The two per-row inputs a level solve reads, attached in place: the
+    RAW mu_ref (`mu_ref_hat`) and, on the censored basis, each row's r
+    (`r_val`). Neither depends on the window, so a schedule attaches them to
+    its whole scope once and slices, instead of predicting per week."""
     from fit.fit_dispersion import lookup_r_vec   # local: avoids a cycle
+    frame["mu_ref_hat"] = model.predict_mu_ref(frame, raw=True)
+    if r_lookup is not None:
+        frame["r_val"] = lookup_r_vec(r_lookup, frame.subcategory,
+                                      frame.category)
+    return frame
 
+
+def pinned_cells(detail):
+    """{cell: bracket end} for every cell of a detail table whose own solve
+    pinned (rule 3)."""
+    return {k: v["at_bound"] for k, v in detail.items() if v.get("at_bound")}
+
+
+def _solve_level_factors(calib, model, k_shrink, min_anchor,
+                         tier_step, max_k, r_lookup, predicted=False):
+    """Factors for one fit window (shared by the anchor fit and every schedule
+    week). Returns (factors, detail, global_factor, global_at_bound,
+    detail_category), or None when the window holds too few anchor rows --
+    the caller holds those weeks at 1.0. Cells ABOVE that floor are shrunk
+    toward their parent (category, then global) by `k_shrink` pseudo-units.
+    A bound is not a solve, at any level (rule 3): a cell whose bisection
+    ran off the bracket carries `at_bound` in its detail; a subcategory
+    whose PARENT category pinned carries `parent_at_bound` (it is shrunk
+    toward a bracket end, however thin it is); `global_at_bound` names the
+    end the GLOBAL solve pinned to (None when it converged). `predicted`
+    says `attach_fit_basis` already ran on `calib` (a schedule attaches once
+    to its scope); otherwise it runs here, on `calib` in place."""
     bm = model.cfg["baseline_model"]
     f_lo, f_hi = (float(x) for x in bm["calibration_factor_search_bounds"])
     halvings = int(bm["calibration_factor_bisection_steps"])
 
-    calib["mu_ref_hat"] = model.predict_mu_ref(calib, raw=True)
-    if r_lookup is not None:
-        calib["r_val"] = lookup_r_vec(r_lookup, calib.subcategory,
-                                      calib.category)
+    if not predicted:
+        attach_fit_basis(calib, model, r_lookup)
 
     def solve_factor(anchor):
         """(factor, predicted at f=1, at_bound): solved against the censored
@@ -320,11 +339,13 @@ def _solve_level_factors(calib, model, k_shrink, min_anchor,
     f_global, _, global_at_bound = solve_factor(anchor_all)
 
     def fit_level(groups, parent_of):
+        """`parent_of(key, g)` -> (parent factor, the bracket end the
+        parent's OWN solve pinned to, or None)."""
         out, det = {}, {}
         for key, g in groups:
             raw_f, pred, at_bound = solve_factor(g)
             evidence = float(g["units_sold"].sum())
-            parent = parent_of(key, g)
+            parent, parent_at_bound = parent_of(key, g)
             f = shrink(raw_f, parent, evidence)
             out[str(key)] = round(float(f), 4)
             det[str(key)] = {
@@ -345,14 +366,25 @@ def _solve_level_factors(calib, model, k_shrink, min_anchor,
                     f"calibration_factor_search_bounds {[f_lo, f_hi]}, not a "
                     "solved value -- the bisection bracket does not contain "
                     "the sold total. Investigate the cell before trusting it.")
+            if parent_at_bound:
+                # the parent this cell is shrunk toward is itself a bracket
+                # end: the thinner the cell, the more of its factor is bound
+                det[str(key)]["parent_at_bound"] = parent_at_bound
         return out, det
 
-    cat_factors, _ = fit_level(
-        anchor_all.groupby("category"), lambda k, g: f_global)
-    factors, detail = fit_level(
-        anchor_all.groupby("subcategory"),
-        lambda k, g: cat_factors.get(str(g["category"].iloc[0]), f_global))
-    return factors, detail, f_global, global_at_bound
+    cat_factors, cat_detail = fit_level(
+        anchor_all.groupby("category"),
+        lambda k, g: (f_global, global_at_bound))
+
+    def parent_of_sub(key, g):
+        cat = str(g["category"].iloc[0])
+        if cat not in cat_factors:
+            return f_global, global_at_bound
+        return cat_factors[cat], cat_detail[cat].get("at_bound")
+
+    factors, detail = fit_level(anchor_all.groupby("subcategory"),
+                                parent_of_sub)
+    return factors, detail, f_global, global_at_bound, cat_detail
 
 
 def fit_level_calibration(d, cfg):
@@ -386,9 +418,8 @@ def fit_level_calibration(d, cfg):
     tier_step = cfg["pricing"]["tier_step"]
     max_k = cfg["pricing"]["negbin_max_k"]
 
-    r_path = cfg["dispersion"]["r_lookup_path"]
-    censored_basis = os.path.exists(r_path)
-    r_lookup = read_json(r_path)
+    r_lookup = read_json(cfg["dispersion"]["r_lookup_path"])
+    censored_basis = r_lookup is not None
 
     min_anchor = cfg["baseline_model"]["calibration_min_anchor_rows"]
     k_shrink = cfg["baseline_model"]["calibration_shrinkage_units"]
@@ -400,7 +431,7 @@ def fit_level_calibration(d, cfg):
         raise RuntimeError(
             f"fit window has only {anchors} anchor rows (need {min_anchor})"
             " -- widen calibration_fit_trailing_weeks")
-    factors, detail, f_global, global_at_bound = fitted
+    factors, detail, f_global, global_at_bound, detail_category = fitted
 
     # POINT-IN-TIME schedule. Pre-launch: over every pre-launch week (a
     # forward replay must see exactly what production re-fits weekly; the
@@ -416,19 +447,27 @@ def fit_level_calibration(d, cfg):
     if launched and weeks:
         weeks.append((episodes.week_start(weeks[-1]) + pd.Timedelta(days=7))
                      .strftime("%Y-%m-%d"))
-    by_week, coverage = {}, []
+    by_week, coverage, pinned_by_week = {}, [], {}
     opened = episodes.opening_dates(scope)     # once, not once per week
+    attach_fit_basis(scope, model, r_lookup)   # once: the windows are slices
     for w in weeks:
         window, weeks_seen = episodes.trailing_weeks_window(
             scope, w, weeks_back, opened=opened)
         if not len(window):
             continue
-        f = _solve_level_factors(window.copy(), model, k_shrink,
-                                 min_anchor, tier_step, max_k, r_lookup)
+        f = _solve_level_factors(window, model, k_shrink, min_anchor,
+                                 tier_step, max_k, r_lookup, predicted=True)
         if f is None:                       # too thin: hold 1.0, say so
             coverage.append({"week": w, "fitted": False})
             continue
         by_week[w] = f[0]
+        # the week's pinned cells, by level -- the per-cell detail itself is
+        # the anchor fit's; a week keeps only what rule 3 needs
+        pinned = {**{f"category:{k}": v for k, v in pinned_cells(f[4]).items()},
+                  **{f"subcategory:{k}": v
+                     for k, v in pinned_cells(f[1]).items()}}
+        if pinned:
+            pinned_by_week[w] = pinned
         coverage.append({"week": w, "fitted": True,
                          "fit_rows": int(len(window)),
                          "weeks_in_window": weeks_seen,
@@ -442,7 +481,10 @@ def fit_level_calibration(d, cfg):
                   f"pre-launch -- through split.test_end {split['test_end']}"),
         "trailing_weeks": weeks_back,
         "gate_freezes_at": str(gate_start.date()),
-        "anchor_fit_window": [str(lo.date()), str(gate_start.date())],
+        # the frozen anchor's window, both ends INCLUSIVE (the day before
+        # the gate opens is its last day)
+        "anchor_fit_window": [str(lo.date()),
+                              str((gate_start - pd.Timedelta(days=1)).date())],
         "week_key": "ISO week start the factors APPLY to; fit on the "
                     "trailing window ending strictly before it",
         "weeks_fitted": sum(1 for c in coverage if c["fitted"]),
@@ -457,8 +499,22 @@ def fit_level_calibration(d, cfg):
         "weeks_global_at_bound": {c["week"]: c["global_at_bound"]
                                   for c in coverage
                                   if c.get("global_at_bound")},
+        # {week: {"level:cell": bracket end}} for the weeks with a pinned
+        # cell -- the schedule's rule-3 flags, since by_week keeps factors only
+        "pinned_by_week": pinned_by_week,
         "by_week": by_week,
     }
+
+    # every pinned solve in the artifact, anchor and schedule, in one list
+    # (ops.status reads this field alone): {scope, level, cell, at_bound}
+    pins = ([{"scope": "anchor", "level": "category", "cell": k, "at_bound": v}
+             for k, v in sorted(pinned_cells(detail_category).items())]
+            + [{"scope": "anchor", "level": "subcategory", "cell": k,
+                "at_bound": v} for k, v in sorted(pinned_cells(detail).items())]
+            + [{"scope": w, "level": lc.split(":", 1)[0],
+                "cell": lc.split(":", 1)[1], "at_bound": v}
+               for w, cells in sorted(pinned_by_week.items())
+               for lc, v in sorted(cells.items())])
 
     fv = np.array(list(factors.values()), dtype=float)
     payload = {"grain": GRAIN,
@@ -475,13 +531,20 @@ def fit_level_calibration(d, cfg):
                "factors": factors,
                "schedule": schedule,
                "detail": detail,
+               # the parent level's own solves: a subcategory shrinks toward
+               # its category's factor, so a category pinned here is a bound
+               # under every thin subcategory it holds (parent_at_bound)
+               "detail_category": detail_category,
+               "pinned_cells": pins,
                "global_factor": round(float(f_global), 4),
                # None, or the bracket end ("lower"/"upper") the global solve
                # pinned to: then the parent every category shrinks toward is
                # a bound, not a solve (rule 3)
                "global_factor_at_bound": global_at_bound,
                "shrinkage_units": k_shrink,
-               "fit_window": "rolling_trailing",
+               # the frozen anchor is ONE trailing window ending the day
+               # before the gate opens; the rolling re-fit is `schedule`
+               "fit_window": "trailing_before_gate",
                "fit_basis": "censored E[min(D,q)]" if censored_basis
                    else "raw mu (r_lookup missing)",
                "fit_window_dates": [str(fit_dates.min().date()),
@@ -495,10 +558,29 @@ def fit_level_calibration(d, cfg):
                          "calibration_min_anchor_rows is unfitted (held at "
                          "the frozen anchor); a cell whose bisection pinned "
                          "at calibration_factor_search_bounds carries "
-                         "at_bound in detail")}
-    write_json(cfg["baseline_model"]["calibration_factor_path"],
-               stamp(payload, cfg, model.version,
-                     "fit.train_baseline --fit-calibration"))
+                         "at_bound in detail, one whose parent pinned "
+                         "parent_at_bound; pinned_cells lists every pin, "
+                         "anchor and schedule")}
+    path = cfg["baseline_model"]["calibration_factor_path"]
+    # The weekly PRODUCTION re-fit (launch_date set) retrains nothing: the
+    # prior, r and rho it was checked against are the ones on disk, so the
+    # convergence verdict still holds and is carried forward -- written
+    # without it, ops.tune read "never checked" and BLOCKED the daily lane
+    # after every cron. The bootstrap path is unchanged: its verdict comes
+    # from the --check-convergence that follows each fit.
+    previous = read_json(path) or {}
+    if launched and previous.get("convergence"):
+        conv = dict(previous["convergence"])
+        conv["carried_from"] = (
+            conv.get("carried_from")
+            or (previous.get("provenance") or {}).get("created_at"))
+        conv["carried_note"] = (
+            "carried forward from the previous artifact by the weekly "
+            "production re-fit, which moves no prior/r/rho; status still "
+            "reads checked_against against the artifacts on disk")
+        payload["convergence"] = conv
+    write_json(path, stamp(payload, cfg, model.version,
+                           "fit.train_baseline --fit-calibration"))
     return factors
 
 
@@ -557,8 +639,11 @@ def check_calibration_convergence(d, cfg, commit=False):
                        if row["artifact"] in ("prior", "r_lookup", "rho")
                        and row["present"]}
 
-    # anchor rows behind the worst cell: a thin, shrinkage-dominated cell
-    # reads identically to an unsettled loop unless the row count is shown
+    # anchor rows behind the worst cell IN THE FROZEN ANCHOR FIT: a thin,
+    # shrinkage-dominated cell reads identically to an unsettled loop unless
+    # the row count is shown. The per-week detail is not kept, so a worst
+    # cell in a schedule week is sized by its anchor-fit count, and labelled
+    # as such
     worst_rows = None
     if worst[1]:
         cell = worst[1].split(":", 1)[1]
@@ -573,6 +658,9 @@ def check_calibration_convergence(d, cfg, commit=False):
         "tol_log": tol,
         "history": history,
         "worst_cell_anchor_rows": worst_rows,
+        "worst_cell_anchor_rows_basis": (
+            "the cell's anchor rows in the FROZEN ANCHOR fit, whatever "
+            "scope the worst cell is in (per-week cell counts are not kept)"),
         "checked_against": checked_against,
         "max_abs_dlog": round(worst[0], 6),
         "worst_cell": worst[1],
@@ -590,8 +678,8 @@ def check_calibration_convergence(d, cfg, commit=False):
             "current prior/r{}. Run --fit-calibration, estimate_prior and "
             "fit_dispersion once more, then re-check.{}".format(
                 worst[0], tol,
-                f", worst cell on {worst_rows:,} anchor rows"
-                if worst_rows else "",
+                f", worst cell on {worst_rows:,} anchor rows in the frozen "
+                "anchor fit" if worst_rows else "",
                 (" Trajectory " + " -> ".join(f"{h:.4f}" for h in history)
                  + (" is contracting: keep going, several turns is normal."
                     if len(history) > 1 and history[-1] < history[-2] else
@@ -632,11 +720,21 @@ def _describe_calibration(art, factors, widest_n=12):
                         if info.get("at_bound") else "") + ")")
     if len(factors) > len(widest):
         lines.append(f"  ... {len(factors) - len(widest)} more cells nearer 1.0")
-    pinned = sorted(k for k, v in detail.items() if v.get("at_bound"))
+    pinned = sorted(pinned_cells(detail))
     if pinned:
         lines.append(f"{len(pinned)} cell(s) pinned at "
                      "calibration_factor_search_bounds -- a bound is not a "
                      "solve: " + ", ".join(pinned))
+    parents = sorted(pinned_cells(art.get("detail_category") or {}))
+    if parents:
+        under = sorted(k for k, v in detail.items() if v.get("parent_at_bound"))
+        lines.append(f"{len(parents)} CATEGORY solve(s) pinned -- the parent "
+                     f"{len(under)} subcategory cell(s) shrink toward is a "
+                     "bound: " + ", ".join(parents))
+    weekly = (art.get("schedule") or {}).get("pinned_by_week") or {}
+    if weekly:
+        lines.append(f"{len(weekly)} schedule week(s) with a pinned cell "
+                     "(schedule.pinned_by_week)")
     below = [k for k, v in factors.items() if v < 1.0]
     if below:
         lines.append(f"{len(below)}/{len(factors)} cells below 1.0 (model "
@@ -676,6 +774,9 @@ def main():
         if block["cells_appeared_or_gone"]:
             print(f"cells appeared/disappeared: "
                   f"{block['cells_appeared_or_gone']}")
+        if block.get("worst_cell_anchor_rows"):
+            print("  (row count = the cell's anchor rows in the frozen "
+                  "anchor fit)")
         print(block["verdict"])
         return
 

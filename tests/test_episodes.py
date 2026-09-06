@@ -274,3 +274,21 @@ def test_a_censored_entry_row_is_a_one_hour_episode():
     # episode b is one hour, so entry IS last -- the only censored entry row
     assert cen[2]
     assert list(pd.Series(cen)[entry_idx]) == [False, True]
+
+
+def test_identity_violations_are_the_rows_the_flow_already_marks():
+    """`flow_identity_violations` re-derived `opening + arrived != sold +
+    scrap`, which `episode_flow` had already decided as `accounting_closes`;
+    it now reads that column, and the flow carries no leftover `net`."""
+    rows = [("A", 10, 3, 10, 4, 6), ("A", 11, 2, 6, 3, 3), ("A", 12, 1, 3, 0, 0),
+            ("B", 10, 9, 10, 1, 9), ("B", 11, 8, 9, 1, 8)]
+    d = episode_frame(rows, columns=["episode_id", "hour_of_day", "hours_remaining",
+                                     "starting_inventory", "units_sold",
+                                     "ending_inventory"], date="2026-03-01")
+    flow = episodes.episode_flow(d)
+    assert "net" not in flow.columns
+    assert flow.accounting_closes.all()
+    assert episodes.flow_identity_violations(d).empty
+    broken = flow.copy()
+    broken.loc["B", "accounting_closes"] = False
+    assert list(episodes.flow_identity_violations(d, flow=broken).index) == ["B"]

@@ -1,6 +1,7 @@
 """config.yaml as shipped: the hold-out sits after every fitting window,
-tau_initial is void until re-derived, strict mode refuses a null measured
-key, and a paste left over from a previous retrain is detected."""
+the owner's launch tau is a positive paste that shadow re-derives, strict
+mode refuses a null MEASURED key, and a paste left over from a previous
+retrain is detected."""
 
 import pytest
 import yaml
@@ -23,18 +24,27 @@ def test_holdout_is_disjoint_from_every_fitting_window(cfg):
         assert not (h["start"] <= hi and lo <= h["end"])
 
 
-def test_config_ships_the_owners_launch_tau_and_can_rederive_it(cfg):
+def test_config_ships_the_owners_launch_tau_as_a_positive_paste(cfg):
     """config.yaml carries the owner's production pastes as the defaults
-    (2026-09-06); tau is a positive currency amount, and the derivation
-    floor is set so shadow re-derives it on every run."""
+    (2026-09-06): tau is a positive currency amount, never void, and the
+    derivation floor is positive so shadow re-derives it on every run."""
     assert cfg["exploration"]["tau_initial"] > 0
     assert cfg["exploration"]["tau0_derivation_min_decisions"] > 0
 
 
 def test_config_strict_refuses_null_measured(tmp_path):
+    """On a scratch config with one MEASURED key nulled -- the shipped one
+    has only `launch_date` null, which is gone on launch day."""
     from common.config import ConfigError
-    with pytest.raises(ConfigError, match="refusing to start"):
-        load_config(strict=True)
+
+    with open("config.yaml") as f:
+        cfg = yaml.safe_load(f)
+    cfg["data"]["launch_date"] = "2026-09-07"
+    cfg["dispersion"]["rho"] = None
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(ConfigError, match="refusing to start.*dispersion.rho"):
+        load_config(str(path), strict=True)
 
 
 def test_config_detects_stale_paste_from_frozen_artifact(tmp_path):

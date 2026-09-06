@@ -24,7 +24,6 @@ def scored_rows(frame):
     see learnings.md)."""
     f = frame.copy()
     f["censored"] = episodes.censored_hours(f)
-    f = f[f.starting_inventory >= 1]
     # censored entry rows kept: the Poisson likelihood handles censoring
     # without a dispersion parameter, so there is nothing to drop them for
     # DATE first: sorting on hour alone picks the 00:00 row of an episode
@@ -32,8 +31,12 @@ def scored_rows(frame):
     # path row, exactly the confound rule 7 exists to exclude. Production
     # windows routinely cross midnight (design 12a); episodes.last_rows
     # already orders by ("date", "hour_of_day") for the same reason.
-    return f.sort_values(["episode_id", "date", "hour_of_day"]) \
-            .groupby("episode_id").head(1).copy()
+    entry = (f.sort_values(["episode_id", "date", "hour_of_day"])
+              .groupby("episode_id").head(1))
+    # the ENTRY row, then the stock test -- not the first STOCKED row: an
+    # episode opening on an empty shelf would otherwise score its first
+    # post-ramp hour as its entry (rule 7). No stock at entry = no entry row.
+    return entry[entry.starting_inventory >= 1].copy()
 
 
 def hour_multipliers(mu, cell, k, censored, min_rows=1):
@@ -160,7 +163,7 @@ def build_curves(d, cfg, model, grid, window):
     out = {}
     for cat, g in rows.groupby("category"):
         mu_ref = model.predict_mu_ref(g)
-        deff, rho, m = deflation_deff(g, mu_ref, cfg)
+        deff, rho, _ = deflation_deff(g, mu_ref, cfg)
         lr = np.log((1 - g.total_discount.to_numpy())
                     / (1 - g.d_ref.to_numpy()))
         # de-meaned on the SAME cell the controlled arm profiles out, or the
@@ -168,19 +171,16 @@ def build_curves(d, cfg, model, grid, window):
         cells = time_cell(g)
         within = lr - pd.Series(lr).groupby(cells).transform("mean").to_numpy()
         v = float(np.var(lr))
-        sizes = pd.Series(cells).value_counts()
         out[str(cat)] = {
             "naive": curve(g, mu_ref, grid, False, cfg),
             "controlled": curve(g, mu_ref, grid, True, cfg),
-            "deff": deff, "rho_eps_free": rho, "mean_rows_per_episode": m,
+            "deff": deff, "rho_eps_free": rho,
             "rows": int(len(g)), "episodes": int(g.episode_id.nunique()),
             "censored_share": float(g.censored.mean()),
             "log_ratio_sd": float(np.std(lr)),
             "distinct_discounts": int(g.total_discount.nunique()),
             "identifying_variation_share": (float(np.var(within) / v)
                                             if v > 0 else 0.0),
-            "time_cells": int(len(sizes)),
-            "median_rows_per_time_cell": float(sizes.median()),
         }
     return out
 
@@ -258,6 +258,7 @@ def fold_spread(d, cfg, model, grid, folds=3):
     train = population(frames["train"], cfg)
     if train.empty:
         return {}
+    min_rows = int(cfg["posterior"]["prior"]["fold_min_entry_rows"])
     opened = episodes.opening_dates(train)
     dates = np.array_split(np.sort(opened.unique()), folds)
     out = {}
@@ -268,7 +269,7 @@ def fold_spread(d, cfg, model, grid, folds=3):
         sl = episodes.window_slice(train, chunk[0], chunk[-1], opened=opened)
         rows = scored_rows(sl)
         for cat, g in rows.groupby("category"):
-            if len(g) < 50:
+            if len(g) < min_rows:
                 continue
             mu_ref = model.predict_mu_ref(g)
             n = grid[int(np.argmax(curve(g, mu_ref, grid, False, cfg)))]
@@ -452,7 +453,9 @@ def holdout_comparison(d, cfg, model, grid, candidates):
     """Score every candidate prior on held-out data: log marginal predictive
     likelihood per row, deff-deflated -- narrow-and-wrong loses badly,
     too-wide loses mildly. `oracle` (hindsight-best eps, unreachable) and
-    `uniform` (flat, the floor) bracket the result. Rationale: design 5.6."""
+    `uniform` (flat, the floor) bracket the result. One candidate in
+    practice (the profile density); the ranking is against the brackets,
+    never between methods. Rationale: design 5.6."""
     window = "calib"                       # the out-of-train scoring window
     hold = build_curves(d, cfg, model, grid, window)
     if not hold:
@@ -519,32 +522,6 @@ def holdout_comparison(d, cfg, model, grid, candidates):
             "support: on this held-out window that prior is worse than knowing "
             "nothing about epsilon. A confident wrong answer costs more than "
             "an honest wide one, and this is what that looks like in nats.")
-
-    if len(ranked) >= 2:
-        a, b = ranked[0], ranked[1]
-        gain = (totals[a] - totals[b]) / max(rows_total, 1)
-        # measured against the floor, not against the loser, so a sub-uniform
-        # rival cannot manufacture a share above 100%
-        headroom = (totals["oracle"] - max(totals[b], totals["uniform"])) \
-            / max(rows_total, 1)
-        share = gain / headroom if headroom > 0 else float("nan")
-        out["method_gap_per_row"] = round(gain, 6)
-        out["method_gap_share_of_available"] = (
-            None if headroom <= 0 else round(share, 3))
-        out["verdict"] = (
-            f"{a} beats {b} by {gain:.6f} nats per held-out row "
-            f"({totals[a] - totals[b]:.1f} total over {rows_total:,} rows). "
-            + (f"{b} is itself below a flat prior, so this is not a close "
-               f"contest between two reasonable answers -- it is one answer "
-               f"and one that costs more than knowing nothing. "
-               if b in below_floor else
-               f"That is {share:.0%} of the {headroom:.6f} still on the table "
-               f"above the loser. ")
-            + ("The information available on this window (oracle minus "
-               "uniform) is under 0.01 nats/row, so read any ranking here as "
-               "weak evidence and decide on which prior is more honest about "
-               "what it does not know. Compare their WIDTHS."
-               if available < 0.01 else "Large enough to act on."))
     if ranked and totals[ranked[0]] < totals["uniform"]:
         out["warning"] = (
             "NO CANDIDATE BEATS A FLAT PRIOR. On this held-out window the data "

@@ -24,8 +24,8 @@ DATA_DIR = "data"
 DEFAULT_OUT_PARQUET = os.path.join(DATA_DIR, "flc_raw.parquet")
 SOURCE_TABLE = "sb_scm.fresh_flc_detail"
 
-# Every column steps 1 and 2 read, under the names they read them by; kept as
-# data so the test can compare the two lists directly.
+# Every column step 1 (fit.prepare_data) reads, under the names it reads them
+# by; kept as data so the test can compare the two lists directly.
 REQUIRED_COLUMNS = (
     "date", "hour", "skuseq", "fc", "inventory", "units_sold",
     "ending_inventory", "discount", "normal_asp", "final_price",
@@ -179,7 +179,9 @@ def main():
 
     query = build_query(start, end, excl.get("start"), excl.get("end"))
     print(f"== {SOURCE_TABLE}: {start} -> {end}"
-          + (f", excluding {excl['start']} -> {excl['end']}" if excl else "")
+          + (f", skipping the interior of {excl['start']} -> {excl['end']} "
+             "(both edge days pulled; step 1 removes the window whole)"
+             if excl else "")
           + " ==")
 
     conn = get_conn(args.env_file)

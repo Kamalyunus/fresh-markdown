@@ -96,9 +96,12 @@ def r_at_bound(r, cfg):
     return bool(r >= hi * (1 - tol) or r <= lo * (1 + tol))
 
 
-def fit_dispersion(d, cfg):
+def fit_dispersion(d, cfg, model=None):
+    """r_lookup and rho on the calib window. `model` is the BaselineModel
+    when the caller already holds one (main shares it with drift_by_window
+    and the stamp); built here otherwise."""
     dc = cfg["dispersion"]
-    model = BaselineModel(cfg)
+    model = model or BaselineModel(cfg)
     # working elasticity per category from the prior in force
     eps_by_cat, eps0 = _working_elasticity(cfg)
     calib = _residual_frame(population(split_frames(d, cfg)["calib"], cfg),
@@ -129,7 +132,13 @@ def fit_dispersion(d, cfg):
             p = pearson_dispersion(g.units_sold.to_numpy(), g.mu_hat.to_numpy())
             if p < 1.0:
                 under[f"{level}:{key}"] = round(p, 4)
-    r_global, _ = fit_group(calib)
+    r_global, ok = fit_group(calib)
+    if not ok:
+        # a group that fails to converge is skipped; the global r ends the
+        # fallback chain and cannot be, so the failure is a refusal (rule 13)
+        raise RuntimeError(
+            "the global r fit did not converge on the calib window -- every "
+            "fallback ends here, so there is no r_lookup to write")
     global_at_bound = r_at_bound(r_global, cfg)
     pearson_global = pearson_dispersion(calib.units_sold.to_numpy(),
                                         calib.mu_hat.to_numpy())
@@ -213,16 +222,27 @@ def fit_dispersion(d, cfg):
     return r_lookup, rho_out
 
 
-def drift_by_window(d, cfg, freq="W"):
+def drift_by_window(d, cfg, freq="W", model=None):
     """Do r and rho actually move, or are they stable enough to freeze?
     Refits both on rolling windows with the SAME estimators as the frozen
     fit. A MEASUREMENT, not a re-fit schedule: weekly re-fits would add noise
     to the learning rate's denominators and reintroduce the eps<->r cycle.
-    Use: decide the retrain cadence; baseline the assurance alerts."""
+    Use: decide the retrain cadence; baseline the assurance alerts.
+
+    Windows are fitted over the whole pre-launch scope but GRADED on the
+    post-train ones: the model fits its own residuals in train, so in-train
+    windows understate r and rho, and pooling them with post-train windows
+    read the train/test seam as drift. `basis` names each window's side;
+    the medians, spreads and verdict take the post-train windows alone
+    (all windows, and a note, when fewer than `drift_min_windows` exist).
+    """
     dc = cfg["dispersion"]
-    model = BaselineModel(cfg)
+    model = model or BaselineModel(cfg)
     eps_by_cat, eps0 = _working_elasticity(cfg)
     bounds = dc["r_search_bounds"]
+    min_windows = int(dc["drift_min_windows"])
+    max_unusable = float(dc["drift_max_unusable_share"])
+    train_end = pd.Timestamp(cfg["data"]["split"]["train_end"])
 
     # rule 16: drift_by_window sets the retrain cadence and baselines the
     # rho drift alert, both pre-launch readings -- the hold-out is shadow's
@@ -260,6 +280,10 @@ def drift_by_window(d, cfg, freq="W"):
                  if sub.episode_id.nunique() > 1 else None)
         by_window[label] = {
             "rows": int(len(g)),
+            # a window is post-train only when it opens AFTER train_end
+            # whole; one straddling the seam holds in-train residuals
+            "basis": ("post_train" if win.start_time > train_end
+                      else "in_train"),
             "r": round(r, 4) if ok else None,
             "rho": round(rho_w, 4) if rho_w is not None else None,
             "pearson": round(pear, 3),
@@ -268,11 +292,20 @@ def drift_by_window(d, cfg, freq="W"):
             "r_usable": usable,
         }
 
-    # r stats over the windows where an NB fit MEANS anything
-    rs = [v["r"] for v in by_window.values() if v["r_usable"]]
-    unusable = [w for w, v in by_window.items() if not v["r_usable"]]
-    rhos = [v["rho"] for v in by_window.values() if v["rho"] is not None]
-    pears = [v["pearson"] for v in by_window.values()]
+    post = {w: v for w, v in by_window.items() if v["basis"] == "post_train"}
+    if len(post) >= min_windows:
+        graded, stats_basis = post, "post_train"
+    else:
+        graded = by_window
+        stats_basis = (f"all windows -- only {len(post)} post-train window(s), "
+                       f"below dispersion.drift_min_windows {min_windows}; "
+                       "in-train windows understate r and rho, so read the "
+                       "spread as a floor on the drift, not a measurement")
+    # r stats over the graded windows where an NB fit MEANS anything
+    rs = [v["r"] for v in graded.values() if v["r_usable"]]
+    unusable = [w for w, v in graded.items() if not v["r_usable"]]
+    rhos = [v["rho"] for v in graded.values() if v["rho"] is not None]
+    pears = [v["pearson"] for v in graded.values()]
     alert = cfg["assurance"].get("rho_drift_alert")
 
     def spread(xs):
@@ -281,12 +314,16 @@ def drift_by_window(d, cfg, freq="W"):
 
     r_spread, r_med = spread(rs)
     rho_spread, rho_med = spread(rhos)
-    unusable_share = len(unusable) / max(len(by_window), 1)
+    unusable_share = len(unusable) / max(len(graded), 1)
     return {
         "freq": freq,
         "windows_fitted": len(by_window),
         "windows_too_thin": thin,
         "by_window": by_window,
+        # which windows the medians, spreads and verdict below are taken over
+        "stats_basis": stats_basis,
+        "windows_graded": len(graded),
+        "windows_post_train": len(post),
         "r_median": r_med, "r_spread": r_spread,
         "r_windows_usable": len(rs),
         "r_windows_unusable": unusable,
@@ -299,15 +336,17 @@ def drift_by_window(d, cfg, freq="W"):
         "pearson_range": [round(min(pears), 3), round(max(pears), 3)]
             if pears else None,
         "verdict": (
-            "NOT ENOUGH WINDOWS -- widen freq or the extract"
-            if len(by_window) < 3 else
+            f"NOT ENOUGH WINDOWS -- {len(graded)} graded, "
+            f"dispersion.drift_min_windows is {min_windows}; widen freq or "
+            "the extract"
+            if len(graded) < min_windows else
             f"r IS NOT FITTABLE AT THIS CADENCE -- {len(unusable)} of "
-            f"{len(by_window)} windows are under-dispersed (Pearson < 1, which "
+            f"{len(graded)} windows are under-dispersed (Pearson < 1, which "
             "no NB expresses) or pinned at a search bound, so their r is a "
             "failed fit rather than a value. Re-fitting r this often would "
             "bank those as if they were measurements; read pearson_range "
             "before reading r at all"
-            if unusable_share > 0.34 else
+            if unusable_share > max_unusable else
             f"rho varies by {rho_spread} across {freq} windows against a "
             f"{alert} live alert ({rho_spread / alert:.1f}x): the alert would "
             "fire on ORDINARY variation, so treat it as an alarm to retune "
@@ -362,16 +401,16 @@ def main():
 
     cfg = load_config(args.config)
     d = pd.read_parquet(args.input)
-    r_lookup, rho_out = fit_dispersion(d, cfg)
+    model = BaselineModel(cfg)                 # once: both fits and the stamp
+    r_lookup, rho_out = fit_dispersion(d, cfg, model=model)
 
     dc = cfg["dispersion"]
     # is freezing these defensible on THIS extract? Measured, not assumed --
     # and it sets the retrain cadence rather than a weekly re-fit (see
     # drift_by_window on why weekly is the wrong answer)
-    rho_out["drift_by_window"] = drift_by_window(d, cfg)
-    bundle = BaselineModel(cfg).version
-    stamp(r_lookup, cfg, bundle, "fit.fit_dispersion")
-    stamp(rho_out, cfg, bundle, "fit.fit_dispersion")
+    rho_out["drift_by_window"] = drift_by_window(d, cfg, model=model)
+    stamp(r_lookup, cfg, model.version, "fit.fit_dispersion")
+    stamp(rho_out, cfg, model.version, "fit.fit_dispersion")
     write_json(dc["r_lookup_path"], r_lookup)
     write_json(dc["rho_path"], rho_out)
 
@@ -383,7 +422,8 @@ def main():
     if dr.get("windows_fitted"):
         print(f"drift ({dr['freq']})       : r {dr['r_median']} +-{dr['r_spread']} | "
               f"rho {dr['rho_median']} +-{dr['rho_spread']} over "
-              f"{dr['windows_fitted']} windows")
+              f"{dr['windows_graded']} of {dr['windows_fitted']} windows "
+              f"({dr['stats_basis'].split(' --')[0]})")
         print(f"                   {dr['verdict']}")
     print("paste into config.yaml: dispersion.rho, "
           "-- m is measured per batch, never pasted")

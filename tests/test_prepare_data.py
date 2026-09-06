@@ -170,12 +170,10 @@ def test_recovery_cannot_merge_a_negative_episode_into_its_neighbour():
     raw["episode_id"] = assign_episode_ids(raw)
     assert raw.episode_id.nunique() == 2, "the two windows are distinct at source"
 
-    # apply recovery exactly as the chain does
-    cap, d = 24, raw.copy()
-    entry = d.groupby("episode_id")["hours_remaining"].transform("first")
-    length = d.groupby("episode_id")["hours_remaining"].transform("size")
-    rec = (entry < 0) & (length <= cap)
-    d.loc[rec, "hours_remaining"] = (cap - 1) - d.groupby("episode_id").cumcount()[rec]
+    # recovery as the chain applies it -- the chain's own function
+    from fit.prepare_data import recover_negative_windows
+    d, rec = recover_negative_windows(raw, 24)
+    assert rec.sum() == 3 and list(d.hours_remaining[:3]) == [23.0, 22.0, 21.0]
 
     # re-deriving ids from the REWRITTEN counter is what used to happen, and
     # it silently fuses the two windows
@@ -687,7 +685,7 @@ def test_the_raw_waterfall_row_counts_rows_episodes_and_cogs_on_one_frame(cfg, s
     so the first row of the artifact was two frames wearing one label."""
     path = synth_flc
     _, wf = load_and_filter(path, cfg)
-    raw, dedup = wf[0], wf[1]
+    raw, dedup = wf[0], wf[2]          # wf[1] is the null-key integrity drop
     assert raw[0] == "raw" and dedup[0] == "duplicate_hour_rows_dropped"
     assert raw[1] == len(pd.read_parquet(path)), "raw rows = the file's rows"
     # duplicated hours collide into extra ids, so the raw frame has AT LEAST
@@ -859,3 +857,60 @@ def test_the_universe_stage_reports_where_censoring_was_decided(cfg, synth_flc):
     assert {"rows_shelf_emptied_mid_episode",
             "rows_with_zero_starting_inventory"} <= set(cen)
     assert cen["rows_shelf_emptied_mid_episode"] == 0
+
+
+def test_the_ref_rate_window_is_the_thirty_prior_days(cfg):
+    """Design 5.4 says [t-30, t-1]. The right-closed rolling window is
+    [t-29, t], and subtracting the day back out left 29 prior days; the
+    left-closed window is the design's, so day t-30 counts and day t-31
+    does not."""
+    from fit.prepare_data import add_ref_rate_features
+
+    days = pd.date_range("2026-03-01", periods=40, freq="D")
+    rows = [dict(sku_id=1, fc="F", date=str(day.date()), hour_of_day=10,
+                 total_discount=0.25, d_ref=0.25, starting_inventory=5,
+                 units_sold=(1 if i == 0 else 0), episode_id=f"1|F|{i}")
+            for i, day in enumerate(days)]
+    out = add_ref_rate_features(pd.DataFrame(rows), cfg)
+    rate = out.set_index("episode_id").sku_ref_sales_rate_30d
+    W = cfg["baseline_model"]["ref_rate_window_days"]
+    assert W == 30
+    # day W still sees day 0 (W prior days); day W+1 no longer does
+    assert rate[f"1|F|{W}"] == pytest.approx(1.0 / W)
+    assert rate[f"1|F|{W + 1}"] == 0.0
+    # and the day itself is excluded: day 0's own sale is not in its rate
+    assert np.isnan(rate["1|F|0"])
+    assert rate["1|F|1"] == pytest.approx(1.0)
+
+
+def test_a_row_with_no_episode_key_is_dropped_and_counted(cfg, synth_flc, tmp_path):
+    """A null sku_id or fc fell out of every groupby in assign_episode_ids,
+    so such rows collapsed into one NaN "episode" that later stages read as
+    a window. INTEGRITY (rule 14): a DROP with its own waterfall row."""
+    from fit.prepare_data import EPISODE_KEY, null_key_rows
+
+    raw = pd.read_parquet(synth_flc)
+    dirty = raw.copy()
+    dirty.loc[dirty.index[:3], "skuseq"] = None
+    dirty.loc[dirty.index[5:7], "fc"] = None
+    dirty.loc[dirty.index[5], "hour"] = None
+    path = tmp_path / "dirty.parquet"
+    dirty.to_parquet(path, index=False)
+
+    d, wf = load_and_filter(str(path), cfg)
+    labels = [t[0] for t in wf]
+    assert labels[:3] == ["raw", "null_key_rows_dropped",
+                          "duplicate_hour_rows_dropped"]
+    stage = wf[1]
+    assert stage[1] == len(raw) - 5 and stage[4]["rows_dropped"] == 5
+    assert stage[4]["nulls_by_column"] == {"sku_id": 3, "fc": 2, "date": 0,
+                                           "hour_of_day": 1}
+    assert not d.episode_id.isna().any()
+    assert not d.episode_id.astype(str).str.contains("nan").any()
+    assert EPISODE_KEY == ("sku_id", "fc", "date", "hour_of_day")
+    # the clean extract loses nothing to this stage
+    _, clean = load_and_filter(synth_flc, cfg)
+    assert clean[1][1] == clean[0][1] and clean[1][4]["rows_dropped"] == 0
+    mask, by_col = null_key_rows(pd.DataFrame({"sku_id": [1, None], "fc": ["F", "F"],
+                                               "date": ["d", "d"], "hour_of_day": [1, 1]}))
+    assert list(mask) == [False, True] and by_col["sku_id"] == 1

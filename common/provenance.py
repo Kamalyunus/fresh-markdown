@@ -111,7 +111,7 @@ def launch_posterior(cfg):
     RECORDED, never verified -- the file is learning state and moves by
     design; the record is what a later cell is traced back to."""
     path = cfg["posterior"]["path"]
-    state = read_json(path) if os.path.exists(path) else None
+    state = read_json(path)
     if not state:
         return None
     return {"digest": file_digest(path),
@@ -127,11 +127,15 @@ def launch_posterior(cfg):
 
 def environment_drift(cfg, sealed):
     """What moved since the seal, outside the artifacts: config keys and
-    library versions. [] when nothing did or the seal predates the
-    environment record."""
-    env = (sealed or {}).get("environment")
-    if not env:
+    library versions. [] when nothing did, or when there is no seal at all;
+    a seal that predates the environment record is ONE problem, not silence
+    -- read as "no drift" it would never be re-sealed with the record."""
+    if not sealed:
         return []
+    env = sealed.get("environment")
+    if not env:
+        return ["environment not sealed -- re-seal once to record config "
+                "and libraries"]
     out = []
     if env.get("config_digest") != config_fingerprint(cfg)["digest"]:
         snap = (sealed.get("config_snapshot") or {})

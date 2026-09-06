@@ -18,11 +18,10 @@ def _sharp_curves(peaks):
         for cat, peak in peaks.items():
             ll = -50.0 * (np.asarray(grid) - peak) ** 2
             out[cat] = {"naive": ll, "controlled": ll.copy(), "deff": 1.0,
-                        "rho_eps_free": 0.0, "mean_rows_per_episode": 1.0,
+                        "rho_eps_free": 0.0,
                         "rows": 100, "episodes": 100, "censored_share": 0.0,
                         "log_ratio_sd": 0.1, "distinct_discounts": 3,
-                        "identifying_variation_share": 0.5, "time_cells": 5,
-                        "median_rows_per_time_cell": 20.0}
+                        "identifying_variation_share": 0.5}
         return out
     return build
 
@@ -108,12 +107,10 @@ def test_one_pinned_arm_is_enough_to_flag_the_boundary(cfg, monkeypatch):
         g = np.asarray(grid)
         return {"HALF": {"naive": -50.0 * (g + 1.0) ** 2,
                          "controlled": -50.0 * (g - (lo - 3.0)) ** 2,
-                         "deff": 1.0, "rho_eps_free": 0.0,
-                         "mean_rows_per_episode": 1.0, "rows": 50,
+                         "deff": 1.0, "rho_eps_free": 0.0, "rows": 50,
                          "episodes": 50, "censored_share": 0.0,
                          "log_ratio_sd": 0.1, "distinct_discounts": 2,
-                         "identifying_variation_share": 0.5, "time_cells": 3,
-                         "median_rows_per_time_cell": 10.0}}
+                         "identifying_variation_share": 0.5}}
     monkeypatch.setattr(pdn, "build_curves", build)
     grid, per, dens, pooled = pdn.estimate(None, cfg, None, fast=True)
     assert per["HALF"]["boundary"] == "lower"
@@ -184,18 +181,16 @@ def test_a_flat_likelihood_is_not_a_boundary_solution(cfg, monkeypatch):
         g = np.asarray(grid)
         flat = np.full(len(g), -12.5)
         return {"FLAT": {"naive": flat, "controlled": flat.copy(), "deff": 1.0,
-                         "rho_eps_free": 0.0, "mean_rows_per_episode": 1.0,
+                         "rho_eps_free": 0.0,
                          "rows": 40, "episodes": 40, "censored_share": 0.0,
                          "log_ratio_sd": 0.0, "distinct_discounts": 1,
-                         "identifying_variation_share": 0.0, "time_cells": 2,
-                         "median_rows_per_time_cell": 20.0},
+                         "identifying_variation_share": 0.0},
                 "REAL": {"naive": -50.0 * (g + 1.5) ** 2,
                          "controlled": -50.0 * (g + 1.5) ** 2, "deff": 1.0,
-                         "rho_eps_free": 0.0, "mean_rows_per_episode": 1.0,
+                         "rho_eps_free": 0.0,
                          "rows": 40, "episodes": 40, "censored_share": 0.0,
                          "log_ratio_sd": 0.2, "distinct_discounts": 3,
-                         "identifying_variation_share": 0.5, "time_cells": 2,
-                         "median_rows_per_time_cell": 20.0}}
+                         "identifying_variation_share": 0.5}}
     monkeypatch.setattr(pdn, "build_curves", build)
     grid, per, dens, pooled = pdn.estimate(None, cfg, None, fast=True)
     flat = per["FLAT"]
@@ -218,11 +213,10 @@ def test_float_noise_on_a_flat_curve_is_not_a_boundary_solution(cfg, monkeypatch
         flat = np.full(len(g), -3000.0)
         flat[0] += 1e-12                       # the edge "wins" by noise
         return {"FLAT": {"naive": flat, "controlled": flat.copy(), "deff": 1.0,
-                         "rho_eps_free": 0.0, "mean_rows_per_episode": 1.0,
+                         "rho_eps_free": 0.0,
                          "rows": 40, "episodes": 40, "censored_share": 0.0,
                          "log_ratio_sd": 0.0, "distinct_discounts": 1,
-                         "identifying_variation_share": 0.0, "time_cells": 2,
-                         "median_rows_per_time_cell": 20.0}}
+                         "identifying_variation_share": 0.0}}
     monkeypatch.setattr(pdn, "build_curves", build)
     _, per, _, _ = pdn.estimate(None, cfg, None, fast=True)
     assert per["FLAT"]["boundary"] is None and "boundary_note" not in per["FLAT"]
@@ -237,11 +231,10 @@ def test_a_prior_std_can_never_be_zero(cfg, monkeypatch):
         # thousands of nats per grid step: the density is one grid point
         ll = -1e6 * (g + 1.0) ** 2
         return {"SHARP": {"naive": ll, "controlled": ll.copy(), "deff": 1.0,
-                          "rho_eps_free": 0.0, "mean_rows_per_episode": 1.0,
+                          "rho_eps_free": 0.0,
                           "rows": 100, "episodes": 100, "censored_share": 0.0,
                           "log_ratio_sd": 0.3, "distinct_discounts": 5,
-                          "identifying_variation_share": 0.5, "time_cells": 5,
-                          "median_rows_per_time_cell": 20.0}}
+                          "identifying_variation_share": 0.5}}
     monkeypatch.setattr(pdn, "build_curves", build)
     grid, per, _, _ = pdn.estimate(None, cfg, None, fast=True)
     step = float(grid[1] - grid[0])
@@ -465,3 +458,92 @@ def test_the_deflation_takes_rho_and_cluster_size_over_the_same_units(cfg):
     deff, rho, m = deflation_deff(frame, np.full(len(frame), 5.0), cfg)
     assert m == pytest.approx(lo), "m is the mean over the units rho was measured on"
     assert rho > 0 and deff == pytest.approx(1.0 + (m - 1.0) * rho)
+
+
+def test_an_episode_opening_on_an_empty_shelf_has_no_entry_row(cfg):
+    """`scored_rows` dropped unstocked rows FIRST and then took the head, so
+    a zero-stock opening scored its first stocked hour -- a post-ramp row at
+    a deeper discount -- as the entry (rule 7). The entry row is the first
+    row; unstocked there, the episode is not scored at all."""
+    import pandas as pd
+
+    from fit.prior_density import scored_rows
+
+    def episode(eid, opening_stock):
+        return pd.DataFrame([
+            {"date": "2026-07-01", "hour_of_day": 10, "total_discount": 0.10,
+             "starting_inventory": opening_stock},
+            {"date": "2026-07-01", "hour_of_day": 11, "total_discount": 0.40,
+             "starting_inventory": 5},
+        ]).assign(episode_id=eid, units_sold=1, ending_inventory=4,
+                  category="VEG", sku_id="S", fc="F", d_ref=0.30)
+
+    rows = scored_rows(pd.concat([episode("EMPTY", 0), episode("STOCKED", 5)]))
+    assert list(rows.episode_id) == ["STOCKED"]
+    assert int(rows.hour_of_day.iloc[0]) == 10
+    assert rows.total_discount.iloc[0] == 0.10
+
+
+def test_the_fold_row_floor_is_a_config_key(cfg, monkeypatch):
+    """`if len(g) < 50` was a tunable as a literal (rule 8): it is
+    `posterior.prior.fold_min_entry_rows`."""
+    import inspect
+
+    import pandas as pd
+
+    rows = [{"episode_id": f"{day}-{e}", "date": f"2026-04-0{day}",
+             "hour_of_day": 10, "total_discount": 0.10}
+            for day in range(1, 4) for e in range(20)]            # 20 per fold
+    train = pd.DataFrame(rows).assign(
+        starting_inventory=5, units_sold=1, ending_inventory=4,
+        category="VEG", sku_id="S", fc="F", d_ref=0.30)
+
+    class _M:
+        @staticmethod
+        def predict_mu_ref(g):
+            return np.full(len(g), 2.0)
+
+    monkeypatch.setattr(pdn, "split_frames", lambda d, c: {"train": d})
+    monkeypatch.setattr(pdn, "population", lambda f, c: f)
+    monkeypatch.setattr(pdn, "curve", lambda g, m, grid, c, cfg:
+                        -((np.asarray(grid) + 1.0) ** 2))
+    grid = np.linspace(-5.0, -0.05, 20)
+    cfg = copy.deepcopy(cfg)
+    cfg["posterior"]["prior"]["fold_min_entry_rows"] = 21
+    assert pdn.fold_spread(train, cfg, _M(), grid, folds=3) == {}
+    cfg["posterior"]["prior"]["fold_min_entry_rows"] = 20
+    assert pdn.fold_spread(train, cfg, _M(), grid, folds=3)["VEG"]["folds"] == 3
+    src = inspect.getsource(pdn.fold_spread)
+    assert "fold_min_entry_rows" in src and "< 50" not in src
+
+
+def test_the_holdout_comparison_ranks_one_candidate_against_its_brackets(
+        cfg, monkeypatch):
+    """Only one candidate is ever scored, so the two-candidate 'method gap'
+    verdict was dead: the block is the candidate against `uniform` and
+    `oracle`, with the information available read first."""
+    monkeypatch.setattr(pdn, "build_curves", _sharp_curves({"A": -1.0}))
+    grid = np.linspace(-3.0, -0.05, 60)
+    dens = {"A": pdn.density(-50.0 * (grid + 1.0) ** 2, 1.0)}
+    out = pdn.holdout_comparison(None, cfg, None, grid, {"profile_density": dens})
+    assert out["window"] == "calib" and out["ranking"] == ["profile_density"]
+    assert set(out["total_per_row"]) == {"profile_density", "uniform", "oracle"}
+    assert out["information_available_per_row"] > 0
+    assert out["worse_than_a_flat_prior"] == []
+    assert not {"method_gap_per_row", "method_gap_share_of_available",
+                "verdict"} & set(out)
+
+
+def test_the_prior_artifact_carries_no_acceptance_flag(cfg, monkeypatch):
+    """`acceptance` was {passed: True, failures: []} on every run, read by
+    nothing: the gate is human (design 9.3) and reads the evidence fields."""
+    from fit import estimate_prior as ep
+
+    monkeypatch.setattr(pdn, "build_curves", _sharp_curves({"A": -1.0}))
+    monkeypatch.setattr(ep, "_episodes_per_week", lambda d, c: {})
+    monkeypatch.setattr(pdn, "holdout_comparison",
+                        lambda *a, **k: {"window": "calib"})
+    prior = ep.estimate_prior(None, copy.deepcopy(cfg), fast=True, model=object())
+    assert "acceptance" not in prior
+    assert {"holdout_comparison", "wrong_sign_categories",
+            "lower_boundary_categories"} <= set(prior)

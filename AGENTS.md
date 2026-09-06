@@ -31,8 +31,9 @@ statement and the incident that created the rule.
    bound means the likelihood ran off the support: the prior searches past
    both bounds and rejects a lower-pinned category to the pool
    (`lower_boundary_categories`; widen `epsilon_min`, never `epsilon_max`);
-   `r_lookup.at_bound` and `calibration.detail[cell].at_bound` flag the
-   others. (§5.5, §5.6, §9.2)
+   `r_lookup.at_bound`, `calibration.pinned_cells` (every level-factor
+   pin, anchor and weekly, incl. a pinned PARENT category) flag the others;
+   `status`'s `boundary solutions` row READS them all. (§5.5, §5.6, §9.3)
 4. **The calibration gate window must be DISJOINT from the fit window** —
    read `fidelity.gate_window`, never assume it. (§9.2)
 5. **Level factors are fit on anchor rows only** over
@@ -280,15 +281,10 @@ step                                          writes
 11. ops.seal                            artifacts/bundle.json
 ```
 
-Daily production loop (Lane C — full operator guidance in `RUNBOOK.md`):
-
-```bash
-python3 -m daily.update --calibrate-tau   # daily tau walk, no operator
-python3 -m daily.update --apply     # OPERATOR GATE (rule 10), daily
-python3 -m daily.monitor
-python3 -m daily.assurance
-python3 -m ops.status             # done = every line green
-```
+Daily production loop: `advance --feed` runs it (ingest → `update
+--calibrate-tau` → monitor → assurance → export → status) and stops at
+`daily.update --apply`, the operator gate (rule 10); `RUNBOOK.md` is the
+operator's document, Appendix A the step list.
 
 ## Populations
 
@@ -303,7 +299,7 @@ is dropped (rule 14). Resolve via `prepare_data.population(d, cfg, which)`:
 | `m1` / gate 1 | `integrity`, always |
 | DP, backtest, shadow, calibration gate | `dp_eligible`, always (passed explicitly) |
 
-The waterfall (13 rows, `artifacts/split_manifest.json`) records rows,
+The waterfall (14 rows, `artifacts/split_manifest.json`) records rows,
 episodes and COGS after every stage; `kind: hard_drop` drops, the two
 `population_gate` rows (`eligible`, `dp_eligible`) only flag.
 The chain, the inventory convention, the flow identity and the close rules

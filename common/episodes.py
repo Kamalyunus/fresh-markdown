@@ -180,10 +180,8 @@ def episode_flow(d):
     # `d` is in time order, so the last occurrence of each id is its final hour.
     is_last_row = ~d.episode_id.duplicated(keep="last").to_numpy()
     # the write-off exemption lives in shrink_by_hour, the one home; `disc`
-    # keeps its negatives here because `arrived` is read off them below
-    status = hour_status(d.starting_inventory, d.units_sold, d.ending_inventory)
-    disc = np.where((status == WRITE_OFF) & is_last_row, 0, disc)
-
+    # is read here only through its NEGATIVES (`arrived`), which a write-off
+    # row (disc > 0) never has
     g = pd.DataFrame({"episode_id": d.episode_id.to_numpy(), "disc": disc,
                       "shrink": shrink_by_hour(d.starting_inventory,
                                                d.units_sold,
@@ -191,7 +189,7 @@ def episode_flow(d):
                       "sold": d.units_sold.to_numpy(),
                       "start": d.starting_inventory.to_numpy()})
     agg = g.groupby("episode_id", sort=False).agg(
-        net=("disc", "sum"), sold=("sold", "sum"), opening=("start", "first"))
+        sold=("sold", "sum"), opening=("start", "first"))
     # `arrived`/`vanished` are GROSS, never netted: netting a shortfall against
     # a same-size restock would hide both real events (design 12a).
     agg["arrived"] = (-g[g.disc < 0].groupby("episode_id", sort=False).disc.sum()
@@ -239,7 +237,7 @@ def episode_flow(d):
     # ELIGIBLE, stated once: reconciles AND final-hour clean AND closed.
     # NOT dp_eligible -- the DP has further requirements of its own.
     agg["eligible"] = agg.accounting_closes & agg.final_hour_clean & agg.closed
-    return agg.drop(columns=["net"])
+    return agg
 
 
 def hour_adjustment(d):
@@ -269,9 +267,7 @@ def flow_identity_violations(d, flow=None):
     """
     if flow is None:
         flow = episode_flow(d)
-    lhs = flow.opening + flow.arrived
-    rhs = flow.sold + flow.scrap
-    return flow[lhs != rhs]
+    return flow[~flow.accounting_closes]
 
 
 def censored_hours(d):

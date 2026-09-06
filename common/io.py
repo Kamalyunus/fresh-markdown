@@ -24,7 +24,9 @@ def json_safe(value):
         return [json_safe(v) for v in value]
     if isinstance(value, float) and not np.isfinite(value):
         return None
-    if isinstance(value, (np.integer, np.floating)):
+    # np.bool_ is not a bool subclass: left to `default=str` it became the
+    # STRING "False", which reads back as truthy
+    if isinstance(value, (np.integer, np.floating, np.bool_)):
         return json_safe(value.item())
     return value
 
