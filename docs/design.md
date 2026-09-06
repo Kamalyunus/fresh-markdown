@@ -891,7 +891,15 @@ that model, the prior was estimated from its predictions and that
 describing the same world. **The bundle id is the baseline model version.**
 Each artifact carries a `provenance` block; `ops.seal` writes
 `artifacts/bundle.json` with a SHA-256 of every file and refuses an
-inconsistent set. Re-run `seal` after `--fit-calibration`.
+inconsistent set. Re-run `seal` after `--fit-calibration`. **Every seal
+also leaves an audit snapshot**: `artifacts/history/<bundle>/<sealed_at>/`
+holds a copy of every present artifact, the config in force, the posterior
+state and a `MANIFEST.json` (bundle, time, reason — `bootstrap`,
+`check-only`, `retrain`, `weekly-refit` — config digest, hashes); every
+`advance` stop copies the reports as they then stand into the bundle's
+latest snapshot. A retrain overwrites `artifacts/` in place, so the history
+folder is the only place two bundles can be compared side by side, and the
+process never prunes it. `status`'s bundle row counts the snapshots.
 
 Stale *reports* are the other half: after a retrain, yesterday's
 `backtest.json` still parses and silently grades a ghost model. Every

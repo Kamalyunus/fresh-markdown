@@ -17,6 +17,7 @@ meta:
 
 artifacts:
   bundle_path: "artifacts/bundle.json"   # SET  the sealed bundle manifest
+  history_dir: "artifacts/history"       # SET  audit trail: every seal copies the bundle, config and posterior to history/<bundle>/<sealed_at>/; every advance stop adds the reports
 
 data:
   split_manifest_path: "artifacts/split_manifest.json"   # SET

@@ -236,7 +236,7 @@ def plan(st):
         steps.append(_run("weekly level re-fit",
                           ["fit.train_baseline", "--input", PREPARED,
                            "--fit-calibration"], phase="launch"))
-        steps.append(_run("re-seal", ["ops.seal"], phase="launch",
+        steps.append(_run("re-seal", ["ops.seal", "--reason", "weekly-refit"], phase="launch",
                           reevaluate=True))
         return steps
     if (st["schedule_end"] or "") < st["this_week"]:
@@ -407,9 +407,13 @@ def report(cfg, root="reports", journal=JOURNAL, decisions=DECISIONS):
 
 
 def _write_readiness(config_path, root):
-    text = report(load_config(config_path), root)
+    cfg = load_config(config_path)
+    text = report(cfg, root)
     os.makedirs(root, exist_ok=True)
     open(os.path.join(root, READINESS), "w").write(text)
+    # the audit trail: the bundle's snapshot carries how it graded
+    seal = provenance.load_seal(cfg) or {}
+    provenance.archive_reports(cfg, root, seal.get("bundle"))
     return text
 
 

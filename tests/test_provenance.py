@@ -167,3 +167,41 @@ def test_a_sealed_artifact_that_vanished_or_appeared_is_caught(cfg):
     os.remove(provenance._path(cfg, ("dispersion", "r_lookup_path")))
     v = provenance.verify(cfg, sealed)
     assert v["verdict"] == "FAIL" and any("no longer on disk" in p for p in v["problems"])
+
+
+def test_every_seal_leaves_an_audit_snapshot_and_stops_add_the_reports(cfg, tmp_path):
+    """A retrain overwrites artifacts/ in place; the history folder is the
+    audit trail: bundle files, config and posterior per seal, the reports
+    per stop, never pruned by the process."""
+    import os
+    cfg["artifacts"]["history_dir"] = str(tmp_path / "history")
+    cfg["posterior"]["path"] = str(tmp_path / "posterior.json")
+    (tmp_path / "posterior.json").write_text("{}")
+    conf = tmp_path / "config.yaml"; conf.write_text("meta: {config_version: t}\n")
+    _full_bundle(cfg)
+    sealed = seal_mod.seal(cfg)
+
+    snap = provenance.archive(cfg, sealed, config_path=str(conf), reason="bootstrap")
+    assert snap.startswith(str(tmp_path / "history" / BUNDLE))
+    names = set(os.listdir(snap))
+    assert {"MANIFEST.json", "rho.json", "r_lookup.json", "prior.json",
+            "baseline_model.txt", "config.yaml", "posterior.json"} <= names
+    manifest = json.load(open(os.path.join(snap, "MANIFEST.json")))
+    assert manifest["bundle"] == BUNDLE and manifest["reason"] == "bootstrap"
+    assert manifest["sha256"] == sealed["sha256"]
+    # the copy is byte-identical to what was sealed
+    assert provenance.file_digest(os.path.join(snap, "rho.json")) == sealed["sha256"]["rho"]
+
+    # a second seal is a second folder, never an overwrite
+    later = dict(sealed, sealed_at="2030-01-01T00:00:00+00:00")
+    snap2 = provenance.archive(cfg, later, config_path=str(conf), reason="weekly-refit")
+    assert snap2 != snap and provenance.latest_snapshot(cfg, BUNDLE) == snap2
+    assert [r for _, _, r in provenance.history_index(cfg)] == ["bootstrap", "weekly-refit"]
+
+    # a stop copies the reports as they stand into the LATEST snapshot
+    reports = tmp_path / "reports"; reports.mkdir()
+    (reports / "shadow.json").write_text("{}"); (reports / "launch_readiness.md").write_text("x")
+    dst = provenance.archive_reports(cfg, str(reports), BUNDLE)
+    assert dst == os.path.join(snap2, "reports")
+    assert {"shadow.json", "launch_readiness.md"} <= set(os.listdir(dst))
+    assert provenance.archive_reports(cfg, str(reports), "no-such-bundle") is None

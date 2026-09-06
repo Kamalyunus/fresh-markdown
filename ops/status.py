@@ -64,7 +64,7 @@ def _launch_blockers(cfg):
                 "config.yaml")
 
 
-def _bundle(state):
+def _bundle(cfg, state):
     """Do the frozen artifacts form one bundle, unedited since sealing?"""
     if state["verdict"] == "INSUFFICIENT":
         return _row("artifact bundle", NONE, "no stamped artifacts",
@@ -77,6 +77,10 @@ def _bundle(state):
         detail += " · unsealed"
     if state["missing"]:
         detail += " · absent: " + ", ".join(state["missing"])
+    snaps = provenance.history_index(cfg)
+    detail += (f" · {len(snaps)} audit snapshot{'s' if len(snaps) != 1 else ''}"
+               f" (latest {snaps[-1][1][:10]}, {snaps[-1][2] or 'no reason'})"
+               if snaps else " · no audit snapshot yet")
     return _row("artifact bundle", WARN if not state["sealed_bundle"] else PASS,
                 detail,
                 "python3 -m ops.seal" if not state["sealed_bundle"] else "")
@@ -423,7 +427,7 @@ def collect(cfg, root="reports", reports=None):
     state = provenance.verify(cfg, provenance.load_seal(cfg))
     rows = [
         _launch_blockers(cfg),
-        _bundle(state),
+        _bundle(cfg, state),
         _mirrors(cfg),
         _config_vs_reports(cfg, root, reports),
         _vintages(cfg, state, reports),

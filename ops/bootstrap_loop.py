@@ -164,7 +164,8 @@ def main():
                               "--out", "reports/backtest.json"])
     step("step 6b: derive_thresholds",
          ["evaluate.derive_thresholds", "--input", PREPARED])
-    step("step 11: seal", ["ops.seal"], fatal=False)
+    step("step 11: seal", ["ops.seal", "--reason",
+                           "check-only" if args.check_only else "bootstrap"], fatal=False)
     # advisory HERE, not a gate: on a first bootstrap tau is null and shadow
     # has not run, so status is red by design. It gates the pilot (RUNBOOK),
     # and a red row above is the next thing to do, not a broken bundle.

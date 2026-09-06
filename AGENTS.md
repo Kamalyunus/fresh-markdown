@@ -93,8 +93,9 @@ statement and the incident that created the rule.
 
 And the standing prohibitions:
 
-- Never commit `data/`, `reports/`, `artifacts/`, `events_store*/`, or any
-  secret. Redshift credentials come only from `~/.env` as `REDSHIFT_*` —
+- Never commit `data/`, `reports/`, `artifacts/` (including
+  `artifacts/history/`, the per-seal audit trail — compare bundles there,
+  never by re-fitting), `events_store*/`, or any secret. Redshift credentials come only from `~/.env` as `REDSHIFT_*` —
   no hostname or credential in config, code, or a commit.
 - Never hand-edit `artifacts/posterior.json` (production learning state).
 - Never re-derive logic that has one home. The homes, and what each
@@ -325,7 +326,7 @@ Every paste has one source and one checker:
 | posterior, update, operator gate | §5.9, §5.11 |
 | monitoring, guardrails, stop conditions, the pilot read | §5.12, §11, §12 |
 | events, integration, quarantine | `docs/event_contract.html`; `events/store.py` |
-| provenance, seal, freshness | §5.14; rule 18 |
+| provenance, seal, freshness, the audit trail (`artifacts/history/<bundle>/<sealed_at>/`) | §5.14a; rule 18 |
 | operating the chain end to end, phase order | `ops/advance.py` (`--plan`); rule 1b |
 | operator runbook, review tiers | `RUNBOOK.md`, `REVIEW_GUIDE.md` |
 | why is it not done the other way? | `docs/learnings.md` |

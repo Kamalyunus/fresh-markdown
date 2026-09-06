@@ -7,9 +7,11 @@ artifact is fitted AGAINST a model. ops.seal adds per-file hashes so a
 hand-edited artifact is detectable too, which stamps alone cannot catch.
 """
 
+import glob
 import hashlib
 import json
 import os
+import shutil
 from datetime import datetime, timezone
 
 from common.io import read_json
@@ -175,3 +177,72 @@ def verify(cfg, sealed=None):
 
 def load_seal(cfg):
     return read_json(_path(cfg, ("artifacts", "bundle_path")))
+
+
+# ----------------------------------------------------------------- audit trail
+
+def _history_root(cfg):
+    return cfg["artifacts"].get("history_dir") or os.path.join(
+        os.path.dirname(cfg["artifacts"]["bundle_path"]) or ".", "history")
+
+
+def archive(cfg, sealed, config_path="config.yaml", reason=None):
+    """Copy the sealed bundle -- every present artifact, the config in force,
+    the posterior state -- into history/<bundle>/<sealed_at>/ with a
+    MANIFEST. A retrain, a re-fit and a re-seal each leave their own
+    snapshot, so what ran under which artifacts is answerable later without
+    trusting anyone's memory. Never pruned by the process."""
+    stamp = str(sealed["sealed_at"]).replace(":", "").replace("-", "")[:15]
+    out = os.path.join(_history_root(cfg), sealed["bundle"], stamp)
+    os.makedirs(out, exist_ok=True)
+    files = {}
+    for row in collect(cfg):
+        if row["present"]:
+            dst = os.path.join(out, os.path.basename(row["path"]))
+            shutil.copyfile(row["path"], dst)
+            files[row["artifact"]] = os.path.basename(dst)
+    for label, path in (("config", config_path),
+                        ("posterior", cfg["posterior"]["path"]),
+                        ("bundle", cfg["artifacts"]["bundle_path"])):
+        if path and os.path.exists(path):
+            shutil.copyfile(path, os.path.join(out, os.path.basename(path)))
+            files[label] = os.path.basename(path)
+    manifest = {"bundle": sealed["bundle"], "sealed_at": sealed["sealed_at"],
+                "reason": reason, "config_version": sealed.get("config_version"),
+                "config_digest": config_fingerprint(cfg)["digest"],
+                "sha256": sealed["sha256"], "files": files}
+    with open(os.path.join(out, "MANIFEST.json"), "w") as f:
+        json.dump(manifest, f, indent=2)
+    return out
+
+
+def latest_snapshot(cfg, bundle):
+    """The newest history folder for `bundle`, or None."""
+    root = os.path.join(_history_root(cfg), str(bundle))
+    dirs = sorted(d for d in glob.glob(os.path.join(root, "*")) if os.path.isdir(d))
+    return dirs[-1] if dirs else None
+
+
+def archive_reports(cfg, reports_root, bundle):
+    """Copy the reports as they stand into the bundle's latest snapshot
+    (reports/ inside it), so the record of a bundle carries how it graded.
+    Later stops overwrite: the snapshot holds the latest read of that
+    bundle. Returns the folder, or None when the bundle has no snapshot."""
+    snap = latest_snapshot(cfg, bundle) if bundle else None
+    if snap is None:
+        return None
+    dst = os.path.join(snap, "reports")
+    os.makedirs(dst, exist_ok=True)
+    for path in glob.glob(os.path.join(reports_root, "*.json")) + \
+            glob.glob(os.path.join(reports_root, "*.md")):
+        shutil.copyfile(path, os.path.join(dst, os.path.basename(path)))
+    return dst
+
+
+def history_index(cfg):
+    """[(bundle, sealed_at, reason)] for every snapshot, oldest first."""
+    out = []
+    for m in sorted(glob.glob(os.path.join(_history_root(cfg), "*", "*", "MANIFEST.json"))):
+        payload = read_json(m) or {}
+        out.append((payload.get("bundle"), payload.get("sealed_at"), payload.get("reason")))
+    return out
