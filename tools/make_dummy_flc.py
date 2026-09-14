@@ -184,7 +184,7 @@ def randomized_discount_path(entry_d, n_hours, d_max, rng, tier=0.025):
 
 
 def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
-             start=None):
+             start=None, restock_extend_rate=0.03):
     rng = np.random.default_rng(seed)
     master = build_sku_master(n_skus, rng)
     start = start or DEFAULT_START
@@ -211,6 +211,16 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
             inv = int(rng.integers(1, 32))
             window_start = len(records)   # for whole-window dirt injection
 
+            # RESTOCK-EXTENDED WINDOW (contract C5/C9, confirmed): stock
+            # arrives mid-window and the source's counter steps UP from the
+            # NEXT hour -- the one exception to a -1 step that keeps the
+            # episode id. The restocked hour itself still counts down.
+            extend_at, arrival, ext_hours = None, 0, 0
+            if n_hours >= 4 and rng.random() < restock_extend_rate:
+                extend_at = int(rng.integers(1, n_hours - 1))
+                arrival = int(rng.integers(2, 8))
+                ext_hours = int(rng.integers(1, 4))
+
             if policy == "legacy":
                 entry_d = min(d_ref, d_max)
                 path = legacy_discount_path(entry_d, n_hours, d_max)
@@ -221,7 +231,8 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
                 entry_d = min(max(entry_d, 0.0), d_max)
                 path = randomized_discount_path(entry_d, n_hours, d_max, rng)
 
-            for h_idx in range(n_hours):
+            h_idx = 0
+            while h_idx < n_hours:          # n_hours can grow on a restock
                 hour = start_hour + h_idx
                 if inv <= 0:
                     break
@@ -246,6 +257,11 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
                         and rng.random() < shrink_rate):
                     shrink = int(rng.integers(1, min(inv - sold, 3)))
                 ending = inv - sold - shrink
+                if h_idx == extend_at:
+                    if ending >= 1:
+                        ending += arrival          # stock arrived this hour
+                    else:
+                        extend_at = None           # sold out first: no extension
 
                 if sold == 0:
                     final_price = 0.0
@@ -262,6 +278,12 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
                     sku.category, sku.subcategory,
                 ))
                 inv = ending
+                if h_idx == extend_at:
+                    # the window grows from the next hour: its counter steps
+                    # up there, the price path holds its last value
+                    n_hours += ext_hours
+                    path = list(path) + [path[-1]] * ext_hours
+                h_idx += 1
             # WRITE-OFF SENTINEL. The source zeroes ending_inventory on the
             # row where a listing closes, whatever remained. Emulating it is
             # not cosmetic: it is the signal common.episodes reads to tell a
@@ -379,6 +401,9 @@ def main():
           f"— MUST be > 0 or every episode reads unclosed)")
     print(f"shrink rows       : {shrink_rows:,} "
           f"(0 < ending < starting-sold, {shrink_rows/max(len(df),1):.2%})")
+    print(f"restock-extended  : {restock_extended_windows(df):,} windows "
+          "(counter steps UP on the hour after stock arrives -- MUST be > 0 "
+          "or the id rule's restock clause is unexercised)")
     print(f"negative-window   : {int((df.flc_window < 0).sum()):,} rows "
           f"(whole windows entering below zero, never a single row)")
     print(f"null-counter rows : {int(df.flc_window.isna().sum()):,} "
@@ -387,6 +412,19 @@ def main():
     print(f"median d_max      : {(1 - df.cogs_wo_vat/df.normal_asp.replace(0,np.nan)).median():.3f}")
     print(f"corr(discount,hour) within episode: {corr_within(df):.3f}")
     print(f"wrote             : {args.out}")
+
+
+def restock_extended_windows(df):
+    """Windows whose counter stepped up (or held) on the hour after a
+    restocked row -- EPISODE_RULE's restock clause, as the source would
+    show it. Counted on the raw frame; dirt (a null or negative counter)
+    reads as no step."""
+    g = df.sort_values(["skuseq", "fc", "date", "hour"])
+    prev = g.groupby(["skuseq", "fc", "date"]).shift()
+    up = (g.flc_window - prev.flc_window) > -1
+    restocked = prev.ending_inventory > prev.inventory - prev.units_sold
+    hit = up & restocked & (g.hour - prev.hour == 1)
+    return int(g[hit].groupby(["skuseq", "fc", "date"]).ngroups)
 
 
 def corr_within(df):

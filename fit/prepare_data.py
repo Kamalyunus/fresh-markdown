@@ -32,24 +32,72 @@ SOURCE_TO_CANONICAL = {
 # Persisted with the split manifest; production must derive identical boundaries.
 EPISODE_RULE = (
     "episode_id = sku_id|fc|<first hour of the window>: a maximal run of "
-    "consecutive hourly rows over which hours_remaining decrements by one "
-    "per elapsed hour. NOT keyed by calendar date -- windows cross midnight, "
-    "and a date key would split one episode in two at the seam.")
+    "consecutive hourly rows for one SKU x FC. A row opens a new window when "
+    "the clock did not advance exactly one hour, when the previous hour "
+    "CLOSED (ending_inventory == 0, the write-off sentinel -- whatever the "
+    "counter does next), or when hours_remaining did not decrement by one -- "
+    "EXCEPT an upward (or flat) step on the hour after stock arrived "
+    "(ending > starting - sold on the previous row): a restock extends the "
+    "window and the counter moves from the next hour, and every restock "
+    "re-tests on its own, so a window restocked many times is one episode. "
+    "NOT keyed by calendar date -- windows cross midnight, and a date key "
+    "would split one episode in two at the seam.")
+
+
+def window_signals(df):
+    """The per-row signals every window reading is built from, per SKU x FC
+    in window order: the clock step `dt_h` (hours since the previous row),
+    the counter step `hr_diff`, and what the PREVIOUS hour did --
+    `prev_closed` (ending_inventory == 0: the listing closed, contract C2)
+    and `prev_restock` (ending > starting - sold: stock arrived, C9). NaN on
+    a group's first row for the two steps, False for the two flags."""
+    ts = pd.to_datetime(df.date) + pd.to_timedelta(df.hour_of_day, unit="h")
+    grp = [df.sku_id, df.fc]
+    prev = {c: df[c].groupby(grp).shift() for c in
+            ("starting_inventory", "units_sold", "ending_inventory")}
+    return {
+        "dt_h": ts.groupby(grp).diff().dt.total_seconds() / 3600.0,
+        "hr_diff": df.hours_remaining.groupby(grp).diff(),
+        "prev_closed": prev["ending_inventory"].eq(0),
+        "prev_restock": (prev["ending_inventory"]
+                         > prev["starting_inventory"] - prev["units_sold"]),
+    }
+
+
+def window_starts(df):
+    """True where a row opens a window (EPISODE_RULE) -- the ONE boundary
+    reading: assign_episode_ids keys the ids on it and the null-counter run
+    drop reads the same signals. Either clock or counter alone would merge
+    back-to-back windows or stitch across a feed gap; a null counter (a NaN
+    step) opens a window here on purpose -- the phantom id is what
+    null_counter_windows then drops with its whole run."""
+    s = window_signals(df)
+    counter_ok = s["hr_diff"].eq(-1.0) | (s["hr_diff"].gt(-1.0) & s["prev_restock"])
+    return s["dt_h"].ne(1.0) | s["prev_closed"] | ~counter_ok
 
 
 def assign_episode_ids(df):
-    """Episode ids as maximal runs where the timestamp advances one hour AND
-    `hours_remaining` ticks down one -- either signal alone would merge
-    back-to-back windows or stitch across feed gaps. Crossing midnight is an
-    ordinary one-hour step, which is the point."""
+    """Episode ids as `sku_id|fc|<first hour of the window>` over
+    `window_starts`. Crossing midnight is an ordinary one-hour step, which
+    is the point."""
     ts = pd.to_datetime(df.date) + pd.to_timedelta(df.hour_of_day, unit="h")
-    grp = [df.sku_id, df.fc]
-    dt_h = ts.groupby(grp).diff().dt.total_seconds() / 3600.0
-    hr_diff = df.hours_remaining.groupby(grp).diff()
-    starts = (dt_h.ne(1.0) | hr_diff.ne(-1.0)).fillna(True)
-    start_ts = ts.where(starts).groupby(grp).ffill()
+    start_ts = ts.where(window_starts(df)).groupby([df.sku_id, df.fc]).ffill()
     return (df.sku_id.astype(str) + "|" + df.fc.astype(str) + "|"
             + start_ts.dt.strftime("%Y-%m-%dT%H"))
+
+
+def counter_step_detail(df):
+    """The up/flat counter steps at a one-hour clock step, by what the
+    previous hour did -- the measurement behind EPISODE_RULE's restock
+    clause: `restock_continued` (stock arrived last hour: the same
+    window), `closed_new_window` (last hour closed: a relist),
+    `reset_new_window` (neither: back-to-back windows)."""
+    s = window_signals(df)
+    up = s["dt_h"].eq(1.0) & s["hr_diff"].gt(-1.0)
+    return {"up_steps_at_one_hour": int(up.sum()),
+            "restock_continued": int((up & s["prev_restock"] & ~s["prev_closed"]).sum()),
+            "closed_new_window": int((up & s["prev_closed"]).sum()),
+            "reset_new_window": int((up & ~s["prev_closed"] & ~s["prev_restock"]).sum())}
 
 
 def gap_split_windows(df):
@@ -194,31 +242,31 @@ def null_counter_windows(df):
     row-scoped drop left a fragment opening mid-window that no later stage
     could tell from a real entry.
 
-    The window is read with assign_episode_ids' and gap_split_windows'
-    own signals, since the null row breaks neither cleanly: rows of one
+    The window is read with `window_signals` -- the boundary rule's own
+    signals -- since the null row breaks neither cleanly: rows of one
     sku x fc stay in one window while the clock advances an hour (a
     duplicate hour, too), or skips hours the counter ran down by exactly
     (a feed gap -- the fragment beyond it must go too); a counter that
-    resets upward between two non-null rows opens a NEW window, so a
-    back-to-back neighbour is kept. A gap whose counter is unreadable on
-    either side is a break: the far side survives as a fragment nothing
-    later can see -- bounded to a null adjacent to a gap, and counted in
-    `null_counter_gap_fragments_kept`."""
+    resets upward between two non-null rows opens a NEW window unless the
+    previous hour restocked (EPISODE_RULE), and a closed previous hour
+    opens one whatever the counter does, so a back-to-back neighbour is
+    kept. A gap whose counter is unreadable on either side is a break: the
+    far side survives as a fragment nothing later can see -- bounded to a
+    null adjacent to a gap, and counted in `null_counter_gap_fragments_kept`."""
     if not df.hours_remaining.isna().any():
         return pd.Series(False, index=df.index), {"windows": 0,
                                                    "gap_fragments_kept": 0}
-    ts = pd.to_datetime(df.date) + pd.to_timedelta(df.hour_of_day, unit="h")
     grp = [df.sku_id, df.fc]
-    dt_h = ts.groupby(grp).diff().dt.total_seconds() / 3600.0
-    hr = df.hours_remaining
-    hr_drop = -hr.groupby(grp).diff()                 # NaN beside a null
+    sig = window_signals(df)
+    dt_h, hr = sig["dt_h"], df.hours_remaining
+    hr_drop = -sig["hr_diff"]                         # NaN beside a null
     same_window = ((dt_h <= 1.0) | ((dt_h > 1.0) & (dt_h == hr_drop))) \
-        & ~(hr_drop < 0)                              # an upward reset opens one
+        & ~((hr_drop < 0) & ~sig["prev_restock"]) & ~sig["prev_closed"]
     window = (~same_window.fillna(False) | dt_h.isna()).cumsum()
     bad = set(window[hr.isna()])
     mask = window.isin(bad)
     # a gap this window could not be read across (a null on either side)
-    unread = (dt_h > 1.0) & hr_drop.isna() & mask.groupby(grp).shift().fillna(False)
+    unread = (dt_h > 1.0) & hr_drop.isna() & mask.groupby(grp).shift(fill_value=False)
     return mask, {"windows": len(bad), "gap_fragments_kept": int(unread.sum())}
 
 
@@ -307,6 +355,9 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     dup = df.duplicated(subset=list(EPISODE_KEY), keep=False)
     df = df[~dup]
     df["episode_id"] = assign_episode_ids(df)
+    # the up-steps the ids were read on, by what the previous hour did
+    # (EPISODE_RULE's restock clause): reported with the episode universe
+    counter_steps = counter_step_detail(df)
     per_ep["cogs"] = episode_cogs(df)
     prev_ids["ids"] = set(df.episode_id.unique())
     step(df, "duplicate_hour_rows_dropped", gate=True)
@@ -363,6 +414,11 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
         "rows_write_off": int((status0 == episodes.WRITE_OFF).sum()),
         "rows_hour_shortfall_NOT_dropped": int(
             (status0 == episodes.SHORTFALL).sum()),
+        # the counter's up/flat steps at a one-hour clock step, by what the
+        # previous hour did: restock_continued stayed one window (the
+        # counter moves from the hour AFTER stock arrives), closed_new_window
+        # is a relist, reset_new_window back-to-back windows
+        "counter_up_steps": counter_steps,
         # censoring is decided on the LAST row only (design 12a): a row that
         # emptied the shelf mid-episode means the feed carried on past zero
         "censoring": episodes.censoring_off_last_row(d),

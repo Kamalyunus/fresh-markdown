@@ -162,11 +162,12 @@ def test_recovery_cannot_merge_a_negative_episode_into_its_neighbour():
     """`negative_window_recovered` rewrites the field the ids are derived from."""
     from fit.prepare_data import assign_episode_ids
 
+    shelf = dict(starting_inventory=5, units_sold=0, ending_inventory=5)
     rows = ([dict(sku_id=1, fc="X", date="2026-03-01", hour_of_day=h,
-                  hours_remaining=hr) for h, hr in
+                  hours_remaining=hr, **shelf) for h, hr in
              [(10, -5.0), (11, -6.0), (12, -7.0)]]                  # enters negative
             + [dict(sku_id=1, fc="X", date="2026-03-01", hour_of_day=h,
-                    hours_remaining=hr) for h, hr in
+                    hours_remaining=hr, **shelf) for h, hr in
                [(13, 20.0), (14, 19.0)]])                           # a REAL next window
     raw = pd.DataFrame(rows)
     raw["episode_id"] = assign_episode_ids(raw)
@@ -511,12 +512,15 @@ def test_population_refuses_a_frame_without_its_eligibility_flag(cfg):
 # ------------------------------------------------- episode ids and windows
 
 def _window(sku, fc, start, hours, base_hr=None):
-    """One selling window as hourly rows, counting hours_remaining down."""
+    """One selling window as hourly rows, counting hours_remaining down,
+    on an open shelf that reconciles every hour (no close, no restock: the
+    boundary rule reads the inventory too)."""
     hr = hours - 1 if base_hr is None else base_hr
     ts = pd.date_range(start, periods=hours, freq="h")
     return episode_frame(sku_id=sku, fc=fc, date=ts.normalize(),
                          hour_of_day=ts.hour,
-                         hours_remaining=[hr - i for i in range(hours)])
+                         hours_remaining=[hr - i for i in range(hours)],
+                         starting_inventory=5, units_sold=0, ending_inventory=5)
 
 
 def test_episode_spans_midnight_as_one_window():
@@ -584,7 +588,8 @@ def test_a_new_window_is_not_mistaken_for_a_gap():
 
     def frame(rows):
         d = episode_frame(rows, columns=["hour_of_day", "hours_remaining"],
-                          date="2026-03-01", sku_id="S", fc="F")
+                          date="2026-03-01", sku_id="S", fc="F",
+                          starting_inventory=5, units_sold=0, ending_inventory=5)
         d["episode_id"] = assign_episode_ids(d)
         return d
 
@@ -884,13 +889,22 @@ def test_the_ref_rate_window_is_the_thirty_prior_days(cfg):
     assert rate["1|F|1"] == pytest.approx(1.0)
 
 
-def test_a_row_with_no_episode_key_is_dropped_and_counted(cfg, synth_flc, tmp_path):
+def test_a_row_with_no_episode_key_is_dropped_and_counted(cfg, tmp_path):
     """A null sku_id or fc fell out of every groupby in assign_episode_ids,
     so such rows collapsed into one NaN "episode" that later stages read as
     a window. INTEGRITY (rule 14): a DROP with its own waterfall row."""
     from fit.prepare_data import EPISODE_KEY, null_key_rows
+    from tools import make_dummy_flc as gen
 
-    raw = pd.read_parquet(synth_flc)
+    # a SPOTLESS base, so the only dirt this stage sees is what the test
+    # injects (the shared fixture carries the generator's own null counters
+    # and negative windows, whose drops would land in the same row)
+    start, days = gen.span_covering_splits(cfg)
+    raw, _ = gen.generate(40, days, "randomized", 3, dirty_frac=0.0, start=start)
+    raw_path = tmp_path / "spotless.parquet"
+    pq.write_table(pa.Table.from_pandas(raw, schema=gen.SCHEMA,
+                                        preserve_index=False), str(raw_path))
+    raw = pd.read_parquet(raw_path)
     dirty = raw.copy()
     dirty.loc[dirty.index[:3], "skuseq"] = None
     dirty.loc[dirty.index[5:7], "fc"] = None
@@ -900,7 +914,11 @@ def test_a_row_with_no_episode_key_is_dropped_and_counted(cfg, synth_flc, tmp_pa
     # DP-eligible (the owner's extract; the pilot simulator's templates).
     # The WHOLE clock-contiguous run drops, not the row (rule 15)
     dirty.loc[dirty.index[40], "flc_window"] = None
-    run = _clock_run_of(raw, raw.index[40])
+    # the WHOLE window the null sits in drops (rule 15) -- the window as
+    # EPISODE_RULE reads it, so the expectation comes from the ids on the
+    # clean extract, never from the clock alone: a clock-contiguous run can
+    # hold two windows back to back (a close, then a relist)
+    run = _window_run_of(raw, raw.index[40])
     assert len(run) > 1, "pick a row inside a multi-hour window"
     path = tmp_path / "dirty.parquet"
     dirty.to_parquet(path, index=False)
@@ -924,29 +942,24 @@ def test_a_row_with_no_episode_key_is_dropped_and_counted(cfg, synth_flc, tmp_pa
     assert not any((r.sku_id, r.fc, str(r.date), r.hour_of_day) in keys
                    for r in d.itertuples())
     assert EPISODE_KEY == ("sku_id", "fc", "date", "hour_of_day")
-    # an extract with NO dirt loses nothing to this stage (the shared
-    # fixture carries the generator's dirt, null counters included)
-    from tools import make_dummy_flc as gen
-    start, days = gen.span_covering_splits(cfg)
-    spotless, _ = gen.generate(40, days, "randomized", 3, dirty_frac=0.0, start=start)
-    spotless_path = tmp_path / "spotless.parquet"
-    pq.write_table(pa.Table.from_pandas(spotless, schema=gen.SCHEMA,
-                                        preserve_index=False), str(spotless_path))
-    _, clean = load_and_filter(str(spotless_path), cfg)
+    # an extract with NO dirt loses nothing to this stage
+    _, clean = load_and_filter(str(raw_path), cfg)
     assert clean[1][1] == clean[0][1] and clean[1][4]["rows_dropped"] == 0
     mask, by_col = null_key_rows(pd.DataFrame({"sku_id": [1, None], "fc": ["F", "F"],
                                                "date": ["d", "d"], "hour_of_day": [1, 1]}))
     assert list(mask) == [False, True] and by_col["sku_id"] == 1
 
 
-def _clock_run_of(raw, idx):
-    """The rows of `raw` in the same sku x fc clock-contiguous run as `idx`."""
-    r = raw.loc[idx]
-    g = raw[(raw.skuseq == r.skuseq) & (raw.fc == r.fc)].copy()
-    ts = pd.to_datetime(g.date.astype(str)) + pd.to_timedelta(g.hour, unit="h")
-    g = g.assign(_ts=ts).sort_values("_ts")
-    breaks = g._ts.diff().dt.total_seconds().div(3600).ne(1.0).cumsum()
-    return g[breaks == breaks[idx]].drop(columns="_ts")
+def _window_run_of(raw, idx):
+    """The rows of `raw` in the same source WINDOW as `idx`, as the id rule
+    reads the clean frame (source names -> prepared, the chain's own cast)."""
+    from fit.prepare_data import SOURCE_TO_CANONICAL, assign_episode_ids
+    d = raw.rename(columns=SOURCE_TO_CANONICAL).copy()
+    for c in ("starting_inventory", "ending_inventory"):
+        d[c] = d[c].round().astype("int64")
+    d = d.sort_values(["sku_id", "fc", "date", "hour_of_day"])
+    ids = assign_episode_ids(d)
+    return raw.loc[ids.index[ids == ids.loc[idx]]]
 
 
 def test_a_null_counter_drops_its_whole_window_not_a_fragment():
@@ -955,6 +968,7 @@ def test_a_null_counter_drops_its_whole_window_not_a_fragment():
     from fit.prepare_data import null_counter_windows
 
     df = pd.DataFrame({
+        "starting_inventory": [5] * 6, "units_sold": [0] * 6, "ending_inventory": [5] * 6,
         "sku_id": [7] * 6, "fc": ["F"] * 6,
         "date": ["2026-08-01"] * 6,
         "hour_of_day": [9, 10, 11, 14, 15, 16],       # a break between 11 and 14
@@ -969,6 +983,7 @@ def test_a_null_counter_drops_its_whole_window_not_a_fragment():
     # between two non-null rows, so the neighbour is its own window and
     # survives (the contract: two windows back to back are two episodes)
     b2b = pd.DataFrame({
+        "starting_inventory": [5] * 6, "units_sold": [0] * 6, "ending_inventory": [5] * 6,
         "sku_id": [7] * 6, "fc": ["F"] * 6, "date": ["2026-08-01"] * 6,
         "hour_of_day": [9, 10, 11, 12, 13, 14],
         "hours_remaining": [2.0, np.nan, 0.0, 2.0, 1.0, 0.0]})
@@ -984,6 +999,7 @@ def test_a_null_counter_drops_its_whole_window_not_a_fragment():
     # fragment goes with it (gap_split_windows could no longer see the gap
     # once the near side was dropped)
     gap = pd.DataFrame({
+        "starting_inventory": [5] * 6, "units_sold": [0] * 6, "ending_inventory": [5] * 6,
         "sku_id": [7] * 6, "fc": ["F"] * 6, "date": ["2026-08-01"] * 6,
         "hour_of_day": [9, 10, 11, 14, 15, 16],
         "hours_remaining": [7.0, np.nan, 5.0, 2.0, 1.0, 0.0]})
@@ -995,3 +1011,77 @@ def test_a_null_counter_drops_its_whole_window_not_a_fragment():
     mask, detail = null_counter_windows(beside)
     assert list(mask) == [True, True, True, False, False, False]
     assert detail["gap_fragments_kept"] == 1
+
+
+# ------------------------------------------- restock-extended windows (rule)
+
+def _shelf(hours, counters, start, sold, end, day="2026-03-01", sku="S", fc="F"):
+    """Hourly rows of one SKU x FC with the inventory the boundary rule reads."""
+    return episode_frame(hour_of_day=hours, hours_remaining=counters,
+                         starting_inventory=start, units_sold=sold,
+                         ending_inventory=end, date=day, sku_id=sku, fc=fc)
+
+
+def test_a_restock_extended_window_is_one_episode():
+    """Engineering: stock arriving mid-window extends it, and the counter
+    steps UP from the NEXT hour. Hour 12 opens with 3, sells 1 and ends
+    with 6 (4 arrived); hour 13 opens with 6 and the counter jumps 1 -> 4.
+    Same listing, one id -- and every restock re-tests on its own."""
+    from fit.prepare_data import assign_episode_ids, counter_step_detail
+
+    d = _shelf(hours=[10, 11, 12, 13, 14], counters=[4, 3, 2, 4, 3],
+               start=[5, 4, 3, 6, 5], sold=[1, 1, 1, 1, 1], end=[4, 3, 6, 5, 4])
+    assert assign_episode_ids(d).nunique() == 1
+    assert counter_step_detail(d) == {"up_steps_at_one_hour": 1, "restock_continued": 1,
+                                      "closed_new_window": 0, "reset_new_window": 0}
+    # the same up-step with NO stock arriving the hour before is a reset:
+    # two back-to-back windows, two ids
+    reset = d.copy()
+    reset.loc[reset.hour_of_day == 12, "ending_inventory"] = 2   # 3 - 1, reconciles
+    reset.loc[reset.hour_of_day >= 13, ["starting_inventory", "ending_inventory"]] -= 4
+    assert assign_episode_ids(reset).nunique() == 2
+    assert counter_step_detail(reset)["reset_new_window"] == 1
+    # a flat step after a restock continues too; three restocks, one id
+    three = _shelf(hours=list(range(10, 17)), counters=[6, 5, 4, 5, 4, 4, 3],
+                   start=[5, 4, 3, 6, 5, 8, 7], sold=[1] * 7,
+                   end=[4, 3, 6, 5, 8, 7, 6])
+    assert assign_episode_ids(three).nunique() == 1
+
+
+def test_a_write_off_zero_closes_the_window_whatever_the_counter_does():
+    """Engineering: `ending_inventory == 0` is the close, even on an hour
+    that also restocked; the next row opens a new id -- whether the
+    counter resets or, mid-window, keeps counting down (that zero is a
+    write-off leftover, not shrink)."""
+    from fit.prepare_data import assign_episode_ids, counter_step_detail
+
+    # closed at 12 (sold 5 of 5), relisted at 13 with a fresh counter
+    relist = _shelf(hours=[10, 11, 12, 13, 14], counters=[2, 1, 0, 6, 5],
+                    start=[7, 6, 5, 9, 8], sold=[1, 1, 5, 1, 1], end=[6, 5, 0, 8, 7])
+    assert assign_episode_ids(relist).nunique() == 2
+    assert counter_step_detail(relist)["closed_new_window"] == 1
+    # the zero hour sold MORE than it opened with (a restock by C9) and
+    # still ended at zero: closed, not continued
+    oversold = relist.copy()
+    oversold.loc[oversold.hour_of_day == 12, "units_sold"] = 8
+    assert assign_episode_ids(oversold).nunique() == 2
+    # a mid-window zero with the counter still ticking -1: two ids
+    mid = _shelf(hours=[10, 11, 12, 13, 14], counters=[4, 3, 2, 1, 0],
+                 start=[5, 4, 3, 2, 1], sold=[1, 1, 3, 1, 1], end=[4, 3, 0, 1, 0])
+    assert assign_episode_ids(mid).nunique() == 2
+
+
+def test_the_null_counter_run_reads_the_same_boundaries():
+    """The null-counter drop reads the window the id rule would: a null
+    after a restock-extended step is inside ONE window (the whole run
+    drops), and a null after a close belongs to the relist alone."""
+    from fit.prepare_data import null_counter_windows
+
+    ext = _shelf(hours=[10, 11, 12, 13, 14], counters=[4.0, 3.0, 2.0, np.nan, 3.0],
+                 start=[5, 4, 3, 6, 5], sold=[1] * 5, end=[4, 3, 6, 5, 4])
+    mask, detail = null_counter_windows(ext)
+    assert mask.all() and detail["windows"] == 1
+    closed = _shelf(hours=[10, 11, 12, 13, 14], counters=[2.0, 1.0, 0.0, np.nan, 5.0],
+                    start=[7, 6, 5, 9, 8], sold=[1, 1, 5, 1, 1], end=[6, 5, 0, 8, 7])
+    mask, detail = null_counter_windows(closed)
+    assert list(mask) == [False, False, False, True, True] and detail["windows"] == 1

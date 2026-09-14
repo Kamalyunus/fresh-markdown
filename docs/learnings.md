@@ -577,6 +577,24 @@ now. Dates are owner sign-off.
   an hour already priced, and ingest matches neither of two decisions that
   claim one hour (`decisions_colliding_on_hour`).
 
+- **Restock-extended windows (2026-09-14).** The id rule read any upward
+  counter step as a new window, and the contract carried it as a known
+  limitation to retire when engineering's id landed. Engineering settled
+  the two facts the derivation needed instead: the counter moves UP from
+  the hour AFTER stock arrives (the restocked hour still counts down), and
+  a zeroed `ending_inventory` is the close whatever the counter does next
+  — even on an hour that restocked, and even mid-window (that zero is a
+  write-off leftover, not shrink, which reverses the earlier shrink
+  reading for those rows). The rule now has one home
+  (`prepare_data.window_starts`) for the ids and the null-counter run;
+  three copies of the boundary had drifted. Two things the change
+  exposed: the replay and shadow planned every hour over the rows the
+  episode turned out to have (`mu_ref_path[t:]`), so a merged episode's
+  early hours saw an extension production could not — the horizon is the
+  row's own counter now; and the synthetic fixture never emitted the
+  pattern, so the clause had no end-to-end exercise until the generator
+  learned to extend windows (a third printed count).
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,

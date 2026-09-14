@@ -438,6 +438,10 @@ def _episode_frame(g):
         # fallback to the world's eps -- a frame without it is not
         # _attach_predictions output
         "eps_belief": float(g["eps_belief"].iloc[0]),
+        # the ROW's own counter: the horizon production plans over at that
+        # hour (a restock-extended window's early hours must not see the
+        # extension), never the rows the episode turned out to have
+        "counter": g["hours_remaining"].to_numpy(),
         "episode_id": str(g.episode_id.iloc[0]),
         "sku_id": int(g.sku_id.iloc[0]),
         "fc": str(g.fc.iloc[0]),
@@ -504,8 +508,9 @@ def _dp_price(e, cfg, eps_belief, spread_sink=None):
     dmin = explore.delta_min(cfg, eps_belief, e["category"])
 
     def price_at(t, q_int, anchor):
+        horizon = int(e["counter"][t]) + 1          # this hour included
         try:
-            res = dp_mod.solve(p0, cost, q_int, list(e["mu_ref_path"][t:]),
+            res = dp_mod.solve(p0, cost, q_int, list(e["mu_ref_path"][t:t + horizon]),
                                e["d_ref"], eps_belief, e["r"], cfg,
                                anchor_discount=anchor, entry=(t == 0))
         except ValueError:

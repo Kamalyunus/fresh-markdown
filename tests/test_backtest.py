@@ -419,6 +419,7 @@ def test_step_sensitivity_prices_the_cap_on_real_episodes(cfg):
         g = pd.DataFrame({
             "episode_id": [eid] * 4,
             "date": ["2026-05-01"] * 4, "hour_of_day": [9, 10, 11, 12],
+            "hours_remaining": [3, 2, 1, 0],
             "total_discount": [0.25, 0.25, 0.30, 0.30],
             "original_price": [10_000.0] * 4, "cost": [4000.0] * 4,
             "d_ref": [0.25] * 4, "starting_inventory": [6, 5, 4, 3],
@@ -478,7 +479,7 @@ def test_simulated_arms_absorb_only_the_shrink_their_shelf_held(cfg):
     g = pd.DataFrame({
         "episode_id": ["e"] * 3,
         "date": ["2026-05-01"] * 3, "hour_of_day": [9, 10, 11],
-        "total_discount": [0.30] * 3,
+        "hours_remaining": [2, 1, 0], "total_discount": [0.30] * 3,
         "original_price": [10_000.0] * 3, "cost": [4000.0] * 3,
         "d_ref": [0.25] * 3,
         # observed world sells nothing, then 2 units shrink mid-window
@@ -520,6 +521,7 @@ def test_within_episode_moves_are_counted_on_the_arms_own_path(cfg):
         g = pd.DataFrame({
             "episode_id": [eid] * 6, "date": ["2026-05-01"] * 6,
             "hour_of_day": [9, 10, 11, 12, 13, 14],
+            "hours_remaining": [5, 4, 3, 2, 1, 0],
             "total_discount": [0.25] * 6, "original_price": [10_000.0] * 6,
             "cost": [cost] * 6, "d_ref": [0.25] * 6,
             "starting_inventory": [12, 12, 12, 12, 12, 12],
@@ -562,6 +564,7 @@ def test_the_replay_prices_at_the_launch_belief_and_transitions_at_the_prior(cfg
         g = pd.DataFrame({
             "episode_id": ["e"] * 6, "date": ["2026-05-01"] * 6,
             "hour_of_day": [9, 10, 11, 12, 13, 14],
+            "hours_remaining": [5, 4, 3, 2, 1, 0],
             "total_discount": [0.25] * 6, "original_price": [10_000.0] * 6,
             "cost": [7000.0] * 6, "d_ref": [0.25] * 6,
             "starting_inventory": [12] * 6, "units_sold": [0] * 6,

@@ -105,8 +105,8 @@ And the standing prohibitions:
 - Never hand-edit `artifacts/posterior.json` (production learning state).
 - Never re-derive logic that has one home. The homes, and what each
   replaced (a second copy of any of these is a review failure):
-  - population filter — `fit.prepare_data.population`; the null-counter
-    run drop — `null_counter_windows` (the whole clock run, rule 15)
+  - population filter — `fit.prepare_data.population`; window boundaries
+    — `window_starts` (the ids and the null-counter run drop, rule 15)
   - episode-scoped cuts — `common.episodes.window_slice`,
     `trailing_weeks_window` (both factor-fit schedules), `week_key`,
     `opening_dates` (the episode's date key: folds, drift windows, the

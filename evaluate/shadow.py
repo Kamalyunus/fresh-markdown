@@ -91,7 +91,7 @@ def pre_window_il_history(d, cfg, before):
 EP_COLS = ("hour_of_day", "sku_id", "fc", "category", "subcategory",
            "starting_inventory", "ending_inventory", "units_sold",
            "total_discount", "original_price", "cost", "r",
-           "mu_ref_hat", "date", "is_observed")
+           "mu_ref_hat", "date", "is_observed", "hours_remaining")
 
 # per-episode scalars _shadow_one returns and the parent sums -- one list,
 # so a new term cannot be produced without being folded in
@@ -428,16 +428,20 @@ def _shadow_one(ep, ctx):
             "offered_price": float(ep["original_price"][t]) * (1 - legacy_d),
             "cost": float(ep["cost"][t])})
 
+        # the horizon production plans over at this hour is the ROW's own
+        # counter (this hour included) -- a restock-extended window's early
+        # hours must not see the extension the episode turned out to have
+        horizon = int(ep["hours_remaining"][t]) + 1
         state = {
             "episode_id": ep["episode_id"], "sku_id": int(ep["sku_id"][t]),
             "fc": ep["fc"][t], "category": ep["category"][t],
             "subcategory": ep["subcategory"][t],
             "date": row_day,
             "hour_of_day": int(ep["hour_of_day"][t]),
-            "hours_remaining": n - t, "q": q,
+            "hours_remaining": horizon, "q": q,
             "original_price": float(ep["original_price"][t]),
             "cost": float(ep["cost"][t]), "r": float(ep["r"][t]),
-            "mu_ref_path": list(ep["mu_ref_hat"][t:]),
+            "mu_ref_path": list(ep["mu_ref_hat"][t:t + horizon]),
             "current_discount": anchor,
         }
         spreads_here = []

@@ -129,17 +129,24 @@ def test_prepared_data_is_priceable_and_self_consistent(workspace):
 
 def test_every_episode_has_a_monotone_window_counter(workspace):
     """The episode rule's own postcondition: inside an episode, flc_window
-    (hours_remaining) steps down exactly one per row, and the window is at
-    least as long as the rows we hold. A violation means two runs collided
-    into one id -- which is what duplicate (sku, fc, date, hour) rows did."""
+    (hours_remaining) steps down exactly one per row -- with ONE exception,
+    an upward step on the hour after stock arrived (a restock-extended
+    window, EPISODE_RULE) -- and an unextended window is at least as long
+    as the rows we hold. Any other step means two runs collided into one
+    id, which is what duplicate (sku, fc, date, hour) rows did."""
     _chdir(workspace)
     d = pd.read_parquet("data/prepared.parquet")
-    g = d.sort_values(["date", "hour_of_day"]).groupby("episode_id")
-    for eid, s in g.hours_remaining:
-        steps = set(np.diff(s.to_numpy()))
-        assert steps <= {-1.0}, f"{eid} has window-counter steps {steps}"
-    ge = (d[d.dp_eligible].sort_values(["date", "hour_of_day"])
-          .groupby("episode_id"))
+    d = d.sort_values(["episode_id", "date", "hour_of_day"])
+    by = d.groupby("episode_id")
+    prev_restock = (by.ending_inventory.shift()
+                    > by.starting_inventory.shift() - by.units_sold.shift())
+    step = by.hours_remaining.diff()
+    bad = step.notna() & step.ne(-1.0) & ~(step.gt(-1.0) & prev_restock)
+    assert not bad.any(), d.loc[bad, ["episode_id", "hour_of_day", "hours_remaining"]]
+    extended = set(d.loc[step.gt(-1.0) & prev_restock, "episode_id"])
+    assert extended, ("the fixture holds no restock-extended window: the "
+                      "rule's restock clause is unexercised end to end")
+    ge = d[d.dp_eligible & ~d.episode_id.isin(extended)].groupby("episode_id")
     first, n = ge.hours_remaining.first(), ge.size()
     assert (first >= n - 1).all()
     assert not d.duplicated(
@@ -171,7 +178,11 @@ def test_prior_artifact_within_bounds(workspace):
             # wrong-sign category has its own density discarded whatever its
             # information weight says, because the weight measures how SHARP
             # the curve is and the sign says it points the wrong way.
-            if v["own_information_weight"] >= 0.999 and not v.get("wrong_sign"):
+            # ...unless an arm's peak sat on the lower bound: a boundary
+            # solution is not an estimate (rule 3) and is pooled like a
+            # wrong sign, whatever its information weight says
+            if (v["own_information_weight"] >= 0.999 and not v.get("wrong_sign")
+                    and v.get("boundary") is None):
                 assert abs(v["mean"] - v["own_mean"]) < 1e-9, \
                     "a right-signed category standing on its own data must " \
                     "carry its own density's mean unchanged"
@@ -1094,7 +1105,7 @@ def test_a_set_launch_date_schedules_factors_past_the_gate(workspace, tmp_path):
     After launch the same command IS the weekly cron: it must reach the
     week being priced, or calibration_current refuses every --apply. Moving
     split.test_end instead rescopes every sealed fit."""
-    from fit.train_baseline import fit_level_calibration
+    from fit.train_baseline import fit_level_calibration, schedule_reaches
     from common import episodes
     from common.config import load_config
 
@@ -1118,7 +1129,12 @@ def test_a_set_launch_date_schedules_factors_past_the_gate(workspace, tmp_path):
     live = json.loads((tmp_path / "cal.json").read_text())["schedule"]
     priced_week = (episodes.week_start(last_data_week)
                    + pd.Timedelta(days=7)).strftime("%Y-%m-%d")
-    assert max(live["by_week"]) == priced_week, live["weeks_unfitted_held_at_1"]
+    # the schedule REACHES the priced week -- fitted, or deliberately held
+    # at the anchor because its trailing week was thin (the one reading the
+    # --apply gate and advance take, schedule_reaches); a thin last week
+    # on a small fixture is not a missed cron
+    assert schedule_reaches(live) == priced_week, live["weeks_unfitted_held_at_1"]
+    assert priced_week in live["by_week"] or priced_week in live["weeks_unfitted_held_at_1"]
     assert live["scope"].startswith("production")
 
 
@@ -1173,7 +1189,11 @@ def test_the_pilot_simulator_walks_past_launch_date(workspace, tmp_path):
                          "--raw", "data/flc.parquet", "--days", "2",
                          "--episodes-per-day", "8", "--workers", "2",
                          "--sim-dir", sim_dir, "--out", out,
-                         "--fault", "push_fail:0.2"])
+                         # half the pushes fail: on ~20 priced hours a 20%
+                         # rate can draw none on the day the lane ingests
+                         # (the world's one RNG also draws demand), and the
+                         # test is about the reported-failure path, not luck
+                         "--fault", "push_fail:0.5"])
     assert rc == 0
     rep = json.load(open(out))
 

@@ -1556,7 +1556,9 @@ price response an **assumed** elasticity per category (`--epsilon-true`),
 its noise NB at the agent's own `r`, with a log-normal shock every hour of
 an episode shares (`--episode-shock-sd`, the reason `deff` exists) and an
 optional level drift. Episodes are templates sampled from the hold-out's
-DP-eligible population, re-dated onto simulated days; each fresh pick's
+DP-eligible population, re-dated onto simulated days (a template's
+length is its entry counter: a restock-extended window enters at its
+original horizon — the sim never extends one); each fresh pick's
 twin runs under the other arm the day after the first run closes (never
 while its SKU × FC is still open, or the feed would hold two states for
 one hour; on a small pool a template is re-picked), so the IL read is
@@ -1707,14 +1709,24 @@ and everything episode-terminal was wrong at each seam.
 over which the source's `hours_remaining` counter ticks down exactly one
 per elapsed hour.** Both signals must agree: time-contiguity alone merges
 back-to-back windows; the counter alone stitches across a data hole.
-Crossing midnight is a one-hour step like any other. Known limitation,
-confirmed by the producer (contract §01 C5): the counter can also step UP
-mid-window when a restock extends the window, which this rule reads as a
-new-window boundary — so a restock-extended window in the extract splits
-in two. Accepted for now (owner): the derivation retires once
-engineering's `episode_id` lands in the feed. Duplicate
-`(sku, fc, date, hour)` rows collide two runs into one id, so both copies
-drop (`duplicate_hour_rows_dropped`).
+Crossing midnight is a one-hour step like any other. Two readings the
+producer confirmed (contract §01 C2, C5, C9) complete the rule. A restock
+can extend the window, and the counter then steps UP **from the next
+hour** (the restocked hour itself still counts down): an upward or flat
+step is the same window when the previous hour's `ending > starting −
+sold` — stock arrived — and every restock re-tests on its own, so a window
+restocked many times is one episode. And a zeroed `ending_inventory`
+CLOSES the listing whatever the counter does next: the next row opens a
+new id, even when that hour also restocked, and a mid-window zero is a
+write-off leftover, not shrink. The boundary has one home,
+`prepare_data.window_starts`, which the ids and the null-counter run drop
+both read; `counter_up_steps` in the `episode_universe` stage detail
+counts every up-step by what the previous hour did (restock continued /
+closed / reset), which is how often the clause fires on an extract. The
+replay and shadow plan each hour over the ROW's own counter, never the
+rows the episode turned out to have, so an extension is never seen
+before it happened. Duplicate `(sku, fc, date, hour)` rows collide two
+runs into one id, so both copies drop (`duplicate_hour_rows_dropped`).
 
 Three things moved with the key: **split assignment** (an episode belongs
 wholly to the split its window started in), the **leakage guard on the
