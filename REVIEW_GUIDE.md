@@ -37,7 +37,10 @@ the exactly-once tests in `test_end_to_end.py` are the pinned answers.
 (backtest, shadow, thresholds; `pilot_sim.py`/`pilot_world.py` rehearse
 the weeks after launch against a simulated shop — they call the reviewed
 engine and lane, never price a shelf) and `ops/` (`advance.py` is the phase order
-as code; its `plan()` is pure and unit-tested per stop) run before launch,
+as code; its `plan()` is pure and unit-tested per stop; `price_batch.py` is
+Lane B's reference caller — the contract's requests in, a price per request
+out, through the reviewed engine and `engine/state.py`, the one request →
+state) run before launch,
 produce frozen artifacts, and sit behind human gate readings plus the test
 suite. `daily/monitor.py`, `assurance.py`, `ingest_outcomes.py` and
 `export_events.py` run in production but write reports, never prices. A defect here cannot touch a
@@ -57,8 +60,9 @@ the one decision↔outcome pairing.
 
 ## Out of review scope
 
-`tools/` (the fixture generator and the leadership scenario deck, which only
-calls the reviewed solver) and `docs/` pages. The test suite is the
+`tools/` (the fixture generator, the leadership scenario deck, which only
+calls the reviewed solver, and `e2e_cycle.py`, one integration cycle through
+the reviewed caller in a workspace) and `docs/` pages. The test suite is the
 reviewers' asset, not their burden: every non-obvious rule named above has a
 test whose docstring states it in prose.
 

@@ -1224,3 +1224,74 @@ def test_the_pilot_simulator_walks_past_launch_date(workspace, tmp_path):
 
     serial, parallel = applied(1), applied(2)
     assert serial and serial == parallel
+
+
+def test_the_e2e_cycle_prices_ingests_and_pairs(workspace, tmp_path):
+    """One integration cycle as engineering will run it: hourly request
+    batches through ops.price_batch (in parallel), the shop's feed, the
+    outcome ingest, the exports -- in a workspace of its own, production
+    untouched. The outcome ids are the ones the feed row names, and a
+    batch re-sent for a priced hour is refused, never priced twice."""
+    from tools import e2e_cycle
+    from ops import price_batch
+    from common.provenance import file_digest
+    from events.pairs import hour_key, outcome_id_of
+
+    ws = workspace
+    _chdir(ws)
+    with open("config.yaml") as f:
+        cfg = yaml.safe_load(f)
+    cfg["dispersion"]["rho"] = json.load(open(cfg["dispersion"]["rho_path"]))["rho"]
+    cfg["exploration"]["tau_initial"] = 500.0
+    cfg["monitoring"]["stop_conditions"]["scrap_deterioration_pct"] = 0.5
+    cfg["monitoring"]["stop_conditions"]["margin_deterioration_pct"] = 0.1
+    (ws / "e2e_config.yaml").write_text(yaml.safe_dump(cfg))
+    if not os.path.exists(cfg["baseline_model"]["calibration_factor_path"]):
+        subprocess.run([sys.executable, "-m", "fit.train_baseline", "--input",
+                        "data/prepared.parquet", "--fit-calibration",
+                        "--config", "e2e_config.yaml"], check=True,
+                       cwd=ws, env={**os.environ, "PYTHONPATH": ROOT})
+    if os.path.exists(cfg["posterior"]["path"]):
+        os.remove(cfg["posterior"]["path"])          # the workspace initialises one
+    frozen = {p: file_digest(p) for p in (
+        cfg["baseline_model"]["model_path"], cfg["baseline_model"]["calibration_factor_path"],
+        cfg["dispersion"]["r_lookup_path"], cfg["posterior"]["prior"]["path"])}
+
+    out_dir = str(tmp_path / "e2e")
+    assert e2e_cycle.main(["--config", "e2e_config.yaml", "--input", "data/prepared.parquet",
+                           "--dir", out_dir, "--episodes", "6", "--hours", "3",
+                           "--workers", "2"]) == 0
+    rep = json.load(open(os.path.join(out_dir, "e2e_report.json")))
+
+    first = rep["batches"][0]
+    assert first["requests"] == first["decisions"] > 0        # every entry priced
+    assert rep["decisions"] == sum(b["decisions"] for b in rep["batches"])
+    assert rep["decisions"] == rep["feed_rows"]                # one feed row per priced hour
+    ing = rep["ingest"]
+    assert ing["outcomes_built"] == ing["emitted"] == rep["decisions"]
+    assert ing["decisions_without_feed_row"] == 0 and ing["decisions_colliding_on_hour"] == 0
+    assert rep["pairs"] == rep["decisions"] and rep["price_mismatches"] == 0
+    assert rep["outcome_ids_follow_the_formula"]
+    # the exported tables carry the same ids, computable from the hour alone
+    outs = pd.read_parquet(rep["exports"]["outcomes"]["path"])
+    decs = pd.read_parquet(rep["exports"]["decisions"]["path"])
+    m = outs.merge(decs[["decision_id", "sku_id", "fc", "date", "hour_of_day"]], on="decision_id")
+    assert len(m) == rep["decisions"]
+    assert all(o == outcome_id_of(hour_key(s, f, d, h))
+               for o, s, f, d, h in zip(m.outcome_id, m.sku_id, m.fc, m.date, m.hour_of_day))
+
+    # the first hour's batch, sent again: every request is refused as
+    # already priced -- two decisions never land on one feed row
+    with open(rep["config_path"]) as f:
+        c = yaml.safe_load(f)
+    history = price_batch.load_history("data/prepared.parquet", c)
+    rows, events, again = price_batch.run(
+        c, price_batch.read_requests(first["requests_path"]), history)
+    assert not events and again["decisions"] == 0
+    assert all(r["rejected"].startswith("already_priced") for r in rows)
+
+    # every write went under the workspace; production is byte-identical
+    assert {p: file_digest(p) for p in frozen} == frozen
+    assert not os.path.exists(cfg["posterior"]["path"])
+    for sub in ("requests", "decisions", "feed", "exports", "events_store"):
+        assert os.listdir(os.path.join(out_dir, sub))

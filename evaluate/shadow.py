@@ -30,6 +30,7 @@ from engine import explore
 from engine.demand import expected_min_demand_inventory_vec
 from engine.decide import decide, StateRejected
 from engine.posterior import PosteriorStore
+from engine.state import BufferStore
 
 SHADOW_STATUS = "shadow_not_applied"
 
@@ -350,17 +351,9 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
     }
 
 
-class _BufferStore:
-    """Buffers decision events instead of writing them: workers must not
-    touch the event store the gate measures. The parent commits every event
-    through the real store, in episode order."""
-
-    def __init__(self):
-        self.decisions = []
-
-    def emit_decision(self, event):
-        self.decisions.append(event)
-        return True
+# the worker-side event buffer is engine.state's (Lane B and the pilot
+# simulator share it); the old name stays for this module's callers
+_BufferStore = BufferStore
 
 
 class _FrozenCells:

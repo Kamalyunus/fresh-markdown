@@ -17,14 +17,14 @@ One package per responsibility; each maps to one REVIEW_GUIDE tier and one
 | --- | --- | --- |
 | `config.yaml` | 5.1 | Every tunable. Single source of truth; no numeric literals in code. |
 | `pilot_sim.yaml` | 11.3 | The pilot simulator's world, run, faults and paths — nothing the system reads. |
-| `engine/` | 5.7–5.10 | What prices a shelf and learns: `demand.py` (mu(d), censored expectation), `dp.py` (monotone DP, absolute-IL reward), `explore.py` (uniform draw from the admissible, tau-affordable set; `delta_min`; budget, `walk_tau`, `SpreadLedger.sweep`), `posterior.py` (launch belief, bounded step, atomic exactly-once commit, exploration suspension), `decide.py` (state validation — reject, never an unsafe price — and the decision event). |
+| `engine/` | 5.7–5.10 | What prices a shelf and learns: `demand.py` (mu(d), censored expectation), `dp.py` (monotone DP, absolute-IL reward), `explore.py` (uniform draw from the admissible, tau-affordable set; `delta_min`; budget, `walk_tau`, `SpreadLedger.sweep`), `posterior.py` (launch belief, bounded step, atomic exactly-once commit, exploration suspension), `decide.py` (state validation — reject, never an unsafe price — and the decision event), `state.py` (the 12-field request → the engine's state: point-in-time features, `mu_ref_path`, `r`). |
 | `events/` | 5.10 | `store.py` (append-only JSONL: dedup, quarantine with reasons, torn-line safe), `pairs.py` (the one decision↔outcome pairing and trading-day key). |
 | `common/` | 5.1, 5.2, 2.3 | Shared definitions: `config.py` (loader, strict mode), `episodes.py` (endings, leftover, censoring, flow identity, window extension), `metrics.py` (`episode_economics`, `fidelity_decomposition`), `guardrail.py`, `provenance.py` (stamps, seal, config fingerprint), `io.py`, `parallel.py`. |
 | `fit/` | 5.2–5.6 | The frozen artifacts: `download_flc.py` (Redshift extract, `REDSHIFT_*` from `~/.env`), `prepare_data.py` (filter chain, eligibility flags, episodes, waterfall, split manifest), `train_baseline.py` (LightGBM/Tweedie `mu_ref`, level calibration, convergence check), `estimate_prior.py` + `prior_density.py` (the elasticity prior as a profile-likelihood density), `fit_dispersion.py` (NB `r`, `rho`). |
 | `evaluate/` | 5.13, 5.14, 11.3, 12 | Grades the artifacts before launch: `backtest.py` (like-for-like replay, fidelity, tau derivation, step sensitivity, within-episode moves), `shadow.py` (the full decision path on the hold-out, no prices applied), `pilot_sim.py` + `pilot_world.py` (the weeks after launch against a simulated shop: real engine, real daily lane, injected faults, graded expectations), `derive_thresholds.py` (guardrail floors, learning-rail checks). |
 | `daily/` | 5.11, 5.12, 5.15 | The production lane, in run order: `ingest_outcomes.py` (outcome events from the hourly feed), `update.py` (censored NB grid update; `--calibrate-tau` daily; `--apply` and `--resume-exploration` are the human gates), `monitor.py` (business, learning, safety; stop conditions), `assurance.py` (frozen artifacts vs the live world), `export_events.py` (warehouse tables — derived, never the record). |
-| `ops/` | 9, App. A | Drivers and gates: `advance.py` (the order of operations as code; `--plan`, `--feed`, `--report`), `bootstrap_loop.py` (train ONCE, iterate the calibration ↔ dispersion loop to convergence, backtest, thresholds, seal), `tune.py` (the config loop as code), `status.py` (the checks that gate a decision; exit 1 on FAIL), `init_posterior.py`, `seal.py` (every seal also writes an audit snapshot to `artifacts/history/<bundle>/<sealed_at>/`; every `advance` stop adds the reports). |
-| `tools/` | 6, 5.7 | `make_dummy_flc.py` (synthetic FLC generator, legacy + randomized policies), `scenario_deck.py` (the leadership deck: twelve scenarios answered by `dp.solve` → `reports/scenarios.html`). |
+| `ops/` | 9, App. A | Drivers and gates: `advance.py` (the order of operations as code; `--plan`, `--feed`, `--report`), `bootstrap_loop.py` (train ONCE, iterate the calibration ↔ dispersion loop to convergence, backtest, thresholds, seal), `tune.py` (the config loop as code), `status.py` (the checks that gate a decision; exit 1 on FAIL), `init_posterior.py`, `seal.py` (every seal also writes an audit snapshot to `artifacts/history/<bundle>/<sealed_at>/`; every `advance` stop adds the reports), `price_batch.py` (Lane B's reference caller: one hour's requests in, a price per request out). |
+| `tools/` | 6, 5.7, 5.10 | `make_dummy_flc.py` (synthetic FLC generator, legacy + randomized policies), `scenario_deck.py` (the leadership deck: twelve scenarios answered by `dp.solve` → `reports/scenarios.html`), `e2e_cycle.py` (one whole integration cycle — requests, decisions, feed, outcomes, exports — in a workspace under `sim/e2e`). |
 | `tests/` | — | One file per module plus `test_end_to_end.py` and `test_docs_match_the_code.py`; shared builders in `conftest.py`. |
 
 ## Running the bootstrap
@@ -101,6 +101,17 @@ world built on the frozen model with an assumed elasticity;
 the gates fire under an injected fault. Its settings — the world, the
 run, the faults, the paths — live in `pilot_sim.yaml` beside
 `config.yaml`, which it rehearses unchanged.
+
+```bash
+python3 -m tools.e2e_cycle --episodes 20 --hours 3     # one integration cycle under sim/e2e
+python3 -m ops.price_batch --requests hour.jsonl --history data/flc_raw.parquet --out decisions.jsonl
+```
+
+The cycle is what engineering's Lane B does in production, run once
+against the simulated shop: hourly request batches through
+`ops.price_batch` (the reference caller — the contract's 12 fields in, a
+price per request out), the feed the shop wrote, `daily.ingest_outcomes`
+naming the outcomes from the feed row, the exported pair tables.
 
 ## Design invariants worth knowing
 

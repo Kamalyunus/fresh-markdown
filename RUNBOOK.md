@@ -156,13 +156,19 @@ The engine is `engine.decide`: state in, price + decision event out, or
 validate. Engineering owns everything on the other side of the event
 contract:
 
-- the hourly scheduler and transport that call `decide` per SKU × FC
-  (the 12-field request in `docs/event_contract.html` §03), and the
-  service that turns a request into the engine's state: the frozen
-  model's `mu_ref_path` over the remaining hours, whose two demand-rate
-  features are computed point-in-time from the trailing feed by
-  `fit.prepare_data.add_ref_rate_features` — never re-derived;
-  `evaluate.pilot_world.ref_rate_features` is the worked example;
+- the hourly scheduler and transport that call the engine per SKU × FC
+  (the 12-field request in `docs/event_contract.html` §03).
+  **`ops.price_batch` is the reference caller** — one hour's requests in
+  (JSONL/parquet/CSV), a price per request out, or `rejected` with the
+  reason per row; the posterior read once per batch; every decision in the
+  store before its price returns; an hour already priced refused
+  (`already_priced`). Call it as it is (a file drop per hour) or lift the
+  service out of it: `engine.state.build_states` is the one request →
+  state (the frozen model's `mu_ref_path`, its two demand-rate features
+  computed point-in-time from the trailing feed, `r` from the lookup) —
+  never re-derived. `python3 -m tools.e2e_cycle` runs one whole cycle —
+  requests, decisions, the shop's feed, ingest, exports — in a workspace
+  under `sim/e2e`, before any of your code exists;
 - applying the returned price (the applied price must be the returned one —
   the mismatch rate is gated at 1%);
 - reporting **failed price pushes** — one row per failed hour, as a table
@@ -184,7 +190,10 @@ contract:
 Outcomes are NOT engineering's to produce: `daily.ingest_outcomes`
 builds them from the hourly FLC feed, matched to decisions by (SKU, FC,
 date, hour), deriving `adjustment_reason`, `is_stockout` and the offered
-price itself. §08 of the contract page is the pre-build feasibility
+price itself. The outcome id is the hour's key —
+`feed-<sku>|<fc>|<date>T<hh>` — so engineering can name it from the feed
+row; two decisions priced for one hour (a retried batch) match neither and
+are counted (`decisions_colliding_on_hour`). §08 of the contract page is the pre-build feasibility
 checklist, and §01 — deliberately first — is the definitions and claims
 register: every derivation stands on source-data meanings only engineering
 can confirm, so align on §01 before anything else.

@@ -25,8 +25,10 @@ import pandas as pd
 
 from common.config import reference_discount
 from common.io import read_json
+# the request -> state helpers are engine.state's: the one home Lane B
+# (ops.price_batch) and the simulator share
+from engine.state import mu_ref_paths
 from fit.fit_dispersion import lookup_r
-from fit.prepare_data import add_ref_rate_features
 from fit.train_baseline import BaselineModel
 from tools.make_dummy_flc import SCHEMA as FEED_SCHEMA
 
@@ -106,39 +108,6 @@ def episode_templates(prepared, cfg, opened_from=None):
     return out
 
 
-def hour_grid(day, opening_hour, n_hours):
-    """(date "YYYY-MM-DD", hour) for every hour of a window opening on
-    `day` at `opening_hour` -- midnight is an ordinary hour."""
-    base = pd.Timestamp(day) + pd.Timedelta(hours=opening_hour)
-    return [((base + pd.Timedelta(hours=k)).strftime("%Y-%m-%d"),
-             int((base + pd.Timedelta(hours=k)).hour)) for k in range(n_hours)]
-
-
-def ref_rate_features(history, openings, cfg):
-    """The two demand-rate features for episodes OPENING today, computed
-    point-in-time by the one home (fit.prepare_data.add_ref_rate_features)
-    over the trailing history -- the prepared extract plus every simulated
-    hour so far. `openings` rows carry episode_id, sku_id, fc, category,
-    date, hour_of_day, starting_inventory; they enter as the day's first
-    hour with no sales (not anchor rows), so they read yesterday and
-    before. Returns {episode_id: (sku_ref_sales_rate_30d,
-    prior_episode_ref_sales_rate)} with NaN where history is empty -- the
-    model's own encoding of "unknown"."""
-    cols = ["episode_id", "sku_id", "fc", "category", "date", "hour_of_day",
-            "starting_inventory", "units_sold", "total_discount"]
-    stub = openings.assign(units_sold=0, total_discount=np.nan)[cols]
-    frame = pd.concat([history[cols], stub], ignore_index=True)
-    # one lookup per category, mapped over the column (a per-row lambda
-    # was a config read per history row, every morning)
-    d_ref = {c: reference_discount(cfg, c) for c in frame.category.unique()}
-    frame["d_ref"] = frame.category.map(d_ref)
-    feats = add_ref_rate_features(frame, cfg)
-    mine = feats[feats.episode_id.isin(set(stub.episode_id))]
-    return {r.episode_id: (float(r.sku_ref_sales_rate_30d),
-                           float(r.prior_episode_ref_sales_rate))
-            for r in mine.itertuples()}
-
-
 class World:
     """Demand truth. `cfg` is the PRODUCTION config: the level is read from
     the sealed model and calibration as they stand at construction and
@@ -185,29 +154,10 @@ class World:
                                             self.episode_shock_sd)))
 
     def mu_ref_paths(self, openings, model=None):
-        """`mu_ref_path` for many openings in ONE prediction: a frame of
-        every (opening, hour) row, predicted once, split back. Per-episode
-        prediction spent 30 ms of pandas per episode -- at 5,000 a day
-        that was the run. Returns a list aligned with `openings`; each
-        opening carries `template`, `grid`, `features`."""
-        model = model or self.model
-        if not openings:
-            return []
-        rows = []
-        for i, o in enumerate(openings):
-            tpl, (rate30, prior_rate) = o["template"], o["features"]
-            for date, hour in o["grid"]:
-                rows.append((i, date, hour, tpl["category"], tpl["subcategory"],
-                             tpl["fc"], tpl["original_price"], rate30, prior_rate))
-        frame = pd.DataFrame(rows, columns=[
-            "_i", "date", "hour_of_day", "category", "subcategory", "fc",
-            "original_price", "sku_ref_sales_rate_30d", "prior_episode_ref_sales_rate"])
-        frame["total_discount"] = np.nan
-        mu = model.predict_mu_ref(frame)
-        out = [[] for _ in openings]
-        for i, m in zip(frame["_i"].to_numpy(), mu):
-            out[i].append(float(m))
-        return out
+        """`mu_ref_path` for many openings in ONE prediction (engine.state
+        .mu_ref_paths, the one home): the world's frozen model unless the
+        agent's own is passed."""
+        return mu_ref_paths(model or self.model, openings)
 
     def level_multiplier(self, day_index):
         """What the world's level at the reference price is, relative to

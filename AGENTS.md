@@ -113,6 +113,8 @@ And the standing prohibitions:
     schedule), `calendar_days` (the one `n_days`); the hour arithmetic —
     `hour_discrepancy`; COGS at risk — `prepare_data.episode_cogs`
   - outcome reconciliation — `common.episodes.adjustment_reason`
+  - request → state (Lane B and the simulator) — `engine.state.build_states`;
+    the hour key and the outcome id — `events.pairs.hour_key`, `outcome_id_of`
   - scrap, IL, margin at episode grain — `common.metrics.episode_economics`
     (+ `settled`, `daily_rates`; `scrap_rate` is scrap over SUPPLY,
     opening + restocked) over `common.episodes.scrap_units`; live events
@@ -157,13 +159,10 @@ And the standing prohibitions:
     the status "not run" prologue — `ops.status._needs`
 - Never invent a SET BY OWNER value; never drive a quarantine count to zero
   with a catch-all reason.
-- **A code change ships with its doc change in the same commit** — this
-  file's one-home list and paste table, the RUNBOOK step it touches, the
-  design.md section, the event contract for any event field, and a
-  learnings.md entry when a design was superseded. Docs that lag the code
-  are how the next agent re-derives what already has a home.
-- Quote the sampling caveat with any sampled-run count — a zero over a
-  sample is not a proof over the window.
+- **A code change ships with its doc change in the same commit** (which
+  docs: the last section of this file). Docs that lag the code are how
+  the next agent re-derives what already has a home.
+- Quote the sampling caveat with any sampled-run count — a sample's zero is not the window's.
 - `python3 -m pytest tests/` must pass before any push (a couple of minutes; the
   end-to-end module runs the bootstrap chain in subprocesses).
 
@@ -174,9 +173,8 @@ pip install -r requirements.txt
 python3 -m pytest tests/
 ```
 
-All commands run from the repo root — paths in `config.yaml` are relative to
-it, and running a module from elsewhere silently reads/writes the wrong
-artifacts.
+All commands run from the repo root — `config.yaml` paths are relative to
+it; a module run from elsewhere silently reads/writes the wrong artifacts.
 
 ## Driving the chain — `ops.advance`, not the step list
 
@@ -190,8 +188,9 @@ then run `ops.advance` until `reports/launch_readiness.md` says it is
 waiting on `data.launch_date`; the agent pulls the extract per the config's
 split and hold-out dates (`REDSHIFT_*` in `~/.env`), derives every MEASURED
 value, and stops at each owner decision with the evidence. ENGINEERING
-builds Lane B against `docs/event_contract.html` (the caller, applying the
-price, reporting failed pushes) and runs the daily lane
+builds Lane B against `docs/event_contract.html` (the caller —
+`ops.price_batch` is the reference, `tools.e2e_cycle` the rehearsal —
+applying the price, reporting failed pushes) and runs the daily lane
 (`advance --feed`) on a cron; `RUNBOOK.md` is their document.
 
 It owns the order and recomputes state from disk every run. Phase by
@@ -240,10 +239,10 @@ python3 -m evaluate.shadow --input data/prepared.parquet --out reports/shadow.js
 ```
 
 `ops.bootstrap_loop` is the whole bootstrap: it runs 1 and 3, then **iterates
-3b–5b until the fixed point CONVERGES**, then 6, 6b, 11 and `status`; it
+3b–5b until the fixed point CONVERGES**, then 6, 6b, 11 and `status`, and
 exits non-zero if the loop never settles. Its closing `status` is ADVISORY
-(`tau_initial` null, shadow not run): red rows are the next steps, not a
-broken bundle; `status` gates the pilot (RUNBOOK), never the bootstrap.
+(`tau_initial` null, shadow not run): red rows are next steps, not a broken
+bundle; `status` gates the pilot (RUNBOOK), never the bootstrap.
 
 **Why this is not optional.** Steps 3b–5 are one TURN of a fixed-point
 iteration (the factor solve consumes `r`; `r`, `rho` and the prior are fitted
@@ -348,51 +347,53 @@ fixture re-derives fixture values — read them, never commit them
   records, `common/` defines, `fit/` builds the frozen artifacts,
   `evaluate/` grades them (backtest, shadow, thresholds), `daily/` is the
   production lane in run order, `ops/` drives and gates (`advance`,
-  `bootstrap_loop`, `tune`, `status`, `init_posterior`, `seal`), `tools/`
-  is out of review scope. A new module goes where its reader is.
+  `bootstrap_loop`, `tune`, `status`, `init_posterior`, `seal`; `price_batch`
+  is Lane B's caller), `tools/` is out of review scope. A new module goes
+  where its reader is.
 - Run modules as `python3 -m package.module` from the repo root.
-- `--workers N` (`0` = all cores but one) parallelises backtest, shadow and
-  `pilot_sim` (each hour's batch); reports are byte-identical serial or
-  parallel — results return in submission order and only the parent
-  touches the event store. Each episode draws from its own RNG seeded by
-  episode id (the simulator: episode and hour) — order-independent.
+- `--workers N` (`0` = all cores but one) parallelises backtest, shadow,
+  `pilot_sim` and `price_batch` (each hour's batch); reports are
+  byte-identical serial or parallel — results return in submission order
+  and only the parent touches the event store. Each decision draws from
+  its own RNG seeded by episode id (the simulator: episode and hour; the
+  batch: the hour key) — order-independent.
 - Tests: shared builders live in `tests/conftest.py` (`cfg`,
   `decision_event`/`outcome_event`, `episode_frame`, `_reports`,
   `reports_dir`, `synth_flc` — the synthetic extract, generated once per
   session when `data/` is empty, so a fresh clone's `pytest` passes) —
-  extend those, never add a per-file copy. Test a
-  behaviour by calling the function; an `inspect.getsource` assertion is
-  reserved for an architecture ban (no second copy of X, no shared state in
-  a worker) that no behavioural test can express.
+  extend those, never add a per-file copy. Test a behaviour by calling the
+  function; an `inspect.getsource` assertion is reserved for an architecture
+  ban (no second copy of X, no shared state in a worker) that no behavioural
+  test can express.
 - Synthetic fixtures: `tools/make_dummy_flc.py` (`--policy randomized` =
   recoverable elasticity, `--policy legacy` = the production confound). It
   must keep emitting both source inventory conventions — regenerate the
   fixture after any change to them, and read the two printed counts.
 - Leadership deck: `python3 -m tools.scenario_deck --workers 0` writes
-  `reports/scenarios.html` — twelve scenarios answered by the real solver on
-  this machine's config over a state grid (~2 min). Regenerate after any change
-  to `engine/dp.py`, `engine/explore.py`, the tier/entry/δ_min config, or the
-  posterior prior; rule 19 applies to every number on it. It states what the
-  solver does under a chosen demand input, never what a SKU will sell.
+  `reports/scenarios.html` (twelve scenarios, the real solver, this machine's
+  config; ~2 min). Regenerate after any change to `engine/dp.py`,
+  `engine/explore.py`, the tier/entry/δ_min config or the prior; rule 19
+  applies to every number on it — it states what the solver does under a
+  chosen demand input, never what a SKU will sell.
 
 ## Maintaining the documents
 
 The doc surface is small on purpose: `docs/design.md` (the spec),
 `docs/learnings.md` (superseded designs), `docs/event_contract.html` (the
 integration contract), this file, `README.md`, `RUNBOOK.md`,
-`REVIEW_GUIDE.md`. Two are guarded by tests: `design.md` (every waterfall
-stage, gate, flag and population must appear, no retired rule may read as
-live — `test_docs_match_the_code.py`) and `event_contract.html` (checked
-against `events/store.py` in both directions; its quoted thresholds are NOT
-guarded — re-read them when `monitoring.*` moves; the worked episode is real
-solver output, regenerate it rather than hand-patch numbers).
+`REVIEW_GUIDE.md`. Two are test-guarded: `design.md` (every waterfall stage,
+gate, flag and population must appear, no retired rule may read as live —
+`test_docs_match_the_code.py`) and `event_contract.html` (checked against
+`events/store.py` both ways; its quoted thresholds are NOT guarded — re-read
+them when `monitoring.*` moves; the worked episode is real solver output,
+regenerate it rather than hand-patch numbers).
 
 **A code change ships with its doc change in the same commit**: this
 file's one-home list and paste table, the RUNBOOK step it touches, the
 design section (a simulator setting: its `pilot_sim.yaml` comment and the
 §11.3 key table, test-guarded), the event contract for any event field,
-and a learnings entry when a design was superseded. This file is a router, not a
-reference — a 400-line budget, enforced by test; new material goes to
+and a learnings entry when a design was superseded. This file is a router,
+not a reference — a 400-line budget, enforced by test; new material goes to
 design.md or learnings.md with a one-liner and a pointer here. Quote only
-from a gate-passing run, never invent a figure, and never present a
-fixture number as a production finding (rule 19).
+from a gate-passing run, never invent a figure, and never present a fixture
+number as a production finding (rule 19).

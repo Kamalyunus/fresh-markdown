@@ -53,9 +53,9 @@ from engine import dp as dp_mod
 from engine.decide import StateRejected, decide
 from engine.posterior import PosteriorStore
 from events.store import EventStore
-from evaluate.pilot_world import (FEED_SCHEMA, FAULTS, World, hour_grid, parse_faults,
-                                  ref_rate_features)
-from evaluate.shadow import _BufferStore
+from evaluate.pilot_world import FEED_SCHEMA, FAULTS, World, parse_faults
+from engine.state import (HISTORY_COLS as HIST_COLS, BufferStore, FrozenCells,
+                          hour_grid, ref_rate_features)
 from common.parallel import resolve_workers
 from fit import prepare_data
 from fit.train_baseline import BaselineModel, fit_level_calibration, schedule_reaches
@@ -171,25 +171,6 @@ TRUTH_COLS = ("episode_id", "template_id", "arm", "date", "hour_of_day",
               "original_price", "offered_price", "cost", "category", "fc",
               "sku_id", "dp_eligible", "shelf_discount", "mu_true",
               "mu_ref_world", "mu_ref_agent")
-HIST_COLS = ("episode_id", "sku_id", "fc", "category", "date", "hour_of_day",
-             "starting_inventory", "units_sold", "total_discount")
-
-
-class _SimCells:
-    """The posterior as the worker sees it: the cells resolved in the
-    parent for this tick, and the suspension in force (unlike shadow's
-    rehearsal, a simulated pilot IS suspended when the monitor says so)."""
-
-    def __init__(self, by_category, suspended):
-        self._by_category, self._suspended = by_category, suspended
-
-    def get(self, category):
-        return self._by_category[str(category)]
-
-    def exploration_suspended(self):
-        return self._suspended
-
-
 def _decision_rng(seed, episode_id, t):
     """One generator per (episode, hour), from the ids alone: the draw does
     not depend on which worker prices it or in what order."""
@@ -204,9 +185,11 @@ def _price_one(item, ctx):
     rejection; the parent commits the event and runs the shop."""
     state, (episode_id, t) = item
     rng = _decision_rng(ctx["seed"], episode_id, t)
-    store = _BufferStore()
+    store = BufferStore()
     try:
-        evt = decide(state, _SimCells(ctx["cells"], ctx["suspended"]), store,
+        # unlike shadow's rehearsal, a simulated pilot IS suspended when the
+        # monitor says so
+        evt = decide(state, FrozenCells(ctx["cells"], ctx["suspended"]), store,
                      ctx["cfg"], rng, ctx["tau"], ctx["model_version"],
                      config_digest=ctx["digest"])
     except StateRejected as e:

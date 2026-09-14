@@ -5,11 +5,15 @@ FLC feed the bootstrap ingests, matched to decisions by (sku_id, fc, date,
 hour_of_day). Every outcome field is derived from the feed row:
 `adjustment_reason` and `is_stockout` through the common.episodes rules,
 `applied_price` as the OFFERED price (original_price x (1 - discount)),
-`outcome_id` as "feed-<decision_id>" (re-runs dedup), `finalized_at` as the
-hour's close in UTC. The one fact only engineering knows -- did the price
-push succeed -- arrives as an optional failures input (parquet/CSV/JSONL,
-one row per failed push: sku_id, fc, date, hour_of_day, reason). Runs as a
-DAILY batch over the previous day's rows.
+`outcome_id` as the hour's key -- "feed-<sku>|<fc>|<date>T<hh>"
+(events.pairs.outcome_id_of: engineering can name it from the feed row;
+re-runs dedup), `finalized_at` as the hour's close in UTC. The one fact
+only engineering knows -- did the price push succeed -- arrives as an
+optional failures input (parquet/CSV/JSONL, one row per failed push:
+sku_id, fc, date, hour_of_day, reason). Two decisions for one hour match
+neither (two prices claimed one feed row: a retried batch), counted as
+`decisions_colliding_on_hour`. Runs as a DAILY batch over the previous
+day's rows.
 
 Run: python3 -m daily.ingest_outcomes --feed <hourly parquet> [--failures f.jsonl]
 """
@@ -23,35 +27,11 @@ import pandas as pd
 from common.config import load_config
 from common.episodes import adjustment_reason, is_censored_hour
 from fit.prepare_data import SOURCE_TO_CANONICAL
-from events.pairs import decision_day
+from events.pairs import decision_day, hour_key, outcome_id_of
 from events.store import EventStore
 
-
-def _day(value):
-    """One spelling of a trading day, whatever the producer's dtype: a
-    parquet datetime column reads `2026-08-19 00:00:00` under str()."""
-    return pd.Timestamp(value).strftime("%Y-%m-%d")
-
-
-def _ident(v):
-    """One spelling of an identifier column: pandas reads an integer column
-    as float once it holds a NaN, so the feed's 7.0 must key the decision's
-    "7". A NaN or an unparseable value raises -- the caller counts the row."""
-    if isinstance(v, (float, np.floating)):
-        if not np.isfinite(v) or v != int(v):
-            raise ValueError(f"not an identifier: {v!r}")
-        return str(int(v))
-    return str(v)
-
-
-def _key(sku, fc, date, hour):
-    """The (sku, fc, day, hour) a feed row and a decision meet on. Raises on
-    a value that names no hour or no item -- the caller decides whether that
-    costs one row or one decision, never the batch."""
-    h = float(hour)
-    if not np.isfinite(h) or h != int(h):
-        raise ValueError(f"not an hour: {hour!r}")
-    return (_ident(sku), _ident(fc), _day(date), int(h))
+# the one key a feed row, a decision and a price request meet on
+_key = hour_key
 
 
 def load_failures(path):
@@ -134,6 +114,10 @@ def build_outcomes(decisions, feed, failures=None):
 
     outcomes, unmatched, reasons = [], [], {}
     outside, failed_keys = 0, set()
+    # key every decision the feed could answer for, once: two decisions on
+    # one hour (a retried price batch) match neither -- neither is the
+    # price the shelf held, and pairing both would count one hour twice
+    keyed, claims = [], {}
     for dec in decisions:
         day = decision_day(dec)
         if feed_range is None:
@@ -152,6 +136,13 @@ def build_outcomes(decisions, feed, failures=None):
         except (TypeError, ValueError) as exc:
             unusable.append({"decision_id": dec["decision_id"],
                              "reason": f"unkeyable decision: {type(exc).__name__}: {exc}"})
+            continue
+        keyed.append((dec, k))
+        claims[k] = claims.get(k, 0) + 1
+    colliding = []
+    for dec, k in keyed:
+        if claims[k] > 1:
+            colliding.append(dec["decision_id"])
             continue
         r = rows.get(k)
         if r is None:
@@ -179,7 +170,7 @@ def build_outcomes(decisions, feed, failures=None):
         offered = base * (1 - disc / 100.0)
         out = {
             "event": "outcome",
-            "outcome_id": f"feed-{dec['decision_id']}",
+            "outcome_id": outcome_id_of(k),
             "decision_id": dec["decision_id"],
             "units_sold": sold,
             "starting_inventory": start,
@@ -210,6 +201,12 @@ def build_outcomes(decisions, feed, failures=None):
         "outcomes_built": len(outcomes),
         "decisions_without_feed_row": len(unmatched),
         "unmatched_decision_ids": unmatched[:20],
+        # decisions that claimed one hour between them: none is matched,
+        # and completeness falls by all of them -- a retried price batch
+        # is an integration miss, not silence
+        "decisions_colliding_on_hour": len(colliding),
+        "colliding_hours": sum(1 for n in claims.values() if n > 1),
+        "colliding_decision_ids": colliding[:20],
         "feed_duplicate_hours": dup_feed,
         # counted and named, never silently dropped: one unusable row costs
         # its own decision, not the day
@@ -273,6 +270,10 @@ def main():
     if report["feed_duplicate_hours"]:
         print(f"feed duplicate hrs : {report['feed_duplicate_hours']:,} "
               "(matched to no decision -- two states for one hour)")
+    if report["decisions_colliding_on_hour"]:
+        print(f"colliding decisions: {report['decisions_colliding_on_hour']:,} "
+              f"on {report['colliding_hours']:,} hour(s) -- two prices claimed "
+              "one feed row (a retried batch?); none matched")
     for why, n in sorted(report["adjustment_reasons"].items()):
         print(f"  {why:28s} {n:,}")
     if report["push_failures_applied"]:

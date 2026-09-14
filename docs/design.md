@@ -719,6 +719,28 @@ event alone. The store is append-only JSONL with duplicate detection;
 malformed events are **quarantined with their validation failures
 attached**, never silently dropped.
 
+**Lane B's reference caller is `ops.price_batch`** — one hour's 12-field
+requests in (JSONL, parquet or CSV), one response row per request out, in
+request order: the price to apply and the `decision_id`, or `rejected`
+with the reason. It resolves what the engine needs beyond the request by
+the one home for each — `engine.state.build_states` (the frozen model's
+`mu_ref_path` over the remaining hours on the two demand-rate features
+computed point-in-time from the trailing feed, `r` from the lookup; the
+pilot simulator opens its episodes through the same functions), one
+`PosteriorStore` read per batch, one config digest — commits every
+decision before returning its price, and refuses row by row, never the
+batch: a request that cannot become a state, a state the engine rejects,
+two requests for one hour, or an hour the store already holds a decision
+for (`already_priced` — a retried batch never lands two prices on one
+feed row). Outcomes are named from the feed row, not the decision:
+`outcome_id = feed-<sku>|<fc>|<date>T<hh>` (`events.pairs.outcome_id_of`
+over the one key, `hour_key`), so engineering can name the outcome an
+hour will produce, a re-ingest dedups, and two decisions that claimed one
+hour match neither (`decisions_colliding_on_hour`; completeness falls by
+both). `tools.e2e_cycle` runs one whole cycle — requests, decisions, the
+shop's feed, ingest, exports — in a workspace under `sim/e2e`, before any
+of engineering's code exists.
+
 ### 5.11 Learning update — censored, deflated, bounded, gated
 
 A daily batch consumes **exploration outcomes only**, evaluates the
@@ -1903,6 +1925,10 @@ python3 -m evaluate.shadow --input data/prepared.parquet --out reports/shadow.js
 #   --workers N (0 = every core but one); byte-identical serial or parallel
 python3 -m evaluate.pilot_sim [--days N] [--fault name:arg] [--workers N]
 #   the weeks AFTER launch vs a simulated shop, per pilot_sim.yaml (§11.3)
+python3 -m tools.e2e_cycle [--episodes N] [--hours H]
+#   one whole integration cycle under sim/e2e: requests -> decisions -> feed -> outcomes (§5.10)
+python3 -m ops.price_batch --requests <hour.jsonl> --history <flc.parquet> --out decisions.jsonl
+#   Lane B's reference caller: one hour's requests in, a price per request out (§5.10)
 
 # tuning loop
 python3 -m ops.tune              # what to change, on what evidence

@@ -37,7 +37,9 @@ def test_outcomes_are_built_from_the_feed_not_from_a_producer():
         [_dec(1)], _feed([{"start": 3, "sold": 1, "end": 2}]))
     assert rep["outcomes_built"] == 1 and not rep["decisions_without_feed_row"]
     o = outs[0]
-    assert o["decision_id"] == "D1" and o["outcome_id"] == "feed-D1"
+    # the id is the HOUR's key, not the decision's: engineering can name it
+    # from the feed row before the outcome exists
+    assert o["decision_id"] == "D1" and o["outcome_id"] == "feed-7|F1|2026-08-19T17"
     assert (o["units_sold"], o["starting_inventory"],
             o["ending_inventory"]) == (1, 3, 2)
     # OFFERED price from the discount column, never the zeroed final_price
@@ -116,6 +118,23 @@ def test_duplicate_feed_hours_match_nothing():
     assert not outs
     assert rep["feed_duplicate_hours"] == 1
     assert rep["decisions_without_feed_row"] == 1
+
+
+def test_two_decisions_for_one_hour_match_neither():
+    """A retried price batch put two decisions on one hour. Pairing both
+    with the one feed row double-counted the hour's evidence, and the
+    duplicate gate saw nothing (distinct ids, distinct decision ids). Now
+    neither is matched, both are counted, and completeness falls by both."""
+    outs, rep = build_outcomes(
+        [_dec(1), _dec(2), _dec(3, hour=18)],
+        _feed([{"start": 3, "sold": 1, "end": 2},
+               {"hour": 18, "start": 2, "sold": 0, "end": 2}]))
+    assert [o["decision_id"] for o in outs] == ["D3"]
+    assert rep["decisions_colliding_on_hour"] == 2
+    assert rep["colliding_hours"] == 1
+    assert sorted(rep["colliding_decision_ids"]) == ["D1", "D2"]
+    assert rep["decisions_without_feed_row"] == 0     # the row was there
+    assert rep["outcomes_built"] == 1
 
 
 def test_push_failures_mark_the_outcome_ineligible(tmp_path):

@@ -562,6 +562,21 @@ now. Dates are owner sign-off.
     bias with the wrong sign, held every feed row of the run in memory,
     and read a template's economics as paired when its twin never ran.
 
+- **The integration surface (2026-09-14).** Lane B had a function
+  (`engine.decide`) and a worked example inside the simulator, but no
+  entry point that took the contract's payload; engineering asked for one
+  they could call with a batch and get outcomes back from. `ops.price_batch`
+  is that caller and `engine.state.build_states` the one request → state
+  (lifted out of `pilot_world`, which now reads it — a second feature path
+  was the risk); `tools.e2e_cycle` runs the whole loop in a workspace.
+  Two things the loop exposed: `outcome_id = "feed-<decision_id>"` could
+  not be named by engineering from their own table, and nothing refused
+  two decisions on one hour — a retried batch paired both with the one
+  feed row and the duplicate gate saw nothing (distinct ids). The id is
+  now the hour's key (`events.pairs.outcome_id_of`), `price_batch` refuses
+  an hour already priced, and ingest matches neither of two decisions that
+  claim one hour (`decisions_colliding_on_hour`).
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,

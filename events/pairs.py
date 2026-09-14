@@ -8,6 +8,7 @@ never charged. Every per-day series shares `decision_day` -- the trading
 date the decision priced, never the UTC wall clock of its outcome.
 """
 
+import numpy as np
 import pandas as pd
 
 from common import episodes
@@ -23,6 +24,43 @@ LEARNABLE_STATUSES = (None, "ok", "success")
 def decision_day(d):
     """The TRADING date a decision priced."""
     return str(d.get("date") or pd.Timestamp(d["timestamp"]).date())
+
+
+def _day(value):
+    """One spelling of a trading day, whatever the producer's dtype: a
+    parquet datetime column reads `2026-08-19 00:00:00` under str()."""
+    return pd.Timestamp(value).strftime("%Y-%m-%d")
+
+
+def _ident(v):
+    """One spelling of an identifier column: pandas reads an integer column
+    as float once it holds a NaN, so the feed's 7.0 must key the decision's
+    "7". A NaN or an unparseable value raises -- the caller counts the row."""
+    if isinstance(v, (float, np.floating)):
+        if not np.isfinite(v) or v != int(v):
+            raise ValueError(f"not an identifier: {v!r}")
+        return str(int(v))
+    return str(v)
+
+
+def hour_key(sku, fc, date, hour):
+    """The (sku, fc, day, hour) a feed row, a decision and a price request
+    meet on -- the ONE key, spelt one way. Raises on a value that names no
+    hour or no item; the caller decides whether that costs one row or one
+    decision, never the batch."""
+    h = float(hour)
+    if not np.isfinite(h) or h != int(h):
+        raise ValueError(f"not an hour: {hour!r}")
+    return (_ident(sku), _ident(fc), _day(date), int(h))
+
+
+def outcome_id_of(key):
+    """The outcome id for the hour keyed `key`: "feed-<sku>|<fc>|<date>T<hh>",
+    computable by anyone holding the feed row -- engineering can name the
+    outcome an hour will produce before it exists -- and the same on every
+    re-ingest, so a re-run dedups instead of double-counting."""
+    sku, fc, day, hour = key
+    return f"feed-{sku}|{fc}|{day}T{hour:02d}"
 
 
 def is_learnable(o):

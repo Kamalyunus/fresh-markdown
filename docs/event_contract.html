@@ -718,6 +718,56 @@
     </p>
   </div>
 
+  <div class="note">
+    <h4>How to call it — the reference batch caller, and a whole cycle to watch first</h4>
+    <p>
+      <code>ops.price_batch</code> is Lane B's reference caller: one hour's requests in — JSONL, one
+      object per line in the twelve fields above (parquet or CSV in the same column names read too) —
+      and one response row per request out, in request order. It resolves everything the engine needs
+      beyond the request (the forecast path, the dispersion parameter, the reference discount), reads
+      the posterior <em>once per batch</em>, commits every decision to the event store before
+      returning its price, and refuses row by row, never the batch:
+    </p>
+<pre class="json">python3 -m ops.price_batch --requests 2026-08-19T17.jsonl \
+    --history flc_to_date.parquet --out decisions.jsonl [--report report.json] [--workers N]
+
+<span class="c">// one request line: the 17:00 entry decision of §06</span>
+{"episode_id": "EP-88213-4471", "sku_id": "SKU-88213", "fc": "FC-04", "category": "vegetables",
+ "subcategory": "leafy_greens", "date": "2026-08-19", "hour_of_day": 17, "hours_remaining": 4,
+ "q": 3, "original_price": 10000.0, "cost": 4000.0, "current_discount": null}
+
+<span class="c">// its response row: put applied_price on the shelf; decision_id is the handle</span>
+{"episode_id": "EP-88213-4471", "sku_id": "SKU-88213", "fc": "FC-04", "date": "2026-08-19",
+ "hour_of_day": 17, "decision_id": "d7557c60-5fad-4336-84ac-06775172f3e5",
+ "applied_discount": 0.3, "applied_price": 7000.0, "is_exploration": false, "rejected": null}
+
+<span class="c">// a refused one: no price, the reason -- the rest of the batch priced</span>
+{"episode_id": "EP-88213-4472", "sku_id": "SKU-88214", "fc": "FC-04", "date": "2026-08-19",
+ "hour_of_day": 17, "decision_id": null, "applied_discount": null, "applied_price": null,
+ "is_exploration": null, "rejected": "cost must not exceed original_price"}</pre>
+    <ul>
+      <li><code>--history</code> is the hourly FLC table the outcomes are ingested from — the same
+          table, source schema — covering at least the trailing <code>ref_rate_window_days</code>
+          (30) before the batch's day: the two demand-rate features are computed point-in-time from
+          it, the one way the bootstrap computed them.</li>
+      <li>One batch per hour. A request for an hour the store already holds a decision for is refused
+          (<code>already_priced</code>) — a retried batch never puts two prices on one feed row; two
+          requests for one hour in the same batch are both refused (<code>duplicate_request</code>).</li>
+      <li>A state the engine rejects comes back as <code>rejected</code> with the reason — the
+          <code>StateRejected</code> path below, per row; your fallback applies to that row.</li>
+      <li>Call it as it is (a file drop per hour) or lift the service out of it:
+          <code>engine.state.build_states</code> is the one request → state; the rest of the module
+          is plumbing.</li>
+    </ul>
+    <p>
+      Before any of it exists on your side, <code>python3 -m tools.e2e_cycle</code> runs one whole
+      cycle in a workspace under <code>sim/e2e</code> against a simulated shop — requests per hour,
+      decisions back, the feed the shop wrote, <code>daily.ingest_outcomes</code> naming the
+      outcomes, <code>daily.export_events</code> writing the paired tables — and prints the paired
+      table. Every file it writes is one you will produce or read.
+    </p>
+  </div>
+
   <div class="note risk">
     <h4>The agent refuses rather than returning an unsafe price</h4>
     <p>
@@ -827,7 +877,7 @@
         <tr><th>Field</th><th>Source</th><th>Type</th><th>Example</th><th>Rule</th></tr>
       </thead>
       <tbody>
-        <tr><td class="f">outcome_id</td><td><span class="tag">derived</span></td><td class="t">string</td><td class="ex">"feed-faf79b6c-…"</td><td>Derived from the decision id, so re-ingesting the same feed dedups instead of double-counting.</td></tr>
+        <tr><td class="f">outcome_id</td><td><span class="tag">derived</span></td><td class="t">string</td><td class="ex">"feed-SKU-88213|FC-04|2026-08-19T18"</td><td>The hour's key — <code>feed-&lt;sku_id&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code> — so you can name the outcome a feed row will produce before it exists, and re-ingesting the same feed dedups instead of double-counting. Two decisions priced for one hour (a retried batch) match neither: counted as <code>decisions_colliding_on_hour</code>, and completeness falls by both.</td></tr>
         <tr><td class="f">decision_id</td><td><span class="tag">derived</span></td><td class="t">string</td><td class="ex">"faf79b6c-fde0-…"</td><td>The decision the feed row matched on (SKU, FC, date, hour).</td></tr>
         <tr><td class="f">units_sold</td><td><span class="tag you">feed</span></td><td class="t">int ≥ 0</td><td class="ex">0</td><td><strong>Zero-sale hours count.</strong> They are roughly three quarters of all hours and they are evidence, not noise — the feed carries them already.</td></tr>
         <tr><td class="f">starting_inventory</td><td><span class="tag you">feed</span></td><td class="t">int ≥ 0</td><td class="ex">2</td><td>The feed's inventory at the top of the hour. Should equal the decision's <code>q_remaining</code>.</td></tr>
@@ -1088,7 +1138,7 @@
 //         adjustment_reason is needed.</span>
 {
   "event": "outcome",
-  "outcome_id": "feed-d7557c60-5fad-4336-84ac-06775172f3e5",
+  "outcome_id": "feed-SKU-88213|FC-04|2026-08-19T17",
   "decision_id": "d7557c60-5fad-4336-84ac-06775172f3e5",
   "units_sold": 1,
   "starting_inventory": 3,
@@ -1104,7 +1154,7 @@
 //         that says demand was low at ₩5,500.</span>
 {
   "event": "outcome",
-  "outcome_id": "feed-<the 18:00 decision_id>",
+  "outcome_id": "feed-SKU-88213|FC-04|2026-08-19T18",
   "decision_id": "faf79b6c-fde0-4f0f-8e19-9c274a0d4d43",
   "units_sold": <mark>0</mark>,
   "starting_inventory": 2,
@@ -1120,7 +1170,7 @@
 //         adjustment_reason this event is quarantined and never lands.</span>
 {
   "event": "outcome",
-  "outcome_id": "feed-<the 20:00 decision_id>",
+  "outcome_id": "feed-SKU-88213|FC-04|2026-08-19T20",
   "decision_id": "d4ab8f32-9533-4896-afe4-976d63d0e68b",
   "units_sold": 1,
   "starting_inventory": 2,
@@ -1165,7 +1215,7 @@
         <tr><th>Gate</th><th class="n">Threshold</th><th>What breaches it</th></tr>
       </thead>
       <tbody>
-        <tr><td class="f">event completeness</td><td class="t n">≥ 99%</td><td>Outcomes landing per decision. A priced hour missing from the feed, or a feed hour the ingester cannot interpret, shows up here first.</td></tr>
+        <tr><td class="f">event completeness</td><td class="t n">≥ 99%</td><td>Outcomes landing per decision. A priced hour missing from the feed, a feed hour the ingester cannot interpret, or two decisions priced for one hour (a retried batch: neither matched, <code>decisions_colliding_on_hour</code>) shows up here first.</td></tr>
         <tr><td class="f">duplicate or unmatched</td><td class="t n">≤ 1%</td><td>Outcomes with no matching decision over the finalized outcomes of the trailing <code>event_quality_window_days</code> (14) of trading days, plus repeated ids counted all-time (a duplicate line has no trading day; a producer that re-appends one is broken, not an incident that ages out). The mismatch rate reads the same window, so one incident stops re-firing a lifted stop once history dilutes it.</td></tr>
         <tr><td class="f">price mismatch</td><td class="t n">≤ 1%</td><td>Outcomes whose offered price (from the feed) differs from the decision's by more than <code>1e-6</code>. This is the "did the agent's price actually go live" check — it catches silent push failures your failures table missed; a failure you reported shows the old price by definition and is counted apart (<code>push_failures_reported</code>), never as a mismatch.</td></tr>
         <tr><td class="f">missing stockout field</td><td class="t n">exactly 0</td><td>Any outcome at all without <code>is_stockout</code>.</td></tr>
@@ -1176,10 +1226,11 @@
   <div class="note">
     <h4>Exactly-once, on the agent's side</h4>
     <p>
-      Outcome ids derive from decision ids, so re-running the ingester over the same feed
-      dedups instead of double-counting, and learning consumes each <code>outcome_id</code>
-      once. Nothing on your side needs exactly-once delivery — the feed just needs to keep
-      carrying every hour.
+      Outcome ids are the hour's key (<code>feed-&lt;sku&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code>),
+      so re-running the ingester over the same feed dedups instead of double-counting, and
+      learning consumes each <code>outcome_id</code> once; a price batch re-sent for an hour
+      already priced is refused before it reaches the store. Nothing on your side needs
+      exactly-once delivery — the feed just needs to keep carrying every hour.
     </p>
   </div>
 </section>
@@ -1196,6 +1247,16 @@
   </div>
 
   <ol class="check">
+    <li>
+      <span class="sev med">med</span>
+      <b>Have you watched one cycle run end to end?</b>
+      <p>
+        <code>python3 -m tools.e2e_cycle</code> (§03) prices hourly request batches through
+        <code>ops.price_batch</code>, sells them in a simulated shop, writes the feed, ingests the
+        outcomes and exports the paired tables, all under <code>sim/e2e</code>. The files it writes
+        are the files you will produce and read; a question about a field is faster asked of them.
+      </p>
+    </li>
     <li>
       <span class="sev hard">hard</span>
       <b>Is <code>episode_id</code> stable across midnight?</b>

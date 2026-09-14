@@ -10,7 +10,8 @@ import pytest
 
 from conftest import _hours
 from evaluate import pilot_sim, pilot_world
-from evaluate.pilot_world import World, episode_templates, hour_grid, parse_faults
+from engine.state import hour_grid
+from evaluate.pilot_world import World, episode_templates, parse_faults
 
 
 def test_faults_parse_to_their_shape_and_reject_the_unknown():
