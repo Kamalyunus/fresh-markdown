@@ -73,10 +73,10 @@ dispersion:
   drift_max_unusable_share: 0.34       # SET  share of windows with a pinned or thin r above which the drift verdict is not decision-grade
   r_lookup_path: "artifacts/r_lookup.json"
   rho_path: "artifacts/rho.json"
-  rho: 0.6364  # MEASURED  fit_dispersion, on the calib window; mirrors artifacts/rho.json. m is NOT pasted: deff measures forced hours per episode per batch (common.config.deff_from_episodes)
+  rho: 0.6364  # MEASURED  fit_dispersion, on the calib window; mirrors artifacts/rho.json. m is NOT pasted: deff measures forced hours per episode per batch (common.clustering.deff_from_episodes)
   rho_paste_tolerance_rel: 0.01        # SET  the paste vs artifacts/rho.json, relative to the frozen value. A PROVENANCE check sized to the consequence: rho is frozen for the pilot and divides every unit of evidence via deff, so 1% of rho is well under 1% of deff; tau's 5% is looser because the controller corrects tau daily. Above the ~1e-3 step a --check-only turn takes while the loop contracts (below it, every settle was a new paste)
 
-tuning:                                # SET  ops.tune's auto-apply gates, and the evaluate reports' own knobs (each routed to the one report that reads it -- ops.tune.READ_BY)
+tuning:                                # SET  ops.tune's auto-apply gates, and the evaluate reports' own knobs (each routed to the one report that reads it -- ops.config_keys.READ_BY)
   max_price_share_changed_for_auto_rail: 0.10   # SET  auto-rail ceiling on price churn
   max_il_delta_pct_for_auto_rail: 0.005         # SET  auto-rail ceiling on the IL move
   calibration_band_sigma_multiple: 3            # SET  band = this many sigma of log f
