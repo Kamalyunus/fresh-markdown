@@ -1,0 +1,712 @@
+<title>Engineering handover — Lane B and the daily cron</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&display=swap">
+
+
+<style>
+  /* ---------------------------------------------------------------- tokens */
+  :root {
+    --ground:   #F1F5F4;
+    --surface:  #FFFFFF;
+    --sunk:     #E8EEEC;
+    --rule:     #D5DEDB;
+    --rule-firm:#B9C6C2;
+    --ink:      #111A19;
+    --muted:    #5A6B67;
+    --faint:    #7C8D89;
+    --accent:   #0E5C55;
+    --accent-w: #DDECE9;
+    --warn:     #8A5300;
+    --warn-w:   #F7EAD5;
+    --crit:     #9A2B2B;
+    --crit-w:   #F6E0DE;
+
+    --display: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+    --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --data: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:   #0D1413;
+      --surface:  #141D1B;
+      --sunk:     #1A2523;
+      --rule:     #26332F;
+      --rule-firm:#3A4A46;
+      --ink:      #E4EDEA;
+      --muted:    #94A6A1;
+      --faint:    #7A8C88;
+      --accent:   #5CB9AE;
+      --accent-w: #14312D;
+      --warn:     #D9A25A;
+      --warn-w:   #33260F;
+      --crit:     #E08279;
+      --crit-w:   #371B1A;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:   #0D1413;
+    --surface:  #141D1B;
+    --sunk:     #1A2523;
+    --rule:     #26332F;
+    --rule-firm:#3A4A46;
+    --ink:      #E4EDEA;
+    --muted:    #94A6A1;
+    --faint:    #7A8C88;
+    --accent:   #5CB9AE;
+    --accent-w: #14312D;
+    --warn:     #D9A25A;
+    --warn-w:   #33260F;
+    --crit:     #E08279;
+    --crit-w:   #371B1A;
+  }
+
+  /* ----------------------------------------------------------------- frame */
+  * { box-sizing: border-box; }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16px;
+    line-height: 1.62;
+    margin: 0;
+    padding: 0 20px 100px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; }
+  .prose { max-width: 68ch; }
+
+  /* ------------------------------------------------------------------ head */
+  header.masthead {
+    padding: 56px 0 30px;
+    border-bottom: 2px solid var(--rule-firm);
+    margin-bottom: 40px;
+  }
+  .eyebrow {
+    font-family: var(--data);
+    font-size: 11.5px;
+    font-weight: 500;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 18px;
+  }
+  h1 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: clamp(30px, 5vw, 43px);
+    line-height: 1.1;
+    letter-spacing: -.015em;
+    text-wrap: balance;
+    margin: 0 0 20px;
+  }
+  .standfirst {
+    font-size: 18px;
+    line-height: 1.58;
+    color: var(--muted);
+    max-width: 64ch;
+    margin: 0;
+  }
+  .standfirst strong { color: var(--ink); font-weight: 600; }
+
+  /* --------------------------------------------------------------- summary */
+  .ataglance {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(178px, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    overflow: hidden;
+    margin: 34px 0 0;
+  }
+  .ataglance div { background: var(--surface); padding: 16px 18px; }
+  .ataglance b {
+    display: block;
+    font-family: var(--data);
+    font-size: 25px;
+    font-weight: 600;
+    letter-spacing: -.02em;
+    font-variant-numeric: tabular-nums;
+    margin-bottom: 3px;
+  }
+  .ataglance span {
+    display: block;
+    font-size: 12.5px;
+    line-height: 1.45;
+    color: var(--muted);
+  }
+
+  /* --------------------------------------------------------------- section */
+  section { margin-top: 62px; scroll-margin-top: 20px; }
+  h2 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 27px;
+    line-height: 1.2;
+    letter-spacing: -.012em;
+    text-wrap: balance;
+    margin: 0 0 6px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--rule-firm);
+  }
+  h2 .num {
+    font-family: var(--data);
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--accent);
+    margin-right: 12px;
+    letter-spacing: 0;
+  }
+  h3 {
+    font-family: var(--body);
+    font-weight: 600;
+    font-size: 15px;
+    letter-spacing: .02em;
+    margin: 38px 0 10px;
+  }
+  p { margin: 0 0 15px; }
+  section > p:first-of-type { margin-top: 20px; }
+  a { color: var(--accent); }
+
+  code, .mono { font-family: var(--data); font-size: .875em; }
+  p code, li code, td code {
+    background: var(--sunk);
+    border-radius: 3px;
+    padding: 1px 5px;
+    color: var(--ink);
+  }
+
+  /* ---------------------------------------------------------------- tables */
+  .tscroll {
+    overflow-x: auto;
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    background: var(--surface);
+    margin: 20px 0 0;
+  }
+  table { border-collapse: collapse; width: 100%; min-width: 660px; }
+  caption {
+    caption-side: top;
+    text-align: left;
+    font-size: 12.5px;
+    color: var(--muted);
+    padding: 0 0 9px;
+  }
+  th {
+    font-family: var(--data);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    text-align: left;
+    color: var(--faint);
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--rule-firm);
+    white-space: nowrap;
+    background: var(--sunk);
+  }
+  td {
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.f {
+    font-family: var(--data);
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    color: var(--ink);
+  }
+  td.t { color: var(--muted); font-family: var(--data); font-size: 12.5px; white-space: nowrap; }
+  td.n { font-variant-numeric: tabular-nums; }
+  td.ex {
+    font-family: var(--data);
+    font-size: 12.5px;
+    color: var(--accent);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  td.ex.null { color: var(--faint); }
+  tbody tr.groupsep td { border-top: 1px solid var(--rule-firm); }
+
+  /* group label rows inside a field table */
+  tr.grouphead td {
+    background: var(--sunk);
+    font-family: var(--data);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--faint);
+    padding: 9px 16px;
+  }
+
+  /* ------------------------------------------------------------------ tags */
+  .tag {
+    display: inline-block;
+    font-family: var(--data);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    padding: 3px 7px;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .tag.you  { background: var(--accent-w); color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .tag.svc  { background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1px var(--rule-firm); }
+  .tag.cond { background: var(--warn-w); color: var(--warn); box-shadow: inset 0 0 0 1px var(--warn); }
+
+  /* --------------------------------------------------------------- callout */
+  .note {
+    border-left: 3px solid var(--accent);
+    background: var(--surface);
+    border-radius: 0 5px 5px 0;
+    padding: 16px 20px;
+    margin: 24px 0 0;
+    max-width: 68ch;
+  }
+  .note.risk { border-left-color: var(--crit); }
+  .note h4 {
+    font-family: var(--body);
+    font-size: 13.5px;
+    font-weight: 600;
+    margin: 0 0 7px;
+    letter-spacing: .01em;
+  }
+  .note p { margin: 0 0 10px; font-size: 14.5px; }
+  .note p:last-child { margin-bottom: 0; }
+
+  /* ------------------------------------------------------------------ flow */
+  .flow {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 14px;
+    margin: 26px 0 0;
+  }
+  .flow > div {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    padding: 15px 17px;
+  }
+  .flow .step {
+    font-family: var(--data);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: block;
+    margin-bottom: 7px;
+  }
+  .flow b { display: block; font-size: 14.5px; font-weight: 600; margin-bottom: 4px; }
+  .flow span.d { font-size: 13.5px; color: var(--muted); line-height: 1.45; }
+
+  /* --------------------------------------------------------------- feasib. */
+  ol.check { list-style: none; counter-reset: c; padding: 0; margin: 24px 0 0; }
+  ol.check > li {
+    counter-increment: c;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    padding: 17px 20px 17px 58px;
+    position: relative;
+    margin-bottom: 10px;
+  }
+  ol.check > li::before {
+    content: counter(c);
+    position: absolute;
+    left: 18px;
+    top: 17px;
+    font-family: var(--data);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+  ol.check b { display: block; font-size: 15px; font-weight: 600; margin-bottom: 5px; }
+  ol.check p { margin: 0; font-size: 14.5px; color: var(--muted); }
+  ol.check p + p { margin-top: 9px; }
+  ol.check .sev {
+    float: right;
+    margin-left: 14px;
+    font-family: var(--data);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    padding: 3px 7px;
+    border-radius: 3px;
+  }
+  .sev.hard { background: var(--crit-w); color: var(--crit); }
+  .sev.med  { background: var(--warn-w); color: var(--warn); }
+
+  ul.plain { padding-left: 20px; margin: 12px 0 0; max-width: 68ch; }
+  ul.plain li { margin-bottom: 8px; font-size: 14.5px; }
+
+  /* ------------------------------------------------------------ JSON blocks */
+  .payload { margin: 22px 0 0; }
+  .payload > .hd {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 12px;
+    padding: 10px 16px;
+    background: var(--sunk);
+    border: 1px solid var(--rule);
+    border-bottom: 0;
+    border-radius: 5px 5px 0 0;
+  }
+  .payload > .hd b {
+    font-family: var(--data);
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+  .payload > .hd span { font-size: 13px; color: var(--muted); }
+  pre.json {
+    margin: 0;
+    padding: 16px 18px;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 0 0 5px 5px;
+    overflow-x: auto;
+    font-family: var(--data);
+    font-size: 12.5px;
+    line-height: 1.62;
+    color: var(--ink);
+    tab-size: 2;
+  }
+  pre.json .k { color: var(--muted); }
+  pre.json .s { color: var(--accent); }
+  pre.json .b { color: var(--warn); font-weight: 500; }
+  pre.json .c {
+    color: var(--faint);
+    font-style: italic;
+  }
+  pre.json mark {
+    background: var(--accent-w);
+    color: inherit;
+    border-radius: 2px;
+    padding: 0 2px;
+  }
+
+  .hourline {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    overflow: hidden;
+    margin: 24px 0 0;
+  }
+  .hourline > div { background: var(--surface); padding: 14px 16px; }
+  .hourline .h {
+    font-family: var(--data);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: block;
+    margin-bottom: 6px;
+  }
+  .hourline b {
+    display: block;
+    font-family: var(--data);
+    font-size: 17px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    margin-bottom: 3px;
+  }
+  .hourline span.d { font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+
+  footer {
+    margin-top: 74px;
+    padding-top: 22px;
+    border-top: 1px solid var(--rule);
+    font-size: 13px;
+    color: var(--faint);
+    max-width: 68ch;
+  }
+  footer code { font-family: var(--data); }
+
+  @media (max-width: 620px) {
+    body { padding: 0 15px 70px; }
+    header.masthead { padding-top: 38px; }
+    ol.check > li { padding-left: 20px; padding-top: 42px; }
+    ol.check > li::before { top: 15px; }
+  }
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="eyebrow">Perishable Markdown MVP · engineering handover</p>
+  <h1>Engineering handover — Lane B and the daily cron</h1>
+  <p class="standfirst">This is the one page for the engineering team. It says what you receive, what you build, the constraints the engine will hold you to, how to prove the integration end to end before any of your code exists, and who owns what. The binding integration contract is <code>docs/event_contract.html</code> (field by field, with a worked episode); <code>RUNBOOK.md</code> is the operator's document. Where this page and the contract disagree, the contract wins.</p>
+</header>
+
+
+<section id="the-big-picture">
+  <h2><span class="num">01</span>The big picture</h2>
+
+<p class="prose">The markdown engine is a black box to you. Once per clock hour you send one price request per open clearance episode (SKU × FC), get back a price or a row-scoped rejection with a reason, put exactly that price on the shelf, and report the pushes that failed. The engine forecasts, optimises, explores, learns and monitors itself. You never produce outcomes or forecasts: outcomes are built by the engine from the hourly FLC feed you already produce.</p>
+
+</section>
+
+
+<section id="what-you-receive-from-us">
+  <h2><span class="num">02</span>What you receive from us</h2>
+
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>What</th><th>It is</th><th>How it reaches you</th></tr></thead>
+      <tbody>
+        <tr><td><code>docs/event_contract.html</code></td><td>The contract: request fields (§03), the decision the engine logs (§04), the outcome it builds from your feed (§05), one worked episode (§06), the gates the events feed (§07), the checklist (§08)</td><td>The HTML file is self-contained; share it</td></tr>
+        <tr><td><code>ops.price_batch</code></td><td>The reference caller: one hour's requests in, one response row per request out. Run it as a file drop per hour, or lift <code>engine.state.build_states</code> into your service</td><td>In the repo</td></tr>
+        <tr><td><code>tools.e2e_cycle</code></td><td>A runnable rehearsal of the whole cycle (requests → decisions → shop feed → ingest → exports) against the real artifacts, in a throwaway workspace</td><td>In the repo</td></tr>
+        <tr><td><code>artifacts/</code></td><td>The sealed bundle the engine prices with: model, calibration, prior, dispersion lookup, posterior, thresholds, <code>bundle.json</code></td><td>Deployed beside the engine, never edited by hand</td></tr>
+        <tr><td><code>config.yaml</code></td><td>Every tunable the engine reads (tier step, entry offsets, <code>max_window_hours</code>, the event store path, …)</td><td>Deployed beside the engine; the owner's file</td></tr>
+        <tr><td>the event store (<code>events.store_dir</code> in config)</td><td>The decision and outcome log the engine reads and writes: one decision per hour, one outcome per decision, duplicates refused and counted</td><td>Shared state on disk (or its equivalent) reachable by the hourly caller and the daily cron</td></tr>
+        <tr><td><code>data.launch_date</code> in config</td><td>Null until the owner sets it on launch day</td><td>The owner sets it</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</section>
+
+
+<section id="what-you-build">
+  <h2><span class="num">03</span>What you build</h2>
+
+  <h3>1. The hourly caller</h3>
+
+<p class="prose">One batch per clock hour, one request per open episode, in the twelve fields of contract §03, in this order:</p>
+
+<pre class="json">episode_id, sku_id, fc, category, subcategory,
+date, hour_of_day, hours_remaining, q,
+original_price, cost, current_discount</pre>
+
+<p class="prose">The reference caller:</p>
+
+<pre class="json">python3 -m ops.price_batch --requests &lt;hour&gt;.jsonl|.parquet|.csv \
+    --history &lt;trailing hourly FLC table&gt; \
+    --out &lt;hour&gt;.response.jsonl --report &lt;hour&gt;.report.json</pre>
+
+<p class="prose">Every request is read in one spelling before anything else: ids as text (a <code>7</code>, a <code>"7"</code> and a <code>7.0</code> are one item), the day as <code>YYYY-MM-DD</code> (a parquet timestamp is fine), counts as integers. The response has one row per request, in the request's order:</p>
+
+<pre class="json">{&quot;episode_id&quot;: ..., &quot;sku_id&quot;: ..., &quot;fc&quot;: ..., &quot;date&quot;: ..., &quot;hour_of_day&quot;: ...,
+ &quot;decision_id&quot;: &quot;&lt;id&gt;&quot;, &quot;applied_discount&quot;: 0.15, &quot;applied_price&quot;: 8500.0,
+ &quot;is_exploration&quot;: false, &quot;rejected&quot;: null}</pre>
+
+<p class="prose">or, for a request the engine will not price:</p>
+
+<pre class="json">{..., &quot;decision_id&quot;: null, &quot;applied_discount&quot;: null, &quot;applied_price&quot;: null,
+ &quot;is_exploration&quot;: null, &quot;rejected&quot;: &quot;&lt;reason&gt;&quot;}</pre>
+
+<p class="prose">A rejection is always row-scoped: the rest of the batch prices. Every reason the system can return is below; several can appear on one row, joined by <code>; </code>. Validate the first two groups on your side before sending, and you will never see them.</p>
+
+<p class="prose"><strong>Refused before the engine — the request itself (<code>validate_request</code>).</strong></p>
+
+  <div class="tscroll">
+    <table>
+      <thead><tr><th><code>rejected</code> reads</th><th>Cause</th><th>Send instead</th></tr></thead>
+      <tbody>
+        <tr><td><code>missing &lt;field&gt;</code></td><td>One of the twelve fields is absent (a null value is present, a missing key is not)</td><td>Every field, every row</td></tr>
+        <tr><td><code>date '&lt;value&gt;' names no day</code></td><td><code>date</code> is not a calendar day</td><td><code>YYYY-MM-DD</code>, or a date/timestamp column</td></tr>
+        <tr><td><code>q must be a non-negative integer</code></td><td><code>q</code> is null, negative, fractional or a boolean</td><td>Units on hand at the top of the hour, an integer ≥ 0</td></tr>
+        <tr><td><code>hours_remaining must be an integer &gt;= 1</code></td><td>Null, zero, negative or fractional</td><td>Hours left including this one, ≥ 1</td></tr>
+        <tr><td><code>hours_remaining must not exceed data.max_window_hours (&lt;cap&gt;); got &lt;n&gt;</code></td><td>The counter is not hours (minutes, a sentinel, a stale value)</td><td>A value ≤ the config cap; fix the feed, do not clip</td></tr>
+        <tr><td><code>hour_of_day must be an integer in 0..23</code></td><td>Outside the day, fractional or null</td><td>The clock hour the batch is for</td></tr>
+        <tr><td><code>episode_id is null</code> / <code>sku_id is null</code> / <code>fc is null</code></td><td>A null id</td><td>The id</td></tr>
+        <tr><td><code>&lt;id field&gt; is not an identifier: &lt;value&gt;</code></td><td>An id that is not text or a number (a struct, a list, NaN)</td><td>One scalar id per field</td></tr>
+        <tr><td><code>category is null</code> / <code>subcategory is null</code></td><td>A null label</td><td>The labels the history table uses</td></tr>
+        <tr><td><code>original_price is null</code> / <code>cost is null</code></td><td>A null number</td><td>The hour's price and unit cost, per FC</td></tr>
+        <tr><td><code>original_price is not a number: &lt;value&gt;</code> / <code>cost is not a number: &lt;value&gt;</code></td><td>Text or a boolean where a number belongs</td><td>A number</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+<p class="prose"><strong>Refused by the batch — the hour was already claimed.</strong></p>
+
+  <div class="tscroll">
+    <table>
+      <thead><tr><th><code>rejected</code> reads</th><th>Cause</th><th>Send instead</th></tr></thead>
+      <tbody>
+        <tr><td><code>duplicate_request: two requests for one hour</code></td><td>Two rows in one batch name the same <code>(sku_id, fc, date, hour_of_day)</code>; both are refused</td><td>One row per item per hour</td></tr>
+        <tr><td><code>already_priced: the store holds a decision for this hour</code></td><td>A resend of a priced hour; the stored price stands, nothing is re-priced</td><td>Nothing; read the earlier response</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+<p class="prose"><strong>Refused by the engine — the state it built (<code>StateRejected</code>).</strong> These are still row-scoped. The ones marked <em>yours</em> come from the request's values; the rest are the bundle's or the configuration's and belong to the owner.</p>
+
+  <div class="tscroll">
+    <table>
+      <thead><tr><th><code>rejected</code> reads</th><th>Whose</th><th>Cause</th></tr></thead>
+      <tbody>
+        <tr><td><code>original_price must be a finite positive number</code></td><td>yours</td><td>Zero, negative, infinite or NaN price</td></tr>
+        <tr><td><code>cost must be a finite non-negative number</code></td><td>yours</td><td>Negative, infinite or NaN cost</td></tr>
+        <tr><td><code>cost must not exceed original_price</code></td><td>yours</td><td>No legal discount exists below cost</td></tr>
+        <tr><td><code>current_discount must be a finite number</code></td><td>yours</td><td>A non-null anchor that is NaN or infinite; the anchor is <code>null</code> on an entry hour and a fraction on every later one</td></tr>
+        <tr><td><code>no feasible tier at or below the current anchor price</code></td><td>yours</td><td>The anchor discount sits deeper than any tier the cost floor allows, or is not on the discount grid (<code>pricing.tier_step</code>); prices never move back up, so the row cannot be priced</td></tr>
+        <tr><td><code>empty feasible set or degenerate state</code></td><td>yours</td><td><code>q</code> is 0 — an empty shelf between your snapshot and the call; there is nothing to price</td></tr>
+        <tr><td><code>hours_remaining must ...</code> and the count checks above</td><td>yours</td><td>The same checks re-run on the built state</td></tr>
+        <tr><td><code>r must be a finite positive number</code></td><td>owner</td><td>The dispersion lookup in the bundle has no usable value for this category</td></tr>
+        <tr><td><code>demand predictions must be finite and positive</code></td><td>owner</td><td>The frozen model returned a non-positive forecast for this episode</td></tr>
+        <tr><td><code>mu_ref_path has &lt;n&gt; hours but hours_remaining is &lt;m&gt;: ...</code></td><td>owner</td><td>The stored forecast path and the counter disagree; the batch report's <code>non_entry_requests_without_stored_path</code> says whether an entry hour was skipped (yours)</td></tr>
+        <tr><td><code>exploration.delta_min_log_bias has no entry for '&lt;category&gt;' and no </code>_default<code>: ...</code></td><td>owner</td><td>The exploration floor map in <code>config.yaml</code> lacks this category</td></tr>
+        <tr><td><code>quarantined: the store refused the decision event</code></td><td>owner</td><td>The decision failed the store's own validation; <code>quarantine.jsonl</code> in the store says why</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+<p class="prose">A category the posterior has no cell for is not a rejection: it prices on the pooled <code>GLOBAL</code> cell.</p>
+
+<p class="prose">The batch report (<code>--report</code>) is your integration dashboard. Read these after every early batch:</p>
+
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>Key</th><th>Meaning</th><th>Healthy</th></tr></thead>
+      <tbody>
+        <tr><td><code>rejected_before_the_engine</code>, <code>rejected_by_the_engine</code></td><td>Rows refused, by reason</td><td>Explained per reason</td></tr>
+        <tr><td><code>requests_with_unknown_features</code></td><td>Entry requests whose SKU has no trailing history behind them, so the forecast starts from "unknown"</td><td>A few new SKUs; a whole batch means the history table or the id spelling does not meet the requests</td></tr>
+        <tr><td><code>non_entry_requests_without_stored_path</code></td><td>Later hours of episodes the store never priced at entry</td><td>Zero once you are live; non-zero means an episode's entry hour was skipped or its id changed mid-window</td></tr>
+        <tr><td><code>exploration_suspended</code>, <code>tau_in_force</code></td><td>Whether the monitor has suspended exploration (exploitation pricing continues)</td><td>Read, do not act</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>2. Apply the returned price</h3>
+
+<p class="prose"><code>applied_price</code> is what goes on the shelf, exactly that number. The engine matches its decision against the price your feed shows in force; the mismatch rate is gated (contract §07) and a breach suspends exploration. A price you could not apply is a failed push (next item), never a silent mismatch.</p>
+
+  <h3>3. Report failed price pushes</h3>
+
+<p class="prose">The one outcome fact only you know. One row per failed hour, as a table (parquet or CSV) or JSONL:</p>
+
+<pre class="json">sku_id, fc, date, hour_of_day, reason</pre>
+
+<p class="prose">No row means the push succeeded. Keys are normalised on read the same way requests are. A reported failure is counted apart (<code>push_failures_applied</code> in the ingest report) and excluded from learning; an unreported one is caught by the mismatch gate as if it were your bug.</p>
+
+  <h3>4. A fallback for a rejected request</h3>
+
+<p class="prose">When a row comes back rejected, hold the current shelf price and alert on the rejection rate. Do not retry the same hour with altered fields to get a price out; the next hour's request is the retry.</p>
+
+  <h3>5. The daily cron</h3>
+
+<p class="prose">Once per day, after the previous day's hourly feed has landed:</p>
+
+<pre class="json">python3 -m ops.advance --feed &lt;yesterday&#x27;s hourly FLC parquet&gt; --failures &lt;yesterday&#x27;s failed pushes&gt;</pre>
+
+<p class="prose">Omit <code>--failures</code> on a day with none. One command runs the lane in order: ingest outcomes (from the feed, matched to decisions on <code>sku_id, fc, date, hour_of_day</code>), walk the exploration budget, monitor (guardrails and stop conditions), assurance, export the paired tables, status. It stops at <code>daily.update --apply</code>, the operator's gate, and never runs it. It keeps running the lane while status is red; a red stop names the row and what clears it.</p>
+
+</section>
+
+
+<section id="constraints-the-engine-holds-you-to">
+  <h2><span class="num">04</span>Constraints the engine holds you to</h2>
+
+  <ul class="plain">
+    <li><strong><code>episode_id</code> is stable across midnight.</strong> An episode is one clearance window of one SKU at one FC, from the hour it opens to the hour the listing closes; windows cross midnight. Never derive the id from the calendar date: a date-keyed id splits one window in two, the second half arrives with <code>current_discount = null</code>, the engine treats it as a fresh entry, and the price can move back up on shoppers who saw yesterday's — the one move the system guarantees never happens inside a window. The full assignment rule is the box under contract §03.</li>
+    <li><strong>A restock keeps the id.</strong> Stock arriving mid-window, even one that extends the window so <code>hours_remaining</code> jumps up, is the same listing: send the new, larger counter and the engine re-plans over the longer horizon. The counter moves from the hour after the arrival.</li>
+    <li><strong>A sell-out closes the window.</strong> When the shelf empties, that hour is the last hour of the episode; if stock later arrives under the same listing, those hours are a new episode with a new id and a fresh entry (<code>current_discount = null</code>). Rows that continue an emptied window under the old id are flagged and not priced.</li>
+    <li><strong><code>hours_remaining</code> means hours.</strong> Hours left in the window, this one included, at least 1 and at most <code>data.max_window_hours</code> (config); a larger value is rejected as a feed defect. Within one id it decrements by exactly one per hour, with the one restock exception above. Build that consistency check into your side: any other jump means the id is stitching two windows together or a feed hour is missing.</li>
+    <li><strong><code>current_discount</code></strong> is <code>null</code> on the first hour of an episode and a fraction (<code>0.15</code>, not <code>15</code>) on every later one. Prices only hold or deepen within an episode; the engine's action set enforces it.</li>
+    <li><strong><code>cost</code> and <code>original_price</code></strong> are per-request inputs, per hour, per FC. Cost sets the price floor; a stale or missing cost either blocks legal discounts or rejects the row.</li>
+    <li><strong><code>--history</code></strong> is the trailing hourly FLC table the two demand-rate features read (the prepared extract plus every hour fed since); it must reach back at least <code>data.ref_rate_window_days</code> (config) before the batch's day, in the same id spelling as the requests.</li>
+    <li><strong>The feed keeps every priced hour</strong>, zero-sale hours included. Outcomes are built from the feed, so a priced hour the feed drops is a completeness miss (contract §07), and the zero-sale rows are most of the evidence.</li>
+    <li><strong>One request per hour per episode.</strong> A second request for a priced hour is refused (<code>already_priced</code>); two rows for one hour in one batch are both refused (<code>duplicate_request</code>).</li>
+  </ul>
+
+</section>
+
+
+<section id="what-you-do-not-build">
+  <h2><span class="num">05</span>What you do not build</h2>
+
+  <ul class="plain">
+    <li><strong>Outcomes.</strong> <code>daily.ingest_outcomes</code> builds them from the feed and matches them to decisions on <code>(sku_id, fc, date, hour_of_day)</code>; the outcome id is that key. You keep the feed landing.</li>
+    <li><strong>Forecasts.</strong> The engine resolves demand from the frozen model; a later hour of an episode is priced from the entry decision's stored forecast path, so nothing is recomputed on your side.</li>
+    <li><strong>Monitoring and guardrails.</strong> The monitor, assurance and the stop conditions run inside <code>advance --feed</code>.</li>
+  </ul>
+
+</section>
+
+
+<section id="how-to-prove-the-integration-end-to-end">
+  <h2><span class="num">06</span>How to prove the integration end to end</h2>
+
+<p class="prose">Nothing below needs your code. It needs the sealed bundle in <code>artifacts/</code> and a prepared extract under <code>data/</code>; the owner's agent produces both (<code>ops.bootstrap_loop</code>, then <code>ops.init_posterior</code>).</p>
+
+<p class="prose"><strong>Step 1 — watch one cycle.</strong></p>
+
+<pre class="json">python3 -m tools.e2e_cycle --input data/prepared.parquet --episodes 50 --hours 6 --workers 0</pre>
+
+<p class="prose">This wipes and rebuilds <code>sim/e2e/</code> and writes every file you will handle in production:</p>
+
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>File under <code>sim/e2e/</code></th><th>What it represents</th></tr></thead>
+      <tbody>
+        <tr><td><code>requests/&lt;date&gt;T&lt;hh&gt;.jsonl</code></td><td>What you send, one file per hour, twelve fields</td></tr>
+        <tr><td><code>decisions/&lt;date&gt;T&lt;hh&gt;.jsonl</code></td><td>What you get back, one response row per request</td></tr>
+        <tr><td><code>feed/&lt;date&gt;.parquet</code></td><td>The hourly FLC feed you already produce, in its source column names</td></tr>
+        <tr><td><code>exports/decisions.parquet</code>, <code>exports/outcomes.parquet</code></td><td>The paired tables the daily lane exports for the warehouse</td></tr>
+        <tr><td><code>e2e_report.json</code></td><td>The cycle's counts</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+<p class="prose"><strong>Step 2 — read the counts.</strong> In <code>e2e_report.json</code> and the printed summary, these must be zero: <code>price_mismatches</code>, <code>decisions_colliding_on_hour</code>, <code>outcomes_per_decision_over_one</code>, <code>missing_stockout_field</code>. <code>requests_with_unknown_features</code> and <code>non_entry_requests_without_stored_path</code> should be zero here too (the harness prices every entry hour and feeds the history it built); a non-zero count in your own integration is a plumbing fault — an id spelling, a history table cut short, an entry hour skipped. Every rejection is listed with its reason.</p>
+
+<p class="prose"><strong>Step 3 — price a batch from real data.</strong> Build one hour's requests from the prepared extract, one row per open episode, and write it twice: as JSONL and as parquet with a datetime <code>date</code> column. Price each with the full source table as history, then send the JSONL batch a second time:</p>
+
+<pre class="json">python3 -m ops.price_batch --requests &lt;file&gt; --history data/flc_raw.parquet \
+    --out sim/batch/&lt;name&gt;.jsonl --report sim/batch/&lt;name&gt;.json --workers 0</pre>
+
+<p class="prose">Check: ids echo the request ids; every priced row sits on the discount grid (<code>pricing.tier_step</code> in config); JSONL and parquet price identically; the resend returns <code>already_priced</code> on every row; unknown-feature requests are few and are genuinely new SKUs. Steps 1 and 3 write to the event store the config names, so clear that store before launch.</p>
+
+<p class="prose"><strong>Step 4 — the checklist.</strong> Contract §08, in the order things go wrong: have you watched one cycle run; is <code>episode_id</code> stable across midnight; does <code>hours_remaining</code> mean hours; does the feed keep every priced hour, zero-sale hours included; can you report a failed push; are <code>cost</code> and <code>original_price</code> available per hour, per FC.</p>
+
+</section>
+
+
+<section id="operational-rules">
+  <h2><span class="num">07</span>Operational rules</h2>
+
+  <ul class="plain">
+    <li><strong>Reload the posterior once per batch</strong> if you lift the engine into a long-lived service (<code>PosteriorStore.reload()</code> before pricing). The monitor writes suspensions and <code>--apply</code> writes updates into the same file from other processes; a handle that never reloads keeps exploring on a suspended pilot. <code>ops.price_batch</code> does this for you.</li>
+    <li><strong>The exploration budget comes from the store</strong> (<code>PosteriorStore.tau</code>), never from <code>exploration.tau_initial</code> in config, which is only the launch value.</li>
+    <li><strong>Never run <code>daily.update --apply</code>.</strong> It is the operator's gate.</li>
+    <li><strong>Safety is structural</strong>, not configured on your side: the cost floor and the never-rises-within-a-window rule live in the engine's action set. There is nothing for the caller to check or enforce.</li>
+    <li><strong>The bundle is sealed.</strong> Do not edit <code>artifacts/</code> or <code>config.yaml</code>; a moved file shows as a red seal row in <code>ops.status</code> and the lane stops.</li>
+  </ul>
+
+</section>
+
+
+<section id="who-owns-what">
+  <h2><span class="num">08</span>Who owns what</h2>
+
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>Responsibility</th><th>Owner</th></tr></thead>
+      <tbody>
+        <tr><td>Artifacts, model, config, the prior gate, <code>data.launch_date</code></td><td>The product owner</td></tr>
+        <tr><td>Hourly caller, price application, failed-push reporting, the daily cron, the feed</td><td>Engineering</td></tr>
+        <tr><td>Outcomes, forecasts, learning, monitoring, guardrails, stop conditions</td><td>The engine</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</section>
+
+
+</div>

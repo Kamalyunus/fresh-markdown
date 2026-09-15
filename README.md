@@ -7,7 +7,7 @@ Legacy history cannot point-identify price elasticity (price is collinear
 with hour-of-day under the legacy ramp), so history supplies baseline
 demand, dispersion, correlation structure and a bounded prior — elasticity
 itself is learned in production from IL-budgeted randomized exploration.
-Engineering's handover page is [`docs/engineering_handover.md`](docs/engineering_handover.md);
+Engineering's handover page is [`docs/engineering_handover.html`](docs/engineering_handover.html);
 the integration contract it points at is `docs/event_contract.html`.
 
 ## Layout

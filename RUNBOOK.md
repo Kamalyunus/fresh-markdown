@@ -5,7 +5,7 @@ code — `python3 -m ops.advance` — so this document is about the parts
 the process cannot do: what engineering builds, what the owner decides, and
 what a stop or a red line means. The authoritative spec is
 `docs/design.md`; the integration contract is `docs/event_contract.html`
-(engineering's one-page handover: `docs/engineering_handover.md`);
+(engineering's one-page handover: `docs/engineering_handover.html`);
 `REVIEW_GUIDE.md` maps the code by risk tier; `AGENTS.md` is what an agent
 reads before touching the repo.
 
