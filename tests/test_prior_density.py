@@ -124,14 +124,38 @@ def test_the_lower_margin_is_a_config_key_and_the_upper_bound_never_moves(cfg):
     """The one bound that MAY be widened is epsilon_min; the search past
     epsilon_max is fixed at +1.0 (a positive optimum must be visible) and
     is not a tunable."""
-    import inspect
-    assert "unconstrained_search_below" in cfg["posterior"]["prior"]
-    src = inspect.getsource(pdn.search_grid)
-    assert 'cfg["posterior"]["prior"]["unconstrained_search_below"]' in src
-    assert "max(1.0, hi)" in src
+    import pandas as pd
+    lo, hi = cfg["posterior"]["epsilon_min"], cfg["posterior"]["epsilon_max"]
+    grid = np.linspace(lo, hi, cfg["posterior"]["prior"]["search_grid_size"])
+    step = grid[1] - grid[0]
+    # moving the key moves the lower margin, and only the lower margin
+    narrow, wide = copy.deepcopy(cfg), copy.deepcopy(cfg)
+    narrow["posterior"]["prior"]["unconstrained_search_below"] = 0.5
+    wide["posterior"]["prior"]["unconstrained_search_below"] = 2.0
+    w_narrow, _ = pdn.search_grid(grid, narrow)
+    w_wide, _ = pdn.search_grid(grid, wide)
+    assert lo - 0.5 - step < w_narrow[0] <= lo - 0.5 + 1e-9
+    assert lo - 2.0 - step < w_wide[0] <= lo - 2.0 + 1e-9
+    assert w_narrow[-1] == w_wide[-1] >= 1.0 - 1e-9
+    # the upper reach is +1.0 whatever epsilon_max is: not a tunable
+    higher = copy.deepcopy(cfg)
+    higher["posterior"]["epsilon_max"] = 0.5
+    g2 = np.linspace(lo, 0.5, len(grid))
+    assert pdn.search_grid(g2, higher)[0][-1] >= 1.0 - 1e-9
+    g3 = np.linspace(lo, 3.0, len(grid))
+    assert pdn.search_grid(g3, higher)[0][-1] == pytest.approx(3.0)
 
-    # the design_effect floor lives in common.config, not re-applied here
-    assert "max(1.0, design_effect" not in inspect.getsource(pdn.deflation_deff)
+    # the design_effect floor lives in common.config, not re-applied here:
+    # a negative ICC still yields a deff of exactly 1.0 through one floor
+    from common.config import design_effect
+    assert design_effect(-0.5, 6.0) == 1.0
+    rows = pd.DataFrame({"units_sold": [3, 0, 3, 0, 3, 0], "sku_id": ["a"] * 6,
+                         "fc": ["F"] * 6})
+    rows["sku_id"] = ["a", "a", "a", "b", "b", "b"]
+    c = copy.deepcopy(cfg)
+    c["assurance"]["rho_min_hours_per_episode"] = 2
+    deff, rho, m = pdn.deflation_deff(rows, np.full(6, 1.5), c)
+    assert deff >= 1.0 and deff == design_effect(rho, m)
 
 
 def test_wrong_sign_is_a_peak_within_one_grid_step_of_zero_or_above(
@@ -245,7 +269,7 @@ def test_a_prior_std_can_never_be_zero(cfg, monkeypatch):
     assert sharp["std_basis"] == "grid_resolution"
 
 
-def test_the_bincount_multipliers_match_the_groupby_reference():
+def test_the_bincount_multipliers_match_the_groupby_reference(cfg):
     """hour_multipliers ran a pandas groupby per grid point; it is now one
     factorisation and three bincounts -- the same numbers, incl. thin cells,
     cells with no uncensored row, and censored rows excluded from the fit."""
@@ -269,14 +293,21 @@ def test_the_bincount_multipliers_match_the_groupby_reference():
         return (frame.cell.map(m).fillna(1.0).to_numpy(),
                 float(np.mean(frame.cell.map(m).isna().to_numpy())))
 
+    bounds = cfg["posterior"]["prior"]["time_cell_multiplier_bounds"]
+    assert list(bounds) == [0.05, 20.0]
     for min_rows in (1, 5, 30):
         want, want_thin = reference(mu, cells, k, cen, min_rows)
-        got, thin = pdn.hour_multipliers(mu, cells, k, cen, min_rows)
+        got, thin = pdn.hour_multipliers(mu, cells, k, cen, min_rows, bounds)
         assert np.allclose(got, want) and thin == pytest.approx(want_thin)
         # integer codes (what `curve` passes) give the same answer
         got2, thin2 = pdn.hour_multipliers(mu, pd.factorize(cells)[0], k, cen,
-                                           min_rows)
+                                           min_rows, bounds)
         assert np.array_equal(got2, got) and thin2 == thin
+    # the clamp is the config's, not a literal: a tighter one binds
+    tight, _ = pdn.hour_multipliers(mu, cells, k, cen, 1, (0.9, 1.1))
+    assert tight.max() <= 1.1 + 1e-12 and tight.min() >= 0.9 - 1e-12
+    loose, _ = pdn.hour_multipliers(mu, cells, k, cen, 1, None)
+    assert loose.max() > 1.1
 
 
 def test_fold_spread_cuts_the_train_window_by_episode_not_by_row(
@@ -372,12 +403,15 @@ def test_the_hour_control_is_keyed_on_the_day_not_just_the_clock():
     mu = np.full(6, 2.0)
     k = np.array([3, 3, 3, 1, 1, 1])
     cen = np.zeros(6, bool)
-    mult, thin = pdn.hour_multipliers(mu, np.array(cells), k, cen, min_rows=5)
+    bounds = (0.05, 20.0)
+    mult, thin = pdn.hour_multipliers(mu, np.array(cells), k, cen, min_rows=5,
+                                      bounds=bounds)
     assert np.allclose(mult, 1.0), "every cell here has 1-2 rows; none qualify"
     assert thin == pytest.approx(1.0)
     # with no minimum they are all fitted, which is the behaviour the guard
     # exists to prevent at small cell sizes
-    fitted, _ = pdn.hour_multipliers(mu, np.array(cells), k, cen, min_rows=1)
+    fitted, _ = pdn.hour_multipliers(mu, np.array(cells), k, cen, min_rows=1,
+                                     bounds=bounds)
     assert not np.allclose(fitted, 1.0)
 
 
@@ -487,8 +521,6 @@ def test_an_episode_opening_on_an_empty_shelf_has_no_entry_row(cfg):
 def test_the_fold_row_floor_is_a_config_key(cfg, monkeypatch):
     """`if len(g) < 50` was a tunable as a literal (rule 8): it is
     `posterior.prior.fold_min_entry_rows`."""
-    import inspect
-
     import pandas as pd
 
     rows = [{"episode_id": f"{day}-{e}", "date": f"2026-04-0{day}",
@@ -513,8 +545,12 @@ def test_the_fold_row_floor_is_a_config_key(cfg, monkeypatch):
     assert pdn.fold_spread(train, cfg, _M(), grid, folds=3) == {}
     cfg["posterior"]["prior"]["fold_min_entry_rows"] = 20
     assert pdn.fold_spread(train, cfg, _M(), grid, folds=3)["VEG"]["folds"] == 3
-    src = inspect.getsource(pdn.fold_spread)
-    assert "fold_min_entry_rows" in src and "< 50" not in src
+    # the floor is the key's, at every value: 50 (the old literal) would
+    # score nothing here, and 1 scores every fold
+    cfg["posterior"]["prior"]["fold_min_entry_rows"] = 50
+    assert pdn.fold_spread(train, cfg, _M(), grid, folds=3) == {}
+    cfg["posterior"]["prior"]["fold_min_entry_rows"] = 1
+    assert pdn.fold_spread(train, cfg, _M(), grid, folds=3)["VEG"]["folds"] == 3
 
 
 def test_the_holdout_comparison_ranks_one_candidate_against_its_brackets(

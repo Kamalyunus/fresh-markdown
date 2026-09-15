@@ -173,7 +173,9 @@ def _report(days=8, **over):
         return {"day": k, "lane_c": None, "date": date,
                 "calibration_current": {"pass": True, "held_at_anchor": False},
                 "ingest": {"decisions": 50, "decisions_outside_feed_range": 10,
-                           "outcomes_built": 40, "decisions_without_feed_row": 0},
+                           "outcomes_built": 40, "decisions_without_feed_row": 0,
+                           "decisions_colliding_on_hour": 0, "emitted": 40,
+                           "quarantined": 0},
                 "gates": {"duplicate_or_unmatched_rate": True,
                           "price_mismatch_rate": True,
                           "calibration_schedule_current": True},
@@ -261,7 +263,7 @@ def test_a_fault_turns_its_expectation_around(cfg):
     assert g["outcome_completeness"]["observed"]["fault_expects_a_gap"]
     assert g["event_quality_gates"]["verdict"] == "PASS"
     for d in gap["days"]:
-        d["ingest"]["decisions_without_feed_row"] = 2
+        d["ingest"].update(decisions_without_feed_row=2, outcomes_built=38, emitted=38)
     assert _verdicts(gap, cfg)["outcome_completeness"] == "PASS"
 
     # exploration silently off -- no forced decision for starve_days with a
@@ -275,8 +277,9 @@ def test_a_fault_turns_its_expectation_around(cfg):
     assert _verdicts(off, cfg)["exploration_never_starves"] == "PASS"
 
     # a shock the scrap series saw but that stays under the owner's floor is
-    # the world's reach, reported and not graded
-    seen = copy.deepcopy(_report(days=40))
+    # the world's reach, reported and not graded (45 mornings: past the
+    # series' readiness under _pin, see the readiness test)
+    seen = copy.deepcopy(_report(days=45))
     seen["world"]["faults"] = {"demand_shock": (20, 0.5)}
     seen["days"][-1]["guardrails"]["scrap_deterioration_pct"]["latest"] = 0.17
     v = _grade(seen, cfg)["stops_only_on_faults"]
@@ -301,6 +304,112 @@ def test_the_engine_accounts_for_every_pilot_hour(cfg):
     assert _verdicts(rep, cfg)["hourly_engine"] == "FAIL"
     rep["engine"].update(decisions=400)
     assert _verdicts(rep, cfg)["hourly_engine"] == "PASS"
+
+
+def test_an_outcome_the_store_refused_is_a_gap_on_both_sides(cfg):
+    """The store's quarantine has an outcome side: an ingester that builds
+    every outcome and a store that refuses every one (a contract defect)
+    once read `hourly_engine` PASS and completeness 1.0, while shadow's
+    gate -- outcomes ACCEPTED per decision -- would read 0%. Both
+    expectations read the accepted count; and a cause the ingester names
+    (two decisions claiming one hour) reaches the report without the
+    grader listing it."""
+    rep = _report()
+    for d in rep["days"]:
+        d["ingest"].update(emitted=0, quarantined=40)
+    g = _grade(rep, cfg)
+    assert g["hourly_engine"]["verdict"] == "FAIL"
+    assert g["hourly_engine"]["observed"]["outcomes_quarantined"] == 40 * len(rep["days"])
+    assert g["outcome_completeness"]["verdict"] == "FAIL"
+    assert g["outcome_completeness"]["observed"]["completeness"] == 0.0
+
+    rep = _report()
+    for d in rep["days"]:
+        d["ingest"].update(decisions_colliding_on_hour=2, outcomes_built=38, emitted=38)
+    g = _grade(rep, cfg)
+    assert g["outcome_completeness"]["verdict"] == "FAIL"
+    assert g["outcome_completeness"]["observed"]["completeness"] == pytest.approx(0.95)
+    counts = g["outcome_completeness"]["observed"]["ingest_counts"]
+    assert counts["decisions_colliding_on_hour"] == 2 * len(rep["days"])
+
+
+def test_the_scrap_stop_is_expected_only_once_its_series_can_have_fired(cfg):
+    """The deterioration series yields its first reading after
+    window + 2 x smoothing - 1 close days (the trailing mean is shifted by
+    the smoothing) and the stop needs persistence readings: one close day
+    per lane morning, so under _pin (28 / 7 / 2) the stop cannot fire
+    before the 42nd morning. A run one morning short is NOT MEASURED; the
+    morning after, a silent stop is a FAIL. The count once stopped at
+    window + smoothing + persistence and graded a correct machine."""
+    from common import guardrail
+    ready = guardrail.stop_ready_close_days(7, 28, 2)
+    assert ready == 42
+
+    def run(days):
+        rep = _report(days=days)
+        rep["world"]["faults"] = {"demand_shock": (5, 0.5)}
+        rep["days"][-1]["guardrails"]["scrap_deterioration_pct"]["latest"] = 0.0
+        return _grade(rep, cfg)["stops_only_on_faults"]
+
+    short = run(ready - 1)
+    assert short["verdict"] == "NOT MEASURED"
+    assert short["observed"]["guardrail_window_reached"] is False
+    assert short["observed"]["guardrail_ready_after_close_days"] == ready
+    long = run(ready)
+    assert long["verdict"] == "FAIL"
+    assert long["observed"]["expected_but_silent"] == ["scrap_deterioration_pct"]
+
+
+def test_a_wide_unrouted_global_cell_does_not_excuse_a_level_bias(cfg):
+    """The implied elasticity bias is bounded by the widest std among the
+    cells a category REACHES (PosteriorStore.widest_active_std, the
+    budget's reading). Every cell in the file once counted, so an unrouted
+    GLOBAL keeping its launch std forever let a bias of two units against a
+    routed cell at 0.4 read PASS."""
+    rep = _report()
+    rep["level_tracking"] = {"2026-09-07": {"hours": 280, "mean_log_ratio": 0.08,
+                                            "p10_p90": [0, 0.2],
+                                            "mean_forced_log_move": -0.04,
+                                            "implied_elasticity_bias": 2.0}}
+    for d in rep["days"]:
+        d["posterior"] = {"GLOBAL": {"std": 2.5, "n_obs": 0, "version": 0},
+                          "FRUIT": {"std": 0.4, "n_obs": 40, "version": 2}}
+        d["cell_of"] = {"FRUIT": "FRUIT"}
+    x = _grade(rep, cfg)["agent_level_tracks_world"]
+    assert x["verdict"] == "FAIL"
+    assert x["observed"]["weeks_off"]["2026-09-07"]["posterior_std"] == 0.4
+    # routed to GLOBAL, its std is the one in force and the bias is inside it
+    for d in rep["days"]:
+        d["cell_of"] = {"FRUIT": "GLOBAL"}
+    assert _verdicts(rep, cfg)["agent_level_tracks_world"] == "PASS"
+
+
+def test_a_refusal_is_excused_only_by_a_gate_the_fault_reaches(cfg):
+    """Under a fault, --apply may be refused on the gate that fault is
+    expected to fail and on no other: a refusal on the calibration gate
+    (a Lane C miss) under a `mismatch` fault was once excused as the
+    fault's doing. And an apply that neither applied nor refused is a
+    lane that does not apply, whatever the cadence count says."""
+    rep = _report()
+    rep["world"]["faults"] = {"mismatch": 0.05}
+    rep["days"][3]["gates"]["calibration_schedule_current"] = False
+    rep["days"][3]["apply"] = {"applied": False, "refused": "hard gate(s) failed",
+                               "calibration_schedule_current": False}
+    x = _grade(rep, cfg)["apply_ran_on_cadence"]
+    assert x["verdict"] == "FAIL"
+    assert x["observed"]["refusals_no_fault_explains"][0]["gates_failed"] == \
+        ["calibration_schedule_current"]
+    assert x["observed"]["gates_a_fault_excuses"] == ["price_mismatch_rate"]
+    # the same refusal on the mismatch gate alone is the fault's
+    rep["days"][3]["gates"].update(calibration_schedule_current=True,
+                                   price_mismatch_rate=False)
+    assert _verdicts(rep, cfg)["apply_ran_on_cadence"] == "PASS"
+    # silent: ran, applied nothing, refused nothing
+    rep["days"][5]["apply"] = {"applied": False, "refused": None,
+                               "calibration_schedule_current": True}
+    x = _grade(rep, cfg)["apply_ran_on_cadence"]
+    assert x["verdict"] == "FAIL"
+    assert x["observed"]["neither_applied_nor_refused"] == [rep["days"][5]["date"]]
 
 
 def test_learning_is_graded_only_once_a_cell_updated(cfg):
@@ -357,9 +466,9 @@ def test_the_schedule_reaches_a_week_it_deliberately_held():
 
     assert schedule_reaches({}) is None
     assert schedule_reaches({"by_week": {"2026-08-17": {}, "2026-08-24": {}},
-                             "weeks_unfitted_held_at_1": ["2026-08-31"]}) == "2026-08-31"
+                             "weeks_unfitted_held_at_anchor": ["2026-08-31"]}) == "2026-08-31"
     assert schedule_reaches({"by_week": {"2026-08-24": {}},
-                             "weeks_unfitted_held_at_1": ["2026-03-02"]}) == "2026-08-24"
+                             "weeks_unfitted_held_at_anchor": ["2026-03-02"]}) == "2026-08-24"
 
 
 def test_the_apply_gate_passes_a_held_week_and_says_so(tmp_path, cfg):
@@ -371,7 +480,7 @@ def test_the_apply_gate_passes_a_held_week_and_says_so(tmp_path, cfg):
     path.write_text(json.dumps({
         "grain": "category", "factors": {"FRUIT": 1.2},
         "schedule": {"by_week": {"2026-08-24": {"FRUIT": 1.1}},
-                     "weeks_unfitted_held_at_1": ["2026-08-31"]}}))
+                     "weeks_unfitted_held_at_anchor": ["2026-08-31"]}}))
     held = calibration_current(cfg, today="2026-09-02")
     assert held["pass"] and held["held_at_anchor"]
     assert "anchor" in held["note"]
@@ -431,11 +540,13 @@ def test_a_level_error_of_the_agent_is_named_not_read_as_learning(cfg):
 
 def test_a_decision_draws_from_its_own_episode_and_hour():
     """Serial and parallel runs must price identically: the generator comes
-    from the ids, never from a shared stream or the worker."""
-    a = pilot_sim._decision_rng(0, "sim|pilot|7|F|2026-09-01T10", 3)
-    b = pilot_sim._decision_rng(0, "sim|pilot|7|F|2026-09-01T10", 3)
-    c = pilot_sim._decision_rng(0, "sim|pilot|7|F|2026-09-01T10", 4)
-    d = pilot_sim._decision_rng(1, "sim|pilot|7|F|2026-09-01T10", 3)
+    from the ids -- the episode and its hour, through the one seeding home
+    (common.parallel.keyed_rng) -- never from a shared stream or the worker."""
+    from common.parallel import keyed_rng
+    a = keyed_rng(0, "sim|pilot|7|F|2026-09-01T10", 3)
+    b = keyed_rng(0, "sim|pilot|7|F|2026-09-01T10", 3)
+    c = keyed_rng(0, "sim|pilot|7|F|2026-09-01T10", 4)
+    d = keyed_rng(1, "sim|pilot|7|F|2026-09-01T10", 3)
     assert a.random() == b.random()
     assert a.random() != c.random() and a.random() != d.random()
 
@@ -450,15 +561,79 @@ def test_the_worker_prices_against_the_ticks_snapshot_and_reports_a_rejection(cf
     ctx = {"cfg": cfg, "tau": 1e9,
            "cells": {"FRUIT": {"mean": -1.2, "std": 0.5, "version": 0}},
            "suspended": None, "model_version": "m", "digest": "d", "seed": 0}
-    res = pilot_sim._price_one((state, ("e", 0)), ctx)
+    # the worker body is engine.state.price_one, Lane B's own
+    res = pilot_sim.price_one((state, ("e", 0)), ctx)
     assert res["rejected"] is None and res["evt"]["config_digest"] == "d"
     assert res["evt"]["tau_current"] == 1e9
     # a suspension in force prices with no budget, as production does
-    held = pilot_sim._price_one((state, ("e", 0)), dict(ctx, suspended={"since": "x", "reasons": ["y"]}))
+    held = pilot_sim.price_one((state, ("e", 0)), dict(ctx, suspended={"since": "x", "reasons": ["y"]}))
     assert held["evt"]["tau_current"] is None and not held["evt"]["is_exploration"]
-    bad = pilot_sim._price_one((dict(state, q=-1), ("e", 0)), ctx)
+    bad = pilot_sim.price_one((dict(state, q=-1), ("e", 0)), ctx)
     assert bad["evt"] is None and bad["rejected"]
     assert launch_belief(-1.2, 0.5, cfg) < 0
+
+
+class _Posterior:
+    """What a tick reads off the store: reloaded once, then the snapshot."""
+    def reload(self):
+        return self
+
+    def tau(self, cfg):
+        return 100.0
+
+    def get(self, category):
+        return {"mean": -1.2, "std": 0.5, "version": 0}
+
+    def exploration_suspended(self):
+        return None
+
+
+class _Store:
+    def __init__(self, accept=True):
+        self.accept, self.emitted = accept, []
+
+    def emit_decision(self, evt):
+        self.emitted.append(evt)
+        return self.accept
+
+
+def test_the_tick_prices_through_whatever_pricer_it_is_given(cfg, monkeypatch):
+    """The shop is one loop with a pluggable pricer: the rehearsal's runs
+    engine.decide in the workers, tools.e2e_cycle's goes through
+    ops.price_batch (which commits every decision itself -- `committed`,
+    so the shop does not emit it twice). A rejection holds the shelf at
+    the defined fallback and the episode carries on; a pricer that did not
+    commit hands its event to the store, and a refused one is quarantined."""
+    s = _sim(cfg, [_template("A", 1, n_hours=3, q0=4)], monkeypatch)
+    s.posterior, s.store, s.tier_step = _Posterior(), _Store(), cfg["pricing"]["tier_step"]
+    s.violations = {"price_rose_within_episode": 0, "below_cost": 0}
+    s.rejected, s.quarantined, s.failures_by_day = {}, 0, {}
+    s.open_templates(0, "2026-09-01", [("pilot", s.world.templates[0], None)])
+    s._open_due(0, "2026-09-01", 10)
+    (ep,) = s.open
+    seen = []
+
+    def priced(discount, committed):
+        def pricer(pilot, k, date, hour):
+            seen.append([(e["episode_id"], e["t"], date, hour) for e in pilot])
+            return [{"evt": {"applied_discount": discount,
+                             "applied_price": 10_000.0 * (1 - discount)},
+                     "rejected": None, "committed": committed} for _ in pilot]
+        return pricer
+
+    s.pricer = priced(0.40, True)
+    s._tick(0, "2026-09-01", 10)
+    assert seen == [[("sim|pilot|1|F|2026-09-01T10", 0, "2026-09-01", 10)]]
+    assert ep["anchor"] == 0.40 and ep["t"] == 1 and s.store.emitted == []
+    # a rejected state: the shelf holds the price in force
+    s.pricer = lambda pilot, k, date, hour: [{"evt": None, "rejected": "no cost"}]
+    s._tick(0, "2026-09-01", 11)
+    assert ep["anchor"] == 0.40 and s.rejected == {"no cost": 1} and ep in s.open
+    # an uncommitted event goes through the store; a refused one is counted
+    s.store, s.pricer = _Store(accept=False), priced(0.45, False)
+    s._tick(0, "2026-09-01", 12)
+    assert len(s.store.emitted) == 1 and s.quarantined == 1
+    assert ep["anchor"] == 0.45 and ep not in s.open                 # the window closed
 
 
 # ------------------------------------------------- the pairing, in the small

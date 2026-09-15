@@ -81,10 +81,13 @@ tuning:                                # SET  ops.tune's auto-apply gates, and t
   max_il_delta_pct_for_auto_rail: 0.005         # SET  auto-rail ceiling on the IL move
   calibration_band_sigma_multiple: 3            # SET  band = this many sigma of log f
   calibration_band_max_half_width: 0.10         # SET BY OWNER  ceiling; tune may only tighten
+  w_switch_mae_ratio: 0.9                       # SET  the W hysteresis: the sweep's preferred window is pasted only when its mean_abs_log_error is below this share of the window in force's ...
+  w_switch_band_gain: 0.05                      # SET  ... or its share_weeks_in_band beats the window in force's by at least this; a near-tie HOLDS W (design 9.2)
   guardrail_inert_floor_multiple: 3             # SET  a stop threshold above this multiple of its noise floor is LIKELY INERT
   bounded_step_consistent_band: [0.7, 1.4]      # SET  std-surprise band inside which the two learning rails are called CONSISTENT
   cost_ratio_bands: [0.4, 0.6]                  # SET  cost/price cut points for the backtest's within-episode move table (the deepening bar falls with cost)
   step_sensitivity_episodes: 300                # SET  replayed episodes the backtest re-solves at the launch belief +- max_mean_step
+  backtest_policy_episodes: 2000                # SET  episodes the backtest's policy replay samples (every policy figure, intra_episode_moves, step_sensitivity's pool and the tau cross-check sit on it); --policy-episodes overrides for one run
   controller_trace_max_days: 60                 # SET  decision days shadow's tau-controller trace walks from the window start
 
 posterior:
@@ -97,6 +100,7 @@ posterior:
   path: "artifacts/posterior.json"
   prior:
     min_rows_per_time_cell: 5          # SET  thinner time cells are dropped
+    time_cell_multiplier_bounds: [0.05, 20.0]  # SET  clamp on a fitted time-cell multiplier (the controlled arm's fixed effects; a cell wanting more is capped and the residual lands on epsilon)
     own_information_saturation: 2.0    # SET  log-lik units that count as informative
     stability_folds: 3                 # SET  disjoint train slices for fold_spread
     fold_min_entry_rows: 50            # SET  entry rows a category needs in a fold before fold_spread scores it
@@ -107,7 +111,7 @@ posterior:
 pricing:
   tier_step: 0.025                     # SET  hourly discount grid granularity
   entry_offsets: [-0.15, -0.10, -0.05, 0.0, 0.05]  # SET  the ENTRY action set
-  negbin_max_k: 25                     # SET  demand truncation
+  negbin_max_k: 25                     # SET  minimum width of the NB demand table; the table runs to the shelf when the shelf is deeper (engine.dp.table_width), so this caps nothing a shelf can sell
   demand_floor: 0.01                   # SET
 
 exploration:

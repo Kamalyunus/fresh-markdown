@@ -135,6 +135,11 @@ def guardrail_series(decisions, outcomes, cfg, episodes=None):
             # a reader cannot tell 0.15 relative from 0.15 pp by looking
             "units": guard.units_of(dev_basis),
             "smoothing_days": smoothing[key],
+            # how long the series stays empty, from its own arithmetic
+            # (common.guardrail.first_reading_close_days): the one figure
+            # the simulator's readiness reads too
+            "first_reading_after_close_days": guard.first_reading_close_days(
+                smoothing[key], window),
             "by_day": {str(k): round(float(v), 4) for k, v in dev.items()},
             "latest": round(float(dev.iloc[-1]), 4) if len(dev) else None,
         }
@@ -154,13 +159,19 @@ def overspend_series(learning, business, cfg):
     if not (il_by_day and cells and last):
         return {"basis": "spend / budget_today", "by_day": {}, "latest": None}
     widest_std = PosteriorStore.widest_active_std(cells, learning.get("cell_of") or {})
+    # the std IN FORCE on each day -- the widest the decisions priced that
+    # day carried (learning_metrics reads it off the events); a day that
+    # priced no decision falls back to today's. Re-pricing history at
+    # today's narrower std read past days over a budget they never had
+    std_by_day = learning.get("widest_std_by_day") or {}
     by_day = {}
     # every PRICED day gets a reading -- a day with no forced spend (the
     # suspension in force, or nothing affordable) reads 0, so it ends the
     # streak instead of leaving the last over-budget days as "latest"
     for day in learning.get("priced_days") or sorted(spend_by_day):
         budget = explore.budget_today(
-            explore.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
+            explore.trailing_daily_il(il_by_day, day, cfg),
+            std_by_day.get(day, widest_std), cfg)
         # the controller's own rule (explore.budget_held): a zero budget or
         # a base shorter than its window is no signal -- no reading, no streak
         if explore.budget_held(il_by_day, day, budget, cfg) is None:
@@ -182,10 +193,15 @@ def evaluate_guardrail(block, threshold, persistence_days):
         return {**base, "status": "BLOCKED -- threshold is null (SET BY OWNER)"}
     by_day = block.get("by_day") or {}
     if not by_day:
-        # smoothing consumes the first `smoothing_days - 1` days, so a short
-        # window legitimately has nothing to compare yet
+        # the series is empty until window + 2 x smoothing - 1 consecutive
+        # close days (common.guardrail.first_reading_close_days, carried
+        # by the block): a short series legitimately has nothing to
+        # compare yet, and the note says when it will
+        first = block.get("first_reading_after_close_days")
         return {**base, "consecutive_days_over": 0,
-                "status": "no comparable days yet"}
+                "status": "no comparable days yet" + (
+                    f" (first reading after {first} consecutive close days)"
+                    if first is not None else "")}
     streak, prev = 0, None
     for day in sorted(by_day, reverse=True):
         stamp = pd.Timestamp(day)
@@ -218,10 +234,20 @@ def learning_metrics(decisions, posterior, cfg, outcomes=(), pairs=None):
     empty_rate = (np.mean([d["affordable_set_size"] == 0 for d in budgeted])
                   if budgeted else None)
     priced_days, spend_by_day = update_mod.finalized_days(decisions, outcomes, pairs)
+    # the widest posterior std a day's decisions were priced with: the std
+    # in force that day, as the events recorded it (a routed cell that
+    # priced nothing that day is not seen -- the one approximation)
+    std_by_day = {}
+    for d in decisions:
+        std = d.get("epsilon_posterior_std")
+        if std is not None:
+            day = decision_day(d)
+            std_by_day[day] = max(std_by_day.get(day, 0.0), float(std))
     return {
         # routing, so the budget's widest-std is taken over cells a category
         # actually reaches (an unrouted GLOBAL never narrows)
         "cell_of": dict(cell_of),
+        "widest_std_by_day": std_by_day,
         "posterior_by_cell": {
             c: {"mean": r["mean"], "std": r["std"], "n_obs": r["n_obs"],
                 "accumulated_information": round(r["accumulated_information"], 2),
@@ -270,7 +296,12 @@ def safety_metrics(store, decisions, outcomes, pairs=None, cfg=None):
     matched = {o["decision_id"] for o in outcomes}
     if pairs is None:
         pairs = match_pairs(decisions, outcomes)
-    quality = quality_counts(decisions, outcomes, cfg, store.duplicate_counts, pairs)
+    # the decision side of completeness rides in the same block: the
+    # colliding and unanswered decisions (windowed) and what the store
+    # refused all-time (a second outcome for a decision, an outcome without
+    # is_stockout) -- the counts the contract's section 07 names
+    quality = quality_counts(decisions, outcomes, cfg, store.duplicate_counts, pairs,
+                             getattr(store, "completeness_counts", None))
     rates = quality_rates(quality)
     expected_denom, realised_denom = 0.0, 0.0
     for d, o in pairs:

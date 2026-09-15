@@ -198,16 +198,19 @@ def test_dispersion_reads_a_stockout_by_the_shared_censoring_rule(cfg):
 
 
 # ----------------------------------------------------------- 3 · correlation
-def _episodes(cfg, n_ep, hours, episode_shift, seed=0):
+def _episodes(cfg, n_ep, hours, episode_shift, seed=0, forced_per_episode=None):
     """episode_shift > 0 gives every hour of an episode a shared offset --
-    exactly the structure rho measures."""
+    exactly the structure rho measures. Every hour is a FORCED one (the
+    learner's population, what deff is applied over) unless
+    `forced_per_episode` caps how many hours of each episode are."""
     def build():
         rng = np.random.default_rng(seed)
         decs, outs = [], []
         for e in range(n_ep):
             shared = rng.normal(0, episode_shift)
-            for _ in range(hours):
+            for h in range(hours):
                 d = _decision(cfg, q=3, path=[0.8] * 2, episode=f"ep{e}")
+                d["is_exploration"] = forced_per_episode is None or h < forced_per_episode
                 mu = mu_at(d["reference_mu"], d["applied_discount"], D_REF,
                            -1.0,
                            cfg["pricing"]["demand_floor"])
@@ -215,7 +218,7 @@ def _episodes(cfg, n_ep, hours, episode_shift, seed=0):
                 decs.append(d)
                 outs.append(_outcome(d, min(sold, 3), 3))
         return decs, outs
-    return _cached(("episodes", n_ep, hours, episode_shift, seed), build)
+    return _cached(("episodes", n_ep, hours, episode_shift, seed, forced_per_episode), build)
 
 
 def _frozen_at_live_rho(cfg, decs, outs):
@@ -263,6 +266,28 @@ def test_correlation_catches_drift_that_would_rescale_every_update(cfg):
     assert out["verdict"] == "FAIL"
     assert out["rho_live"] > 0.12 and out["rho_frozen"] == 0.12
     assert out["deff_live"] > out["deff_frozen"]
+
+
+def test_deff_is_judged_at_the_learners_forced_hours_per_episode(cfg):
+    """`m` is what the learner deflates by: forced outcomes per episode
+    (common.config.deff_from_episodes over the forced ids), never every
+    learnable hour. Six priced hours with ONE forced per episode read m=1
+    -- deff is 1 on both sides whatever rho did, because nothing is
+    deflated -- and the same rho error at six forced hours is the drift
+    the alert exists for. The reported m moves with the forced share."""
+    hours = 6
+    frozen = {**cfg, "dispersion": {**cfg["dispersion"], "rho": 0.12}}
+    one = _episodes(cfg, 300, hours=hours, episode_shift=3.0, seed=5, forced_per_episode=1)
+    out = assurance.correlation_drift(*one, frozen)
+    assert out["forced_outcomes"] == 300
+    assert out["mean_forced_hours_live"] == pytest.approx(1.0)
+    assert out["deff_live"] == out["deff_frozen"] == 1.0
+    assert out["rho_drift"] > 0 and out["verdict"] == "PASS"
+    every = _episodes(cfg, 300, hours=hours, episode_shift=3.0, seed=5)
+    out = assurance.correlation_drift(*every, frozen)
+    assert out["forced_outcomes"] == 300 * hours
+    assert out["mean_forced_hours_live"] == pytest.approx(hours)
+    assert out["deff_live"] > out["deff_frozen"] and out["verdict"] == "FAIL"
 
 
 def test_correlation_reports_insufficient_on_a_thin_window(cfg):

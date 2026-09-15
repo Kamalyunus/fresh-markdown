@@ -20,10 +20,69 @@ def test_state_rejected_when_planning_horizon_disagrees_with_recorded_one():
             "hours_remaining": 4, "hour_of_day": 12, "r": 1.0}
     tiers = [0.0, 0.025, 0.05]
 
-    assert validate_state(base, tiers, None, [1.0, 1.0, 1.0, 1.0]) == []
+    assert validate_state(base, tiers, None, [1.0, 1.0, 1.0, 1.0], CFG) == []
 
-    failures = validate_state(base, tiers, None, [1.0, 1.0])
+    failures = validate_state(base, tiers, None, [1.0, 1.0], CFG)
     assert any("planning horizon" in f for f in failures)
+
+
+def test_a_horizon_past_max_window_hours_is_rejected_not_priced():
+    """The DP plans `hours_remaining` stages: a counter defect (a feed
+    emitting minutes) allocated a value function over thousands of hours
+    and priced a twenty-year episode. The live path refuses above the same
+    `data.max_window_hours` prepare_data flags offline, and the request
+    and the state read ONE set of count checks (count_failures)."""
+    from engine.decide import StateRejected, count_failures, decide, validate_state
+
+    cap = CFG["data"]["max_window_hours"]
+    ok = {"q": 3, "hours_remaining": cap, "hour_of_day": 12}
+    assert count_failures(ok, CFG) == []
+    too_long = count_failures({**ok, "hours_remaining": cap + 1}, CFG)
+    assert too_long and "max_window_hours" in too_long[0]
+    # the bound reads the config, not a literal
+    tighter = dict(CFG, data=dict(CFG["data"], max_window_hours=cap - 1))
+    assert count_failures(ok, tighter)
+    # an integral float from a table IS a count; 12.5 names no hour
+    assert count_failures({"q": 3.0, "hours_remaining": 4.0, "hour_of_day": 12.0}, CFG) == []
+    assert count_failures({"q": 3, "hours_remaining": 4, "hour_of_day": 12.5}, CFG)
+    assert count_failures({}, CFG) and len(count_failures({}, CFG)) == 3
+    # and the whole state path rejects, by name, never allocates
+    path = [1.0] * (cap + 1)
+    failures = validate_state(_state(hours_remaining=cap + 1, mu_ref_path=path),
+                              [0.0, 0.025], None, path, CFG)
+    assert any("max_window_hours" in f for f in failures)
+    with pytest.raises(StateRejected, match="max_window_hours"):
+        decide(_state(hours_remaining=cap + 1, mu_ref_path=path), None, None,
+               CFG, np.random.default_rng(0), 100.0, "v")
+
+
+def test_a_floor_mapping_that_names_neither_the_category_nor_a_default_rejects_the_row(tmp_path):
+    """A broken per-category delta_min paste refused the WHOLE batch: the
+    bare KeyError escaped every caller that catches StateRejected. It is a
+    row rejection naming the config key -- loud, per row, never the batch."""
+    from common.config import ConfigError
+    from engine import explore
+    from engine.decide import StateRejected, decide
+    from events.store import EventStore
+
+    broken = dict(CFG, exploration=dict(CFG["exploration"],
+                                        delta_min_log_bias={"FRUIT": 0.12}))
+    with pytest.raises(ConfigError, match="_default"):
+        explore.delta_min(broken, -1.0, "MEAT")
+    with pytest.raises(StateRejected, match="delta_min_log_bias"):
+        decide(_state(), _posterior_for("MEAT", tmp_path / "a"), None, broken,
+               np.random.default_rng(0), 100.0, "v")
+    # a mapped category on the same config still prices
+    store = EventStore(CFG, root=str(tmp_path / "events"))
+    assert decide(_state(category="FRUIT"), _posterior_for("FRUIT", tmp_path / "b"),
+                  store, broken, np.random.default_rng(0), 100.0, "v")["applied_price"] > 0
+
+
+def _posterior_for(category, root):
+    from engine.posterior import PosteriorStore
+    return PosteriorStore.initialise(
+        CFG, {category: {"mean": -1.0, "std": 0.6}}, {category: 10**6},
+        path=str(root / "posterior.json"))
 
 
 def _state(**over):
@@ -119,7 +178,7 @@ def test_the_economics_are_judged_once_before_the_grid():
     assert any("original_price" in f for f in economics_failures(0.0, 4000.0))
     assert any("cost" in f for f in economics_failures(10000.0, -1.0))
     # the rest of the state is validated on its own, tiers given
-    assert validate_state(_state(), [0.0, 0.025], None, [1.0, 1.0]) == []
+    assert validate_state(_state(), [0.0, 0.025], None, [1.0, 1.0], CFG) == []
     with pytest.raises(StateRejected) as exc:
         decide(_state(cost=12000.0), None, None, CFG, np.random.default_rng(0),
                100.0, "v")
@@ -134,7 +193,10 @@ def _reference_solve(original_price, cost, q0, mu_ref_path, d_ref, epsilon, r,
     reference the production solver must match bit for bit."""
     pcfg = cfg["pricing"]
     tiers, d_max = dp_mod.feasible_tiers(original_price, cost, pcfg["tier_step"])
-    horizon, n_tiers, max_k = len(mu_ref_path), len(tiers), pcfg["negbin_max_k"]
+    horizon, n_tiers = len(mu_ref_path), len(tiers)
+    # the table runs to the shelf when the shelf is deeper than negbin_max_k
+    # (dp.table_width): the same rule the vectorised solver reads
+    max_k = dp_mod.table_width(pcfg["negbin_max_k"], q0)
     k = np.arange(max_k + 1)
     pmf = np.empty((horizon, n_tiers, max_k + 1))
     tail_max = 0.0
@@ -195,6 +257,57 @@ def test_the_vectorised_dp_is_bit_identical_to_the_scalar_loop():
     assert checked > 100
 
 
+def test_the_dp_sells_a_shelf_deeper_than_negbin_max_k_exactly():
+    """With q0 above negbin_max_k the DP could sell at most max_k units a
+    stage (sold = min(k, q) over a pmf folded at max_k), so Q undervalued
+    clearing a large shelf. The table now runs to the shelf; the value is
+    the one a table wide enough to hold every unit of demand gives."""
+    max_k = CFG["pricing"]["negbin_max_k"]
+    q0, mu = max_k * 2 + 10, float(max_k) * 1.6
+    got = dp_mod.solve(10000.0, 4000.0, q0, [mu], 0.30, -1.0, 1.5, CFG,
+                       anchor_discount=0.0, entry=False)
+    wide = dict(CFG, pricing=dict(CFG["pricing"], negbin_max_k=q0 * 8))
+    want = dp_mod.solve(10000.0, 4000.0, q0, [mu], 0.30, -1.0, 1.5, wide,
+                        anchor_discount=0.0, entry=False)
+    for j, v in want.q_by_tier.items():
+        assert got.q_by_tier[j] == pytest.approx(v, rel=1e-9), j
+    # and the folded table at max_k alone reads pessimistic: the fix is real
+    from engine.demand import expected_min_demand_inventory, nb_pmf_vector
+    pmf, _ = nb_pmf_vector(mu, 1.5, max_k)
+    folded = float(np.sum(pmf * np.minimum(np.arange(max_k + 1), q0)))
+    assert expected_min_demand_inventory(mu, 1.5, q0, max_k) > folded * 1.2
+    # the table is never narrower than negbin_max_k
+    assert dp_mod.table_width(max_k, 3) == max_k and dp_mod.table_width(max_k, q0) == q0
+
+
+def test_the_censored_expectation_is_exact_past_negbin_max_k():
+    """E[min(D, q)] folded the NB tail at negbin_max_k and read
+    E[min(D, min(q, max_k))]: a shelf deeper than the table was capped,
+    the sold/predicted ratio pushed above 1 and the level factor absorbed
+    a truncation artefact. Every q matches a brute-force sum now."""
+    from engine.demand import (censored_mean_closed_form,
+                               expected_min_demand_inventory_vec)
+
+    max_k = CFG["pricing"]["negbin_max_k"]
+    mu, r = np.array([40.0, 2.0, 60.0]), np.array([1.5, 0.7, 3.0])
+    q = np.array([100.0, 100.0, 30.0])              # every shelf past the table
+    k = np.arange(20000)
+    brute = np.array([np.sum(nbinom.pmf(k, ri, ri / (ri + mi)) * np.minimum(k, qi))
+                      for mi, ri, qi in zip(mu, r, q)])
+    got = expected_min_demand_inventory_vec(mu, r, q, max_k)
+    assert np.allclose(got, brute, rtol=1e-10)
+    assert np.allclose(censored_mean_closed_form(mu, r, q), brute, rtol=1e-10)
+    # the closed form agrees with the folded table wherever the table is exact
+    small_q = np.array([3.0, 12.0, max_k])
+    assert np.allclose(censored_mean_closed_form(mu, r, small_q),
+                       expected_min_demand_inventory_vec(mu, r, small_q, max_k), rtol=1e-10)
+    # mixed shelves in one call: each row on its own basis
+    mixed_q = np.array([3.0, 100.0, 30.0])
+    mixed = expected_min_demand_inventory_vec(mu, r, mixed_q, max_k)
+    assert mixed[0] == expected_min_demand_inventory_vec(mu[:1], r[:1], mixed_q[:1], max_k)[0]
+    assert mixed[1] == pytest.approx(brute[1], rel=1e-10)
+
+
 def test_the_one_mu_pmf_is_the_table_it_delegates_to():
     """nb_pmf_vector (the censored expectation's pmf) and the DP's table are
     one NB parameterisation: same values, tail folded the same way."""
@@ -235,11 +348,14 @@ def test_a_finite_positive_state_still_prices(tmp_path):
     ({"hours_remaining": True}, "hours_remaining"),
     ({"hour_of_day": 24}, "hour_of_day"),
     ({"hour_of_day": True}, "hour_of_day"),
-    ({"hour_of_day": 12.0}, "hour_of_day"),
+    ({"hour_of_day": 12.5}, "hour_of_day"),          # a float naming no hour
     ({"hour_of_day": None}, "hour_of_day"),
-    ({"current_discount": "0.3"}, "p_current"),      # cast before it was judged
-    ({"current_discount": float("nan")}, "p_current"),
-    ({"current_discount": True}, "p_current"),
+    ({"hours_remaining": 0}, "hours_remaining"),
+    # the field engineering sends is `current_discount` (contract section
+    # 03): the rejection names it, never a field that exists nowhere
+    ({"current_discount": "0.3"}, "current_discount"),  # cast before it was judged
+    ({"current_discount": float("nan")}, "current_discount"),
+    ({"current_discount": True}, "current_discount"),
     ({"mu_ref_path": [1.0, None]}, "demand predictions"),   # TypeError before
     ({"mu_ref_path": None}, "demand predictions"),
 ])
@@ -254,6 +370,7 @@ def test_every_malformed_count_hour_anchor_or_path_is_a_state_rejection(bad, fie
         decide(_state(**bad), None, None, CFG, np.random.default_rng(0),
                100.0, "v")
     assert field in str(exc.value)
+    assert "p_current" not in str(exc.value)
 
 
 def test_the_caller_may_pass_the_config_digest_once_per_batch(tmp_path):

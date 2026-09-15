@@ -27,7 +27,7 @@ def _anchor_rows(weeks, categories=("VEG", "FRUIT"), seed=7, start="2026-01-05")
     return pd.DataFrame([
         {"episode_id": f"{d.date()}|{c}", "date": str(d.date()), "category": c,
          "total_discount": 0.30, "d_ref": 0.30,
-         "units_sold": float(rng.integers(40, 60)), "predicted_units": 50.0}
+         "units_sold": float(rng.integers(40, 60)), "mu_ref_hat": 50.0}
         for d in days for c in categories])
 
 
@@ -36,8 +36,38 @@ def _sweep_cfg(cfg, windows, train_end="2025-12-31"):
     the frame so the eval set is the burn-in alone unless a test moves it."""
     cfg = copy.deepcopy(cfg)
     cfg["baseline_model"]["calibration_window_sweep_weeks"] = list(windows)
+    cfg["baseline_model"]["calibration_min_anchor_rows"] = 4   # the frames here are small
     cfg["data"]["split"]["train_end"] = train_end
     return cfg
+
+
+def test_the_sweep_fits_each_window_with_the_production_solver(cfg, monkeypatch):
+    """One level estimator: the sweep ranks W for the solver production
+    pastes it into, so each candidate window is fit by
+    `_solve_level_factors` (its own category-grain ratio ranked a different
+    estimator) on exactly the calendar weeks behind the eval week."""
+    from evaluate import backtest as bt
+    from fit import train_baseline as tb
+    calls = []
+    real = tb._solve_level_factors
+
+    def spy(calib, model, *args, **kw):
+        calls.append((sorted(calib.week.unique()), model is None and kw.get("cfg") is not None))
+        return real(calib, model, *args, **kw)
+
+    monkeypatch.setattr(bt, "_solve_level_factors", spy)
+    out = calibration_window_sweep(_anchor_rows(8), _sweep_cfg(cfg, [2]))
+    assert calls and all(basis_attached for _, basis_attached in calls)
+    assert all(len(weeks_in) == 2 for weeks_in, _ in calls), "a 2w window is two calendar weeks"
+    assert out["trailing_2w"]["weeks_too_thin"] == []
+
+    # a window too thin to fit scores its week uncalibrated -- production
+    # holds the anchor there -- and says so
+    thin = _sweep_cfg(cfg, [2])
+    thin["baseline_model"]["calibration_min_anchor_rows"] = 10_000
+    out = calibration_window_sweep(_anchor_rows(8), thin)
+    assert out["trailing_2w"]["weeks_too_thin"] == out["eval_weeks"]
+    assert out["trailing_2w"]["median_anchor_ratio"] == out["uncalibrated"]["median_anchor_ratio"]
 
 
 def test_every_sweep_row_is_scored_on_the_same_weeks(cfg):
@@ -79,7 +109,7 @@ def test_the_sweep_keys_rows_by_the_episodes_opening_week(cfg):
                 rows.append({"episode_id": f"{s.date()}|{c}", "date": str(day.date()),
                              "hour_of_day": hour, "category": c,
                              "total_discount": 0.30, "d_ref": 0.30,
-                             "units_sold": 50.0, "predicted_units": 50.0})
+                             "units_sold": 50.0, "mu_ref_hat": 50.0})
     out = calibration_window_sweep(pd.DataFrame(rows), cfg)
     weeks = [str((s - pd.Timedelta(days=6)).date()) for s in sundays]
     assert out["eval_weeks"] == weeks[1:]
@@ -183,7 +213,7 @@ def test_a_window_that_genuinely_helps_is_called_out(cfg):
                          "date": str(d.date()), "category": c,
                          "total_discount": 0.30, "d_ref": 0.30,
                          "units_sold": 50.0 * bias + rng.normal(0, 1.0),
-                         "predicted_units": 50.0})
+                         "mu_ref_hat": 50.0})
     out = calibration_window_sweep(pd.DataFrame(rows), cfg)
 
     pv = out["trailing_2w"]["paired_vs_uncalibrated"]
@@ -198,6 +228,49 @@ def test_replay_collects_every_decision_hour(cfg):
     _, _, ledger = policy_replay(d, cfg)
     # entry-only collection would give exactly one spread per episode
     assert ledger.decisions > d.episode_id.nunique()
+
+
+def test_the_replay_sample_is_a_config_key_the_flag_overrides(cfg):
+    """Every policy figure, the within-episode moves, step_sensitivity's
+    pool and the tau cross-check sit on the replay's episode sample. A
+    literal default had no config key: a run with the flag left no record
+    in the report's fingerprint. The sample is tuning.backtest_policy_episodes;
+    --policy-episodes overrides it for one run."""
+    from evaluate.backtest import policy_replay
+    d = pd.concat([_replay_episode(eid) for eid in ("a", "b", "c")])
+    assert cfg["tuning"]["backtest_policy_episodes"] > 3
+    _, ep, _ = policy_replay(d, cfg)
+    assert len(ep) == 3
+    cfg["tuning"]["backtest_policy_episodes"] = 1            # set here, never read shipped
+    _, ep, _ = policy_replay(d, cfg)
+    assert len(ep) == 1
+    _, ep, _ = policy_replay(d, cfg, max_episodes=2)
+    assert len(ep) == 2
+
+
+def test_the_dp_arm_plans_over_the_rows_own_counter(cfg, monkeypatch):
+    """The horizon at hour t is episodes.planning_horizon of the row's
+    counter (this hour included) -- the one spelling shadow, the simulator's
+    templates and the feed row share -- so the solver never sees the
+    extension a restocked window turned out to have."""
+    from common import episodes
+    from evaluate import backtest as bt
+    seen = []
+    solve = bt.dp_mod.solve
+
+    def spy(p0, cost, q, mu_path, *args, **kw):
+        seen.append(len(mu_path))
+        return solve(p0, cost, q, mu_path, *args, **kw)
+
+    monkeypatch.setattr(bt.dp_mod, "solve", spy)
+    e = bt._episode_frame(_replay_episode("e", hours_remaining_last=3))   # counters 2, 1, 3
+    price_at = bt._dp_price(e, cfg, e["eps_belief"])
+    for t in range(3):
+        price_at(t, 6, None if t == 0 else 0.25)
+    want = [episodes.planning_horizon(c) for c in e["counter"]]
+    assert want == [3, 2, 4]
+    # the path is cut at the frame's end; the horizon is the counter's own
+    assert seen == [min(h, 3 - t) for t, h in enumerate(want)]
 
 
 def test_the_replay_ledger_keys_spreads_on_the_rows_day(cfg):
@@ -379,14 +452,18 @@ def test_the_backtest_slices_to_pre_launch_before_anything_reads_the_frame(
 
     monkeypatch.setattr(bt, "BaselineModel", lambda c: _Applier(c))
     monkeypatch.setattr(bt, "fidelity", fake_fidelity)
-    monkeypatch.setattr(bt, "policy_replay", lambda *a, **k: (
-        {"actual_il": 1.0, "actual_il_pct": 0.1, "legacy_model_il": 1.0,
-         "dp_il": 1.0, "pct_dp_deepened": 0.0,
-         "intra_episode_moves": {"overall": {
-             "share_episodes_with_a_step": 0.0, "mean_steps_per_episode": 0.0,
-             "legacy_share_episodes_with_a_step": 0.0}, "by_cost_ratio_band": {}},
-         "policy_gap_like_for_like": {"dp_il_reduction_pct_of_legacy": None}},
-        pd.DataFrame(), SpreadLedger()))
+
+    def fake_replay(*a, **k):
+        got["replay_kw"] = k
+        return ({"actual_il": 1.0, "actual_il_pct": 0.1, "legacy_model_il": 1.0,
+                 "dp_il": 1.0, "pct_dp_deepened": 0.0,
+                 "intra_episode_moves": {"overall": {
+                     "share_episodes_with_a_step": 0.0, "mean_steps_per_episode": 0.0,
+                     "legacy_share_episodes_with_a_step": 0.0}, "by_cost_ratio_band": {}},
+                 "policy_gap_like_for_like": {"dp_il_reduction_pct_of_legacy": None}},
+                pd.DataFrame(), SpreadLedger())
+
+    monkeypatch.setattr(bt, "policy_replay", fake_replay)
     monkeypatch.setattr(bt, "derive_tau_initial", lambda *a, **k: None)
     monkeypatch.setattr(sys, "argv", [
         "backtest", "--input", str(tmp_path / "prepared.parquet"),
@@ -396,6 +473,8 @@ def test_the_backtest_slices_to_pre_launch_before_anything_reads_the_frame(
 
     assert set(got["frame"].episode_id) == {"before"}, \
         "fidelity saw a hold-out or dp-ineligible episode"
+    # no flag: the replay reads its sample from the config, not a literal
+    assert got["replay_kw"]["max_episodes"] is None
     out = json.load(open(tmp_path / "bt.json"))
     assert out["population"]["episodes_excluded_after_test_end"] == 1
     assert out["population"]["episodes_excluded_dp_ineligible"] == 1

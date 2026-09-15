@@ -1,9 +1,10 @@
-"""common.io -- the one way a JSON artifact or report is read and written."""
+"""common.io -- the one way a JSON artifact, report or row file is read and written."""
 
 import json
 import os
 
 import numpy as np
+import pandas as pd
 
 
 def read_json(path, default=None):
@@ -36,3 +37,46 @@ def write_json(path, payload, **dump_kw):
     with open(path, "w") as f:
         json.dump(json_safe(payload), f,
                   **{"indent": 2, "default": str, **dump_kw})
+
+
+def write_jsonl(path, rows, fields=None):
+    """One JSON object per line, through `json_safe` (a NaN cell from a
+    table reads as null, a numpy scalar as its value, a timestamp as its
+    text) -- the ONE row writer. `fields`, when given, is the exact key
+    set and order every line carries (a missing key writes null)."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w") as f:
+        for row in rows:
+            out = {k: row.get(k) for k in fields} if fields else row
+            f.write(json.dumps(json_safe(out), default=str) + "\n")
+
+
+def read_rows(path, rename=None):
+    """Rows as a list of dicts from JSONL (one object per line; a line that
+    is not one is a row with NO fields, `{}`, so the caller refuses or
+    counts that row and never raises for the batch), parquet or CSV (one
+    row each; a null cell reads as None). `rename` maps column names on
+    the way in (the feed's spellings to the contract's) -- the ONE
+    three-way loader, shared by the price requests and the failures
+    table."""
+    rename = rename or {}
+    if path.endswith(".parquet"):
+        frame = pd.read_parquet(path)
+    elif path.endswith(".csv"):
+        frame = pd.read_csv(path)
+    else:
+        rows = []
+        with open(path) as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    obj = {}
+                rows.append({rename.get(k, k): v for k, v in obj.items()}
+                            if isinstance(obj, dict) else {})
+        return rows
+    frame = frame.rename(columns=rename)
+    frame = frame.astype(object).where(frame.notna(), None)
+    return frame.to_dict("records")

@@ -3,7 +3,6 @@ their own week, the freeze at the gate, convergence of the f <-> r loop, and
 the --apply gate on a schedule that no longer reaches today."""
 
 import json
-import os
 
 import numpy as np
 import pandas as pd
@@ -11,29 +10,64 @@ import pytest
 
 from common import episodes
 from conftest import _harness_cfg, load_config
+from fit import train_baseline as tb
+from test_calibration import _CountingModel, _prepared, scratch_config
 
 
-def test_calibration_factors_never_see_their_own_week_or_later(cfg):
+@pytest.fixture
+def scratch_cfg(cfg, tmp_path):
+    return scratch_config(cfg, tmp_path)
+
+
+def _schedule_artifact(cfg, monkeypatch, cells_by_day, weeks_back=1, k_shrink=0.0):
+    """Fit the calibration artifact on a constructed frame under tmp paths:
+    `cells_by_day(day) -> {sub: (cat, sold)}` gives each day's cells (one
+    4-hour anchor episode per cell per day, mu_ref 1.0), over the three
+    weeks before the gate and the gate week. Returns (artifact, frame)."""
+    cfg["baseline_model"]["calibration_fit_trailing_weeks"] = weeks_back
+    cfg["baseline_model"]["calibration_shrinkage_units"] = k_shrink
+    gate = pd.Timestamp(cfg["data"]["split"]["test_start"])
+    days = [str(x.date()) for x in
+            pd.date_range(gate - pd.Timedelta(days=21), gate + pd.Timedelta(days=6))]
+    d = pd.concat([_prepared(cells_by_day(day), [day]) for day in days],
+                  ignore_index=True)
+    monkeypatch.setattr(tb, "BaselineModel", lambda c: _CountingModel(cfg, 1.0))
+    tb.fit_level_calibration(d, cfg)
+    return json.load(open(cfg["baseline_model"]["calibration_factor_path"])), d
+
+
+def test_calibration_factors_never_see_their_own_week_or_later(scratch_cfg, monkeypatch):
     """The whole point of the rolling schedule: week W's factors are fit on
-    the trailing window ENDING STRICTLY BEFORE W."""
-    import json
-    import os
+    the trailing window ENDING STRICTLY BEFORE W. Checked against a factor
+    computed independently from the rows each week may read (raw basis,
+    no shrinkage: sold over predicted on the trailing window's whole
+    episodes) -- on a frame where the level jumps mid-way, so the jump
+    week's table cannot contain it."""
+    cfg = scratch_cfg
+    gate = pd.Timestamp(cfg["data"]["split"]["test_start"])
+    jump = str((gate - pd.Timedelta(days=10)).date())
 
-    path = cfg["baseline_model"]["calibration_factor_path"]
-    if not os.path.exists(path):
-        pytest.skip("no calibration artifact on disk")
-    with open(path) as f:
-        cal = json.load(f)
-    sched = cal.get("schedule")
-    if not sched:
-        pytest.skip("calibration is not on the rolling schedule")
-
+    def cells(day):
+        return {"A": ("C", 6 if day >= jump else 2)}
+    art, d = _schedule_artifact(cfg, monkeypatch, cells)
+    sched = art["schedule"]
+    assert sched["trailing_weeks"] == 1 and len(sched["by_week"]) >= 3
+    opened = episodes.opening_dates(d)
+    for week, table in sched["by_week"].items():
+        window, _ = episodes.trailing_weeks_window(d, week, 1, opened=opened)
+        assert (opened.loc[window.index] < week).all(), "a row of its own week"
+        want = float(window.units_sold.sum()) / float(len(window))   # mu_ref 1.0
+        assert table["A"] == pytest.approx(want, abs=1e-3), week
     weeks = sorted(sched["by_week"])
-    assert weeks, "a rolling schedule with no fitted weeks is not a schedule"
-    assert int(sched["trailing_weeks"]) >= 1
-    # the window [start - n weeks, start) ends strictly before the week the
-    # factors apply to: exercised on real rows in
-    # test_a_level_shift_does_not_leak_into_its_own_weeks_factor
+    jump_week = episodes.week_key(pd.Series([jump])).iloc[0]
+    before = [w for w in weeks if w <= jump_week]
+    after = [w for w in weeks if w > jump_week]
+    assert before and after
+    # the jump week's table is fit on the week before it: the old level
+    assert sched["by_week"][before[-1]]["A"] == pytest.approx(2.0, abs=1e-3)
+    # only a week AFTER the jump can carry it, and the last one carries it whole
+    assert sched["by_week"][after[-1]]["A"] == pytest.approx(6.0, abs=1e-3)
+    assert all(sched["by_week"][w]["A"] < 6.0 for w in before)
 
 
 def test_both_harnesses_get_point_in_time_factors_without_their_own_code():
@@ -188,48 +222,39 @@ def test_apply_refuses_when_the_weekly_refit_was_missed(tmp_path, cfg):
     assert calibration_current(cfg, today="2027-01-01")["pass"]
 
 
-def test_a_partial_trailing_window_is_counted_not_passed_off_as_full(cfg):
-    """`trailing_weeks: 4` does not mean every week HAS four behind it."""
-    import json
-    import os
-
-    path = cfg["baseline_model"]["calibration_factor_path"]
-    if not os.path.exists(path):
-        pytest.skip("no calibration artifact on disk")
-    sched = (json.load(open(path)).get("schedule") or {})
-    if not sched.get("by_week"):
-        pytest.skip("calibration is not on the rolling schedule")
-
-    assert "weeks_on_partial_window" in sched, \
+def test_a_partial_trailing_window_is_counted_not_passed_off_as_full(scratch_cfg, monkeypatch):
+    """`trailing_weeks: 2` does not mean every week HAS two behind it: the
+    first fitted weeks have one, and are flagged, not dropped."""
+    art, _ = _schedule_artifact(scratch_cfg, monkeypatch,
+                                lambda day: {"A": ("C", 2)}, weeks_back=2)
+    sched = art["schedule"]
+    assert sched["weeks_on_partial_window"], \
         "a short trailing window must be counted, not silently labelled full"
     for row in sched["weeks_on_partial_window"]:
         assert row["weeks_in_window"] < sched["trailing_weeks"]
         assert row["week"] in sched["by_week"], \
             "a partial week is still fitted -- it is flagged, not dropped"
+    full = [w for w in sched["by_week"]
+            if w not in {r["week"] for r in sched["weeks_on_partial_window"]}]
+    assert full, "later weeks have the whole window behind them"
 
 
-def test_the_gate_freezes_calibration_even_though_the_schedule_runs_past_it(cfg):
+def test_the_gate_freezes_calibration_even_though_the_schedule_runs_past_it(scratch_cfg, monkeypatch):
     """Two questions, one artifact, and they must not be confused."""
-    import json
-    import os
-
-    path = cfg["baseline_model"]["calibration_factor_path"]
-    if not os.path.exists(path):
-        pytest.skip("no calibration artifact on disk")
-    sched = (json.load(open(path)).get("schedule") or {})
-    if not sched.get("by_week"):
-        pytest.skip("calibration is not on the rolling schedule")
-
+    cfg, BaselineModel = scratch_cfg, tb.BaselineModel
+    art, _ = _schedule_artifact(cfg, monkeypatch, lambda day: {"A": ("C", 2)})
+    sched = art["schedule"]
     gate_start = pd.Timestamp(cfg["data"]["split"]["test_start"])
     assert sched.get("gate_freezes_at") == str(gate_start.date()), (
         "the artifact must record where the gate freezes, or coverage cannot "
         "tell a deliberate freeze from production running onto stale factors")
+    # the schedule itself runs past the gate (pre-launch scope: to test_end)
+    assert max(sched["by_week"]) >= str(gate_start.date())
 
     # (that the fidelity gate does the freezing is exercised in
     # test_fidelity_grades_the_frozen_artifact_and_reports_the_refit_beside_it)
 
     # frozen rows take the anchor, scheduled rows take their own week
-    from fit.train_baseline import BaselineModel
     m = BaselineModel.__new__(BaselineModel)
     m.calibration_grain = "category"
     m.calibration = {"A": 2.0}
@@ -305,42 +330,74 @@ def test_convergence_check_flags_drift_and_never_commits_the_resolve(
     assert "anchor:B" in block["cells_appeared_or_gone"]
 
 
-def test_rho_is_fit_on_the_calib_window_not_the_full_frame():
-    """rho once read the whole input frame: ~83% training rows, where the
+def test_rho_is_fit_on_the_calib_window_not_the_full_frame(cfg, monkeypatch):
+    """rho once read the whole input frame: mostly training rows, where the
     model fits its own residuals and between-episode variance reads small
-    (fixture: in-train rho 0.081 vs out-of-sample 0.230) -- plus, on a longer
-    extract, rows past test_end (hard rule 16). An understated rho understates
-    deff, and deff deflates every posterior update. calib is the one window
-    both out-of-train and pre-gate, and r already lives there."""
-    path = load_config()["dispersion"]["rho_path"]
-    if not os.path.exists(path):
-        pytest.skip("no rho artifact on disk")
-    art = json.load(open(path))
-    if "fit_window" in art:                 # artifact written post-change
-        assert art["fit_window"] == "calib"
+    -- plus, on a longer extract, rows past test_end (hard rule 16). An
+    understated rho understates deff, and deff deflates every posterior
+    update. calib is the one window both out-of-train and pre-gate, and r
+    already lives there. Observed on the rows the ICC is handed."""
+    import copy
+
+    from fit import fit_dispersion as fd
+    from test_dispersion import _FlatModel, _calib_frame
+
+    cfg = copy.deepcopy(cfg)
+    cfg["dispersion"]["min_rows_per_group"] = 8
+    monkeypatch.setattr(fd, "fit_r", lambda k, mu, cen, b: (2.0, True))
+    monkeypatch.setattr(fd, "_working_elasticity", lambda c: ({}, -1.0))
+    monkeypatch.setattr(fd, "pearson_dispersion", lambda k, mu: 5.0)
+    calib = _calib_frame(cfg, {"S1": ("C1", 16), "S2": ("C2", 32)})
+    train = calib.assign(date=cfg["data"]["split"]["train_start"],
+                         episode_id=lambda f: "train-" + f.episode_id)
+    seen = []
+    real = fd.intraclass_correlation
+
+    def spy(resid, groups, clip_max=None):
+        seen.append(len(resid))
+        return real(resid, groups, clip_max)
+    monkeypatch.setattr(fd, "intraclass_correlation", spy)
+    _, rho_out = fd.fit_dispersion(pd.concat([train, calib], ignore_index=True),
+                                   cfg, model=_FlatModel())
+    assert rho_out["fit_window"] == "calib"
+    assert seen == [len(calib)], "rho read rows outside the calib window"
+    assert rho_out["fit_rows"] == len(calib)
 
 
-def test_convergence_carries_its_trajectory_and_the_worst_cell_s_evidence():
+def test_convergence_carries_its_trajectory_and_the_worst_cell_s_evidence(tmp_path, cfg):
     """A single reading cannot tell a contracting loop from a stuck one, and
     an unweighted max cannot tell an unsettled chain from one thin cell."""
     import copy
 
-    cfg = copy.deepcopy(load_config())
-    cfg["baseline_model"]["calibration_convergence_tol_log"] = 0.02
-    path = cfg["baseline_model"]["calibration_factor_path"]
-    if not os.path.exists(path):
-        pytest.skip("no calibration artifact on disk")
-    block = (json.load(open(path)).get("convergence") or {})
-    if not block:
-        pytest.skip("convergence never run")
+    from fit import train_baseline as tb
 
-    assert isinstance(block.get("history"), list) and block["history"]
-    assert len(block["history"]) <= 6, "the history is bounded"
-    assert block["history"][-1] == block["max_abs_dlog"], \
-        "the last reading must be this run's"
-    # the worst cell's evidence is reported, so a shrinkage-dominated cell is
-    # distinguishable from a genuinely unsettled loop
-    assert "worst_cell_anchor_rows" in block
+    cfg = copy.deepcopy(cfg)
+    path = str(tmp_path / "cal.json")
+    cfg["baseline_model"]["calibration_factor_path"] = path
+    cfg["baseline_model"]["calibration_convergence_tol_log"] = 0.02
+    json.dump({"factors": {"A": 1.0, "B": 1.2},
+               "detail": {"B": {"anchor_rows": 37}},
+               "schedule": {"by_week": {}}}, open(path, "w"))
+    moves = iter([1.4, 1.3, 1.25])                  # a contracting loop
+
+    def refit(d, c):
+        json.dump({"factors": {"A": 1.0, "B": next(moves)},
+                   "schedule": {"by_week": {}}}, open(path, "w"))
+    import unittest.mock as um
+    with um.patch.object(tb, "fit_level_calibration", refit):
+        blocks = [tb.check_calibration_convergence(None, cfg) for _ in range(3)]
+    for block in blocks:
+        assert isinstance(block.get("history"), list) and block["history"]
+        assert len(block["history"]) <= 6, "the history is bounded"
+        assert block["history"][-1] == block["max_abs_dlog"], \
+            "the last reading must be this run's"
+        # the worst cell's evidence is reported, so a shrinkage-dominated
+        # cell is distinguishable from a genuinely unsettled loop
+        assert block["worst_cell"] == "anchor:B"
+        assert block["worst_cell_anchor_rows"] == 37
+    assert [len(b["history"]) for b in blocks] == [1, 2, 3]
+    assert blocks[-1]["history"] == sorted(blocks[-1]["history"], reverse=True)
+    assert "contracting" in blocks[-1]["verdict"]
 
 
 def test_the_prior_fast_path_drops_only_what_cannot_move_the_fixed_point():

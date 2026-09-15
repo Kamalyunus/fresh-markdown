@@ -18,6 +18,8 @@ forced exploration only, exploitation pricing continues, and only a human
 (`daily.update --resume-exploration`) clears it.
 """
 
+import contextlib
+import fcntl
 import json
 import os
 import tempfile
@@ -61,7 +63,13 @@ class PosteriorStore:
     reader (the hourly pricing service holding one store) sees neither
     until it calls `reload()`. The contract: the CALLER reloads once per
     decision batch, before its first `decide()`; `decide()` itself never
-    re-reads the file (one read per hour, not one per SKU)."""
+    re-reads the file (one read per hour, not one per SKU).
+
+    Every write goes through ONE path, `_commit`: take the file lock,
+    re-read the file, apply the mutation to what is on disk, write. A
+    writer never writes the state it loaded earlier, so a suspension the
+    monitor wrote between an `--apply`'s load and its write survives it,
+    and neither writer can empty the other's processed-id ledger."""
 
     def __init__(self, cfg, path=None):
         self.cfg = cfg
@@ -76,6 +84,29 @@ class PosteriorStore:
             self.state = json.load(f)
         self._processed = None
         return self
+
+    @contextlib.contextmanager
+    def _locked(self):
+        """Exclusive lock beside the file for the reload-mutate-write
+        window; the atomic replace keeps readers whole without it."""
+        fd = os.open(self.path + ".lock", os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def _commit(self, mutate):
+        """Load-modify-write: `mutate(state)` runs on the state re-read
+        from disk under the lock, its result (or the state) is written,
+        and `self.state` is that written state."""
+        with self._locked():
+            self.reload()
+            out = mutate(self.state)
+            self.state = self.state if out is None else out
+            self._atomic_write(self.path, self.state)
+        return self.state
 
     @staticmethod
     def launch_state(cfg, prior_by_category, episodes_per_week):
@@ -203,18 +234,18 @@ class PosteriorStore:
         """
         if not applied:
             return                       # nothing consumed, nothing persisted
-        rec = self.state["cells"][cell]
-        # no information_since_update counter -- the trigger reads the
-        # unconsumed batch, never a running total (design 5.11)
-        rec["mean"], rec["std"] = float(new_mean), float(new_std)
-        rec["version"] += 1
-        rec["accumulated_information"] += effective_information
-        rec["updated_at"] = pd.Timestamp.now("UTC").isoformat()
-        rec["n_obs"] += n_new_obs
-        self.state["processed_outcome_ids"].extend(outcome_ids)
-        if self._processed is not None:
-            self._processed.update(outcome_ids)
-        self._atomic_write(self.path, self.state)
+
+        def mutate(state):
+            rec = state["cells"][cell]
+            # no information_since_update counter -- the trigger reads the
+            # unconsumed batch, never a running total (design 5.11)
+            rec["mean"], rec["std"] = float(new_mean), float(new_std)
+            rec["version"] += 1
+            rec["accumulated_information"] += effective_information
+            rec["updated_at"] = pd.Timestamp.now("UTC").isoformat()
+            rec["n_obs"] += n_new_obs
+            state["processed_outcome_ids"].extend(outcome_ids)
+        self._commit(mutate)
 
     # tau is production learning state: it lives here, not in hand-
     # maintained config.yaml (design 5.8).
@@ -233,13 +264,41 @@ class PosteriorStore:
         """The last date tau was calibrated for, or None."""
         return self.state.get("tau_calibrated_through")
 
-    def commit_tau(self, tau, through_date):
-        """Persist a recalibrated tau, stamped with the date it consumed --
-        the exactly-once-per-day guard."""
-        self.state["tau"] = float(tau)
-        self.state["tau_calibrated_through"] = str(through_date)
-        self.state["tau_updated_at"] = pd.Timestamp.now("UTC").isoformat()
-        self._atomic_write(self.path, self.state)
+    def tau_day_walked(self, day):
+        """Has the controller already graded `day`? Read off the walked-day
+        ledger (`tau_walked_days`); a day before the ledger began counts as
+        walked, and a file with no ledger yet reads the through-date alone.
+        A priced day the ledger does not hold is one whose outcomes arrived
+        AFTER a later day was walked -- graded on the next walk, never
+        skipped (each day's step is tau-independent, so order cannot
+        change where the walk lands)."""
+        day = str(day)
+        ledger = self.state.get("tau_walked_days")
+        if ledger is None:
+            done = self.tau_calibrated_through()
+            return done is not None and day <= str(done)
+        before = self.state.get("tau_walked_before")
+        return day in ledger or (before is not None and day <= str(before))
+
+    def commit_tau(self, tau, through_date, days=()):
+        """Persist a recalibrated tau, stamped with the latest date it
+        consumed and the days the walk graded -- the exactly-once-per-day
+        guard (`tau_day_walked`)."""
+        days = sorted({str(d) for d in days})
+
+        def mutate(state):
+            if days and "tau_walked_days" not in state:
+                # the ledger starts here: whatever was calibrated before it
+                # existed counts as walked, not as late outcomes
+                state["tau_walked_before"] = state.get("tau_calibrated_through")
+            if days:
+                state["tau_walked_days"] = sorted(
+                    set(state.get("tau_walked_days") or []) | set(days))
+            state["tau"] = float(tau)
+            state["tau_calibrated_through"] = max(
+                [str(through_date)] + [str(state.get("tau_calibrated_through") or "")])
+            state["tau_updated_at"] = pd.Timestamp.now("UTC").isoformat()
+        self._commit(mutate)
 
     # exploration suspension (design 5.12): a fired stop condition stops
     # FORCED exploration only -- decide() prices with no budget and records
@@ -256,24 +315,28 @@ class PosteriorStore:
         call keeps the FIRST `since` and unions the reasons, so a stop that
         keeps firing does not restart the clock. Same atomic write as the
         cells. Returns the record."""
-        current = self.state.get("exploration_suspended")
-        merged = sorted(set(reasons) | set(current["reasons"] if current else ()))
-        if not merged:
+        if not set(reasons):
             raise ValueError("suspend_exploration needs at least one reason")
-        record = {"reasons": merged,
-                  "since": current["since"] if current else str(since)}
-        if current and current["reasons"] == merged \
-                and current["since"] == record["since"]:
-            return current                     # nothing changed, nothing written
-        record["updated_at"] = pd.Timestamp.now("UTC").isoformat()
-        self.state["exploration_suspended"] = record
-        self._atomic_write(self.path, self.state)
-        return record
+
+        def mutate(state):
+            current = state.get("exploration_suspended")
+            merged = sorted(set(reasons) | set(current["reasons"] if current else ()))
+            record = {"reasons": merged,
+                      "since": current["since"] if current else str(since)}
+            if current and current["reasons"] == merged \
+                    and current["since"] == record["since"]:
+                return                         # nothing changed
+            record["updated_at"] = pd.Timestamp.now("UTC").isoformat()
+            state["exploration_suspended"] = record
+        self._commit(mutate)
+        return self.state["exploration_suspended"]
 
     def resume_exploration(self):
         """Clear the suspension (the human gate). Returns the record cleared,
         or None when exploration was not suspended."""
-        record = self.state.pop("exploration_suspended", None)
-        if record is not None:
-            self._atomic_write(self.path, self.state)
-        return record
+        cleared = {}
+
+        def mutate(state):
+            cleared["record"] = state.pop("exploration_suspended", None)
+        self._commit(mutate)
+        return cleared["record"]

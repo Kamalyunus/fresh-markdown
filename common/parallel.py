@@ -7,8 +7,23 @@ the answer), and workers compute while the parent commits (shared state never
 crosses the boundary). workers=None/1 runs in-process, serial path unchanged.
 """
 
+import hashlib
 import os
 from concurrent.futures import ProcessPoolExecutor
+
+import numpy as np
+
+
+def keyed_rng(seed, *key):
+    """ONE generator per (seed, key): the draw depends on what is priced
+    (an episode id, an hour key, an episode and its hour), never on which
+    worker prices it or in what order -- the rule that makes serial and
+    parallel runs agree. `key` parts are joined as text and hashed
+    (blake2b), so any tuple of ids spells one stream; the seed moves every
+    stream. The one home for the per-decision seeding the batch caller,
+    shadow and the simulator each spelt for themselves."""
+    h = hashlib.blake2b("|".join(map(str, key)).encode(), digest_size=8).digest()
+    return np.random.default_rng([int(seed), int.from_bytes(h, "big")])
 
 
 def resolve_workers(workers):

@@ -62,7 +62,12 @@ process changed (before, after, why, source), the config in force, status,
 and what is waited on. Its stops, in order: a moved training input
 (`--retrain` is yours) · a tune BLOCK · a MEASURED value a report could not
 derive · a failed shadow gate · the owner keys · `data.launch_date` · a
-stale extract (after launch, a refreshed extract moves the split manifest alone; the next `advance` absorbs it with the weekly re-fit and re-seal, not a red stop) · a red `status` · and, daily, **`daily.update --apply`**,
+stale extract (after launch, a refreshed extract moves the split manifest alone; the next `advance` absorbs it with the weekly re-fit and re-seal, not a red stop) · then the daily lane
+(ingest, tau walk, monitor, assurance, export, status — it runs even
+while `status` is red, because the rows that go red after launch, a fired
+stop or an assurance verdict, are refreshed only by this lane; stopping
+before it once deadlocked the lane on a fired stop) · a red `status`,
+naming the rows and the resume path · and, daily, **`daily.update --apply`**,
 which stays a human's. A step that fails, a plan that loops or a round
 budget that runs out are stops too: journaled, reported, exit 1.
 
@@ -139,13 +144,17 @@ per cell per day; each cell triggers on its own batch. Before approving:
 | `bound_clipped` | occasional | most updates clip — step cap or increment mis-sized; escalate |
 | `batch_oldest_outcome_age_days` | near the expected cadence | growing without a trigger — the loop is stalling; check volumes and tau |
 | event-quality gates | green (the command refuses on red) | never work around a refusal |
-| `calibration_schedule_current` | green | red means the weekly re-fit was missed — `--apply` refuses, because learning from prices set on stale factors banks evidence about a model that is not the one running. A week the re-fit ran and HELD at the anchor (too few anchor rows) is green with `held_at_anchor: true`: production prices on the anchor factors that week — read it, it is not a refusal |
+| `calibration_schedule_current` | green | red means the weekly re-fit was missed — `--apply` refuses, because learning from prices set on stale factors banks evidence about a model that is not the one running (the tau walk still commits: it moves on spend, not factors). A week the re-fit ran and HELD at the anchor (too few anchor rows) is green with `held_at_anchor: true`: production prices on the anchor factors that week — read it, it is not a refusal |
 
 `tau` needs no approval: `advance --feed` walks it one clipped step per
 closed day (`update --calibrate-tau`) once the trailing IL base spans
 `budget_il_window_days` — the first week after launch holds it, and the
-walk rows say `held`; a second run on the same day is a no-op, and a
-missed day is graded, not skipped.
+walk rows say `held`; a day exploration was suspended on is held too
+(`exploration suspended`: nothing was drawn, so its zero spend is no
+reading), and only pushes that executed count as spend. A second run on
+the same day is a no-op, and a missed day is graded, not skipped — a day
+whose outcomes arrived after a later day was walked is graded on the
+next walk and printed (`day(s) whose outcomes arrived late`).
 
 ---
 
@@ -162,13 +171,24 @@ contract:
   (JSONL/parquet/CSV), a price per request out, or `rejected` with the
   reason per row; the posterior read once per batch; every decision in the
   store before its price returns; an hour already priced refused
-  (`already_priced`). Call it as it is (a file drop per hour) or lift the
-  service out of it: `engine.state.build_states` is the one request →
-  state (the frozen model's `mu_ref_path`, its two demand-rate features
-  computed point-in-time from the trailing feed, `r` from the lookup) —
-  never re-derived. `python3 -m tools.e2e_cycle` runs one whole cycle —
+  (`already_priced`). Every request is read in one spelling (ids as the
+  hour key spells them, the day as `YYYY-MM-DD`), so a parquet timestamp
+  or an id read back as `7.0` prices and writes. Call it as it is (a file
+  drop per hour) or lift the service out of it: `engine.state.build_states`
+  is the one request → state (an entry request: the frozen model's
+  `mu_ref_path` on its two demand-rate features computed point-in-time
+  from the trailing feed; a later hour of a known episode: the entry's
+  stored path SLICED to the hour, extended only when a restock grew the
+  window; `r` from the lookup) — never re-derived. Read the batch report's
+  `requests_with_unknown_features` (fresh forecasts with no history
+  behind them) and `non_entry_requests_without_stored_path` (later hours
+  of episodes the store never priced) after the first batches: a whole
+  batch of either means the history table or the episode ids do not meet
+  the requests. `python3 -m tools.e2e_cycle` runs one whole cycle —
   requests, decisions, the shop's feed, ingest, exports — in a workspace
-  under `sim/e2e`, before any of your code exists;
+  under `sim/e2e`, before any of your code exists (the pilot simulator's
+  shop, priced through `ops.price_batch`; a rejected request holds the
+  shelf and is priced again next hour, as your fallback should);
 - applying the returned price (the applied price must be the returned one —
   the mismatch rate is gated at 1%);
 - reporting **failed price pushes** — one row per failed hour, as a table
@@ -193,7 +213,13 @@ date, hour), deriving `adjustment_reason`, `is_stockout` and the offered
 price itself. The outcome id is the hour's key —
 `feed-<sku>|<fc>|<date>T<hh>` — so engineering can name it from the feed
 row; two decisions priced for one hour (a retried batch) match neither and
-are counted (`decisions_colliding_on_hour`). §08 of the contract page is the pre-build feasibility
+are counted (`decisions_colliding_on_hour`); the store itself refuses a
+second decision for a priced hour and a second outcome for a decision
+(`outcomes_per_decision_over_one`), and an outcome without `is_stockout`
+never lands (`missing_stockout_field`). The monitor's safety block
+carries the decision side of completeness — `decisions_colliding_on_hour`
+and `decisions_without_outcome` over the days the feed has answered for —
+beside the outcome side. §08 of the contract page is the pre-build feasibility
 checklist, and §01 — deliberately first — is the definitions and claims
 register: every derivation stands on source-data meanings only engineering
 can confirm, so align on §01 before anything else.
@@ -210,15 +236,15 @@ in the caller.
 
 | Line | Response |
 | --- | --- |
-| stop condition fired (overspend >2× on `persistence_days` consecutive days — no reading while the IL base is shorter than `budget_il_window_days`, the first week after launch, `explore.budget_base_ready` — mismatch, duplicates, guardrail) | the monitor suspends exploration in the posterior state; `decide` stops drawing and **exploitation pricing continues**; `status` shows `exploration SUSPENDED since …`. Investigate, then a human resumes with `python3 -m daily.update --resume-exploration` — never restart blindly. A resumed pilot is not re-suspended by the days it spent suspended (they read as zero spend); a fresh fire is a fresh two-day streak. The posterior file is production state from the first walked τ: `advance` never re-initialises it after launch |
+| stop condition fired (overspend >2× on `persistence_days` consecutive days — no reading while the IL base is shorter than `budget_il_window_days`, the first week after launch, `explore.budget_base_ready` — mismatch, duplicates, guardrail) | the monitor suspends exploration in the posterior state; `decide` stops drawing and **exploitation pricing continues**; `status` shows `exploration SUSPENDED since …`. `advance --feed` keeps running the lane (ingest, tau walk, monitor, assurance, export) while the row is red — that is what lets the windowed rate dilute and the monitor re-read — and stops before the operator gate naming the row; `fired` clears on its own once the window or the streak is back under the threshold, the SUSPENSION only when a human runs `python3 -m daily.update --resume-exploration` after investigating — never restart blindly. A resumed pilot is not re-suspended by the days it spent suspended (they read as zero spend); a fresh fire is a fresh two-day streak. The posterior file is production state from the first walked τ: `advance` never re-initialises it after launch |
 | `config mirrors reports` FAIL | a MEASURED paste disagrees with the report that derives it, or the report could not measure it (NOT RUN). `python3 -m ops.tune` prints the reason; `advance` re-pastes what it can |
 | `guardrail floors` WARN | "insufficient history" — nobody measured the floor, so the stop was not checked. Not a pass: more closed-episode history, then re-run `derive_thresholds` |
 | `assurance · reproduction` FAIL | something moved under the solver (config edit, artifact swap, deploy, library). Diff the bundle first: `artifact bundle` line, then `artifact mirrors`, then the live `artifacts/` against the latest `artifacts/history/<bundle>/<sealed_at>/` snapshot (every seal leaves one, with the config and posterior of the moment; its `MANIFEST.json` names the reason — `bootstrap`, `check-only`, `retrain`, `weekly-refit`, `config`, `libraries` — the config and library versions in force, and every copy was re-hashed against the seal when written). The failing decisions name their own `config_digest` |
-| `artifact bundle` FAIL — `config moved` / `libraries moved since sealing` | the seal covers the environment too. A config edit or a library upgrade changed what the next hour is priced with; nothing prices on it until it is sealed. If the change was deliberate: `python3 -m ops.seal --reason config|libraries` (`advance` does it once nothing is left to paste) — the snapshot it leaves is the record. If it was not, the `MANIFEST.json` of the latest snapshot holds the config and versions that were in force |
+| `artifact bundle` FAIL — `config moved` / `libraries moved since sealing` | the seal covers the environment too. A config edit or a library upgrade changed what the next hour is priced with; nothing prices on it until it is sealed. If the change was deliberate: `python3 -m ops.seal --reason config|libraries` (`advance` does it once nothing is left to paste) — the snapshot it leaves is the record. If it was not, the `MANIFEST.json` of the latest snapshot holds the config and versions that were in force. A `config`/`libraries` re-seal REFUSES when an artifact also moved since the previous seal (it names which): it may not bless an edited or re-fitted artifact as the record. Seal that under the reason that changed it (`check-only`, `weekly-refit` — the calibration alone — `retrain`), or restore the artifact from the latest snapshot, then re-run `advance` |
 | `boundary solutions` WARN | a fit is pinned at a search bound (rule 3): a prior category pooled off `epsilon_min`, a level factor at a bracket end (`calibration.json → pinned_cells`, the GLOBAL parent), an `r` at the search bound. Not an estimate — investigate the cell; widening `epsilon_min` or the bracket is a config decision, never a paste |
 | `artifact mirrors` FAIL | config paste and its source disagree (rho). Read the **bundle** line before re-pasting — the stale side is not always config |
 | `report vintages` FAIL | a report was produced against a model no longer on disk — its gate rows grade a ghost. `advance` re-runs it; do not launch on it |
-| `calibration_coverage` says `STALE FACTORS IN USE` | the weekly re-fit was missed: rows were priced on frozen factors. `advance` re-fits and re-seals; re-run the report |
+| `calibration_schedule_current` red in `daily.update`'s batch summary (`--apply` refuses on it) | the weekly re-fit was missed: rows are being priced on frozen factors. `advance` re-fits and re-seals on its own rule (the schedule must reach the week being priced); run it, then `--apply`. `status` has no row for this: it is read at the operator gate. The backtest and shadow reports carry their own reading of the same thing, `artifact_versions.calibration_coverage` (`STALE FACTORS IN USE` when rows fell past the schedule's end) — a report figure, read in the report, never a `status` line |
 | posterior std flat ≥ alert days | the loop is dead: no committed update. Check batch age, tau, volumes — in that order |
 | guardrail breach (scrap/margin, 2 consecutive days) | business decision, not a code fix — escalate to the owner with the monitor's trailing comparison |
 | `INSUFFICIENT` verdicts | not a pass. A thin window said so; widen or wait. Assurance's top line stays `INSUFFICIENT` until every check ran |

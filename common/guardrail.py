@@ -68,6 +68,31 @@ def deterioration_series(series, smooth_days, window, worse_when_higher, basis):
     return dev
 
 
+def first_reading_close_days(smooth_days, window):
+    """Consecutive close days `deterioration_series` needs before its FIRST
+    reading, from the series' own arithmetic: `smooth_days` close days fill
+    the first smoothed value, the trailing mean needs `window` smoothed
+    values (window + smooth_days - 1 close days), and it is shifted by
+    `smooth_days` more so the two windows never overlap. The one home the
+    monitor's short-series note and the simulator's readiness read; a
+    `window + smoothing` count graded a correct machine as a silent stop."""
+    return int(window) + 2 * int(smooth_days) - 1
+
+
+def stop_ready_close_days(smooth_days, window, persistence_days):
+    """Consecutive close days before the trigger CAN fire at all: the first
+    reading, then `persistence_days - 1` more readings for the streak."""
+    return first_reading_close_days(smooth_days, window) + int(persistence_days) - 1
+
+
+def change_visible_close_days(smooth_days, persistence_days):
+    """Close days from the first FULLY changed close day (inclusive) until a
+    level change fills `persistence_days` consecutive smoothed readings:
+    the smoother carries the old level for `smooth_days - 1` more days,
+    then the streak needs `persistence_days` readings."""
+    return int(smooth_days) + int(persistence_days) - 1
+
+
 BASIS = {"scrap": RELATIVE,        # strictly positive rate
          "margin": ABSOLUTE_PP}    # can cross zero (relative floor blocked)
 

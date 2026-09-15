@@ -588,7 +588,8 @@ def test_calibrate_tau_commits_tau_without_touching_the_cells(cfg, tmp_path):
     assert rep["tau_committed"] and not rep["applied"]
     again = PosteriorStore(cfg, path=str(tmp_path / "posterior.json"))
     assert again.tau_calibrated_through() == "2026-08-19"
-    assert again.tau(cfg) < posterior.tau(cfg) or again.tau(cfg) == rep["tau_calibration"]["tau_after"]
+    # the committed tau IS the walk's, and the overspend lowered it
+    assert again.tau(cfg) == rep["tau_calibration"]["tau_after"] < posterior.tau(cfg)
     for k, v in again.state["cells"].items():
         assert (v["mean"], v["std"], v["n_obs"]) == \
             (cells_before[k]["mean"], cells_before[k]["std"], cells_before[k]["n_obs"])
@@ -792,3 +793,246 @@ def test_a_reported_push_failure_is_not_a_price_mismatch(cfg):
     assert counts["price_mismatch_count"] == 1
     assert counts["outcomes_in_window"] == 10
     assert quality_rates(counts)["price_mismatch_rate"] == pytest.approx(1 / 9)
+
+
+# ------------------------------------------------- the controller and suspension
+def _suspended_store(cfg, tmp_path, suspended_days, history_days=2):
+    """`history_days` budgeted days (an IL base), then one forced-nothing
+    decision per day in `suspended_days` carrying tau_current None -- what
+    engine.decide records while the store holds a suspension."""
+    store = _store(cfg, tmp_path, 4, cost_each=1.0, date="2026-08-19",
+                   history_days=history_days)
+    i = 1000
+    for day in suspended_days:
+        d = _decision(i, 0.30, 0.0, day)
+        d["tau_current"] = None
+        store.emit_decision(d)
+        store.emit_outcome(_outcome(i, 1, day))
+        i += 1
+    return store
+
+
+def test_a_suspended_day_holds_tau_instead_of_ratcheting_it_up(cfg, tmp_path):
+    """While a stop condition kept exploration suspended, every morning's
+    walk graded the day's zero spend as under-spend and multiplied tau by
+    the clip: seven suspended days quintupled tau, and the resume overspent
+    on day one and re-fired the stop. A suspended day is a held day."""
+    days = [f"2026-08-{d:02d}" for d in range(20, 27)]            # seven
+    store = _suspended_store(cfg, tmp_path, days)
+    posterior = _posterior(cfg, tmp_path, calibrated_through="2026-08-19")
+    assert upd.suspended_days(store.load_decisions()) == days
+    before = posterior.tau(cfg)
+    block = upd.tau_calibration(store.load_decisions(), store.load_outcomes(),
+                                posterior, cfg)
+    assert block["commit"] and block["days_walked"] == 7
+    assert all(r["held"] == "exploration suspended" for r in block["by_day"])
+    assert block["held_days"] == days
+    assert block["tau_after"] == pytest.approx(before, abs=0.01)
+    # a day with ANY budgeted decision is graded: the budget was in force
+    late = _decision(2000, 0.30, 0.0, "2026-08-27")
+    store.emit_decision(late)
+    store.emit_outcome(_outcome(2000, 1, "2026-08-27"))
+    assert "2026-08-27" not in upd.suspended_days(store.load_decisions())
+
+
+def test_a_failed_push_spends_nothing(cfg, tmp_path):
+    """A forced decision whose push FAILED left the old price on the shelf:
+    its exploration_cost was expected, never realised. Counting it read a
+    day of integration failures as an overspend, halved tau and could fire
+    the overspend stop on an incident that was not exploration's."""
+    store = _store(cfg, tmp_path, 3, cost_each=100.0)
+    failed = _decision(500, 0.30, 250.0)
+    store.emit_decision(failed)
+    o = _outcome(500, 1)
+    o["execution_status"] = "failed"
+    store.emit_outcome(o)
+    decisions, outcomes = store.load_decisions(), store.load_outcomes()
+    days, spend = upd.finalized_days(decisions, outcomes)
+    assert days[-1] == "2026-08-19"
+    assert spend["2026-08-19"] == pytest.approx(3 * 100.0)
+    # the monitor's per-day series is the same reading
+    learning = mon.learning_metrics(decisions, _posterior(cfg, tmp_path), cfg, outcomes)
+    assert learning["exploration_cost_by_day"]["2026-08-19"] == pytest.approx(300.0)
+
+
+def test_the_overspend_series_prices_each_day_at_the_std_in_force(cfg, tmp_path):
+    """The monitor re-priced every past day's budget at TODAY'S widest std;
+    once the posterior narrowed, history read over a budget it never had.
+    Each day takes the widest std its own decisions were priced with (the
+    events record it); a day that priced nothing takes today's."""
+    cfg["exploration"]["budget_il_window_days"] = 1
+    cfg["exploration"]["budget_scale_ref_std"] = 1.0
+    il = {f"2026-09-{d:02d}": 1000.0 for d in range(1, 8)}
+    wide_day, narrow_day = "2026-09-05", "2026-09-06"
+    decisions = [_decision(1, 0.30, 5.0, wide_day), _decision(2, 0.30, 5.0, narrow_day)]
+    decisions[0]["epsilon_posterior_std"] = 0.8
+    decisions[1]["epsilon_posterior_std"] = 0.4
+    posterior = _posterior(cfg, tmp_path)
+    learning = mon.learning_metrics(decisions, posterior, cfg,
+                                    [_outcome(1, 1, wide_day), _outcome(2, 1, narrow_day)])
+    assert learning["widest_std_by_day"] == {wide_day: 0.8, narrow_day: 0.4}
+    series = mon.overspend_series(learning, {"il_by_close_day": il}, cfg)["by_day"]
+    budget = {day: upd.explore.budget_today(1000.0, std, cfg)
+              for day, std in ((wide_day, 0.8), (narrow_day, 0.4))}
+    assert series[wide_day] == pytest.approx(5.0 / budget[wide_day], abs=1e-4)
+    assert series[narrow_day] == pytest.approx(5.0 / budget[narrow_day], abs=1e-4)
+    assert series[wide_day] < series[narrow_day]
+    # a day without a std of its own takes today's widest routed std
+    learning["priced_days"] = learning["priced_days"] + ["2026-09-07"]
+    today = mon.overspend_series(learning, {"il_by_close_day": il}, cfg)["by_day"]
+    assert today["2026-09-07"] == 0.0
+
+
+def test_a_stale_factor_schedule_refuses_apply_but_not_the_tau_walk(cfg, tmp_path):
+    """The schedule gate is about banking evidence on prices set with stale
+    factors (--apply). tau moves on spend and needs no factors: refusing
+    --calibrate-tau on it left yesterday's overspend uncorrected all the
+    while the cron was down."""
+    import json
+    cal = tmp_path / "calibration.json"
+    cal.write_text(json.dumps({"schedule": {"by_week": {"2026-07-06": {"FRUIT": 1.0}}}}))
+    c = dict(cfg, baseline_model=dict(cfg["baseline_model"],
+                                      calibration_factor_path=str(cal)))
+    _store(c, tmp_path, 20, cost_each=5000.0)          # latest priced day 08-19
+    _posterior(c, tmp_path)
+    rep = upd.run(c, calibrate_tau=True, events_root=str(tmp_path / "events"),
+                  posterior_path=str(tmp_path / "posterior.json"))
+    assert not rep["event_quality_gates"]["calibration_schedule_current"]["pass"]
+    assert "refused" not in rep and rep["tau_committed"]
+    walked = PosteriorStore(c, path=str(tmp_path / "posterior.json"))
+    assert walked.tau_calibrated_through() == "2026-08-19"
+    # --apply on the same store: the cells are refused, tau still walks
+    again = _posterior(c, tmp_path / "again")
+    _store(c, tmp_path / "again", 20, cost_each=5000.0)
+    rep = upd.run(c, apply=True, events_root=str(tmp_path / "again" / "events"),
+                  posterior_path=str(tmp_path / "again" / "posterior.json"))
+    assert "calibration_schedule_current" in rep["refused"]
+    assert not rep["applied"] and rep["tau_committed"]
+    assert again.reload().tau_calibrated_through() == "2026-08-19"
+    # an event-quality breach still refuses the walk: with mismatched
+    # prices the spend itself is not a reading
+    wide = _with_window(c, 10)
+    _incident_store(wide, tmp_path / "bad", days_back=3, incident_back=0)
+    _posterior(wide, tmp_path / "bad")
+    rep = upd.run(wide, calibrate_tau=True, events_root=str(tmp_path / "bad" / "events"),
+                  posterior_path=str(tmp_path / "bad" / "posterior.json"))
+    assert "price_mismatch_rate" in rep["refused"] and "tau_committed" not in rep
+
+
+def test_a_day_whose_outcomes_arrived_late_is_walked_not_skipped(cfg, tmp_path):
+    """The walk graded days after `tau_calibrated_through`; a day whose
+    outcomes arrived after a later day had been walked sat behind the
+    stamp forever. The store keeps the days it walked, so a late day is
+    graded on the next walk and counted -- and lands the walk where a
+    timely one would, each step being tau-independent."""
+    lo = cfg["exploration"]["tau_adjust_clip"][0]
+    store = _store(cfg, tmp_path, 20, cost_each=5000.0, history_days=3,
+                   history_cost=5000.0)                # 08-16 .. 08-19, all over
+    decisions, outcomes = store.load_decisions(), store.load_outcomes()
+    # 08-18's outcomes are not in yet when 08-19 is walked
+    early = [o for o in outcomes if not any(
+        d["decision_id"] == o["decision_id"] and d["date"] == "2026-08-18" for d in decisions)]
+    posterior = _posterior(cfg, tmp_path, calibrated_through="2026-08-17")
+    first = upd.tau_calibration(decisions, early, posterior, cfg)
+    assert first["walked_days"] == ["2026-08-19"] and first["days_walked_before_outcomes"] == 0
+    posterior.commit_tau(first["tau_after"], first["through_date"], days=first["walked_days"])
+    assert posterior.tau_day_walked("2026-08-19") and posterior.tau_day_walked("2026-08-17")
+    assert not posterior.tau_day_walked("2026-08-18")
+    # 08-18 arrives: walked now, counted as late, and the stamp holds
+    second = upd.tau_calibration(decisions, outcomes, posterior, cfg)
+    assert second["commit"] and second["walked_days"] == ["2026-08-18"]
+    assert second["days_walked_before_outcomes"] == 1
+    assert second["late_outcome_days"] == ["2026-08-18"]
+    assert second["through_date"] == "2026-08-19"
+    assert second["tau_after"] == pytest.approx(first["tau_after"] * lo, abs=0.01)
+    posterior.commit_tau(second["tau_after"], second["through_date"], days=second["walked_days"])
+    assert posterior.tau_calibrated_through() == "2026-08-19"
+    # nothing left once the late day is in the ledger
+    third = upd.tau_calibration(decisions, outcomes, posterior, cfg)
+    assert not third["commit"] and "already calibrated" in third["skipped"]
+    # the late day's own step is the one it would have taken in order (a
+    # step is tau-independent); the day walked while its base was missing
+    # that IL was HELD, and a held day is not re-graded
+    ordered = _posterior(cfg, tmp_path / "ordered", calibrated_through="2026-08-17")
+    both = upd.tau_calibration(decisions, outcomes, ordered, cfg)
+    assert both["walked_days"] == ["2026-08-18", "2026-08-19"]
+    late_row = next(r for r in both["by_day"] if r["day"] == "2026-08-18")
+    assert late_row["tau_after"] / late_row["tau"] == pytest.approx(
+        second["by_day"][0]["tau_after"] / second["by_day"][0]["tau"], rel=1e-3)
+    assert first["by_day"][0]["held"] == "no trailing IL"
+    # the run commits the walked days itself
+    rep = upd.run(cfg, calibrate_tau=True, events_root=str(tmp_path / "events"),
+                  posterior_path=str(tmp_path / "ordered" / "posterior.json"))
+    assert rep["tau_committed"]
+    assert PosteriorStore(cfg, path=str(tmp_path / "ordered" / "posterior.json")) \
+        .state["tau_walked_days"] == ["2026-08-18", "2026-08-19"]
+
+
+def test_a_suspension_written_between_a_load_and_a_commit_survives(cfg, tmp_path):
+    """Two writers, one file: `--apply` loaded the state, the monitor wrote
+    a suspension, `--apply` wrote its loaded state back and the suspension
+    was gone -- or the monitor's write emptied the processed-id ledger the
+    other way round. Every write re-reads the file under a lock and
+    applies its change to what is on disk."""
+    path = str(tmp_path / "posterior.json")
+    applier = _posterior(cfg, tmp_path)
+    monitor = PosteriorStore(cfg, path=path)
+    # a commit is a delta on the disk state, not a write of the loaded one
+    monitor.suspend_exploration(["price_mismatch"], "2026-08-19")
+    assert applier.exploration_suspended() is None          # stale handle
+    applier.commit_update("vegetables", -1.1, 0.55, 2, 1.5, ["X1", "X2"], applied=True)
+    fresh = PosteriorStore(cfg, path=path)
+    assert fresh.exploration_suspended()["since"] == "2026-08-19"
+    assert fresh.is_processed("X1") and fresh.state["cells"]["vegetables"]["version"] == 1
+    assert applier.exploration_suspended()["since"] == "2026-08-19"   # current after its write
+    # the other way: a stale monitor handle cannot empty the ledger
+    monitor.suspend_exploration(["exploration_cost_vs_budget"], "2026-08-20")
+    fresh = PosteriorStore(cfg, path=path)
+    assert fresh.is_processed("X2") and fresh.state["cells"]["vegetables"]["version"] == 1
+    assert fresh.exploration_suspended()["reasons"] == ["exploration_cost_vs_budget", "price_mismatch"]
+    # a stale handle's tau commit keeps the cells another writer moved
+    stale = PosteriorStore(cfg, path=path)
+    applier.commit_update("vegetables", -1.2, 0.5, 1, 1.0, ["X3"], applied=True)
+    stale.commit_tau(123.0, "2026-08-20")
+    fresh = PosteriorStore(cfg, path=path)
+    assert fresh.state["cells"]["vegetables"]["version"] == 2 and fresh.is_processed("X3")
+    assert fresh.tau(cfg) == 123.0
+    # resume clears exactly the record on disk
+    assert stale.resume_exploration()["since"] == "2026-08-19"
+    assert PosteriorStore(cfg, path=path).exploration_suspended() is None
+
+
+def test_a_censored_row_carries_the_information_of_the_event_it_observed(cfg):
+    """grid_update credited every row the uncensored NB information
+    mu L^2 r/(r+mu). A stocked-out row was observed only as D >= q -- a
+    Bernoulli whose information is strictly less -- so a batch of
+    sell-outs crossed the increment before the evidence justified."""
+    from scipy.stats import nbinom
+
+    mu0, r, eps = 3.0, 1.5, -1.5
+    ratio = 0.55 / 0.70
+    L = np.log(ratio)
+    dec = decision_event(reference_mu=mu0, dispersion_r=r, applied_discount=0.45,
+                         reference_discount=0.30, is_exploration=True)
+    rec = {"mean": eps, "std": 0.5}
+    c = dict(cfg, dispersion=dict(cfg["dispersion"], rho=0.0))
+
+    def info(o):
+        return upd.grid_update([(dec, o, ratio)], rec, c)[2]
+
+    open_shelf = outcome_event(units_sold=1, starting_inventory=9, ending_inventory=8)
+    mu = mu0 * ratio ** eps
+    assert info(open_shelf) == pytest.approx(mu * L ** 2 * r / (r + mu))
+    for q in (1, 2, 5):
+        sold_out = outcome_event(units_sold=q, starting_inventory=q, ending_inventory=0)
+        got = info(sold_out)
+        # the Bernoulli information of the event D >= q, by finite difference
+        def s(e):
+            m = mu0 * ratio ** e
+            return nbinom.sf(q - 1, r, r / (r + m))
+        h = 1e-5
+        want = ((s(eps + h) - s(eps - h)) / (2 * h)) ** 2 / (s(eps) * (1 - s(eps)))
+        assert got == pytest.approx(want, rel=1e-4), q
+        assert got < info(open_shelf)
+    # a certain event teaches nothing
+    assert upd.row_information([1e-6], [r], [L], [50.0], [True])[0] == 0.0

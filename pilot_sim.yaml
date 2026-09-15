@@ -12,7 +12,10 @@
 
 run:
   days: 21                       # simulated days after launch; the first budget_il_window_days hold tau
-                                 # (design 5.8) and tau_walks_on_spend needs grading.tau_week_days walked past that
+                                 # (design 5.8) and tau_walks_on_spend needs grading.tau_week_days walked past that;
+                                 # a guardrail test needs common.guardrail.stop_ready_close_days mornings
+                                 # (window + 2 x smoothing + persistence - 1) and the shock followed by
+                                 # smoothing + persistence fully-shocked close days
   launch_date: null              # null: the day after the extract's last day
   episodes_per_day: 5000         # a day's total, split across the two arms (each fresh pick's twin runs
                                  # under the other arm the day after it closes; a small pool re-picks

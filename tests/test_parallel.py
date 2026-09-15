@@ -54,8 +54,23 @@ def test_resolve_workers():
 
 # ------------------------------------------------------- per-episode seeding
 
+def test_keyed_rng_is_the_one_per_decision_seeding():
+    """One generator per (seed, key), from the key alone: the same hour
+    draws the same whichever worker prices it; another hour, another
+    episode or another --seed draws differently. The batch caller's hour
+    key and the simulator's (episode, hour) both spell a key."""
+    from common.parallel import keyed_rng
+    key = ("7", "F1", "2026-08-19", 17)
+    a = keyed_rng(0, *key).integers(0, 10_000, 5)
+    assert np.array_equal(a, keyed_rng(0, *key).integers(0, 10_000, 5))
+    assert not np.array_equal(a, keyed_rng(0, "7", "F1", "2026-08-19", 18).integers(0, 10_000, 5))
+    assert not np.array_equal(a, keyed_rng(1, *key).integers(0, 10_000, 5))
+    ep = keyed_rng(0, "sku|fc|2026-08-04T09", 3).integers(0, 10_000, 5)
+    assert not np.array_equal(ep, keyed_rng(0, "sku|fc|2026-08-04T09", 4).integers(0, 10_000, 5))
+
+
 def test_the_episode_generator_is_reproducible_and_order_free():
-    from evaluate.shadow import _episode_seed
+    from common.parallel import keyed_rng as _episode_seed
     a = _episode_seed(0, "sku|fc|2026-08-04T09").integers(0, 10_000, 5)
     b = _episode_seed(0, "sku|fc|2026-08-04T09").integers(0, 10_000, 5)
     assert np.array_equal(a, b), "same episode, same seed -> same draws"
@@ -71,8 +86,9 @@ def test_the_episode_generator_is_reproducible_and_order_free():
 
 def test_workers_buffer_events_and_the_parent_commits_them():
     from evaluate import shadow
+    from engine.state import BufferStore
 
-    buf = shadow._BufferStore()
+    buf = BufferStore()
     assert buf.emit_decision({"a": 1}) is True
     assert buf.decisions == [{"a": 1}]
     assert not hasattr(buf, "emit_outcome"), \
@@ -101,8 +117,8 @@ def test_the_replay_episode_function_touches_no_shared_state():
 
 
 def test_the_frozen_posterior_is_read_only():
-    from evaluate.shadow import _FrozenCells
-    cells = _FrozenCells({"MEAT": {"mean": -1.0, "std": 0.4}})
+    from engine.state import FrozenCells
+    cells = FrozenCells({"MEAT": {"mean": -1.0, "std": 0.4}})
     assert cells.get("MEAT")["mean"] == -1.0
     assert not hasattr(cells, "commit_update")
     with pytest.raises(KeyError):

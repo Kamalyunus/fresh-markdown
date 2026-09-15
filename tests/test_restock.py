@@ -140,10 +140,12 @@ def test_stock_arriving_mid_hour_is_an_exact_count_not_a_lower_bound(cfg):
     assert rep_stock["stockout_share"] == 1.0
     assert m_stock != pytest.approx(m_exact, abs=1e-6)
 
-    # information does not depend on the censoring flag -- it is computed from
-    # mu at the prior mean and the log price ratio -- so it must NOT move
+    # information reads the censoring flag: an uncensored count carries the
+    # full NB information wherever it was observed (the over-sell IS an
+    # exact count, so it matches the deep shelf), while a stockout was
+    # observed only as the event D >= q, which carries strictly less
     assert info_over == pytest.approx(info_exact)
-    assert info_stock == pytest.approx(info_exact)
+    assert 0 < info_stock < info_exact
 
 
 def test_information_is_in_nb_units_not_poisson(cfg):

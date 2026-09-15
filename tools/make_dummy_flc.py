@@ -83,10 +83,13 @@ FCS = ["BUC2", "DAJ1", "ICN3", "BSN1", "GWJ2"]
 
 # Time-of-day demand multiplier. This is the confounder: it rises through the
 # evening independently of price, and the legacy policy ramps price on the
-# same clock.
+# same clock. Night hours are thin: a window that crosses midnight sells
+# little there, as a shop's does.
 HOUR_FACTOR = {
     10: 0.45, 11: 0.55, 12: 0.75, 13: 0.80, 14: 0.85,
     15: 0.95, 16: 1.20, 17: 1.55, 18: 1.95, 19: 2.20,
+    20: 1.60, 21: 1.10, 22: 0.70, 23: 0.40,
+    0: 0.25, 1: 0.20, 2: 0.15, 3: 0.15, 4: 0.20, 5: 0.25,
 }
 
 # The fixture must cover the configured splits: --start defaults to
@@ -184,7 +187,16 @@ def randomized_discount_path(entry_d, n_hours, d_max, rng, tier=0.025):
 
 
 def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
-             start=None, restock_extend_rate=0.03):
+             start=None, restock_extend_rate=0.03, cross_midnight_rate=0.15,
+             early_close_rate=0.6):
+    """`cross_midnight_rate`: the share of windows opening in the evening
+    and running past midnight (design 12a's seam -- every opening-date
+    cut, the entry-row sort and the week schedule's seam run on it, and a
+    fixture without it exercises none of them). `early_close_rate`: the
+    share of windows the source closes (writes off) with hours still on
+    the counter -- production's final rows carry a positive counter on
+    essentially every one, so a fixture whose last rows all read 0 tests a
+    closure rule production never sees."""
     rng = np.random.default_rng(seed)
     master = build_sku_master(n_skus, rng)
     start = start or DEFAULT_START
@@ -205,8 +217,18 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
         for _ in range(n_episodes):
             day = start + dt.timedelta(days=int(rng.integers(0, n_days)))
             fc = rng.choice(FCS)
-            start_hour = int(rng.integers(10, 14))
-            n_hours = int(rng.integers(4, 20 - start_hour + 1))
+            if rng.random() < cross_midnight_rate:
+                # an evening opening long enough to run past midnight
+                start_hour = int(rng.integers(18, 24))
+                n_hours = int(rng.integers(25 - start_hour, 32 - start_hour))
+            else:
+                start_hour = int(rng.integers(10, 14))
+                n_hours = int(rng.integers(4, 20 - start_hour + 1))
+            # the source closes the listing with hours still on the counter
+            # (a positive final counter, as production's rows carry)
+            close_after = (n_hours - int(rng.integers(1, 4))
+                           if n_hours > 4 and rng.random() < early_close_rate
+                           else None)
 
             inv = int(rng.integers(1, 32))
             window_start = len(records)   # for whole-window dirt injection
@@ -233,7 +255,11 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
 
             h_idx = 0
             while h_idx < n_hours:          # n_hours can grow on a restock
-                hour = start_hour + h_idx
+                if close_after is not None and h_idx >= close_after:
+                    break                   # written off with hours left
+                # midnight is an ordinary hour: the date rolls, the clock wraps
+                row_day = day + dt.timedelta(days=(start_hour + h_idx) // 24)
+                hour = (start_hour + h_idx) % 24
                 if inv <= 0:
                     break
                 d = path[h_idx]
@@ -259,7 +285,11 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
                 ending = inv - sold - shrink
                 if h_idx == extend_at:
                     if ending >= 1:
-                        ending += arrival          # stock arrived this hour
+                        # stock arrived this hour: MORE than any shrink the
+                        # same hour, or the row reconciles and the counter's
+                        # up-step next hour reads as a reset
+                        arrival = max(arrival, shrink + 1)
+                        ending += arrival
                     else:
                         extend_at = None           # sold out first: no extension
 
@@ -271,7 +301,7 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
                     final_price = round_to(realized, 10)
 
                 records.append((
-                    day, hour, int(sku.skuseq), fc,
+                    row_day, hour, int(sku.skuseq), fc,
                     float(inv), float(np.round(d * 100, 0)), int(sold),
                     float(sku.normal_asp), final_price, float(sku.cogs_wo_vat),
                     float(ending), float(n_hours - h_idx - 1),
@@ -289,7 +319,7 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
             # not cosmetic: it is the signal common.episodes reads to tell a
             # closed episode from one still open, so a fixture without it
             # exercises a code path production never takes.
-            if records and records[-1][0] == day:
+            if len(records) > window_start:
                 last = list(records[-1])
                 last[10] = 0.0
                 records[-1] = tuple(last)
@@ -389,7 +419,11 @@ def main():
     print(f"policy            : {args.policy}")
     print(f"rows              : {len(df):,}")
     print(f"skus              : {df.skuseq.nunique():,}")
-    print(f"episodes          : {df.groupby(['skuseq','fc','date']).ngroups:,}")
+    print(f"windows           : {int(window_opens(df).sum()):,}")
+    print(f"crossing midnight : {cross_midnight_windows(df):,} windows "
+          "(MUST be > 0 or every 12a seam path is unexercised)")
+    print(f"final counter > 0 : {final_counter_positive_share(df):.1%} of windows "
+          "(production: essentially all)")
     print(f"zero-sale rows    : {(df.units_sold == 0).mean():.1%}")
     print(f"mean units_sold   : {df.units_sold.mean():.3f}")
     print(f"discount range    : {df.discount.min():.0f}-{df.discount.max():.0f} (percent)")
@@ -414,26 +448,67 @@ def main():
     print(f"wrote             : {args.out}")
 
 
+def _clocked(df):
+    """The frame in (sku, fc, clock) order with the hours since the previous
+    row of the same sku x fc -- the raw frame's own reading of a window,
+    which crosses midnight like the source's (a date key would cut it)."""
+    g = df.sort_values(["skuseq", "fc", "date", "hour"]).copy()
+    ts = pd.to_datetime(g.date) + pd.to_timedelta(g.hour, unit="h")
+    g["_dt_h"] = ts.groupby([g.skuseq, g.fc]).diff().dt.total_seconds() / 3600.0
+    return g
+
+
+def window_opens(df):
+    """Rows that open a window on the raw frame: the clock did not advance
+    exactly one hour, or the previous row closed (ending 0). Aligned to
+    `df`'s index."""
+    g = _clocked(df)
+    prev_end = g.ending_inventory.groupby([g.skuseq, g.fc]).shift()
+    return (g._dt_h.ne(1.0) | prev_end.eq(0)).reindex(df.index)
+
+
+def _window_ids(df):
+    g = _clocked(df)
+    return window_opens(g).cumsum().reindex(df.index)
+
+
+def cross_midnight_windows(df):
+    """Windows whose rows sit on two dates with a one-hour step between."""
+    w = _window_ids(df)
+    return int(df.groupby(w).date.nunique().gt(1).sum())
+
+
+def final_counter_positive_share(df):
+    """Share of windows whose last row still carries a positive counter."""
+    g = _clocked(df)
+    last = g.groupby(_window_ids(g).reindex(g.index)).tail(1)
+    ok = last.flc_window.notna() & (last.flc_window >= 0)
+    return float((last.flc_window[ok] > 0).mean()) if ok.any() else float("nan")
+
+
 def restock_extended_windows(df):
     """Windows whose counter stepped up (or held) on the hour after a
     restocked row -- EPISODE_RULE's restock clause, as the source would
     show it. Counted on the raw frame; dirt (a null or negative counter)
     reads as no step."""
-    g = df.sort_values(["skuseq", "fc", "date", "hour"])
-    prev = g.groupby(["skuseq", "fc", "date"]).shift()
+    g = _clocked(df)
+    prev = g.groupby(["skuseq", "fc"]).shift()
     up = (g.flc_window - prev.flc_window) > -1
     restocked = prev.ending_inventory > prev.inventory - prev.units_sold
-    hit = up & restocked & (g.hour - prev.hour == 1)
-    return int(g[hit].groupby(["skuseq", "fc", "date"]).ngroups)
+    hit = up & restocked & g._dt_h.eq(1.0)
+    return int(_window_ids(g).reindex(g.index)[hit].nunique())
 
 
 def corr_within(df):
-    """Mean within-episode correlation of discount and hour -- the confound."""
-    g = df[df.normal_asp > 0].groupby(["skuseq", "fc", "date"])
+    """Mean within-episode correlation of discount and hour -- the confound
+    (hours counted from the window's opening, so a window past midnight
+    reads as one clock)."""
+    g = _clocked(df[df.normal_asp > 0])
+    g["_pos"] = g.groupby(_window_ids(g).reindex(g.index)).cumcount()
     cs = []
-    for _, sub in g:
+    for _, sub in g.groupby(_window_ids(g).reindex(g.index)):
         if len(sub) > 3 and sub.discount.std() > 0:
-            cs.append(np.corrcoef(sub.discount, sub.hour)[0, 1])
+            cs.append(np.corrcoef(sub.discount, sub._pos)[0, 1])
     return float(np.nanmean(cs)) if cs else float("nan")
 
 

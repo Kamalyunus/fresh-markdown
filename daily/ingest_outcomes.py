@@ -19,48 +19,32 @@ Run: python3 -m daily.ingest_outcomes --feed <hourly parquet> [--failures f.json
 """
 
 import argparse
-import json
+from collections import Counter
 
 import numpy as np
 import pandas as pd
 
 from common.config import load_config
 from common.episodes import adjustment_reason, is_censored_hour
+from common.io import read_rows
 from fit.prepare_data import SOURCE_TO_CANONICAL
-from events.pairs import decision_day, hour_key, outcome_id_of
+from events.pairs import colliding_keys, decision_day, hour_key, outcome_id_of
 from events.store import EventStore
-
-# the one key a feed row, a decision and a price request meet on
-_key = hour_key
 
 
 def load_failures(path):
     """{key: reason} from the failures input -- a parquet/CSV table or
-    JSONL, in the contract's names or the feed's (skuseq, hour) -- or {}
-    when no file is given. One unkeyable row (a NaN id, a blank line)
-    costs that row, never the batch: it is counted in
-    `push_failures_unkeyable` on the returned dict's `.unkeyable`."""
+    JSONL (common.io.read_rows), in the contract's names or the feed's
+    (skuseq, hour) -- or {} when no file is given. One unkeyable row (a
+    NaN id, a blank line, a line that is not an object) costs that row,
+    never the batch: it is counted in `push_failures_unkeyable` on the
+    returned dict's `.unkeyable`."""
     out = _Failures()
     if not path:
         return out
-    if path.endswith(".parquet"):
-        rows = pd.read_parquet(path).rename(columns=SOURCE_TO_CANONICAL).to_dict("records")
-    elif path.endswith(".csv"):
-        rows = pd.read_csv(path).rename(columns=SOURCE_TO_CANONICAL).to_dict("records")
-    else:
-        rows = []
-        with open(path) as f:
-            for line in f:
-                if line.strip():
-                    try:
-                        rows.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        out.unkeyable += 1
-        rows = [{SOURCE_TO_CANONICAL.get(k, k): v for k, v in r.items()}
-                for r in rows if isinstance(r, dict)]
-    for r in rows:
+    for r in read_rows(path, rename=SOURCE_TO_CANONICAL):
         try:
-            k = _key(r["sku_id"], r["fc"], r["date"], r["hour_of_day"])
+            k = hour_key(r["sku_id"], r["fc"], r["date"], r["hour_of_day"])
         except (KeyError, TypeError, ValueError):
             out.unkeyable += 1
             continue
@@ -92,32 +76,32 @@ def build_outcomes(decisions, feed, failures=None):
         feed = feed.assign(date=pd.to_datetime(feed["date"], errors="coerce")
                            .dt.strftime("%Y-%m-%d"))
     rows, unusable = {}, []
-    dup_feed = 0
+    keyed_rows = []
     for i, r in enumerate(feed.itertuples()):
         # a row that names no hour or no item (NaN hour_of_day) is one
         # unusable row, never a fatal int(nan) before any decision is matched
         try:
-            k = _key(r.sku_id, r.fc, r.date, r.hour_of_day)
+            k = hour_key(r.sku_id, r.fc, r.date, r.hour_of_day)
         except (TypeError, ValueError) as exc:
             unusable.append({"decision_id": None, "feed_row": i,
                              "reason": f"unkeyable feed row: {type(exc).__name__}: {exc}"})
             continue
-        if k in rows:
-            dup_feed += 1        # two states for one hour: match neither
-            rows[k] = None
-        else:
-            rows[k] = r
+        keyed_rows.append((k, r))
+    # two states for one hour: match neither (the one rule, colliding_keys)
+    dup_hours = colliding_keys(k for k, _ in keyed_rows)
+    for k, r in keyed_rows:
+        rows[k] = None if k in dup_hours else r
     # the keyable days only: a NaN date is an unkeyable row, counted above
     feed_days = sorted(d for d in set(feed["date"]) if isinstance(d, str)) \
         if len(feed) else []
     feed_range = (feed_days[0], feed_days[-1]) if feed_days else None
 
-    outcomes, unmatched, reasons = [], [], {}
+    outcomes, unmatched, reasons = [], [], Counter()
     outside, failed_keys = 0, set()
     # key every decision the feed could answer for, once: two decisions on
     # one hour (a retried price batch) match neither -- neither is the
     # price the shelf held, and pairing both would count one hour twice
-    keyed, claims = [], {}
+    keyed = []
     for dec in decisions:
         day = decision_day(dec)
         if feed_range is None:
@@ -129,19 +113,20 @@ def build_outcomes(decisions, feed, failures=None):
             outside += 1         # not this feed's business: no gap, no match
             continue
         # one unusable row costs its own decision, never the day's batch: it
-        # is counted below, and a zero/absent base price is refused rather
-        # than priced as a full-list discount
+        # is counted below (a foreign line missing a key field included),
+        # and a zero/absent base price is refused rather than priced as a
+        # full-list discount
         try:
-            k = _key(dec["sku_id"], dec["fc"], day, dec["hour_of_day"])
+            k = hour_key(dec.get("sku_id"), dec.get("fc"), day, dec.get("hour_of_day"))
         except (TypeError, ValueError) as exc:
             unusable.append({"decision_id": dec["decision_id"],
                              "reason": f"unkeyable decision: {type(exc).__name__}: {exc}"})
             continue
         keyed.append((dec, k))
-        claims[k] = claims.get(k, 0) + 1
+    claimed_twice = colliding_keys(k for _, k in keyed)
     colliding = []
     for dec, k in keyed:
-        if claims[k] > 1:
+        if k in claimed_twice:
             colliding.append(dec["decision_id"])
             continue
         r = rows.get(k)
@@ -185,7 +170,7 @@ def build_outcomes(decisions, feed, failures=None):
         why = adjustment_reason(start, sold, end)
         if why:
             out["adjustment_reason"] = why
-            reasons[why] = reasons.get(why, 0) + 1
+            reasons[why] += 1
         if k in failures:
             out["execution_status"] = "failed"
             out["execution_failure_reason"] = failures[k]
@@ -205,14 +190,14 @@ def build_outcomes(decisions, feed, failures=None):
         # and completeness falls by all of them -- a retried price batch
         # is an integration miss, not silence
         "decisions_colliding_on_hour": len(colliding),
-        "colliding_hours": sum(1 for n in claims.values() if n > 1),
+        "colliding_hours": len(claimed_twice),
         "colliding_decision_ids": colliding[:20],
-        "feed_duplicate_hours": dup_feed,
+        "feed_duplicate_hours": len(dup_hours),
         # counted and named, never silently dropped: one unusable row costs
         # its own decision, not the day
         "unusable_feed_rows": len(unusable),
         "unusable_examples": unusable[:20],
-        "adjustment_reasons": reasons,
+        "adjustment_reasons": dict(reasons),
         "push_failures_applied": len(failed_keys),
         # a reported failure naming no outcome built here: a key spelt
         # differently, an hour with no decision or no feed row. Counted --
@@ -223,6 +208,28 @@ def build_outcomes(decisions, feed, failures=None):
         "feed_empty": feed_range is None,
     }
     return outcomes, report
+
+
+def emit_all(store, outcomes, report):
+    """Emit the built outcomes through the store and record what it
+    refused: duplicates, a second outcome for a decision the store already
+    holds one for (`outcomes_per_decision_over_one`), the quarantined, and
+    the contract's `missing_stockout_field` count (an outcome without the
+    field never lands -- the store refuses it; every outcome built here
+    carries it, so the count reads what a foreign line or an older stream
+    lacked)."""
+    before = dict(store.completeness_counts)
+    emitted = sum(store.emit_outcome(o) for o in outcomes)
+    after = store.completeness_counts
+    report["emitted"] = int(emitted)
+    report["outcomes_per_decision_over_one"] = (
+        after["outcomes_per_decision_over_one"] - before["outcomes_per_decision_over_one"])
+    report["quarantined"] = store.quarantined_this_run
+    report["duplicates_skipped"] = (len(outcomes) - int(emitted) - report["quarantined"]
+                                    - report["outcomes_per_decision_over_one"])
+    # all-time, the store's: what the contract's "exactly 0" gate reads
+    report["missing_stockout_field"] = after["missing_stockout_field"]
+    return report
 
 
 def main():
@@ -243,11 +250,7 @@ def main():
         raise SystemExit("no decisions in the event store -- nothing to match")
     outcomes, report = build_outcomes(decisions, pd.read_parquet(args.feed),
                                       load_failures(args.failures))
-    emitted = sum(store.emit_outcome(o) for o in outcomes)
-    report["emitted"] = int(emitted)
-    report["duplicates_skipped"] = len(outcomes) - int(emitted) \
-        - store.quarantined_this_run
-    report["quarantined"] = store.quarantined_this_run
+    emit_all(store, outcomes, report)
 
     print(f"decisions          : {report['decisions']:,} "
           f"({report['decisions_outside_feed_range']:,} outside the feed's "
@@ -256,6 +259,14 @@ def main():
           f"(emitted {report['emitted']:,}, "
           f"duplicates {report['duplicates_skipped']:,}, "
           f"quarantined {report['quarantined']:,})")
+    if report["outcomes_per_decision_over_one"]:
+        print(f"second outcomes    : {report['outcomes_per_decision_over_one']:,} "
+              "refused -- the store already holds an outcome for the decision "
+              "(an id scheme that moved? the first one stands)")
+    if report["missing_stockout_field"]:
+        print(f"missing is_stockout: {report['missing_stockout_field']:,} outcome "
+              "line(s) in the store lack the field (contract 07: exactly 0) -- "
+              "refused on emit, skipped on load")
     if report["unusable_feed_rows"]:
         print(f"unusable feed rows : {report['unusable_feed_rows']:,} "
               "(non-numeric inventory, a zero/absent base price, or a row "

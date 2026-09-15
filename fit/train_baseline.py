@@ -65,9 +65,12 @@ class BaselineModel:
     """Frozen mu_ref predictor. Loads model + schema + calibration artifacts."""
 
     # class-level so an applier built without __init__ (the tests' __new__
-    # path) prices unfrozen with no gate; the instance sets both
+    # path, the harness appliers) prices unfrozen with no gate and no
+    # parent tables; the instance sets them all
     calibration_stops_at = None
     calibration_reaches = None
+    calibration_category = None
+    calibration_schedule_category = None
     _freeze_from = None
 
     def __init__(self, cfg):
@@ -77,18 +80,25 @@ class BaselineModel:
         with open(bm["feature_schema_path"]) as f:
             self.schema = json.load(f)
         self.calibration, self.calibration_grain = {}, GRAIN
-        # week-keyed factors applied by ROW DATE (no row priced by its own
-        # week's fit); `calibration` is the frozen-anchor fallback
+        # week-keyed factors applied by the week the row's EPISODE OPENED
+        # (no row priced by its own week's fit); `calibration` is the
+        # frozen-anchor fallback. The `_category` tables are the parent
+        # level, for a cell the window never saw (level_factors waterfalls
+        # subcategory -> category -> 1.0)
+        self.calibration_category = {}
         self.calibration_schedule = None
+        self.calibration_schedule_category = {}
         self.calibration_stops_at = None
         if os.path.exists(bm["calibration_factor_path"]):
             with open(bm["calibration_factor_path"]) as f:
                 cal = json.load(f)
             self.calibration = cal.get("factors", {})
+            self.calibration_category = cal.get("factors_category") or {}
             self.calibration_grain = cal.get("grain", GRAIN)
             sched = cal.get("schedule")
             if sched and sched.get("by_week"):
                 self.calibration_schedule = sched["by_week"]
+                self.calibration_schedule_category = sched.get("by_week_category") or {}
                 self.calibration_stops_at = sched.get("gate_freezes_at")
                 # the week the schedule COVERS (fitted or held), for coverage
                 self.calibration_reaches = schedule_reaches(sched)
@@ -111,19 +121,44 @@ class BaselineModel:
         self._freeze_from = pd.Timestamp(date) if date is not None else None
         return self
 
+    @staticmethod
+    def level_lookup(table, parent_table, keys, parents):
+        """Factors for `keys` from `table`, a key the table never fitted
+        taking its PARENT's factor (`parents`, the category column) and
+        only a cell no level of the table saw reading 1.0 -- the waterfall
+        the fit itself applies (`_solve_level_factors` emits every cell of
+        the window's population at its parent), carried to cells outside
+        the window entirely: a new subcategory prices at its category's
+        level, never at raw mu while its category solved to something else."""
+        out = keys.map(table).astype(float)
+        if parents is not None and parent_table:
+            out = out.fillna(parents.map(parent_table).astype(float))
+        return out.fillna(1.0).to_numpy()
+
     def level_factors(self, d):
         """Per-row level factor, the one `predict_mu_ref` applies: each row
-        takes the factors in force for ITS week; unfitted weeks fall back to
-        the frozen anchor, never forward. Public because a caller may need
-        the factor itself (a rescale between two freezes is exact, so the
-        backtest's weekly-refit reading never predicts twice)."""
+        takes the factors in force for the week its EPISODE OPENED (a frame
+        without `episode_id` -- the live path's forecast rows -- reads the
+        row's own date); unfitted weeks fall back to the frozen anchor,
+        never forward. Applied by opening week because the fit windows are
+        cut by opening week: a row-week read put the Monday rows of a
+        Sunday-opened episode inside week w's fit window AND under week
+        w's table. Public because a caller may need the factor itself (a
+        rescale between two freezes is exact, so the backtest's
+        weekly-refit reading never predicts twice)."""
         keys = d[self.calibration_grain].astype(str)
-        anchor = keys.map(lambda key: self.calibration.get(key, 1.0)).to_numpy()
+        parents = (d["category"].astype(str)
+                   if self.calibration_grain != "category" and "category" in d
+                   else None)
+        anchor = self.level_lookup(self.calibration, self.calibration_category,
+                              keys, parents)
         if self.calibration_schedule is None:
             self._cal_rows_static += len(d)
             return anchor
         dates = pd.to_datetime(d["date"])
-        weeks = episodes.week_key(dates).to_numpy()
+        opened = (pd.to_datetime(episodes.opening_dates(d))
+                  if "episode_id" in d else dates)
+        weeks = episodes.week_key(opened).to_numpy()
         frozen = ((dates >= self._freeze_from).to_numpy()
                   if self._freeze_from is not None else np.zeros(len(d), bool))
         out = anchor.copy()                  # frozen rows keep the anchor
@@ -137,7 +172,9 @@ class BaselineModel:
                 self._cal_fallback_weeks.add(str(wk))
                 continue
             self._cal_rows_scheduled += int(rows.sum())
-            out[rows] = keys[rows].map(lambda key: table.get(key, 1.0)).to_numpy()
+            out[rows] = self.level_lookup(
+                table, (self.calibration_schedule_category or {}).get(wk),
+                keys[rows], None if parents is None else parents[rows])
         return out
 
     def calibration_coverage(self):
@@ -269,18 +306,26 @@ def attach_fit_basis(frame, model, r_lookup):
     return frame
 
 
+def weeks_held_at_anchor(schedule):
+    """The weeks a schedule judged too thin to fit and holds at the frozen
+    anchor -- `weeks_unfitted_held_at_anchor`, or the name an artifact
+    sealed before the rename wrote it under (`weeks_unfitted_held_at_1`)."""
+    return list((schedule or {}).get("weeks_unfitted_held_at_anchor")
+                or (schedule or {}).get("weeks_unfitted_held_at_1") or [])
+
+
 def schedule_reaches(schedule):
     """The last week the factor schedule COVERS: a week it fitted, or one it
     judged too thin and deliberately holds at the frozen anchor
-    (`weeks_unfitted_held_at_1`; `level_factors` applies the anchor there).
-    None when there is no schedule. The ONE reading `daily.update`'s
-    calibration_current gate and `ops.advance`'s re-fit trigger share --
-    reading `by_week` alone made a thin week look like a missed cron: the
-    gate refused every --apply and advance re-fit every morning."""
+    (`weeks_unfitted_held_at_anchor`; `level_factors` applies the anchor
+    there). None when there is no schedule. The ONE reading
+    `daily.update`'s calibration_current gate and `ops.advance`'s re-fit
+    trigger share -- reading `by_week` alone made a thin week look like a
+    missed cron: the gate refused every --apply and advance re-fit every
+    morning."""
     if not schedule:
         return None
-    weeks = list(schedule.get("by_week") or {}) + list(
-        schedule.get("weeks_unfitted_held_at_1") or [])
+    weeks = list(schedule.get("by_week") or {}) + weeks_held_at_anchor(schedule)
     return max(weeks) if weeks else None
 
 
@@ -291,20 +336,26 @@ def pinned_cells(detail):
 
 
 def _solve_level_factors(calib, model, k_shrink, min_anchor,
-                         tier_step, max_k, r_lookup, predicted=False):
-    """Factors for one fit window (shared by the anchor fit and every schedule
-    week). Returns (factors, detail, global_factor, global_at_bound,
+                         tier_step, max_k, r_lookup, predicted=False, cfg=None):
+    """Factors for one fit window (shared by the anchor fit, every schedule
+    week, shadow's weekly re-fit and the backtest's window sweep -- the ONE
+    level estimator). Returns (factors, detail, global_factor, global_at_bound,
     detail_category), or None when the window holds too few anchor rows --
-    the caller holds those weeks at 1.0. Cells ABOVE that floor are shrunk
-    toward their parent (category, then global) by `k_shrink` pseudo-units.
-    A bound is not a solve, at any level (rule 3): a cell whose bisection
-    ran off the bracket carries `at_bound` in its detail; a subcategory
-    whose PARENT category pinned carries `parent_at_bound` (it is shrunk
-    toward a bracket end, however thin it is); `global_at_bound` names the
-    end the GLOBAL solve pinned to (None when it converged). `predicted`
-    says `attach_fit_basis` already ran on `calib` (a schedule attaches once
-    to its scope); otherwise it runs here, on `calib` in place."""
-    bm = model.cfg["baseline_model"]
+    the caller holds those weeks at the frozen anchor. Cells ABOVE that
+    floor are shrunk toward their parent (category, then global) by
+    `k_shrink` pseudo-units. EVERY cell of the window's population gets a
+    factor: one with no anchor rows at all takes its parent's outright
+    (`held_at_parent` in its detail, `factor` on every entry) -- left out,
+    it priced at 1.0 while its category solved to something else. A bound
+    is not a solve, at any level (rule 3): a cell whose bisection ran off
+    the bracket carries `at_bound` in its detail; a subcategory whose
+    PARENT category pinned carries `parent_at_bound` (it is shrunk toward
+    a bracket end, however thin it is); `global_at_bound` names the end the
+    GLOBAL solve pinned to (None when it converged). `predicted` says
+    `attach_fit_basis` already ran on `calib` (a schedule attaches once to
+    its scope); otherwise it runs here, on `calib` in place. A caller
+    whose basis is already attached may pass `cfg` and no model."""
+    bm = (cfg if model is None else model.cfg)["baseline_model"]
     f_lo, f_hi = (float(x) for x in bm["calibration_factor_search_bounds"])
     halvings = int(bm["calibration_factor_bisection_steps"])
 
@@ -355,9 +406,11 @@ def _solve_level_factors(calib, model, k_shrink, min_anchor,
 
     f_global, _, global_at_bound = solve_factor(anchor_all)
 
-    def fit_level(groups, parent_of):
-        """`parent_of(key, g)` -> (parent factor, the bracket end the
-        parent's OWN solve pinned to, or None)."""
+    def fit_level(groups, parent_of, population):
+        """`parent_of(key, frame)` -> (parent factor, the bracket end the
+        parent's OWN solve pinned to, or None); `population` is the
+        window's whole frame, whose cells without an anchor row are held
+        at their parent."""
         out, det = {}, {}
         for key, g in groups:
             raw_f, pred, at_bound = solve_factor(g)
@@ -366,6 +419,7 @@ def _solve_level_factors(calib, model, k_shrink, min_anchor,
             f = shrink(raw_f, parent, evidence)
             out[str(key)] = round(float(f), 4)
             det[str(key)] = {
+                "factor": out[str(key)],
                 "anchor_rows": int(len(g)),
                 "anchor_sold": int(evidence),
                 "anchor_predicted_at_f1": round(float(pred), 1),
@@ -387,11 +441,25 @@ def _solve_level_factors(calib, model, k_shrink, min_anchor,
                 # the parent this cell is shrunk toward is itself a bracket
                 # end: the thinner the cell, the more of its factor is bound
                 det[str(key)]["parent_at_bound"] = parent_at_bound
+        # a cell of the population with NO anchor row: nothing to solve or
+        # shrink, so it is its parent's -- said so, never silently 1.0
+        for key, g in population:
+            if str(key) in out:
+                continue
+            parent, parent_at_bound = parent_of(key, g)
+            out[str(key)] = round(float(parent), 4)
+            det[str(key)] = {"factor": out[str(key)], "anchor_rows": 0,
+                             "anchor_sold": 0, "held_at_parent": True,
+                             "parent_factor": round(float(parent), 4),
+                             "shrinkage_weight_on_self": 0.0}
+            if parent_at_bound:
+                det[str(key)]["parent_at_bound"] = parent_at_bound
         return out, det
 
     cat_factors, cat_detail = fit_level(
         anchor_all.groupby("category"),
-        lambda k, g: (f_global, global_at_bound))
+        lambda k, g: (f_global, global_at_bound),
+        calib.groupby("category"))
 
     def parent_of_sub(key, g):
         cat = str(g["category"].iloc[0])
@@ -400,8 +468,21 @@ def _solve_level_factors(calib, model, k_shrink, min_anchor,
         return cat_factors[cat], cat_detail[cat].get("at_bound")
 
     factors, detail = fit_level(anchor_all.groupby("subcategory"),
-                                parent_of_sub)
+                                parent_of_sub, calib.groupby("subcategory"))
     return factors, detail, f_global, global_at_bound, cat_detail
+
+
+def category_factors(detail_category):
+    """{category: factor} off a level solve's category detail -- the parent
+    table `BaselineModel.level_factors` waterfalls to for a subcategory
+    the window never saw."""
+    return {k: v["factor"] for k, v in detail_category.items() if "factor" in v}
+
+
+def keys_held_at_parent(detail):
+    """The cells a level solve held at their parent's factor for want of an
+    anchor row in its window."""
+    return sorted(k for k, v in detail.items() if v.get("held_at_parent"))
 
 
 def fit_level_calibration(d, cfg):
@@ -463,7 +544,7 @@ def fit_level_calibration(d, cfg):
     weeks = sorted(episodes.week_key(scope.date).unique())
     if launched and weeks:
         weeks.append(episodes.week_after(weeks[-1]))
-    by_week, coverage, pinned_by_week = {}, [], {}
+    by_week, by_week_category, coverage, pinned_by_week = {}, {}, [], {}
     opened = episodes.opening_dates(scope)     # once, not once per week
     attach_fit_basis(scope, model, r_lookup)   # once: the windows are slices
     for w in weeks:
@@ -478,10 +559,11 @@ def fit_level_calibration(d, cfg):
             continue
         f = _solve_level_factors(window, model, k_shrink, min_anchor,
                                  tier_step, max_k, r_lookup, predicted=True)
-        if f is None:                       # too thin: hold 1.0, say so
+        if f is None:                       # too thin: hold the anchor, say so
             coverage.append({"week": w, "fitted": False})
             continue
         by_week[w] = f[0]
+        by_week_category[w] = category_factors(f[4])
         # the week's pinned cells, by level -- the per-cell detail itself is
         # the anchor fit's; a week keeps only what rule 3 needs
         pinned = {**{f"category:{k}": v for k, v in pinned_cells(f[4]).items()},
@@ -493,7 +575,8 @@ def fit_level_calibration(d, cfg):
                          "fit_rows": int(len(window)),
                          "weeks_in_window": weeks_seen,
                          "partial": weeks_seen < weeks_back,
-                         "global_at_bound": f[3]})
+                         "global_at_bound": f[3],
+                         "keys_held_at_parent": keys_held_at_parent(f[1])})
     schedule = {
         "mode": "rolling_trailing",
         "scope": (f"production -- launch_date {cfg['data']['launch_date']}; "
@@ -509,8 +592,15 @@ def fit_level_calibration(d, cfg):
         "week_key": "ISO week start the factors APPLY to; fit on the "
                     "trailing window ending strictly before it",
         "weeks_fitted": sum(1 for c in coverage if c["fitted"]),
-        "weeks_unfitted_held_at_1": [c["week"] for c in coverage
-                                     if not c["fitted"]],
+        # too thin (or empty) to fit: priced on the FROZEN ANCHOR
+        # (level_factors), never on raw mu
+        "weeks_unfitted_held_at_anchor": [c["week"] for c in coverage
+                                          if not c["fitted"]],
+        # per fitted week, the cells priced at their PARENT's factor for
+        # want of an anchor row in the trailing window
+        "keys_held_at_parent_by_week": {
+            c["week"]: c["keys_held_at_parent"] for c in coverage
+            if c.get("keys_held_at_parent")},
         # fit on less history than trailing_weeks asks for (extract start)
         "weeks_on_partial_window": [
             {"week": c["week"], "weeks_in_window": c["weeks_in_window"]}
@@ -524,6 +614,9 @@ def fit_level_calibration(d, cfg):
         # cell -- the schedule's rule-3 flags, since by_week keeps factors only
         "pinned_by_week": pinned_by_week,
         "by_week": by_week,
+        # the parent level per week: a subcategory absent from a week's
+        # window prices at its category's factor (level_factors waterfall)
+        "by_week_category": by_week_category,
     }
 
     # every pinned solve in the artifact, anchor and schedule, in one list
@@ -550,6 +643,10 @@ def fit_level_calibration(d, cfg):
                            "in training",
                },
                "factors": factors,
+               # the parent level, for a subcategory outside the window
+               "factors_category": category_factors(detail_category),
+               # anchor-window cells held at their parent (no anchor rows)
+               "keys_held_at_parent": keys_held_at_parent(detail),
                "schedule": schedule,
                "detail": detail,
                # the parent level's own solves: a subcategory shrinks toward
@@ -575,7 +672,9 @@ def fit_level_calibration(d, cfg):
                "split": split,
                "basis": ("anchor rows only; every cell shrunk toward its "
                          "parent (category, then global) by "
-                         "calibration_shrinkage_units; a window below "
+                         "calibration_shrinkage_units; a cell of the window "
+                         "with no anchor row takes its parent's factor "
+                         "(keys_held_at_parent); a window below "
                          "calibration_min_anchor_rows is unfitted (held at "
                          "the frozen anchor); a cell whose bisection pinned "
                          "at calibration_factor_search_bounds carries "
@@ -733,6 +832,11 @@ def _describe_calibration(art, factors, widest_n=12):
     widest = sorted(factors.items(), key=lambda kv: -abs(kv[1] - 1.0))[:widest_n]
     for key, factor in widest:
         info = detail[key]
+        if info.get("held_at_parent"):
+            # no anchor row in the window: nothing was solved for this cell
+            lines.append(f"  {key:26s} {factor:.4f}  (held at its parent's "
+                         f"{info['parent_factor']:.4f} -- no anchor row)")
+            continue
         lines.append(f"  {key:26s} {factor:.4f}  (raw {info['raw_factor']:.4f} "
                      f"-> parent {info['parent_factor']:.4f}, self-weight "
                      f"{info['shrinkage_weight_on_self']:.2f}, "

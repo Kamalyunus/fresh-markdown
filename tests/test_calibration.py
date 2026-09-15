@@ -66,10 +66,14 @@ def test_a_factor_pinned_at_the_bracket_is_flagged_not_returned_silently(cfg):
         cfg["pricing"]["negbin_max_k"], R_LOOKUP)
     assert detail2["HOT"]["raw_factor"] == pytest.approx(2.0)
     assert detail2["HOT"]["at_bound"] == "upper"
-    src = inspect.getsource(tb._solve_level_factors)
-    for literal in ("0.1, 10.0", "range(20)"):
-        assert literal not in src, f"{literal} is still a literal"
-    assert "calibration_factor_bisection_steps" in src
+    # the halvings are config too: one halving resolves the interior cell
+    # to the bracket's midpoint, twenty to well inside a percent
+    cfg["baseline_model"]["calibration_factor_bisection_steps"] = 1
+    _, coarse, _, _, _ = tb._solve_level_factors(
+        calib.copy(), _Model(cfg, 1.0), 0.0, 10, cfg["pricing"]["tier_step"],
+        cfg["pricing"]["negbin_max_k"], R_LOOKUP)
+    assert coarse["COLD"]["raw_factor"] in (pytest.approx(0.875), pytest.approx(1.625))
+    assert abs(coarse["COLD"]["raw_factor"] - detail2["COLD"]["raw_factor"]) > 0.05
 
 
 def test_a_lower_pin_is_named_too(cfg):
@@ -110,10 +114,8 @@ def test_a_pinned_global_factor_is_flagged_not_discarded(cfg):
            "fit_basis": "b", "fit_in_sample_share": 0.0}
     text = tb._describe_calibration(art, factors)
     assert "AT UPPER BOUND" in text.split("\n")[0], "the global pin is on line 1"
-    # the artifact writer carries the flag by name (payload key, not detail)
-    src = inspect.getsource(tb.fit_level_calibration)
-    assert '"global_factor_at_bound": global_at_bound' in src
-    assert '"weeks_global_at_bound"' in src
+    # (the written artifact carries the flag by name: exercised on a fitted
+    # artifact in test_the_artifact_lists_every_pin_and_predicts_the_scope_once)
 
 
 def test_the_vectorised_r_lookup_is_used_for_the_censored_basis(cfg):
@@ -127,9 +129,9 @@ def test_the_vectorised_r_lookup_is_used_for_the_censored_basis(cfg):
     got = lookup_r_vec(r, calib.subcategory, calib.category)
     assert list(got) == [lookup_r(r, s, c)
                          for s, c in zip(calib.subcategory, calib.category)]
-    src = inspect.getsource(tb.attach_fit_basis)
-    assert "lookup_r_vec(" in src and "for s, c in zip(" not in src
-    assert "lookup_r" not in inspect.getsource(tb._solve_level_factors)
+    # the fit basis carries exactly that r per row, attached once
+    attached = tb.attach_fit_basis(calib.copy(), _Model(cfg, 1.0), r)
+    assert list(attached.r_val) == list(got)
 
 
 def test_thin_cells_are_shrunk_toward_the_parent_not_held_at_one(cfg):
@@ -147,11 +149,7 @@ def test_thin_cells_are_shrunk_toward_the_parent_not_held_at_one(cfg):
     assert factors["THIN"] != 1.0
     assert abs(factors["THIN"] - thin["parent_factor"]) < \
         0.2 * abs(thin["raw_factor"] - thin["parent_factor"])
-    doc = tb.fit_level_calibration.__doc__
-    assert "left at 1.0" not in doc and "stay 1.0" not in doc
-    assert "shrunk toward its parent" in doc
-    src = inspect.getsource(tb.fit_level_calibration)
-    assert "left at 1.0" not in src and "shrunk toward" in src
+    assert "held_at_parent" not in thin and thin["factor"] == factors["THIN"]
 
 
 def test_the_convergence_method_label_says_whether_the_resolve_was_kept(
@@ -315,10 +313,11 @@ def _prepared(cells, days):
     return pd.DataFrame(rows)
 
 
-@pytest.fixture
-def scratch_cfg(cfg, tmp_path):
-    """Every artifact path under tmp_path (no r_lookup: raw basis), a thin
-    anchor floor, and W=1 so the anchor window is the week before the gate."""
+def scratch_config(cfg, tmp_path):
+    """`cfg` with every artifact path under tmp_path (no r_lookup: raw
+    basis), a thin anchor floor, and W=1 so the anchor window is the week
+    before the gate -- the builder behind `scratch_cfg` (test_calibration_
+    schedule builds its artifacts on it too)."""
     cfg = copy.deepcopy(cfg)
     for key, name in (("model_path", "m.txt"), ("feature_schema_path", "s.json"),
                       ("calibration_factor_path", "cal.json")):
@@ -330,6 +329,11 @@ def scratch_cfg(cfg, tmp_path):
     cfg["baseline_model"]["calibration_min_anchor_rows"] = 10
     cfg["baseline_model"]["calibration_fit_trailing_weeks"] = 1
     return cfg
+
+
+@pytest.fixture
+def scratch_cfg(cfg, tmp_path):
+    return scratch_config(cfg, tmp_path)
 
 
 def test_the_weekly_production_refit_carries_the_convergence_verdict(
@@ -421,3 +425,124 @@ def test_the_artifact_lists_every_pin_and_predicts_the_scope_once(
     lo, hi = art["schedule"]["anchor_fit_window"]
     assert hi == str((gate - pd.Timedelta(days=1)).date())
     assert art["fit_window_dates"] == [lo, hi]
+
+
+def test_a_cell_with_no_anchor_rows_takes_its_parent_never_one(cfg):
+    """A subcategory with ZERO anchor rows in the fit window priced at raw
+    mu x 1.0 while its category solved to something else -- a cell with
+    one anchor row and no sales was shrunk to its parent, one with none
+    was silently 1.0. Every cell of the window's population gets a
+    factor: no anchor rows means the parent's, said so."""
+    calib = _anchor_frame({"PORK": ("MEAT", 300, 2), "LEAF": ("VEG", 300, 3)})
+    # BEEF is in the window's population but never at the anchor; FISH's
+    # whole category is off the anchor
+    off = _anchor_frame({"BEEF": ("MEAT", 20, 1), "FISH": ("SEAFOOD", 20, 1)})
+    off["total_discount"] = 0.45
+    calib = pd.concat([calib, off], ignore_index=True)
+    factors, detail, f_global, _, cat_detail = tb._solve_level_factors(
+        calib, _Model(cfg, 1.0), k_shrink=0.0, min_anchor=10,
+        tier_step=cfg["pricing"]["tier_step"], max_k=cfg["pricing"]["negbin_max_k"],
+        r_lookup=R_LOOKUP)
+    assert factors["PORK"] > 1.5 and factors["LEAF"] > factors["PORK"]
+    assert factors["BEEF"] == pytest.approx(cat_detail["MEAT"]["factor"])
+    assert factors["BEEF"] == pytest.approx(factors["PORK"], abs=1e-3)   # k_shrink 0
+    assert detail["BEEF"]["held_at_parent"] and detail["BEEF"]["anchor_rows"] == 0
+    # a category with no anchor rows is held at the global, and its child at it
+    assert cat_detail["SEAFOOD"]["held_at_parent"]
+    assert cat_detail["SEAFOOD"]["factor"] == pytest.approx(round(f_global, 4))
+    assert factors["FISH"] == pytest.approx(round(f_global, 4))
+    assert tb.keys_held_at_parent(detail) == ["BEEF", "FISH"]
+    assert tb.category_factors(cat_detail)["MEAT"] == cat_detail["MEAT"]["factor"]
+    assert 1.0 not in factors.values()
+
+
+def test_the_applier_waterfalls_a_cell_the_window_never_saw_to_its_category(cfg):
+    """A subcategory absent from the fit window entirely (new assortment)
+    prices at its CATEGORY's factor, then 1.0 -- in the anchor table and in
+    every schedule week -- never at raw mu beside a category at 1.4."""
+    m = tb.BaselineModel.__new__(tb.BaselineModel)
+    m.cfg, m.calibration_grain = cfg, "subcategory"
+    m.calibration = {"PORK": 1.5}
+    m.calibration_category = {"MEAT": 1.4}
+    m.calibration_schedule = {"2026-07-06": {"PORK": 1.2}}
+    m.calibration_schedule_category = {"2026-07-06": {"MEAT": 1.1}}
+    m._reset_calibration_counters()
+    rows = pd.DataFrame({"subcategory": ["PORK", "BEEF", "FISH"] * 2,
+                         "category": ["MEAT", "MEAT", "SEAFOOD"] * 2,
+                         "date": ["2026-07-08"] * 3 + ["2026-06-29"] * 3})
+    got = list(m.level_factors(rows))
+    assert got[:3] == [1.2, 1.1, 1.0]          # the week's tables
+    assert got[3:] == [1.5, 1.4, 1.0]          # the frozen anchor
+    # without a parent table the waterfall ends at 1.0, as before
+    m.calibration_category, m.calibration_schedule_category = None, None
+    assert list(m.level_factors(rows)) == [1.2, 1.0, 1.0, 1.5, 1.0, 1.0]
+
+
+def test_factors_apply_by_the_week_the_episode_opened_not_the_rows_week(cfg):
+    """The fit windows cut WHOLE episodes by opening week, but the factors
+    were applied by row week: the Monday rows of a Sunday-opened episode
+    sat inside week w's fit window AND took week w's table -- a self-fit at
+    every seam. An episode takes the table of the week it opened in; a
+    frame without episode_id (the live forecast rows) reads the row date."""
+    m = tb.BaselineModel.__new__(tb.BaselineModel)
+    m.cfg, m.calibration_grain = cfg, "category"
+    m.calibration = {"A": 9.0}
+    m.calibration_schedule = {"2026-08-03": {"A": 1.1}, "2026-08-10": {"A": 1.3}}
+    m._reset_calibration_counters()
+    seam = pd.DataFrame({"category": ["A"] * 3,
+                         "episode_id": ["x", "x", "y"],
+                         "date": ["2026-08-09", "2026-08-10", "2026-08-10"],
+                         "hour_of_day": [23, 0, 9]})
+    assert list(m.level_factors(seam)) == [1.1, 1.1, 1.3]
+    assert m._cal_rows_scheduled == 3
+    m._reset_calibration_counters()
+    assert list(m.level_factors(seam.drop(columns="episode_id"))) == [1.1, 1.3, 1.3]
+
+
+def test_the_artifact_carries_the_parent_tables_and_the_held_cells(
+        scratch_cfg, monkeypatch):
+    """`factors_category` / `schedule.by_week_category` are what the
+    applier waterfalls to; `keys_held_at_parent` (anchor and per week)
+    names the cells priced at their parent; the held weeks are named for
+    what they are held at -- the anchor -- with the old key kept for
+    readers not yet moved."""
+    cfg = scratch_cfg
+    gate = pd.Timestamp(cfg["data"]["split"]["test_start"])
+    days = [str(x.date()) for x in
+            pd.date_range(gate - pd.Timedelta(days=21), gate - pd.Timedelta(days=1))]
+    d = _prepared({"A": ("C", 2), "B": ("C", 1)}, days)
+    # an off-anchor subcategory of C, and one of a category never at the
+    # anchor, inside the anchor window (the last trailing week)
+    off = _prepared({"OFF": ("C", 1), "FAR": ("Z", 1)}, days[-3:])
+    off["total_discount"] = 0.45
+    d = pd.concat([d, off], ignore_index=True)
+    model, Applier = _CountingModel(cfg, 1.0), tb.BaselineModel
+    monkeypatch.setattr(tb, "BaselineModel", lambda c: model)
+    tb.fit_level_calibration(d, cfg)
+    art = json.load(open(cfg["baseline_model"]["calibration_factor_path"]))
+    assert art["keys_held_at_parent"] == ["FAR", "OFF"]
+    assert art["factors"]["OFF"] == art["factors_category"]["C"]
+    assert art["factors"]["FAR"] == art["factors_category"]["Z"] == art["global_factor"]
+    sched = art["schedule"]
+    assert set(sched["by_week_category"]) == set(sched["by_week"])
+    for w, table in sched["by_week"].items():
+        assert set(table) >= {"A", "B"}
+        assert set(sched["by_week_category"][w]) >= {"C"}
+    assert "weeks_unfitted_held_at_anchor" in sched
+    assert "weeks_unfitted_held_at_1" not in sched      # the former name is read, never written
+    assert tb.schedule_reaches({"by_week": {}, "weeks_unfitted_held_at_anchor": ["2026-09-07"]}) \
+        == "2026-09-07"
+    assert tb.weeks_held_at_anchor({"weeks_unfitted_held_at_1": ["2026-09-07"]}) == ["2026-09-07"]
+    # the loaded applier reads the parent tables
+    applier = Applier.__new__(Applier)
+    applier.cfg = cfg
+    applier.calibration = art["factors"]
+    applier.calibration_category = art["factors_category"]
+    applier.calibration_grain = art["grain"]
+    applier.calibration_schedule = sched["by_week"]
+    applier.calibration_schedule_category = sched["by_week_category"]
+    applier._reset_calibration_counters()
+    new = pd.DataFrame({"subcategory": ["NEW"], "category": ["C"],
+                        "date": [days[-1]], "episode_id": ["n"]})
+    wk = tb.episodes.week_key(pd.Series([days[-1]])).iloc[0]
+    assert applier.level_factors(new)[0] == sched["by_week_category"][wk]["C"]

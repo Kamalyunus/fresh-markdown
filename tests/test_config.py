@@ -83,3 +83,38 @@ def test_config_detects_stale_paste_from_frozen_artifact(tmp_path):
     cfg["dispersion"]["rho"] = 0.65
     rho_path.write_text(json.dumps({"rho": 0.65 + 0.005}))       # <1% of 0.65
     assert artifact_mirror_drift(cfg) == []
+
+
+def test_the_two_tunables_that_shadowed_config_read_only_config(tmp_path):
+    """`intraclass_correlation(clip_max=0.95)` duplicated
+    dispersion.rho_clip_max and the mirror drift's `.get(..., 0.01)` was a
+    silent default for a documented key: a config with the key deleted
+    read the literal with no error while status called config the single
+    source. The read is mandatory; the ICC's default clips at its own
+    range, never at a tunable."""
+    import json
+
+    import numpy as np
+
+    from common.config import artifact_mirror_drift, intraclass_correlation
+
+    with open(os.path.join(ROOT, "config.yaml")) as f:
+        cfg = yaml.safe_load(f)
+    rho_path = tmp_path / "rho.json"
+    rho_path.write_text(json.dumps({"rho": 0.30}))
+    cfg["dispersion"]["rho_path"] = str(rho_path)
+    cfg["dispersion"]["rho"] = 0.30 * 1.005                      # 0.5% off
+    assert artifact_mirror_drift(cfg) == []
+    cfg["dispersion"]["rho_paste_tolerance_rel"] = 0.001          # the key moves the verdict
+    assert artifact_mirror_drift(cfg)
+    del cfg["dispersion"]["rho_paste_tolerance_rel"]
+    with pytest.raises(KeyError):
+        artifact_mirror_drift(cfg)
+
+    # a perfectly clustered residual: the estimator's own range is 1.0
+    resid = np.repeat([1.0, -1.0, 3.0, -3.0], 5)
+    groups = np.repeat(["a", "b", "c", "d"], 5)
+    assert intraclass_correlation(resid, groups) == pytest.approx(1.0)
+    assert intraclass_correlation(resid, groups, 0.95) == pytest.approx(0.95)
+    assert intraclass_correlation(resid, groups, cfg["dispersion"]["rho_clip_max"]) \
+        == pytest.approx(cfg["dispersion"]["rho_clip_max"])

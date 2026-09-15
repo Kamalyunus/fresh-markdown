@@ -54,7 +54,7 @@ def artifact_mirror_drift(cfg, tol=None):
     new paste. Relative, so it means the same thing on a fixture rho of
     0.12 and a production rho of 0.65. `tol`, when given, is absolute.
     """
-    rel = float(cfg["dispersion"].get("rho_paste_tolerance_rel", 0.01))
+    rel = float(cfg["dispersion"]["rho_paste_tolerance_rel"])   # config, no default
     drift = []
     for path_key, field, cfg_path in ARTIFACT_MIRRORS:
         path = config_get(cfg, path_key)
@@ -108,7 +108,7 @@ def reference_discount(cfg, category):
 OWN_DATA_WEIGHT = 0.999
 
 
-def intraclass_correlation(residuals, groups, clip_max=0.95):
+def intraclass_correlation(residuals, groups, clip_max=None):
     """One-way random-effects ICC -- the ONE home for rho.
 
     `var(group means) / var(all)` estimates `rho + (1 - rho)/m`, not rho:
@@ -118,7 +118,12 @@ def intraclass_correlation(residuals, groups, clip_max=0.95):
     artifact (on the repo FIXTURE, 0.164 at m=6 -- a fixture reading, rule
     19). The ANOVA form subtracts MSW, which is exactly that term, and
     recovers rho at every m.
+
+    `clip_max` is the ceiling on the fitted correlation -- every production
+    caller passes `dispersion.rho_clip_max`; None clips at the estimator's
+    own range (1.0), never at a tunable hidden here.
     """
+    clip_max = 1.0 if clip_max is None else float(clip_max)
     s = pd.Series(np.asarray(residuals, dtype=float)).reset_index(drop=True)
     g = pd.Series(np.asarray(groups)).reset_index(drop=True)
     finite = np.isfinite(s.to_numpy())          # one NaN poisons every sum

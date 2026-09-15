@@ -314,6 +314,18 @@ def test_the_fit_window_holds_on_a_near_tie_instead_of_oscillating(cfg, tmp_path
     f = w_finding(material)
     assert f["status"] == "ACT" and f["recommended"] == 1
 
+    # the margins are config, not code: a looser MAE ratio lets the
+    # near-tie switch, a wider band gain plus a tighter ratio holds the
+    # material win
+    loose = {**cfg, "tuning": {**cfg["tuning"], "w_switch_mae_ratio": 1.0}}
+    finds = tune._readings(loose, {"fidelity": {"calibration_window_sweep": near_tie}}, {})
+    assert [f for f in finds if f["key"].endswith("trailing_weeks")][0]["status"] == "ACT"
+    strict = {**cfg, "tuning": {**cfg["tuning"], "w_switch_mae_ratio": 0.4,
+                                "w_switch_band_gain": 0.2}}
+    finds = tune._readings(strict, {"fidelity": {"calibration_window_sweep": material}}, {})
+    held = [f for f in finds if f["key"].endswith("trailing_weeks")][0]
+    assert held["status"] == "OK" and "HELD" in held["evidence"]
+
 
 def test_no_factors_winning_is_reported_and_is_never_a_paste(cfg):
     """`uncalibrated` beating every window says the level factors are adding

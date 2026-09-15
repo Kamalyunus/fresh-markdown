@@ -31,6 +31,23 @@ def calendar_days(dates):
     return max((ts.max() - ts.min()).days + 1, 1)
 
 
+def planning_horizon(counter):
+    """Hours the solver plans over at a row whose window counter reads
+    `counter`: the counter is the hours STILL TO COME after this one, so
+    the horizon is this hour plus the counter. The ONE home of that `+ 1`
+    (shadow, the replay, the simulator's templates and the request's
+    `hours_remaining` all read it; four spellings once disagreed by an
+    hour on a restock-extended window). `window_counter` is its inverse."""
+    return int(counter) + 1
+
+
+def window_counter(horizon):
+    """The source's counter for a row `horizon` hours from the window's end,
+    this hour included: `planning_horizon` read backwards, so a feed row
+    the simulator writes carries exactly the counter production plans on."""
+    return int(horizon) - 1
+
+
 def week_start(ts):
     """The ISO week (Mon-Sun) holding `ts`, as its Monday."""
     return pd.Timestamp(ts).to_period("W").start_time

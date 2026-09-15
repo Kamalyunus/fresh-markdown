@@ -25,6 +25,8 @@ import math
 import numpy as np
 import pandas as pd
 
+from common.config import ConfigError
+
 # float noise on a LOG price move (|log((1-d)/(1-d_ref))|). Same magnitude as
 # engine.dp.TIER_EPS, but a log move is not a tier: the two comparisons are
 # kept apart so a change to the grid epsilon cannot silently move the
@@ -60,7 +62,10 @@ def delta_min(cfg, eps, category=None):
         # same key convention as reference_discount ('SIDE DISH' -> SIDE_DISH)
         key = str(category).replace(" ", "_") if category is not None else "_default"
         if key not in bias and "_default" not in bias:
-            raise KeyError(
+            # a config defect, named as one: engine.decide turns it into a
+            # per-row StateRejected so one unmapped category never takes a
+            # whole batch down (design 5.10)
+            raise ConfigError(
                 f"exploration.delta_min_log_bias has no entry for {key!r} and "
                 "no `_default`: a per-category floor mapping must name every "
                 "priced category or carry `_default` (ops.tune writes "
@@ -481,11 +486,19 @@ def budget_base_ready(il_by_day, day, cfg):
     return _base_span(il_by_day, pd.Timestamp(str(day)), window) >= window
 
 
-def budget_held(il_by_day, day, budget, cfg):
-    """Why a day's budget is no signal, or None: no trailing IL at all
-    (a zero budget), or a base shorter than its window. The controller
-    (walk_tau) holds tau on such a day and the monitor's overspend series
-    takes no reading -- one composite, read by both."""
+SUSPENDED = "exploration suspended"
+
+
+def budget_held(il_by_day, day, budget, cfg, suspended=False):
+    """Why a day's budget is no signal, or None: exploration was SUSPENDED
+    that day (nothing was drawn, so its zero spend says nothing about tau
+    -- graded as under-spend it ratcheted tau up by the clip every
+    suspended morning, and the resume then overspent at once), no trailing
+    IL at all (a zero budget), or a base shorter than its window. The
+    controller (walk_tau) holds tau on such a day and the monitor's
+    overspend series takes no reading -- one composite, read by both."""
+    if suspended:
+        return SUSPENDED
     if budget <= 0:
         return "no trailing IL"
     if not budget_base_ready(il_by_day, day, cfg):
@@ -506,22 +519,26 @@ def budget_today(trailing_il, posterior_std, cfg):
     return cfg["exploration"]["budget_share_of_il"] * budget_scale(posterior_std, cfg) * trailing_il
 
 
-def walk_tau(tau, days, spend_for, il_by_day, widest_std, cfg):
+def walk_tau(tau, days, spend_for, il_by_day, widest_std, cfg,
+             suspended_days=()):
     """The controller walk, day by day, in one place: production (every
     closed day since the last calibration -- a weekly batch is seven
     steps, never one) and shadow's trace (expected spend at the tau in
     force) both call it. `spend_for(day, tau)` returns the day's realised
-    or expected exploration spend. A ZERO budget (no trailing IL yet) and a
-    base shorter than its window (budget_base_ready) are an absence of
-    signal, not an overspend: tau holds that day. Returns (tau_end, rows);
-    a row's `clipped` says the step sat on a clip bound, `held` why it
-    did not move."""
+    or expected exploration spend. A ZERO budget (no trailing IL yet), a
+    base shorter than its window (budget_base_ready) and a day in
+    `suspended_days` (exploration suspended: nothing drawn, so the zero
+    spend is no reading) are an absence of signal, not an overspend: tau
+    holds that day. Returns (tau_end, rows); a row's `clipped` says the
+    step sat on a clip bound, `held` why it did not move."""
     rows = []
+    suspended_days = {str(d) for d in suspended_days}
     for day in days:
         budget = budget_today(trailing_daily_il(il_by_day, day, cfg),
                               widest_std, cfg)
         spend = float(spend_for(day, tau))
-        held = budget_held(il_by_day, day, budget, cfg)
+        held = budget_held(il_by_day, day, budget, cfg,
+                           suspended=str(day) in suspended_days)
         after, clipped = (tau, False) if held else tau_next(tau, budget, spend, cfg)
         rows.append({"day": str(day), "tau": round(float(tau), 2),
                      "spend": round(spend, 1), "budget": round(budget, 1),

@@ -9,9 +9,29 @@ from tools import scenario_deck as sd
 
 
 @pytest.fixture(scope="module")
-def deck():
+def deck_cfg(tmp_path_factory):
+    """The shipped config pointed at throwaway artifacts -- a global r and a
+    two-category prior written here, so the deck builds on a checkout with
+    no artifacts/ at all (it once read whatever was on disk)."""
+    import os
     from common.config import load_config
-    return sd.build(load_config("config.yaml"), sd.QUICK, workers=0)
+    from conftest import ROOT
+    root = tmp_path_factory.mktemp("deck")
+    (root / "r_lookup.json").write_text(json.dumps(
+        {"fallback_order": ["subcategory", "category", "global"],
+         "subcategory": {}, "category": {}, "global": 2.0}))
+    (root / "prior.json").write_text(json.dumps(
+        {"per_category": {"A": {"mean": -1.0, "std": 0.4},
+                          "B": {"mean": -1.6, "std": 0.4}}}))
+    cfg = load_config(os.path.join(ROOT, "config.yaml"))
+    cfg["dispersion"]["r_lookup_path"] = str(root / "r_lookup.json")
+    cfg["posterior"]["prior"]["path"] = str(root / "prior.json")
+    return cfg
+
+
+@pytest.fixture(scope="module")
+def deck(deck_cfg):
+    return sd.build(deck_cfg, sd.QUICK, workers=0)
 
 
 def test_twelve_scenarios_each_land_on_a_precomputed_state(deck):
@@ -40,8 +60,9 @@ def test_every_state_has_paths_scores_and_monotone_discounts(deck):
         assert all(r["d"] is None for r in rows if r["q"] == 0)
 
 
-def test_page_embeds_valid_json_and_no_placeholders(deck, cfg, tmp_path):
+def test_page_embeds_valid_json_and_no_placeholders(deck, deck_cfg, tmp_path):
     from common.provenance import config_fingerprint
+    cfg = deck_cfg
     out = tmp_path / "deck.html"
     sd.write_page(deck, cfg, out)
     html = out.read_text()
@@ -84,11 +105,56 @@ def test_the_deck_reads_its_inputs_strictly_and_derives_the_learned_belief(
     monkeypatch.setattr(sd, "read_json", lambda path: {})
     with pytest.raises(SystemExit, match="global r"):
         sd.build(cfg, sd.QUICK, workers=0)
-    # a config without the multiple is refused, never read as 1.0
+    # no prior on disk -> refused by name, never an invented elasticity
+    # labelled as the launch belief
     monkeypatch.setattr(sd, "read_json", lambda path: {"global": 1.0})
+    with pytest.raises(SystemExit, match="per_category"):
+        sd.build(cfg, sd.QUICK, workers=0)
+    # a config without the multiple is refused, never read as 1.0
+    monkeypatch.setattr(sd, "read_json", lambda path: {"global": 1.0, **prior})
     del cfg["exploration"]["delta_min_bias_multiple"]
     with pytest.raises(KeyError, match="delta_min_bias_multiple"):
         sd.build(cfg, {"q": [2], "h": [2], "gamma": [0.5], "mu": [1.0]}, workers=0)
+
+
+def test_the_exploration_table_is_solved_by_the_engine_not_the_browser(deck, deck_cfg):
+    cfg = deck_cfg
+    """delta_min, the admissible tiers and the affordable set on the page
+    are engine.explore's own (delta_min, admissible_costs, affordable_set)
+    for every slider position, embedded per state; the browser reads
+    them. A JS copy of the floor once used `_default` for a per-category
+    map and could not follow a change to the rule."""
+    import copy
+    from engine import dp as dp_mod
+    from engine import explore
+
+    st = next(s for s in deck["states"] if s["key"][2] == "cold")
+    gamma, mu, _, q, h = st["key"]
+    eps = deck["beliefs"]["cold"]
+    res = dp_mod.solve(sd.P0, sd.P0 * gamma, q, [mu] * h, deck["d_ref"], eps,
+                       deck["r"], cfg, anchor_discount=None, entry=True)
+    x = st["explore"]
+    assert set(x["by_dmin_scale"]) == {str(s) for s in sd.DMIN_SCALES}
+    assert deck["taus"] == sd.TAUS and deck["dmin_scales"] == sd.DMIN_SCALES
+    for scale in sd.DMIN_SCALES:
+        c = cfg if scale == 0 else copy.deepcopy(cfg)
+        if scale:
+            c["exploration"]["delta_min_log_bias"] = scale
+        dmin = explore.delta_min(c, eps, "_default")
+        block = x["by_dmin_scale"][str(scale)]
+        assert block["delta_min"] == pytest.approx(dmin, abs=1e-4)
+        assert block["admissible"] == sorted(explore.admissible(res, dmin))
+        for tau in sd.TAUS:
+            assert block["affordable_by_tau"][str(tau)] == sorted(
+                explore.affordable_set(res, tau, dmin)[0])
+    for j, cost in x["cost"].items():
+        assert cost == pytest.approx(res.q_by_tier[res.optimal_index]
+                                     - res.q_by_tier[int(j)], abs=0.1)
+        assert x["log_move"][j] == pytest.approx(
+            explore.log_move(deck["d_ref"], res.tiers[int(j)]), abs=1e-4)
+    # the config's own floor is what scale 0 shows, so a paste reaches the deck
+    assert x["by_dmin_scale"]["0"]["delta_min"] == pytest.approx(
+        explore.delta_min(cfg, eps, "_default"), abs=1e-4)
 
 
 def test_no_fixed_schedule_prices_below_cost(deck):
@@ -110,12 +176,12 @@ def test_no_fixed_schedule_prices_below_cost(deck):
     assert sd.legacy_ramp(0.30, 12, 0.30) == pytest.approx([0.15] * 4 + [0.30] * 8)
 
 
-def test_the_refusals_state_the_stop_rules_the_monitor_applies(deck, cfg, tmp_path):
+def test_the_refusals_state_the_stop_rules_the_monitor_applies(deck, deck_cfg, tmp_path):
     """daily.monitor: every stop -- overspend, scrap, margin -- needs
     persistence_days consecutive priced days over its threshold
     (evaluate_guardrail); the deck must say what the monitor does."""
     out = tmp_path / "deck.html"
-    sd.write_page(deck, cfg, out)
+    sd.write_page(deck, deck_cfg, out)
     html = out.read_text()
     assert "Every stop needs ${D.config.persistence_days} consecutive days" in html
     assert "a single day is enough" not in html

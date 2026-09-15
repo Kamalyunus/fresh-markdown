@@ -12,7 +12,7 @@ sittings.
 | `engine/demand.py` | `mu(d) = mu_ref × ((1−d)/(1−d_ref))^ε` with a floor; censored expectation `E[min(D, q)]`. This is the only demand math in the system — everything else calls it |
 | `engine/explore.py` | Exploration is a **uniform** draw from the tau-affordable subset of `admissible` (tiers at least `delta_min` from the REFERENCE discount in log price — information is measured from the reference, cost from p*) — any weighting would un-randomise the evidence the learner consumes, and the ledger, the chooser and the assurance check must read the one `admissible`. Also: `walk_tau` — tau moves by `clip(budget/spend, 0.5, 1.25)` one step per closed day on the trailing 7-day close-day IL base, held (no step, `held` set) until that base spans its window — `budget_base_ready`, the rule the overspend stop reads too — and it is the ONE walk (production and shadow's trace) |
 | `engine/decide.py` | Validation **rejects** rather than returning a best-effort price; the decision event carries enough to re-solve itself (`mu_ref_path`, `anchor_discount`) and names the config digest it was priced with, so it maps to one audit snapshot |
-| `events/store.py` | Append-only, durable writes, dedup on emit AND on load (a duplicated line is counted and loaded once; the id is registered after the append succeeds); malformed events **quarantine with the reason attached** rather than being dropped, and every stream's torn last line is closed on open; exactly three `adjustment_reason` values reconcile inventory |
+| `events/store.py` | Append-only, durable writes, dedup on emit AND on load (a duplicated line is counted and loaded once; the id is registered after the append succeeds); malformed events **quarantine with the reason attached** rather than being dropped, and every stream's torn last line is closed on open; exactly three `adjustment_reason` values reconcile inventory; the two invariants live here and nowhere else — one decision per hour (`priced_hours`, a second one refused and counted) and one outcome per decision (a second one refused on emit, skipped on load, counted; an outcome without `is_stockout` never lands) — and `episode_paths` holds the forecast a later hour of an episode is priced on |
 
 The review question for this tier is single: *can any path emit an unsafe or
 unauditable price?* The test files that pin these properties —
@@ -61,8 +61,10 @@ the one decision↔outcome pairing.
 ## Out of review scope
 
 `tools/` (the fixture generator, the leadership scenario deck, which only
-calls the reviewed solver, and `e2e_cycle.py`, one integration cycle through
-the reviewed caller in a workspace) and `docs/` pages. The test suite is the
+calls the reviewed solver — its exploration table too is `engine.explore`'s,
+embedded, never re-derived in the page — and `e2e_cycle.py`, a thin driver
+of the reviewed simulator's shop through the reviewed caller in a
+workspace) and `docs/` pages. The test suite is the
 reviewers' asset, not their burden: every non-obvious rule named above has a
 test whose docstring states it in prose.
 

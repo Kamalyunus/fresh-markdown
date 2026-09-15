@@ -160,7 +160,7 @@ DECISION PATH (per hourly decision interval)
         ──▶ feasible discount tiers, constructed from the cost floor
         ──▶ exact DP: expected IL for every tier
         ──▶ exploit the argmax | explore the affordable, admissible set (§5.8)
-        ──▶ price ──▶ decision event (~30 fields)
+        ──▶ price ──▶ decision event (events.store.DECISION_REQUIRED)
                           │
                  finalized outcome event
                           │
@@ -226,8 +226,8 @@ report beats a silent removal upstream.
 
 | Step | Drops |
 | --- | --- |
-| `null_key_rows_dropped` | any row with a null sku_id, fc, date or hour — it belongs to no episode and collapsed into one NaN episode id (integrity; row-scoped by construction); and the WHOLE source window holding a null window counter — the counter the ids derive from: kept, the null opened a one-row "episode" that closed on its own zero and read DP-eligible; dropped alone, it left a fragment opening mid-window (rule 15). The window is read with the ids' own signals — the clock advancing an hour, or skipping hours the counter ran down by exactly (a feed gap: the far fragment goes too); an upward counter reset between two non-null rows opens a new window, so a back-to-back neighbour stays. A gap with the null beside it cannot be read across: the far side survives as a fragment, counted (`null_counter_rows`, `null_counter_windows_dropped`, `null_counter_gap_fragments_kept` in the stage detail) |
-| `duplicate_hour_rows_dropped` | both copies of any repeated (SKU, FC, hour) — no principled way to choose, and they collide two runs into one episode id |
+| `null_key_rows_dropped` | any row with a null sku_id, fc, date or hour — it belongs to no episode and collapsed into one NaN episode id (integrity; row-scoped by construction: with no key there is no window to scope it to); and the WHOLE source window holding a null window counter or a null starting/ending inventory or `units_sold` (`prepare_data.defective_windows`, rule 15) — the counter the ids derive from: kept, the null opened a one-row "episode" that closed on its own zero and read DP-eligible; dropped alone, it left a fragment opening mid-window; a null quantity once crashed the int cast before the first waterfall row was written. The window is read with the ids' own signals (`window_signals.counter_ok`, the one counter clause) plus exactly two tolerances a defective row needs: a duplicate hour stays in its window, and a step whose counter is unreadable is taken on the clock alone — one hour on, or a feed gap the counter ran down by exactly (the far fragment goes too). A flat or −2 step between two readable counters opens a new window exactly as the ids do, so a back-to-back neighbour stays. A gap with the null beside it cannot be read across: the far side survives as a fragment, counted (`null_counter_rows`, `null_counter_windows_dropped`, `null_quantity_rows`, `null_quantity_windows_dropped`, `null_counter_gap_fragments_kept` in the stage detail) |
+| `duplicate_hour_rows_dropped` | both copies of any repeated (SKU, FC, hour) — no principled way to choose, and they collide two runs into one episode id — and the WHOLE source window they sit in (rule 15, the same `defective_windows` read): a copy on the window's first hour, dropped alone, left the rest re-id'd as a clean window opening one hour late that no later stage could tell from a real entry (`duplicate_hour_rows`, `windows_dropped` in the stage detail) |
 | `gap_split_windows_dropped` | **every fragment** of a source window a missing hour split in two — the second fragment opens mid-window and its first row would read as an ENTRY row in the elasticity fit. Detected from the counter falling in step with the clock |
 | `exclusion_window_removed` | any episode with any hour in the known bad-data window (scope, not integrity) |
 | `discount_out_of_range_dropped` | discount outside [0,1] — the percent→fraction conversion ran twice or never |
@@ -248,7 +248,8 @@ cannot do; an episode is labelled with the first it trips:
 | `cost_missing` | `cost <= 0` — a *missing* cost, not a free good. At zero cost `d_max` reads 1.0, a 100% discount enters the action set (`0 ** negative` crash), and scrap = cost × leftover reads zero, deflating IL. Two layers on purpose: `feasible_tiers` excludes non-positive prices (owns "which prices are legal"), and this flag keeps unknown-cost episodes out of every DP-side number |
 | `non_priceable` | `cost >= original_price`, so `d_max <= 0` and `feasible_tiers` is EMPTY |
 | `negative_window` | `hours_remaining` still `< 0` after recovery — the DP takes its horizon from the counter |
-| `window_too_long` | above `data.max_window_hours` (120) — `extend_to_window` RAISES above the cap. Dropped, never clamped: clamping would invent a window end |
+| `window_too_long` | above `data.max_window_hours` (120) — `extend_to_window` RAISES above the cap. Dropped, never clamped: clamping would invent a window end. The live path refuses the same bound in `engine.decide.count_failures` (§5.10) |
+| `opens_empty` | the first row opened with NOTHING on the shelf — the feed carried on after a close (contract C3's open question; `counter_up_steps.closed_then_resumed` counts the resumptions, §12a). The DP cannot price an empty shelf, and the backtest arm could not open it while shadow priced it. Kept for the artifacts (the rows are ordinary priced demand once stock arrives) |
 | `outcome_unknown` | the episode never closed inside this data. Gates `eligible` too: an unfinished episode is not a complete observation of anything |
 | `final_hour_restock` | the last row sold more than it opened with, so the leftover is a guess. Gates `eligible` too — the censoring call cannot be made on an ambiguous final hour |
 
@@ -262,7 +263,11 @@ Four conditions are flagged and gate nothing:
 | `shrink` | units left unsold and unwritten-off. Counted into scrap, so `supply == sold + scrap` still closes; `unreconciled_anomalies` locates them by category and month |
 
 The episode stock invariant is against SUPPLY: `sold <= opening +
-restocked` (follows from the identity; asserted on the output). The
+restocked` (follows from the identity; ASSERTED on the chain's output —
+`load_and_filter` stops with the violating count once every continuity
+break is gone, because the identity is then provable and a violation is a
+bug in `episode_flow`; `tag_dp_eligibility` on a bare frame only records
+`flow_identity.holds`). The
 negative-window cap is a claim about the data and the stage checks it: if
 `episodes_entering_negative_but_longer_than_cap` is not near-zero on an
 extract, fix the cap, do not widen the recovery.
@@ -468,7 +473,11 @@ The specification (`fit.prior_density`):
 - **Thin time cells.** Controlled-arm cells with fewer than
   `min_rows_per_time_cell` uncensored rows get no multiplier — a cell
   fitted from a few observations absorbs the price response it is meant to
-  control for and biases |ε| toward zero.
+  control for and biases |ε| toward zero. A fitted multiplier is clamped
+  to `time_cell_multiplier_bounds` ([0.05, 20]): the clamp bounds the
+  fixed effects and therefore |ε| on the controlled arm, so it is a config
+  key, not a literal; a cell wanting more than the ceiling is capped and
+  the residual lands on ε.
 - **Read the artifact in this order:** `wrong_sign_categories` with
   `unconstrained_argmax`, then `holdout_comparison` —
   `log ∫ p(y_hold|ε)π(ε)dε` per held-out row on the calib window, bracketed
@@ -558,11 +567,22 @@ V(·, q, 0)         = −cost × q                       ← terminal scrap valu
 
 Exact DP because the state space is tiny (≤ ~20 tiers × ≤ 30 units × ≤ 12
 hours) and exploration requires the full Q vector per tier. The demand
-distribution is truncated at `negbin_max_k` with tail mass folded in and
-emitted as a diagnostic. The stage update is one broadcast gather over
-(tier, inventory, demand) from a pmf table built once per solve
-(`demand.nb_pmf_table`); a test keeps the scalar loop it replaced and
-asserts bit-identical results, so the vectorisation is a speed-up only.
+table runs to `max(negbin_max_k, q0)` (`dp.table_width`) with the tail
+mass folded into its last bucket: at every k at or beyond the shelf the
+state sells the whole shelf whatever k is, so the fold changes no value
+and the DP is exact at any inventory — `negbin_max_k` is the table's
+minimum width, never a cap on what a deep shelf can sell (folded at 25
+alone, a 60-unit shelf sold at most 25 a stage and Q undervalued clearing
+it). The same holds for the censored expectation every calibration and
+gate comparison reads (`demand.expected_min_demand_inventory_vec`): exact
+at every q, the folded table while q ≤ `negbin_max_k` and the closed form
+`E[min(D,q)] = mu·P(D' ≤ q−2) + q·P(D ≥ q)` (D' ~ NB(r+1)) beyond it. The
+event's `nb_tail_mass_max` is the mass past the table's end — demand the
+shelf could not have met, a diagnostic, not a truncation. The stage
+update is one broadcast gather over (tier, inventory, demand) from a pmf
+table built once per solve (`demand.nb_pmf_table`); a test keeps the
+scalar loop it replaced and asserts bit-identical results, so the
+vectorisation is a speed-up only.
 
 ### 5.8 Exploration — a P&L line item, uniformly randomized
 
@@ -641,17 +661,36 @@ divides by the same span readiness judges — back to the earliest close,
 capped at the window — so a no-close day at the window's leading edge
 cannot inflate it). The owner's rehearsal showed why: a budget priced from
 day two's closers was tiny, the stop fired on day three and exploration
-stayed suspended for the run. Shadow's aggregate `daily_budget` and its
+stayed suspended for the run. A day exploration was SUSPENDED on (every
+decision priced that day carries `tau_current: None`, `update.suspended_days`)
+is held the same way (`explore.SUSPENDED`): nothing was drawn, so its
+zero spend is no reading — graded as under-spend it ratcheted τ up by
+the clip every suspended morning, and the resume then overspent at once
+and re-fired the stop. Spend counts only pushes that EXECUTED
+(`events.pairs.is_learnable`): a failed push left the old price on the
+shelf, so its `exploration_cost` was expected, never realised. Shadow's
+aggregate `daily_budget` and its
 day-one tau derivation read the same rule: a held day is no budget in
 force, and a seed that does not reach back a whole window derives no tau.
 `evaluate.shadow`'s
 controller trace walks the same arithmetic, so "would the pilot survive its
 first week" grades the controller production actually runs — literally:
-both call `explore.walk_tau`, one clipped step per closed day since the
-last calibration (`tau_calibrated_through`), so a missed day is graded,
-never skipped. τ moves on **spend**,
+both call `explore.walk_tau`, one clipped step per closed day the store
+has not yet graded (`PosteriorStore.tau_day_walked`, the walked-day
+ledger the commit keeps), so a missed day is graded, never skipped — a
+day whose outcomes arrive after a later day was walked included: it is
+graded on the next walk and counted (`days_walked_before_outcomes`,
+`late_outcome_days`), and since a day's step `clip(budget/spend)` does
+not depend on τ, a late day lands the walk where a timely one would.
+What a late day cannot repair is the day walked while its IL was
+missing from the base: that day read a shorter base and was held, and a
+held day is not re-graded. τ moves on **spend**,
 not evidence, so it needs no operator: `daily.update --calibrate-tau`
-commits the walk daily, and `--apply` commits it too.
+commits the walk daily, and `--apply` commits it too. The factor-schedule
+gate (§5.11) refuses `--apply` alone — stale factors are a reason not to
+bank evidence, not to leave yesterday's overspend uncorrected — while the
+event-quality gates refuse the walk too (with mismatched prices the spend
+itself is not a reading).
 τ persists in the posterior artifact; `exploration.tau_initial` is only the
 launch value, and a production caller reads `PosteriorStore.tau(cfg)` or τ
 stays pinned at launch forever. Why budget-only rationing is sound:
@@ -697,6 +736,17 @@ lives inside the posterior file because exactly-once learning requires
 "revision applied" and "outcomes consumed" to commit together — one file
 renames atomically, two cannot.
 
+**One write path.** Two processes write the file — `daily.update` (cells,
+τ) and `daily.monitor` (the suspension) — so every write is
+load-modify-write (`PosteriorStore._commit`): take the lock beside the
+file, re-read it, apply the change to what is on disk, write. A writer
+never writes back the state it loaded earlier: a suspension the monitor
+wrote between an `--apply`'s load and its write survives it, and neither
+writer can empty the other's processed-id ledger. The τ commit also
+records the days the walk graded (`tau_walked_days`, with
+`tau_walked_before` marking what was calibrated before the ledger began),
+which is what lets a day whose outcomes arrived late be walked (§5.8).
+
 ### 5.10 Inference and the event contract
 
 The source-data conventions everything below stands on (the write-off
@@ -707,39 +757,86 @@ corrected claim is a code change here, never work on their side.
 
 Validation checks nine invariants and **rejects the state rather than
 returning any price** — the worst failure is a confidently wrong price, not
-"no answer". Outcomes are constructed by `daily.ingest_outcomes` from
+"no answer". The three count checks (`q`, `hours_remaining`,
+`hour_of_day`) and the horizon bound have one home,
+`engine.decide.count_failures`, which the request (`validate_request`)
+and the state (`validate_state`) both read: `hours_remaining` above
+`data.max_window_hours` is refused, because the DP plans that many stages
+and a counter defect (a feed emitting minutes) once allocated a value
+function over thousands of hours and priced a twenty-year episode; an
+integral float from a table is a count, 12.5 is not an hour. A
+`delta_min_log_bias` mapping naming neither the category nor `_default` is
+a config defect (`ConfigError`) that `decide` turns into that row's
+`StateRejected`, never a batch-wide crash. Outcomes are constructed by `daily.ingest_outcomes` from
 the hourly FLC feed (matched by SKU, FC, date, hour; `adjustment_reason`,
 `is_stockout` and the offered price derived), so the integration surface is
 the price request, applying the price, and a failed-push report. Every
-decision emits ~30 fields: the full pricing context, the
-exact prediction, posterior moments, exploration flags and cost, and the
-versions of model, posterior, config. Learning replays evidence from
+decision emits the `events.store.DECISION_REQUIRED` fields (the contract's
+§04 lists them and is test-pinned to the list): the full pricing context,
+the exact prediction, posterior moments, exploration flags and cost, and
+the versions of model, posterior, config. Learning replays evidence from
 events, never recomputation, and any decision must be reproducible from its
 event alone. The store is append-only JSONL with duplicate detection;
 malformed events are **quarantined with their validation failures
-attached**, never silently dropped.
+attached**, never silently dropped. Two invariants live in the store and
+nowhere else (two callers once re-derived each from a full parse, and two
+concurrent batches could both pass a caller's check): **one decision per
+hour** — `priced_hours` is the store's index, a second decision for a
+priced hour is refused and counted (`decisions_on_priced_hour`) — and
+**one outcome per decision** — a second outcome naming an answered
+decision is refused on emit, skipped on load and counted
+(`outcomes_per_decision_over_one`), so the learner can never consume two
+outcomes for one hour; an outcome without `is_stockout` never lands
+either (`missing_stockout_field`, the contract's §07 gate).
 
 **Lane B's reference caller is `ops.price_batch`** — one hour's 12-field
 requests in (JSONL, parquet or CSV), one response row per request out, in
 request order: the price to apply and the `decision_id`, or `rejected`
 with the reason. It resolves what the engine needs beyond the request by
 the one home for each — `engine.state.build_states` (the frozen model's
-`mu_ref_path` over the remaining hours on the two demand-rate features
-computed point-in-time from the trailing feed, `r` from the lookup; the
-pilot simulator opens its episodes through the same functions), one
-`PosteriorStore` read per batch, one config digest — commits every
-decision before returning its price, and refuses row by row, never the
-batch: a request that cannot become a state, a state the engine rejects,
-two requests for one hour, or an hour the store already holds a decision
-for (`already_priced` — a retried batch never lands two prices on one
-feed row). Outcomes are named from the feed row, not the decision:
+`mu_ref_path`, `r` from the lookup; the pilot simulator computes its
+features through the same `ref_rate_features`), one `PosteriorStore` read
+per batch, one config digest — commits every decision before returning
+its price, and refuses row by row, never the batch: a request that cannot
+become a state (`validate_request`: every field, a layable day, the
+counts through `engine.decide.count_failures` — the same three checks and
+the `max_window_hours` bound the state is judged on — ids that name an
+item, a price and a cost that are numbers; their value is the engine's),
+a state the engine rejects, two requests for one hour
+(`events.pairs.colliding_keys`, the one claim-count rule ingest and the
+store share), or an hour the store already holds a decision for
+(`already_priced`, read from the store's own `priced_hours` — a retried
+batch never lands two prices on one feed row). **Every request is read
+in one spelling first** (`engine.state.canonical_request`: ids through
+`events.pairs.ident`, the hour key's spelling; the day as `YYYY-MM-DD`;
+counts as ints), and the feature history's id columns are read the same
+way (`ident_series`), so a parquet timestamp prices and writes and a JSONL
+`"7"` meets an int history — an id dtype mismatch once merged nothing and
+priced every request on NaN features, uncounted; the batch report now
+carries `requests_with_unknown_features`. **The forecast is made once, at
+entry.** An entry request (null anchor) is a fresh `mu_ref_path` on the
+two demand-rate features computed point-in-time over the trailing feed; a
+later request of the same episode is priced on the path the store holds
+for it (`EventStore.episode_paths`: the latest decision's hour, path and
+the hour the episode opened), **sliced** to the hour — serving equals the
+entry forecast, assurance re-solves it, and no history pass runs for it.
+Only a restock that grew `hours_remaining` extends the path, by prediction
+on the features as of the episode's OPENING (never the request's day: a
+mid-episode recompute was the rule-12 skew, and the request's
+`episode_id` never met the history's derived ids anyway). A later request
+the store does not know falls back to a fresh forecast and is counted
+(`non_entry_requests_without_stored_path`). Outcomes are named from the feed row, not the decision:
 `outcome_id = feed-<sku>|<fc>|<date>T<hh>` (`events.pairs.outcome_id_of`
 over the one key, `hour_key`), so engineering can name the outcome an
 hour will produce, a re-ingest dedups, and two decisions that claimed one
 hour match neither (`decisions_colliding_on_hour`; completeness falls by
 both). `tools.e2e_cycle` runs one whole cycle — requests, decisions, the
 shop's feed, ingest, exports — in a workspace under `sim/e2e`, before any
-of engineering's code exists.
+of engineering's code exists: it drives the pilot simulator's own shop
+(`PilotSim`, §11.3) hour by hour with a pricer that goes through
+`ops.price_batch` instead of the engine, so the cycle and the rehearsal
+share one shelf, one demand draw and one feed row, and a rejected state is
+held at the shop's fallback and priced again next hour — never dropped.
 
 ### 5.11 Learning update — censored, deflated, bounded, gated
 
@@ -757,6 +854,15 @@ takes moments.
   carries no demand information at any price, and a restocked hour's
   sold count is not a censored draw. The batch summary counts both
   (`batch.excluded_no_stock`, `batch.excluded_restock`).
+- **Information is what the row observed.** An uncensored count carries
+  the NB Fisher information `mu·L²·r/(r+mu)`; a stocked-out row was
+  observed only as the event `D ≥ q`, a Bernoulli with `S = P(D ≥ q)`,
+  whose information is `(dS/dε)² / (S(1−S))` with
+  `dS/dmu = r/(r+mu)·(P(D' ≥ q−1) − S)`, D' ~ NB(r+1) — strictly less,
+  and 0 for a certain event (`update.row_information`). Crediting every
+  row the uncensored figure overstated evidence exactly where sell-outs
+  dominate a batch (deep forced moves on thin shelves), so the increment
+  fired before the evidence justified it.
 - **Correlation deflation.** Hours within an episode share an inventory
   pool, a demand shock, and a monotone price path; accumulated information
   is divided by `deff = 1 + (forced_hours − 1) × rho`. Without it the
@@ -799,9 +905,13 @@ takes moments.
   counts, never the rounded rate the report prints) or when
   `calibration_current` finds the factor schedule no longer reaches the
   week being priced (a missed weekly re-fit silently reverts production to
-  stale factors). "Reaches" is `train_baseline.schedule_reaches`, shared
+  stale factors; this gate refuses `--apply` only — the τ walk moves on
+  spend and needs no factors, §5.8). "Reaches" is
+  `train_baseline.schedule_reaches`, shared
   with `advance`'s re-fit trigger: a week the re-fit judged too thin and
-  holds at the frozen anchor (`weeks_unfitted_held_at_1`) is COVERED —
+  holds at the frozen anchor (`weeks_unfitted_held_at_anchor`; an
+  artifact sealed under the former name `weeks_unfitted_held_at_1` is
+  still read, `weeks_held_at_anchor`) is COVERED —
   the cron ran and decided — and the gate passes it with `held_at_anchor`
   set; read from `by_week` alone it looked like a missed cron and refused
   every `--apply` of that week (§11.3).
@@ -840,10 +950,23 @@ thin-IL day or two
 expensive draws and the τ controller halves τ on it the next morning; the
 spend series reads every PRICED day, 0 where nothing was forced, so a day
 under suspension ends the streak instead of leaving the over-budget days as
-the latest reading and re-firing the stop a human had just lifted; the
+the latest reading and re-firing the stop a human had just lifted; each
+day's budget is priced at the widest posterior std IN FORCE that day,
+read off the day's own decision events (`learning.widest_std_by_day`; a
+day that priced nothing takes today's) — re-pricing history at today's
+narrower std read past days over a budget they never had, though a
+routed cell that priced nothing on a day is not seen; the
 safety block reports the window it read — `event_quality_window_start`,
 `event_quality_through`, `outcomes_in_window` — and its counts are the
-window's, while `deff_applied_all_time` says what it is) **suspend
+window's, while `deff_applied_all_time` says what it is; the same block
+carries the DECISION side of completeness, which once existed only in
+ingest's stdout: `decisions_colliding_on_hour` and
+`decisions_without_outcome` — decisions on a day the feed has already
+answered for (`decisions_answered_through`, over
+`decisions_on_answered_days`) that no outcome names, so today's decisions
+are pending, not gaps — plus the store's all-time refusals,
+`outcomes_per_decision_over_one` and `missing_stockout_field`; the
+simulator's completeness grade reads the same names) **suspend
 exploration — exploitation pricing continues**: the monitor writes
 `exploration_suspended` into the posterior state, `decide` selects with no
 budget (no draw) while it is set, `status` reads WARN with the reason, and
@@ -908,7 +1031,15 @@ scrap and IL the guardrail floors and the monitor read, never a local copy.
 `daily_budget` is the mean of `budget_today` over the window's **decision
 days** (`ledger.days`, the days the controller trace walks), never over the
 seed days, whose first day has no trailing history and a budget of exactly
-zero. Every per-day figure divides by one `n_days`: the calendar span of
+zero; a window on which every decision day is held (`explore.budget_held`
+— the seed never spans `budget_il_window_days`) has no budget base, and the
+report says `NO BUDGET BASE` and grades no spend against one
+(`decision_days_held`, the sweep skipped) rather than failing after the
+decision loop. The trace's persistence verdict is
+`daily.monitor.evaluate_guardrail` on the readings walked so far — the
+monitor's rule, never a copy of it. The budget base keeps every observed
+hour, a zero-stock restock-gap hour (no decision) included, so every episode
+the ledger priced settles. Every per-day figure divides by one `n_days`: the calendar span of
 the episodes' **opening dates** in the unsampled, unextended window frame
 (`window.date_min/date_max` are opening dates too — a late opener's rows
 run past midnight, and a row-date span would count a day no episode
@@ -998,7 +1129,18 @@ moved config key or library version as a problem on the same
 `artifact bundle` row as an edited artifact, with the remedy named: a
 deliberate `ops.seal --reason config|libraries`. `advance` does that
 itself once nothing is left to paste, so every environment the bundle ran
-in has its own snapshot; the daily lane does not price on a red row. Every
+in has its own snapshot — and because it does, **a re-seal's reason says
+which artifacts may have moved since the previous seal**: none under
+`config` or `libraries`, the calibration alone under `weekly-refit`; a
+fit reason (`bootstrap`, `retrain`, `check-only`) or no reason seals the
+set as it stands. `seal()` once verified with no prior seal, so an
+artifact hand-edited while the config moved was blessed as the record by
+the automatic `config` re-seal — the one red row rule 18 says only a
+deliberate re-seal may clear. Now that re-seal refuses, naming the
+artifact, and the fix is to seal under the reason that changed it or to
+restore it from the latest snapshot. The daily lane runs on a red row
+(its own rows are the ones only it refreshes, §9.2) but stops before the
+operator gate. Every
 decision event carries `config_digest` beside the version label, so any
 priced hour maps to exactly one snapshot in `artifacts/history/`, and
 `assurance.reproduction` counts the recent decisions priced under another
@@ -1107,10 +1249,17 @@ runs daily and tests the frozen artifacts against the live world:
 
 Two thresholds here are set on the quantity with the *consequence*, not the
 one that is easiest to measure. **`correlation` judges `deff = 1 + (m−1)ρ`,
-not `rho`**: deff drifts through both terms, and a rho-only verdict was blind
-to the forced-hours channel — `m` moves whenever the exploration rate does,
-rescaling every update while `rho` sits still (`rho_drift` remains as the
-diagnostic saying which term moved). **`exploration` needs significance AND
+not `rho`**, at the clustering the learner deflates by: `m` is the mean
+number of FORCED outcomes per episode over the pairs the update learns
+from (`common.config.deff_from_episodes` over the forced ids — the one
+home; exploit and restocked hours are not in it), so the verdict prices
+the frozen ρ by the consequence it has today and moves with the forced
+share exactly as every update's divisor does (`mean_forced_hours_live`
+and `forced_outcomes` are reported; an `m` of the check's own — every
+learnable hour of every episode whose discount moved — once read a
+one-forced-hour world as six and tripped the alert on a rho error the
+learner never applied). `rho_drift` remains as the diagnostic saying
+which term moved. **`exploration` needs significance AND
 effect size**: χ² power grows with `n` and the event store is append-only
 with no window, so a p-value alone tightens every day the system runs — at
 100 draws it takes a ~47% bin deviation to FAIL and at a million, ~0.5%. The
@@ -1169,7 +1318,15 @@ Rules, in order:
    one, so the ranking read *which weeks* rather than which window. Rows
    are keyed by the episode's **opening week** and each candidate window
    is the calendar weeks `[t − W, t)` — a gap is a gap, not bridged by the
-   last W fitted weeks — exactly the schedule production applies (§9.2).
+   last W fitted weeks — exactly the schedule production applies (§9.2),
+   and each window is fit by the **same estimator** production pastes W
+   into, `train_baseline._solve_level_factors` (subcategory grain,
+   shrinkage toward the parent, the censored basis, the
+   `calibration_min_anchor_rows` floor) and applied through the same
+   waterfall; a window too thin to fit scores its week uncalibrated, as
+   production holds the anchor, and `weeks_too_thin` counts them. The
+   sweep once carried its own category-grain sold/pred ratio, so it ranked
+   a different estimator from the one it recommended a window for.
    `uncalibrated` is
    ranked with the windows: when no-factors wins, `verdict` says so and
    `tune` raises it as an INFO reading. **The ranking is not the evidence.**
@@ -1209,7 +1366,13 @@ fresh entry row mid-window (rule 7).
 **Synthetic validation:** `tools.make_dummy_flc` reproduces the schema with
 known ground-truth elasticity in two modes — `legacy` (the clock confound;
 estimators must *detect* it) and `randomized` (identifiable; estimators
-must *recover* it). The suite runs the full pipeline against it.
+must *recover* it). The suite runs the full pipeline against it. The
+fixture carries production's two seam properties or the §12a paths go
+unexercised: a share of windows open in the evening and cross midnight
+(`cross_midnight_rate`), and most listings close with hours still on the
+counter (`early_close_rate`) — a fixture whose final rows all read 0
+tests a closure rule production never sees. The generator prints both
+counts on every run, beside the sentinel, shrink and restock counts.
 
 ## 7. What running on production data changed
 
@@ -1280,14 +1443,26 @@ stays frozen; only the level multiplier tracks the world.
 
 **Point-in-time factors.** The factors are re-fit every week on the
 trailing `calibration_fit_trailing_weeks`, on the window *ending strictly
-before* that week, applied **by row date** — no row is ever priced by a
-factor fitted on its own week or later, and the harnesses grade the
-mechanism production runs. The schedule lives in
-`calibration.json → schedule.by_week`; `factors` is the fallback for weeks
-before the first trailing window closes, and an unfitted week holds the
-fallback rather than borrowing a later week's (`weeks_unfitted_held_at_1`;
-the week the schedule COVERS is `train_baseline.schedule_reaches`,
-§5.11). Both harnesses read it
+before* that week, applied **by the week the row's episode opened** — the
+same key the fit windows are cut by (`trailing_weeks_window`), so no row
+is ever priced by a factor fitted on its own week or later; applied by
+row date, the Monday rows of a Sunday-opened episode sat inside week w's
+fit window AND under week w's table, a self-fit at every seam. A frame
+without `episode_id` (the live path's forecast rows) reads the row's own
+date. The harnesses grade the mechanism production runs. The schedule
+lives in `calibration.json → schedule.by_week` (subcategory tables) with
+`by_week_category` (the parent level) beside it; `factors` /
+`factors_category` are the fallback for weeks before the first trailing
+window closes, and an unfitted week holds the fallback rather than
+borrowing a later week's (`weeks_unfitted_held_at_anchor`; the week the
+schedule COVERS is `train_baseline.schedule_reaches`, §5.11). Every cell
+of a window's population gets a factor: a subcategory with no anchor row
+in the window takes its category's factor outright (`keys_held_at_parent`,
+per week `keys_held_at_parent_by_week`; `held_at_parent` in its detail)
+— left out of the table, it priced at raw mu × 1.0 beside a category
+that solved to 1.4 — and a cell absent from the window entirely (new
+assortment) waterfalls subcategory → category → 1.0 in the applier
+(`BaselineModel.level_factors`). Both harnesses read it
 through `BaselineModel.predict_mu_ref` alone.
 `schedule.weeks_on_partial_window` names weeks fitted on less history than
 the label claims (extract start, post-exclusion-gap); they are flagged, not
@@ -1400,7 +1575,12 @@ does not wait on a human*: the guardrail stops (3σ floors), the fit window
 W (the sweep, subject to `calib ≥ 2W`, **with hysteresis** — W is the one
 paste that turns the calibration loop, and re-settling re-scores the
 sweep, so a strict argmin oscillates near-tied windows and loops an agent
-on apply → check-only; it switches only on a material win), and
+on apply → check-only; it switches only on a material win: the
+candidate's `mean_abs_log_error` below `tuning.w_switch_mae_ratio` times
+the window in force's, or its `share_weeks_in_band` ahead by at least
+`tuning.w_switch_band_gain` — config keys, because they decide whether a
+MEASURED value is pasted and the snapshot must record which margin a
+paste stood on), and
 `max_mean_step` (the consistent-rails value) PASTE — `max_mean_step` behind a gate on its
 measured price consequence (`tuning.max_price_share_changed_for_auto_rail`,
 `max_il_delta_pct_for_auto_rail`), downgrading to OWNER with the reason
@@ -1529,7 +1709,7 @@ table against the file):
 
 | section | key | default | meaning |
 | --- | --- | --- | --- |
-| `run` | `days` | 21 | simulated days after launch; a guardrail test needs the trailing window + smoothing + persistence past the shock day |
+| `run` | `days` | 21 | simulated days after launch; a guardrail test needs `common.guardrail.stop_ready_close_days` mornings (window + 2·smoothing + persistence − 1: the series' first reading, then the streak) and the shock followed by smoothing + persistence fully-shocked close days |
 | `run` | `launch_date` | null | the `data.launch_date` the sim config carries; null = the day after the extract's last day |
 | `run` | `episodes_per_day` | 5000 | the day's total, split across the two arms — each fresh pick's twin runs under the other arm the day after it closes (on a small pool a template is re-picked); the template pool and the open SKU × FC keys cap it (`episodes_opened_per_day_mean` says what ran) |
 | `run` | `workers` | 0 | processes pricing each hour's batch of decisions (0 = every core but one, 1 = serial); every decision draws from a generator seeded by its episode and hour, so the answer is the same either way |
@@ -1577,8 +1757,14 @@ live history — the one home, and the thing Lane B's pricing service must
 do the same way.
 
 `reports/pilot_sim.json` grades a fixed list (`EXPECTATIONS`): every hour
-priced and none rejected, prices never rising within an episode or below
-cost, outcome completeness, the event-quality gates, the posterior moving
+priced and none rejected, no event quarantined on either side of the
+store (a decision refused, or an outcome the ingester built that the
+store refused), prices never rising within an episode or below
+cost, outcome completeness on the shadow gate's population — outcomes the
+store ACCEPTED per decision the feed could answer for, so whatever kept
+one from landing (no feed row, two decisions claiming one hour, an
+unusable row, a quarantined outcome) is a gap, with the ingester's counts
+summed generically into `ingest_counts` — the event-quality gates, the posterior moving
 toward `epsilon_true` and narrowing, tau walking to its budget (graded on
 the last `grading.tau_week_days` days the controller moved, against
 `grading.spend_over_budget_band` — the clip bounds the daily step, not
@@ -1587,7 +1773,10 @@ the ratio; mornings held for want of a full IL base, §5.8, are listed as
 firing only under the fault that causes them
 (and firing under it), the
 assurance checks, the schedule covering every priced week, `--apply` on
-cadence, and the agent's level tracking the world's (`level_tracking`,
+cadence (a refusal is the fault's doing only when every gate that failed
+that morning is one a fault in force is expected to fail — a refusal on
+the calibration gate under a `mismatch` fault is a lane that does not
+apply; an apply that neither applied nor refused is silent), and the agent's level tracking the world's (`level_tracking`,
 per ISO week: `mean_log_ratio`, `mean_forced_log_move`,
 `implied_elasticity_bias`): per week, the mean
 log ratio of the agent's `mu_ref` (its own weekly re-fit) to the world's
@@ -1595,7 +1784,10 @@ log ratio of the agent's `mu_ref` (its own weekly re-fit) to the world's
 `demand_shock` level) over the pilot's hours must sit inside the
 calibration gate band, and the elasticity bias it implies — minus the
 level error over the mean forced log move, which is signed (negative =
-deeper than the reference) — inside the posterior's std, because the elasticity learner carries no
+deeper than the reference) — inside the posterior's std (the widest among
+the cells a category reaches, `PosteriorStore.widest_active_std`, the
+budget's own reading: an unrouted GLOBAL keeps its launch std and would
+excuse any bias), because the elasticity learner carries no
 level term and reads a level error as elasticity, magnified by the small
 moves it identifies from: on the fixture an 8% level error from a thin
 week's re-fit, inside the band, implied a bias of half a unit of
@@ -1612,11 +1804,23 @@ graded — the world's within-episode shock is a knob, not a claim about the
 shop — and `dispersion` is excused while any event gate is expected to fail
 (it bins by predicted `mu`, so a belief that `--apply` was never allowed
 to correct reads as a shape problem) and when the world's marginal was
-moved (`r_scale`, `episode_shock_sd`). A guardrail test needs the run to outlast the trailing window plus
-smoothing plus persistence, and the shock by smoothing plus persistence
+moved (`r_scale`, `episode_shock_sd`). A guardrail test needs the run to
+outlast the scrap series' own readiness — its first reading comes after
+window + 2·smoothing − 1 consecutive close days (the trailing mean is
+shifted by the smoothing so the two windows never overlap), and the stop
+needs persistence readings: `common.guardrail.stop_ready_close_days`, the
+one arithmetic the monitor's short-series note and the grader read
+(`guardrail_ready_after_close_days` in the report) — and the shock
+followed by smoothing + persistence fully-shocked close days
 (`demand_shock:30:0.5 --days 45`); shorter runs read NOT MEASURED there,
 as does a shock the scrap series saw but that stays under the owner's
-floor — the reach of that world, reported with the reading. Every number is the
+floor — the reach of that world, reported with the reading. Each Lane C
+run also reports `anchor_rows_by_arm`: the anchor rows in the week's
+trailing fit window per arm, and whether the pilot's own rows alone would
+clear `calibration_min_anchor_rows` — production's re-fit sees the whole
+feed (every shelf in the FC, system-priced or not; the legacy arm stands
+in for the rest of the shop), so a pilot covering the whole FC reads the
+pilot column alone. Every number is the
 simulated world's (rule 19): a PASS says the machinery does what it claims
 on a shop with that elasticity, never that the shop has it. Its first runs
 found defects the unit tests could not: the `--apply` gate and
@@ -1695,7 +1899,13 @@ guardrail that cannot fire is absent, not conservative) are both blocking
 verdicts. **The persistence rule is load-bearing**:
 `persistence_days` (2) means a condition fires only after consecutive days
 over threshold; a single day past a 3σ floor is expected roughly annually,
-two in a row essentially never. Calibration principle: a false fire is
+two in a row essentially never. The series has no reading at all until
+window + 2·smoothing − 1 consecutive close days
+(`common.guardrail.first_reading_close_days`, from the series' own
+arithmetic: the smoother fills, the trailing mean fills, the shift keeps
+the two apart), so the stop cannot fire before `stop_ready_close_days`;
+the monitor's guardrail block carries `first_reading_after_close_days`
+and says so while the series is empty. Calibration principle: a false fire is
 cheap (suspends exploration only), but a threshold that fires constantly
 kills the learning loop — tighten via persistence, never below the floor.
 
@@ -1719,14 +1929,23 @@ restocked many times is one episode. And a zeroed `ending_inventory`
 CLOSES the listing whatever the counter does next: the next row opens a
 new id, even when that hour also restocked, and a mid-window zero is a
 write-off leftover, not shrink. The boundary has one home,
-`prepare_data.window_starts`, which the ids and the null-counter run drop
-both read; `counter_up_steps` in the `episode_universe` stage detail
+`prepare_data.window_starts` (`window_signals.counter_ok` is the counter
+clause), which the ids and the defective-window drops both read;
+`counter_up_steps` in the `episode_universe` stage detail
 counts every up-step by what the previous hour did (restock continued /
-closed / reset), which is how often the clause fires on an extract. The
+closed / reset), which is how often the clause fires on an extract, and
+`closed_then_resumed` counts the hours after a close that opened with
+nothing on the shelf — the feed carrying on past a sell-out (contract
+C3's open question); such a window is `opens_empty`, dp-ineligible
+(§5.2). The
 replay and shadow plan each hour over the ROW's own counter, never the
 rows the episode turned out to have, so an extension is never seen
-before it happened. Duplicate `(sku, fc, date, hour)` rows collide two
-runs into one id, so both copies drop (`duplicate_hour_rows_dropped`).
+before it happened — `common.episodes.planning_horizon` (the counter plus
+this hour) is the one spelling the replay, shadow, the simulator's
+templates and the feed row (`window_counter`, its inverse) read.
+Duplicate `(sku, fc, date, hour)` rows collide two
+runs into one id, so both copies drop with the whole window they sit in
+(`duplicate_hour_rows_dropped`).
 
 Three things moved with the key: **split assignment** (an episode belongs
 wholly to the split its window started in), the **leakage guard on the
@@ -1860,7 +2079,11 @@ held at the prior mean, and `intra_episode_deepening` reports both medians
 collected under `engine.decide`'s explorability gate, and `n_days` is
 the calendar span (`episodes.calendar_days`) — the same three definitions
 shadow's derivation uses, so the cross-check can only disagree on the
-path, never on the bookkeeping.
+path, never on the bookkeeping. The replay's episode sample — what every
+policy figure, `intra_episode_moves`, `step_sensitivity`'s pool and the
+cross-check sit on — is `tuning.backtest_policy_episodes` (as shadow's is
+`monitoring.shadow_gate.sample_episodes`), so it is in the report's config
+fingerprint; `--policy-episodes` overrides it for one exploratory run.
 
 ### The horizon comes from the window, not from the row count
 

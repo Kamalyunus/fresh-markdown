@@ -12,9 +12,15 @@ or above cost. The chosen price becomes the next anchor.
 The reward is absolute IL per design 2.2: no ratio transform, no outer loop.
 mu(p) uses the posterior MEAN epsilon. Evaluation is exhaustive: the state
 is (tiers ~2-40) x (inventory q0 + 1) per stage, the horizon is the episode's
-remaining window (bounded by `data.max_window_hours`, not by any
-assumption here), and each stage is one vectorised gather over
-(tier, inventory, demand).
+remaining window (bounded by `data.max_window_hours` -- enforced on the
+live path by `engine.decide.count_failures`, not by any assumption here),
+and each stage is one vectorised gather over (tier, inventory, demand).
+
+The demand table runs to max(negbin_max_k, q0): every unit of demand past
+the shelf sells exactly q0 whatever k is, so folding the tail there is
+exact, and `negbin_max_k` is the table's minimum width, never a cap on
+what a deep shelf can sell. `tail_mass_max` is the mass folded past the
+table's last bucket -- demand beyond the shelf, a diagnostic.
 """
 
 import time
@@ -80,6 +86,13 @@ def entry_action_set(tiers, d_ref, d_max, pcfg):
     return sorted(allowed)
 
 
+def table_width(max_k, q0):
+    """The demand table's last bucket: `negbin_max_k`, or the shelf when it
+    is deeper. At k >= q0 every state sells the whole shelf, so the fold
+    there changes no value and the DP is exact at any inventory."""
+    return max(int(max_k), int(q0))
+
+
 @dataclass
 class DPResult:
     tiers: list                 # discounts, ascending
@@ -115,7 +128,7 @@ def solve(original_price, cost, q0, mu_ref_path, d_ref, epsilon, r, cfg,
 
     horizon = len(mu_ref_path)
     n_tiers = len(tiers)
-    max_k = pcfg["negbin_max_k"]
+    max_k = table_width(int(pcfg["negbin_max_k"]), int(q0))
 
     # pmf[t][j] over sold counts for pricing tier j at stage t
     mu = np.array([[mu_at(m, d, d_ref, epsilon, pcfg["demand_floor"])

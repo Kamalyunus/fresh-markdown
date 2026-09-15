@@ -313,6 +313,50 @@ def test_a_reported_push_failure_that_lands_on_no_outcome_is_counted(tmp_path):
     assert rep["push_failures_unmatched"] == 1
 
 
+def test_a_foreign_decision_line_missing_a_key_field_costs_itself_not_the_day():
+    """A decision line with no `hour_of_day` at all (a foreign writer's)
+    raised KeyError and aborted the whole daily ingest. It is one unusable
+    decision, counted, and the day's other decisions match."""
+    bare = {k: v for k, v in _dec(2, hour=18).items() if k != "hour_of_day"}
+    outs, rep = build_outcomes([_dec(1), bare, _dec(3, hour=19)],
+                               _feed([{"start": 3, "sold": 1, "end": 2},
+                                      {"hour": 18, "start": 2, "sold": 0, "end": 2},
+                                      {"hour": 19, "start": 4, "sold": 1, "end": 3}]))
+    assert [o["decision_id"] for o in outs] == ["D1", "D3"]
+    assert rep["unusable_feed_rows"] == 1
+    assert rep["unusable_examples"][0]["decision_id"] == "D2"
+    assert "unkeyable decision" in rep["unusable_examples"][0]["reason"]
+
+
+def test_the_ingest_report_carries_what_the_store_refused(tmp_path):
+    """A second outcome for a decision the store already holds one for,
+    and the contract's `missing_stockout_field` count, are reported
+    beside the emitted count -- never folded into "duplicates"."""
+    from conftest import load_config
+    from daily.ingest_outcomes import emit_all
+    from events.store import EventStore
+
+    cfg = load_config()
+    store = EventStore(cfg, root=str(tmp_path / "events"))
+    outs, rep = build_outcomes([_dec(1)], _feed([{"start": 3, "sold": 1, "end": 2}]))
+    emit_all(store, outs, rep)
+    assert rep["emitted"] == 1 and rep["outcomes_per_decision_over_one"] == 0
+    assert rep["missing_stockout_field"] == 0 and rep["duplicates_skipped"] == 0
+    # the same decision under another outcome id (an id scheme that moved)
+    again = [dict(outs[0], outcome_id="feed-old-uuid")]
+    emit_all(store, again, rep)
+    assert rep["emitted"] == 0 and rep["outcomes_per_decision_over_one"] == 1
+    assert rep["duplicates_skipped"] == 0
+    # a re-run of the same feed is a plain dedup
+    emit_all(store, outs, rep)
+    assert rep["emitted"] == 0 and rep["duplicates_skipped"] == 1
+    assert rep["outcomes_per_decision_over_one"] == 0
+    bare = [{k: v for k, v in dict(outs[0], outcome_id="O-bare", decision_id="D9").items()
+             if k != "is_stockout"}]
+    emit_all(store, bare, rep)
+    assert rep["missing_stockout_field"] == 1 and rep["quarantined"] == 1
+
+
 def test_a_decision_is_keyed_on_its_trading_day():
     """events.pairs.decision_day is the one day key: a decision carrying no
     `date` still keys on the trading day of its timestamp."""

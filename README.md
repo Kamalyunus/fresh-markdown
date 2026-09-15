@@ -108,10 +108,11 @@ python3 -m ops.price_batch --requests hour.jsonl --history data/flc_raw.parquet 
 ```
 
 The cycle is what engineering's Lane B does in production, run once
-against the simulated shop: hourly request batches through
-`ops.price_batch` (the reference caller — the contract's 12 fields in, a
-price per request out), the feed the shop wrote, `daily.ingest_outcomes`
-naming the outcomes from the feed row, the exported pair tables.
+against the simulated shop — the pilot simulator's own, driven hour by
+hour with a pricer that goes through `ops.price_batch` (the reference
+caller — the contract's 12 fields in, a price per request out) instead of
+the engine — then the feed the shop wrote, `daily.ingest_outcomes` naming
+the outcomes from the feed row, the exported pair tables.
 
 ## Design invariants worth knowing
 

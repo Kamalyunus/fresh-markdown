@@ -47,33 +47,37 @@ EPISODE_RULE = (
 def window_signals(df):
     """The per-row signals every window reading is built from, per SKU x FC
     in window order: the clock step `dt_h` (hours since the previous row),
-    the counter step `hr_diff`, and what the PREVIOUS hour did --
+    the counter step `hr_diff`, what the PREVIOUS hour did --
     `prev_closed` (ending_inventory == 0: the listing closed, contract C2)
-    and `prev_restock` (ending > starting - sold: stock arrived, C9). NaN on
-    a group's first row for the two steps, False for the two flags."""
+    and `prev_restock` (ending > starting - sold: stock arrived, C9) -- and
+    `counter_ok`, the counter clause of EPISODE_RULE: the step is -1, or
+    upward/flat on the hour after a restock. NaN on a group's first row for
+    the two steps (and so False for `counter_ok`), False for the flags."""
     ts = pd.to_datetime(df.date) + pd.to_timedelta(df.hour_of_day, unit="h")
     grp = [df.sku_id, df.fc]
     prev = {c: df[c].groupby(grp).shift() for c in
             ("starting_inventory", "units_sold", "ending_inventory")}
+    hr_diff = df.hours_remaining.groupby(grp).diff()
+    prev_restock = (prev["ending_inventory"]
+                    > prev["starting_inventory"] - prev["units_sold"])
     return {
         "dt_h": ts.groupby(grp).diff().dt.total_seconds() / 3600.0,
-        "hr_diff": df.hours_remaining.groupby(grp).diff(),
+        "hr_diff": hr_diff,
         "prev_closed": prev["ending_inventory"].eq(0),
-        "prev_restock": (prev["ending_inventory"]
-                         > prev["starting_inventory"] - prev["units_sold"]),
+        "prev_restock": prev_restock,
+        "counter_ok": hr_diff.eq(-1.0) | (hr_diff.gt(-1.0) & prev_restock),
     }
 
 
 def window_starts(df):
     """True where a row opens a window (EPISODE_RULE) -- the ONE boundary
-    reading: assign_episode_ids keys the ids on it and the null-counter run
-    drop reads the same signals. Either clock or counter alone would merge
-    back-to-back windows or stitch across a feed gap; a null counter (a NaN
-    step) opens a window here on purpose -- the phantom id is what
-    null_counter_windows then drops with its whole run."""
+    reading: assign_episode_ids keys the ids on it and the defective-window
+    drops (`defective_windows`) read the same signals. Either clock or
+    counter alone would merge back-to-back windows or stitch across a feed
+    gap; a null counter (a NaN step) opens a window here on purpose -- the
+    phantom id is what null_counter_windows then drops with its whole run."""
     s = window_signals(df)
-    counter_ok = s["hr_diff"].eq(-1.0) | (s["hr_diff"].gt(-1.0) & s["prev_restock"])
-    return s["dt_h"].ne(1.0) | s["prev_closed"] | ~counter_ok
+    return s["dt_h"].ne(1.0) | s["prev_closed"] | ~s["counter_ok"]
 
 
 def assign_episode_ids(df):
@@ -91,13 +95,19 @@ def counter_step_detail(df):
     previous hour did -- the measurement behind EPISODE_RULE's restock
     clause: `restock_continued` (stock arrived last hour: the same
     window), `closed_new_window` (last hour closed: a relist),
-    `reset_new_window` (neither: back-to-back windows)."""
+    `reset_new_window` (neither: back-to-back windows). And, whatever the
+    counter did, `closed_then_resumed`: the hour after a close opened
+    with NOTHING on the shelf -- the feed carried on past a sell-out
+    (contract C3's open question), a window `opens_empty` then flags."""
     s = window_signals(df)
-    up = s["dt_h"].eq(1.0) & s["hr_diff"].gt(-1.0)
+    one_hour = s["dt_h"].eq(1.0)
+    up = one_hour & s["hr_diff"].gt(-1.0)
     return {"up_steps_at_one_hour": int(up.sum()),
             "restock_continued": int((up & s["prev_restock"] & ~s["prev_closed"]).sum()),
             "closed_new_window": int((up & s["prev_closed"]).sum()),
-            "reset_new_window": int((up & ~s["prev_closed"] & ~s["prev_restock"]).sum())}
+            "reset_new_window": int((up & ~s["prev_closed"] & ~s["prev_restock"]).sum()),
+            "closed_then_resumed": int((one_hour & s["prev_closed"]
+                                        & df.starting_inventory.eq(0)).sum())}
 
 
 def gap_split_windows(df):
@@ -191,8 +201,20 @@ def edge_truncated_episodes(d, flow):
     at_edge = unknown[edge.loc[unknown].to_numpy()]
     not_edge = unknown[~edge.loc[unknown].to_numpy()]
     n_unknown = len(unknown)
+    # where the residue the extract boundary does NOT explain sits: a
+    # month (an incident), a corner of the catalogue (a subset that never
+    # writes off) or everywhere (the feed)
+    residue = last[last.episode_id.isin(not_edge)]
+    months = pd.to_datetime(residue.date).dt.strftime("%Y-%m")
+    by_month = {str(k): int(v) for k, v in months.value_counts().sort_index().items()}
+    by_category = ({str(k): int(v) for k, v in
+                    residue.category.astype(str).value_counts().items()}
+                   if "category" in residue else {})
     detail = {
         "episodes_unclosed": int(n_unknown),
+        # contract C2's self-check: the zero is the ONLY closure signal,
+        # so a final row without it is an episode whose ending is unknown
+        "final_rows_without_closure_sentinel": int(n_unknown),
         "episodes_edge_truncated": int(len(at_edge)),
         "leftover_units_edge_truncated":
             int(left.loc[at_edge].sum()) if len(at_edge) else 0,
@@ -202,6 +224,8 @@ def edge_truncated_episodes(d, flow):
         "episodes_unclosed_not_edge": int(len(not_edge)),
         "leftover_units_unclosed_not_edge":
             int(left.loc[not_edge].sum()) if len(not_edge) else 0,
+        "not_closed_by_month": by_month,
+        "not_closed_by_category": by_category,
         "share_of_unclosed_explained_by_edge":
             round(float(len(at_edge) / n_unknown), 4) if n_unknown else 0.0,
         "extract_last_hour": str(extract_end),
@@ -221,6 +245,12 @@ def edge_truncated_episodes(d, flow):
 # as a window. INTEGRITY, so it DROPS (rule 14) -- counted, never silent.
 EPISODE_KEY = ("sku_id", "fc", "date", "hour_of_day")
 
+# The integer quantities the inventory chain is read from. A null in one is
+# an integrity defect of the window it sits in (a null counter likewise):
+# dropped whole and counted, never an int cast that fails before the
+# first waterfall row is written.
+QUANTITY_COLS = ("starting_inventory", "units_sold", "ending_inventory")
+
 
 def null_key_rows(df):
     """Mask of rows with a null in any EPISODE_KEY column, and a per-column
@@ -230,44 +260,59 @@ def null_key_rows(df):
     return nulls.any(axis=1), {c: int(nulls[c].sum()) for c in EPISODE_KEY}
 
 
+def source_windows(df):
+    """The source WINDOW each row sits in, as `window_starts` reads it
+    (EPISODE_RULE, one home), with exactly two tolerances a defective row
+    needs: a DUPLICATE hour stays in its window (the clock did not advance
+    -- the copies are one hour), and a step whose counter is UNREADABLE
+    (NaN beside a null) is taken on the clock alone -- one hour on, or a
+    feed gap the counter ran down by exactly. A flat or upward step
+    between two readable counters is a new window unless the previous
+    hour restocked, and a closed previous hour opens one whatever the
+    counter does, exactly as the ids do; the run drop and the ids once
+    disagreed here and the drop swallowed a neighbouring window. Returns
+    (window ids, mask of rows that open a window across an unreadable
+    gap -- a fragment nothing later can tell from a real entry)."""
+    sig = window_signals(df)
+    dt_h, hr_diff = sig["dt_h"], sig["hr_diff"]
+    hr_drop = -hr_diff
+    gap_ok = (dt_h > 1.0) & (dt_h == hr_drop)
+    same = ((dt_h.eq(1.0) & (sig["counter_ok"] | hr_diff.isna()))
+            | dt_h.eq(0.0) | gap_ok) & ~sig["prev_closed"]
+    window = (~same.fillna(False) | dt_h.isna()).cumsum()
+    unread = (dt_h > 1.0) & hr_drop.isna()
+    return window, unread
+
+
+def defective_windows(df, bad):
+    """Mask of every row of the source window holding a row `bad` marks,
+    and a detail: `windows` dropped and `gap_fragments_kept` -- windows
+    that opened across a gap the null made unreadable, whose far side
+    survives (bounded to a null adjacent to a gap). Rule 15 at the
+    row-defect stages: a row-scoped drop left a fragment opening
+    mid-window (when the defect was the window's first hour, no later
+    stage could tell it from a real entry), so the whole window goes."""
+    bad = pd.Series(np.asarray(bad, dtype=bool), index=df.index)
+    if not bad.any():
+        return pd.Series(False, index=df.index), {"windows": 0,
+                                                   "gap_fragments_kept": 0}
+    window, unread = source_windows(df)
+    hit = set(window[bad])
+    mask = window.isin(hit)
+    grp = [df.sku_id, df.fc]
+    kept = unread & mask.groupby(grp).shift(fill_value=False) & ~mask
+    return mask, {"windows": len(hit), "gap_fragments_kept": int(kept.sum())}
+
+
 def null_counter_windows(df):
-    """Mask of every row of the source WINDOW that holds a null
-    `hours_remaining`, and the number of such windows. The counter is the
+    """`defective_windows` for a null `hours_remaining`. The counter is the
     field the ids derive from: a null one made assign_episode_ids open a
     NEW episode on that row (NaN != -1), so one bad hour became a one-row
     "episode" that closed on its own zero and read DP-eligible -- found on
     the owner's extract by the pilot simulator, whose templates then
     carried a NaN window length. The row itself can be placed (its key is
-    whole), so the drop is the WHOLE window it sits in (rule 15): a
-    row-scoped drop left a fragment opening mid-window that no later stage
-    could tell from a real entry.
-
-    The window is read with `window_signals` -- the boundary rule's own
-    signals -- since the null row breaks neither cleanly: rows of one
-    sku x fc stay in one window while the clock advances an hour (a
-    duplicate hour, too), or skips hours the counter ran down by exactly
-    (a feed gap -- the fragment beyond it must go too); a counter that
-    resets upward between two non-null rows opens a NEW window unless the
-    previous hour restocked (EPISODE_RULE), and a closed previous hour
-    opens one whatever the counter does, so a back-to-back neighbour is
-    kept. A gap whose counter is unreadable on either side is a break: the
-    far side survives as a fragment nothing later can see -- bounded to a
-    null adjacent to a gap, and counted in `null_counter_gap_fragments_kept`."""
-    if not df.hours_remaining.isna().any():
-        return pd.Series(False, index=df.index), {"windows": 0,
-                                                   "gap_fragments_kept": 0}
-    grp = [df.sku_id, df.fc]
-    sig = window_signals(df)
-    dt_h, hr = sig["dt_h"], df.hours_remaining
-    hr_drop = -sig["hr_diff"]                         # NaN beside a null
-    same_window = ((dt_h <= 1.0) | ((dt_h > 1.0) & (dt_h == hr_drop))) \
-        & ~((hr_drop < 0) & ~sig["prev_restock"]) & ~sig["prev_closed"]
-    window = (~same_window.fillna(False) | dt_h.isna()).cumsum()
-    bad = set(window[hr.isna()])
-    mask = window.isin(bad)
-    # a gap this window could not be read across (a null on either side)
-    unread = (dt_h > 1.0) & hr_drop.isna() & mask.groupby(grp).shift(fill_value=False)
-    return mask, {"windows": len(bad), "gap_fragments_kept": int(unread.sum())}
+    whole), so the drop is the WHOLE window it sits in (rule 15)."""
+    return defective_windows(df, df.hours_remaining.isna())
 
 
 def recover_negative_windows(d, cap):
@@ -299,8 +344,11 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
 
     # discount is PERCENT in source -> fraction, exactly once
     df["total_discount"] = df["total_discount"] / 100.0
-    df["starting_inventory"] = df["starting_inventory"].round().astype("int64")
-    df["ending_inventory"] = df["ending_inventory"].round().astype("int64")
+    # the quantities stay float until the null drop below: a null in any
+    # of them is a counted integrity drop, never a cast error before the
+    # first waterfall row is written
+    for col in QUANTITY_COLS:
+        df[col] = pd.to_numeric(df[col]).round()
 
     df = df.sort_values(list(EPISODE_KEY))
     # the `raw` row counts rows, episodes and COGS on ONE basis: the frame as
@@ -330,37 +378,69 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
             prev_ids["ids"] = now
         return d
 
+    # the raw row's COGS is read over the rows whose quantities are readable
+    # (a null inventory has no exposure to price); an id with none reads 0
+    readable = ~df[list(QUANTITY_COLS)].isna().any(axis=1)
+    per_ep["cogs"] = (episode_cogs(df[readable]) if readable.any()
+                      else pd.Series(dtype=float)).reindex(
+        pd.unique(df.episode_id)).fillna(0.0)
     step(df, "raw", gate=True)
+    per_ep["cogs"] = None
     # no episode key, no episode: dropped before the duplicate test, which
     # would otherwise read every null-keyed hour as a duplicate of the rest
     null_key, null_by_col = null_key_rows(df)
     df = df[~null_key]
-    null_counter, null_detail = null_counter_windows(df)
-    df = df[~null_counter]
+    # a null counter or quantity sits in a window the key can place: the
+    # WHOLE window drops (rule 15), read once for both defects
+    null_counter = df.hours_remaining.isna()
+    null_qty = ~readable[df.index]
+    null_win, null_detail = defective_windows(df, null_counter | null_qty)
+    windows, _ = source_windows(df)
+    counter_rows = int(windows.isin(set(windows[null_counter])).sum())
+    qty_rows = int(windows.isin(set(windows[null_qty])).sum())
+    df = df[~null_win]
+    for col in QUANTITY_COLS:
+        df[col] = df[col].astype("int64")
     step(df, "null_key_rows_dropped", {
-        "rows_dropped": int(null_key.sum() + null_counter.sum()),
+        "rows_dropped": int(null_key.sum() + null_win.sum()),
         "nulls_by_column": null_by_col,
-        "null_counter_rows": int(null_counter.sum()),
-        "null_counter_windows_dropped": int(null_detail["windows"]),
+        "null_counter_rows": counter_rows,
+        "null_counter_windows_dropped": int(windows[null_counter].nunique()),
+        "null_quantity_rows": qty_rows,
+        "null_quantity_windows_dropped": int(windows[null_qty].nunique()),
+        "null_windows_dropped": int(null_detail["windows"]),
         "null_counter_gap_fragments_kept": int(null_detail["gap_fragments_kept"]),
         "note": ("a row with no sku_id, fc, date or hour belongs to no "
                  "episode; kept, it collapsed into one NaN episode id "
                  "(INTEGRITY: drop, rule 14; row-scoped by construction -- "
                  "there is no episode to scope it to). A null window "
-                 "counter drops the whole clock-contiguous run it sits in: "
-                 "kept, it opened a one-row episode that read DP-eligible; "
-                 "dropped alone, it left a fragment opening mid-window.")})
+                 "counter, or a null starting/ending inventory or "
+                 "units_sold, drops the whole source window it sits in: "
+                 "kept, a null counter opened a one-row episode that read "
+                 "DP-eligible; dropped alone, it left a fragment opening "
+                 "mid-window.")})
     # Two states for one sku x fc x hour is unresolvable -- keep neither;
-    # left in, they also collide two runs into one episode id.
+    # left in, they also collide two runs into one episode id. The WHOLE
+    # window goes (rule 15): with the duplicate on the window's first
+    # hour, a row-scoped drop left a fragment opening one hour late that
+    # read as a real entry (its clock and counter agree from there on)
     dup = df.duplicated(subset=list(EPISODE_KEY), keep=False)
-    df = df[~dup]
+    dup_win, dup_detail = defective_windows(df, dup)
+    df = df[~dup_win]
     df["episode_id"] = assign_episode_ids(df)
     # the up-steps the ids were read on, by what the previous hour did
     # (EPISODE_RULE's restock clause): reported with the episode universe
     counter_steps = counter_step_detail(df)
     per_ep["cogs"] = episode_cogs(df)
     prev_ids["ids"] = set(df.episode_id.unique())
-    step(df, "duplicate_hour_rows_dropped", gate=True)
+    step(df, "duplicate_hour_rows_dropped", {
+        "duplicate_hour_rows": int(dup.sum()),
+        "rows_dropped": int(dup_win.sum()),
+        "windows_dropped": int(dup_detail["windows"]),
+        "note": ("both copies of a repeated (sku, fc, date, hour) and the "
+                 "whole source window they sit in (rule 15): a copy on the "
+                 "window's first hour would otherwise leave a fragment "
+                 "opening mid-window that reads as an entry row.")}, gate=True)
 
     # Feed-gap fragments are not episodes. Runs FIRST: everything downstream
     # assumes an episode_id is a whole window.
@@ -483,6 +563,16 @@ def load_and_filter(path, cfg=None, examples=None, examples_per_step=3):
     d, economic = tag_dp_eligibility(
         d, cfg, flow=flow0.loc[pd.unique(d.episode_id)],
         per_episode_cogs=per_ep["cogs"])
+    # THE EPISODE IDENTITY, asserted on the output: every break was dropped
+    # at episode_universe, so the two sides are provably equal here and a
+    # violation is a bug in common.episodes.episode_flow -- the run stops
+    # with the count rather than writing `holds: False` into the manifest
+    identity = economic["flow_identity"]
+    assert identity["holds"], (
+        f"the episode identity opening + restocked == sold + scrap fails on "
+        f"{identity['violations']} episode(s) after the continuity drop -- a "
+        "bug in common.episodes.episode_flow, not a data defect; e.g. "
+        f"{identity['violating_episodes']}")
 
     # THE TWO POPULATION GATES GET A ROW EACH: they drop NOTHING, and they
     # are exactly where the consumers diverge (design.md 5.2).
@@ -603,6 +693,10 @@ DP_INELIGIBLE = (
      "the DP horizon and extend_to_window read the counter"),
     ("window_too_long",
      "hours_remaining above data.max_window_hours (extend_to_window raises)"),
+    ("opens_empty",
+     "the first row opened with NOTHING on the shelf (the feed resumed after "
+     "a close -- counter_up_steps.closed_then_resumed): the DP cannot price "
+     "an empty shelf, and the entry hour is not a priced hour of anything"),
     ("outcome_unknown",
      "the episode never closed inside this data (no write-off sentinel). "
      "Gates `eligible` too: an unfinished episode is not a complete "
@@ -685,6 +779,7 @@ def tag_dp_eligibility(d, cfg, flow=None, per_episode_cogs=None):
         "non_priceable": d.cost >= d.original_price,
         "negative_window": d.hours_remaining < 0,
         "window_too_long": d.hours_remaining > cap,
+        "opens_empty": d.episode_id.map(flow.opening).eq(0),
         "outcome_unknown": ~d.outcome_known,
         "final_hour_restock": ~d.final_hour_clean,
     }
@@ -760,15 +855,19 @@ def tag_dp_eligibility(d, cfg, flow=None, per_episode_cogs=None):
     detail["edge_truncated"] = edge_detail
 
     # THE EPISODE IDENTITY, checked not assumed: provable given continuity,
-    # so a violation is a bug in episode_flow that would move every IL figure.
+    # so a violation is a bug in episode_flow that would move every IL
+    # figure. Recorded here (a bare frame may be discontinuous); the chain
+    # ASSERTS it on its output (load_and_filter), where continuity holds
     violations = episodes.flow_identity_violations(d, flow=flow)
     detail["flow_identity"] = {
         "rule": "opening + restocked == sold + shrink + leftover_at_last_hour",
         "episodes_checked": int(d.episode_id.nunique()),
         "violations": int(len(violations)),
+        "violating_episodes": [str(e) for e in violations.index[:5]],
         "holds": not len(violations),
         "note": ("Guaranteed by chain continuity: a violation means the "
-                 "supply arithmetic is broken, not the source."),
+                 "supply arithmetic is broken, not the source. The chain "
+                 "asserts it on its output."),
     }
 
     # Shrink/restock pairs are NOT netted; both counted in full, adjacency

@@ -26,21 +26,53 @@ def decision_day(d):
     return str(d.get("date") or pd.Timestamp(d["timestamp"]).date())
 
 
-def _day(value):
+def iso_day(value):
     """One spelling of a trading day, whatever the producer's dtype: a
-    parquet datetime column reads `2026-08-19 00:00:00` under str()."""
-    return pd.Timestamp(value).strftime("%Y-%m-%d")
+    parquet datetime column reads `2026-08-19 00:00:00` under str().
+    Raises on a value that names no day (None, NaT, text that is not a
+    date)."""
+    stamp = pd.Timestamp(value)
+    if pd.isna(stamp):
+        raise ValueError(f"not a day: {value!r}")
+    return stamp.strftime("%Y-%m-%d")
 
 
-def _ident(v):
-    """One spelling of an identifier column: pandas reads an integer column
-    as float once it holds a NaN, so the feed's 7.0 must key the decision's
-    "7". A NaN or an unparseable value raises -- the caller counts the row."""
+def ident(v):
+    """One spelling of an identifier: pandas reads an integer column as
+    float once it holds a NaN, so the feed's 7.0 must key the decision's
+    "7" -- and a JSONL request's "7" must key an int history's 7. A NaN or
+    an unparseable value raises -- the caller counts the row. The ONE
+    spelling: the hour key, the price request and the feature service's
+    history all read ids through it."""
     if isinstance(v, (float, np.floating)):
         if not np.isfinite(v) or v != int(v):
             raise ValueError(f"not an identifier: {v!r}")
         return str(int(v))
+    if v is None or isinstance(v, (bool, np.bool_)):
+        raise ValueError(f"not an identifier: {v!r}")
     return str(v)
+
+
+def ident_series(s):
+    """`ident` over a whole column, vectorised: the history's id columns
+    are read once per batch (16M rows through a Python call per row was
+    the morning). A NaN reads as None (a row that names no item can never
+    be a feature for any request); a fractional value raises like `ident`."""
+    s = pd.Series(s)
+    if pd.api.types.is_bool_dtype(s):
+        raise ValueError("not an identifier column: bool")
+    if pd.api.types.is_numeric_dtype(s):
+        x = s.astype(float)
+        finite = np.isfinite(x)
+        if not (x[finite] == np.floor(x[finite])).all():
+            raise ValueError("not an identifier column: fractional values")
+        out = pd.Series(None, index=s.index, dtype=object)
+        out[finite] = x[finite].astype("int64").astype(str)
+        return out
+    out = pd.Series(None, index=s.index, dtype=object)
+    present = s.notna()
+    out[present] = s[present].astype(str)
+    return out
 
 
 def hour_key(sku, fc, date, hour):
@@ -51,7 +83,20 @@ def hour_key(sku, fc, date, hour):
     h = float(hour)
     if not np.isfinite(h) or h != int(h):
         raise ValueError(f"not an hour: {hour!r}")
-    return (_ident(sku), _ident(fc), _day(date), int(h))
+    return (ident(sku), ident(fc), iso_day(date), int(h))
+
+
+def colliding_keys(keys):
+    """The keys claimed MORE THAN ONCE in `keys` -- the one rule for "two
+    states for one hour": two requests in a batch, two decisions in the
+    store, two feed rows for one hour. None of the claimants is preferable,
+    so every caller matches none of them and counts all of them."""
+    seen, out = set(), set()
+    for k in keys:
+        if k in seen:
+            out.add(k)
+        seen.add(k)
+    return out
 
 
 def outcome_id_of(key):
@@ -113,7 +158,8 @@ def learnable_with_stock(decisions, outcomes, pairs=None):
     return [(d, o) for d, o in pairs if is_learnable(o) and has_stock(o)]
 
 
-def quality_counts(decisions, outcomes, cfg, duplicate_counts=None, pairs=None):
+def quality_counts(decisions, outcomes, cfg, duplicate_counts=None, pairs=None,
+                   completeness_counts=None):
     """The event-quality counts the update gate and the monitor's stop
     condition both compare, over the trailing
     `monitoring.stop_conditions.event_quality_window_days` TRADING days
@@ -129,7 +175,20 @@ def quality_counts(decisions, outcomes, cfg, duplicate_counts=None, pairs=None):
     the store can key, and a foreign producer's re-appended line is
     re-counted on every load until it is removed from the JSONL. The
     asymmetry is deliberate: a duplicate is a broken producer, not an
-    incident that ages out. `pairs` as in learnable_with_stock."""
+    incident that ages out. `pairs` as in learnable_with_stock.
+
+    The DECISION side of completeness, windowed the same way:
+    `decisions_colliding_on_hour` -- decisions sharing one hour key
+    (colliding_keys; ingest matches none of them, so every one is a gap);
+    `decisions_without_outcome` -- decisions on an ANSWERED day (a day
+    the feed has produced at least one outcome for, through
+    `decisions_answered_through`) that no outcome names, over
+    `decisions_on_answered_days`. Days after the last answered one are
+    pending, not gaps -- today's decisions are ingested tomorrow morning.
+    `completeness_counts` is the store's all-time record of what it
+    refused: `outcomes_per_decision_over_one` (a second outcome for one
+    decision) and `missing_stockout_field`; a caller without a store
+    (update's gate) leaves them 0."""
     window = int(cfg["monitoring"]["stop_conditions"]["event_quality_window_days"])
     if pairs is None:
         pairs = match_pairs(decisions, outcomes)
@@ -143,7 +202,9 @@ def quality_counts(decisions, outcomes, cfg, duplicate_counts=None, pairs=None):
         return start is None or day is None or day >= start
 
     compared = mismatches = reported = 0
+    answered = set()
     for d, o in pairs:
+        answered.add(decision_day(d))
         if not in_window(decision_day(d)):
             continue
         # a push engineering REPORTED as failed is not a silent mismatch:
@@ -158,7 +219,28 @@ def quality_counts(decisions, outcomes, cfg, duplicate_counts=None, pairs=None):
     unmatched = sum(
         1 for o in outcomes if o.get("decision_id") not in known
         and in_window(str(o.get("finalized_at") or "")[:10] or None))
+
+    # the decision side: keyed once, in the window; an unkeyable decision
+    # (a foreign line naming no hour) can neither collide nor be answered
+    answered_through = max(answered) if answered else None
+    keyed = []
+    for d in decisions:
+        day = decision_day(d)
+        if not in_window(day):
+            continue
+        try:
+            keyed.append((d, day, hour_key(d.get("sku_id"), d.get("fc"), day,
+                                           d.get("hour_of_day"))))
+        except (TypeError, ValueError):
+            continue
+    collided = colliding_keys(k for _, _, k in keyed)
+    colliding = sum(1 for _, _, k in keyed if k in collided)
+    with_outcome = {d["decision_id"] for d, _ in pairs}
+    on_answered = [d for d, day, _ in keyed
+                   if answered_through is not None and day <= answered_through]
+    without = sum(1 for d in on_answered if d["decision_id"] not in with_outcome)
     dup = duplicate_counts or {}
+    comp = completeness_counts or {}
     return {
         "event_quality_window_days": window,
         "event_quality_window_start": start,
@@ -171,6 +253,14 @@ def quality_counts(decisions, outcomes, cfg, duplicate_counts=None, pairs=None):
         # all-time, from the store (see above)
         "duplicate_decision_count": int(dup.get("decision", 0)),
         "duplicate_outcome_count": int(dup.get("outcome", 0)),
+        # the decision side of completeness (windowed; see above)
+        "decisions_colliding_on_hour": colliding,
+        "decisions_answered_through": answered_through,
+        "decisions_on_answered_days": len(on_answered),
+        "decisions_without_outcome": without,
+        # all-time, from the store: refused on emit or skipped on load
+        "outcomes_per_decision_over_one": int(comp.get("outcomes_per_decision_over_one", 0)),
+        "missing_stockout_field": int(comp.get("missing_stockout_field", 0)),
     }
 
 

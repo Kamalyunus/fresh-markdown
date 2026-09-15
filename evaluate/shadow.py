@@ -8,7 +8,6 @@ the report says so. Exit gate: event completeness and ZERO cost-floor
 violations."""
 
 import argparse
-import hashlib
 import os
 
 import numpy as np
@@ -18,7 +17,7 @@ from common.config import load_config, deff_from_episodes, ConfigError
 from common import episodes
 from common import metrics
 from common.io import read_json, write_json
-from common.parallel import map_episodes
+from common.parallel import keyed_rng, map_episodes
 from common.provenance import config_fingerprint, file_digest
 from common.episodes import adjustment_reason
 from evaluate.backtest import predict_frame, _coverage_preserved
@@ -30,7 +29,8 @@ from engine import explore
 from engine.demand import expected_min_demand_inventory_vec
 from engine.decide import decide, StateRejected
 from engine.posterior import PosteriorStore
-from engine.state import BufferStore
+from engine.state import BufferStore, FrozenCells
+from daily.monitor import evaluate_guardrail
 
 SHADOW_STATUS = "shadow_not_applied"
 
@@ -176,7 +176,10 @@ def _mean_daily_budget(days, il_by_day, widest_std, cfg):
     DECISION days, never the pre-window seed days (the first of those has
     no trailing history and would read as a zero budget) -- and only the
     days the controller reads (explore.budget_held is None); a held day
-    has no budget in force. None when every day is held."""
+    has no budget in force. None when every day is held: NO BUDGET BASE,
+    which run_shadow reports as its verdict (a window whose trailing IL
+    seed never spans budget_il_window_days -- a thin extract, a short
+    explicit range) rather than grading spend against nothing."""
     live = []
     for day in days:
         budget = explore.budget_today(
@@ -290,24 +293,22 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
         float(tau0), [days[i] for i in order],
         lambda day, t: ledger.spend_by_day(t)[index[day]],
         il_by_day, widest_std, cfg)
-    rows, first_within, suspend_days, streak, prev = [], None, 0, 0, None
+    rows, first_within, suspend_days, readings = [], None, 0, {}
     for rank, r in enumerate(walked):
         # a held day (no base yet, or one shorter than its window) is no
         # reading, exactly as the monitor's overspend series takes none
         over = (r["spend"] / r["budget"]) if r["budget"] > 0 and not r.get("held") else None
-        # the monitor's rule (daily.monitor.evaluate_guardrail): over the
-        # multiple on persistence_days CONSECUTIVE CALENDAR days -- a
-        # calendar day with no decision breaks the streak, as does a
-        # zero-budget day (no reading, not an overspend)
-        day = pd.Timestamp(r["day"])
-        if not (over is not None and over > stop_at):
-            streak = 0
-        elif prev is not None and (day - prev).days == 1:
-            streak += 1
+        # the monitor's own rule on the series walked so far
+        # (daily.monitor.evaluate_guardrail, never a copy of it): over the
+        # multiple on persistence_days CONSECUTIVE CALENDAR days ending
+        # today -- a day with no reading is absent from the series and
+        # breaks the streak there exactly as it does live
+        if over is not None:
+            readings[r["day"]] = over
+            verdict = evaluate_guardrail({"by_day": readings}, stop_at, persist)
+            streak, fired = verdict["consecutive_days_over"], verdict["fired"]
         else:
-            streak = 1
-        prev = day
-        fired = streak >= persist
+            streak, fired = 0, False
         suspend_days += int(fired)
         if over is not None and over <= 1.0 and first_within is None:
             first_within = rank + 1
@@ -351,42 +352,13 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
     }
 
 
-# the worker-side event buffer is engine.state's (Lane B and the pilot
-# simulator share it); the old name stays for this module's callers
-_BufferStore = BufferStore
-
-
-class _FrozenCells:
-    """Read-only posterior cells, pre-resolved in the parent so the cell map
-    (including the fallback to the global cell) is applied exactly once, by
-    the real store. Nothing updates the posterior during a shadow run."""
-
-    def __init__(self, by_category):
-        self._by_category = by_category
-
-    def get(self, category):
-        return self._by_category[str(category)]
-
-    def exploration_suspended(self):
-        # a rehearsal never suspends: the report is what the tau in force
-        # WOULD buy, which a production suspension record must not zero
-        return None
-
-
-def _episode_seed(seed, episode_id):
-    """A generator per episode, seeded from its id: draws are reproducible
-    and independent of visit order, so serial and parallel runs agree."""
-    h = hashlib.blake2b(str(episode_id).encode(), digest_size=8).digest()
-    return np.random.default_rng([int(seed), int.from_bytes(h, "big")])
-
-
 def _shadow_one(ep, ctx):
     """Price one episode's hours. Pure (no store, no shared RNG); returns
     everything the parent folds in. `ep` carries arrays, not a DataFrame."""
     cfg, tau = ctx["cfg"], ctx["tau"]
-    posterior = _FrozenCells(ctx["cells"])
-    store = _BufferStore()
-    rng = _episode_seed(ctx["seed"], ep["episode_id"])
+    posterior = FrozenCells(ctx["cells"])
+    store = BufferStore()
+    rng = keyed_rng(ctx["seed"], ep["episode_id"])
     n = len(ep["hour_of_day"])
 
     out = {k: 0 for k in SCALARS}
@@ -408,17 +380,16 @@ def _shadow_one(ep, ctx):
         if not ep["is_observed"][t]:      # window tail: no outcome to record
             continue
         q = int(ep["starting_inventory"][t])
-        if q <= 0:                        # restock gap: no decision this hour
-            anchor = float(ep["total_discount"][t])
-            continue
-
         row_day = str(ep["date"][t])
         legacy_d = float(ep["total_discount"][t])
         sold = int(ep["units_sold"][t])
         ending = int(ep["ending_inventory"][t])
 
         # legacy IL is unconditioned on decision success: recorded here,
-        # before decide() can reject the state
+        # before decide() can reject the state -- and for a zero-stock hour
+        # too (the restock gap below), or the arrival lands in no row and
+        # metrics.episode_economics cannot settle the episode whose
+        # decisions the ledger already holds
         out["hours"].append({
             "episode_id": ep["episode_id"], "date": row_day,
             "hour_of_day": int(ep["hour_of_day"][t]),
@@ -427,11 +398,14 @@ def _shadow_one(ep, ctx):
             "original_price": float(ep["original_price"][t]),
             "offered_price": float(ep["original_price"][t]) * (1 - legacy_d),
             "cost": float(ep["cost"][t])})
+        if q <= 0:                        # restock gap: no decision this hour
+            anchor = legacy_d
+            continue
 
         # the horizon production plans over at this hour is the ROW's own
         # counter (this hour included) -- a restock-extended window's early
         # hours must not see the extension the episode turned out to have
-        horizon = int(ep["hours_remaining"][t]) + 1
+        horizon = episodes.planning_horizon(ep["hours_remaining"][t])
         state = {
             "episode_id": ep["episode_id"], "sku_id": int(ep["sku_id"][t]),
             "fc": ep["fc"][t], "category": ep["category"][t],
@@ -712,21 +686,29 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
                     if ledger.days else
                     explore.budget_today(markdown_il / max(n_days, 1),
                                          widest_std, cfg))
+    # None: every decision day is HELD (explore.budget_held) -- no budget
+    # base, so nothing below is graded against one; the trace still walks
+    # (tau holds every day, as production's would)
+    no_base = daily_budget is None
     implied_daily_spend = would_be_cost / n_days
-    over = (implied_daily_spend / daily_budget) if daily_budget > 0 else None
+    over = (implied_daily_spend / daily_budget) if daily_budget else None
     stop_at = cfg["monitoring"]["stop_conditions"]["exploration_cost_vs_budget"]
     ec = cfg["exploration"]
     share, mult = float(ec["budget_share_of_il"]), float(ec["delta_min_bias_multiple"])
+    trace = _controller_trace(
+        ledger, il_by_day, tau, widest_std, cfg, window_days=n_days,
+        sampled_episodes=n_ep, population_episodes=n_population)
 
     # re-derive tau on THIS path: same bisection as the replay, but on the
     # decisions that actually happen (the replay solved on entry only)
-    tau_rec = ledger.solve_tau(daily_budget, n_days=n_days)
+    tau_rec = ledger.solve_tau(daily_budget, n_days=n_days) if daily_budget else None
     budget_check = {
         "basis": "shadow's own anchored decision path, same episodes and days "
                  "on both sides",
         "days": int(n_days),
         "implied_daily_spend": round(implied_daily_spend, 1),
-        "daily_budget": round(daily_budget, 1),
+        "daily_budget": round(daily_budget, 1) if daily_budget is not None else None,
+        "decision_days_held": sum(1 for r in trace["by_day"] if r["held"]),
         "trailing_basis_seeded_days": len(prior_il_by_day or {}),
         # the seed is population-scale and everything it is compared against
         # is sample-scale; this is the factor that reconciles them
@@ -756,6 +738,11 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
             if n_ep else None,
         "q_spread_distribution": ledger.distribution(),
         "verdict": (
+            "NO BUDGET BASE -- every decision day is held (explore.budget_held: "
+            "the trailing IL base never spans budget_il_window_days); "
+            "production's controller would read no budget on these days either, "
+            "so spend is not graded against one -- give the run a longer "
+            "pre-window seed" if no_base else
             "NO IL -- cannot project a budget" if over is None else
             f"WOULD SUSPEND -- {over:.2f}x budget, above the {stop_at}x stop "
             "condition; re-derive tau on this basis before the pilot"
@@ -767,14 +754,13 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
                  "over the window: a cross-check on the tau in force, not a "
                  "correction"),
     }
-    budget_check["tau_controller_trace"] = _controller_trace(
-        ledger, il_by_day, tau, widest_std, cfg, window_days=n_days,
-        sampled_episodes=n_ep, population_episodes=n_population)
+    budget_check["tau_controller_trace"] = trace
     # what a smaller budget or a deeper floor would buy, from this ledger
     budget_sweep = ledger.sweep(
         daily_budget, n_days, n_dec, share, mult,
         shares=sorted({round(share * f, 6) for f in (0.25, 0.5, 0.75, 1.0, 1.5)}),
-        multiples=sorted({mult, round(mult * 1.5, 4), round(mult * 2, 4)}))
+        multiples=sorted({mult, round(mult * 1.5, 4), round(mult * 2, 4)})
+    ) if not no_base else {"note": "no budget base -- nothing to sweep against"}
 
     per_episode = eff_information / n_ep if n_ep else 0.0
     step = cfg["learning"]["max_mean_step"]
@@ -997,7 +983,9 @@ def _summary(report):
          f"config paste in force -- {td['note']}" if td else None),
         ("exploration budget",
          f"spend {bc['implied_daily_spend']:,.0f}/day vs budget "
-         f"{bc['daily_budget']:,.0f}/day over {bc['days']} days"),
+         + (f"{bc['daily_budget']:,.0f}/day" if bc["daily_budget"] is not None
+            else "none (every decision day held)")
+         + f" over {bc['days']} days"),
         ("", bc["verdict"]),
         ("tau",
          f"in force {bc['tau']:,.2f} -> recommended {bc['tau_recommended']:,.2f} "

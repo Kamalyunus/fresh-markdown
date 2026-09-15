@@ -23,10 +23,16 @@ from common.io import read_json
 from common.parallel import map_episodes
 from common.provenance import config_fingerprint
 from engine import dp as dp_mod
+from engine import explore
 from engine.demand import expected_min_demand_inventory, mu_at
 from engine.posterior import launch_belief
 
 P0 = 10_000.0          # list price; every currency figure scales with it
+# the page's two exploration sliders: the tau the affordable set is read
+# at (currency) and the delta_min bias scale substituted for the config's
+# map (0 = the config's own); every combination is solved HERE
+TAUS = [0, 500, 1000, 2000, 4000, 8000]
+DMIN_SCALES = [0, 0.05, 0.1, 0.15, 0.3]
 GRID = {
     "q": [1, 2, 4, 8, 12, 20],                 # units on the shelf
     "h": [2, 4, 8, 12, 24],                    # hours left in the window
@@ -38,14 +44,18 @@ WORLD = {"as_forecast": 1.0, "half": 0.5, "double": 2.0}
 
 
 def beliefs(cfg):
-    """Cold start (the prior on disk, or the design default) and a learned
-    posterior: the same shelf under a wide belief and a tighter, steeper one."""
+    """Cold start (the prior on disk) and a learned posterior: the same
+    shelf under a wide belief and a tighter, steeper one. No prior on disk
+    is a refusal, never a made-up elasticity labelled as the launch
+    belief (the deck's every figure claims to be the real solver's)."""
     prior = read_json(cfg["posterior"]["prior"]["path"]) or {}
     per = prior.get("per_category") or {}
+    if not per:
+        raise SystemExit(f"{cfg['posterior']['prior']['path']} carries no "
+                         "per_category prior -- run fit.estimate_prior first")
     # the belief the system LAUNCHES at (posterior.launch_belief), exactly --
     # a steeper prior shows as it is, not clamped to a display range
-    cold = (float(np.mean([launch_belief(v["mean"], v["std"], cfg) for v in per.values()]))
-            if per else -1.0)
+    cold = float(np.mean([launch_belief(v["mean"], v["std"], cfg) for v in per.values()]))
     # a learned belief: one cap-sized update (learning.max_mean_step)
     # steeper than launch, inside the posterior's own grid
     learned = max(cold - float(cfg["learning"]["max_mean_step"]),
@@ -113,6 +123,34 @@ def capped(schedule, d_max):
     return [min(float(d), float(d_max)) for d in schedule]
 
 
+def exploration_table(res, cfg, eps, d_ref):
+    """What the page's exploration table and curve show for one solved
+    state, by the engine's own definitions -- `explore.delta_min`,
+    `admissible_costs`, `affordable_set` -- so the browser reads and never
+    re-derives: per tier its log move from the reference and its cost if
+    forced; per bias scale the floor and the admissible tiers; per (scale,
+    tau) the affordable set. Scale 0 is the config's own map (`_default`,
+    the deck's one category); a positive scale replaces it."""
+    star = res.optimal_index
+    out = {"log_move": {int(j): round(explore.log_move(d_ref, float(res.tiers[j])), 4)
+                        for j in res.q_by_tier},
+           "cost": {int(j): round(float(res.q_by_tier[star] - v), 1)
+                    for j, v in res.q_by_tier.items() if j != star},
+           "by_dmin_scale": {}}
+    for scale in DMIN_SCALES:
+        c = cfg if scale == 0 else {
+            **cfg, "exploration": {**cfg["exploration"], "delta_min_log_bias": scale}}
+        dmin = explore.delta_min(c, eps, "_default")
+        costs = explore.admissible_costs(res, dmin)
+        out["by_dmin_scale"][str(scale)] = {
+            "delta_min": round(float(dmin), 4),
+            "admissible": sorted(int(j) for j in costs),
+            "affordable_by_tau": {
+                str(tau): sorted(int(j) for j in explore.affordable_set(res, tau, dmin, costs)[0])
+                for tau in TAUS}}
+    return out
+
+
 def one_state(item, cfg):
     """Everything the page needs for one (gamma, mu, belief, q, h) cell."""
     gamma, mu, eps_name, eps, q, h, d_ref, r = item
@@ -128,6 +166,7 @@ def one_state(item, cfg):
         "q_by_tier": q_by,                 # Q = -expected IL, allowed entry arms only
         "star": int(star),
         "d_ref": d_ref,
+        "explore": exploration_table(res, cfg, eps, d_ref),
         "paths": {
             "dp": simulate(cache, cfg, d_ref, r, gamma, mu, eps, q, h),
             "dp_world_half": simulate(cache, cfg, d_ref, r, gamma, mu, eps, q, h, world=0.5),
@@ -229,7 +268,7 @@ def build(cfg, grid, workers=None):
     ec, sc = cfg["exploration"], cfg["monitoring"]["stop_conditions"]
     return {
         "grid": grid, "beliefs": bel, "d_ref": d_ref, "r": r, "P0": P0,
-        "world": WORLD,
+        "world": WORLD, "taus": TAUS, "dmin_scales": DMIN_SCALES,
         "config": {
             "tier_step": cfg["pricing"]["tier_step"],
             "entry_offsets": cfg["pricing"]["entry_offsets"],
@@ -297,9 +336,9 @@ const pct=d=>d==null?'—':(100*d).toFixed(1)+'%';
 let cur={sc:D.scenarios[0].id,q:20,h:24,gamma:0.5,mu:1,belief:'cold',world:'as_forecast',tau:0,dmin:0};
 function nearest(arr,v){return arr.reduce((a,b)=>Math.abs(b-v)<Math.abs(a-v)?b:a)}
 function state(){return idx[[cur.gamma,cur.mu,cur.belief,cur.q,cur.h].join('|')]}
-function logMove(dref,d){return Math.abs(Math.log((1-d)/(1-dref)))}
-function deltaMin(){const b=D.config.delta_min_log_bias;let bias=cur.dmin;if(bias===0&&b){bias=typeof b==='number'?b:(b._default||0)}
- const eps=D.beliefs[cur.belief];return bias?D.config.delta_min_bias_multiple*bias/Math.max(Math.abs(eps),Math.abs(D.config.epsilon_max)):0}
+// the exploration reading for the sliders in force -- delta_min, the admissible tiers and the
+// affordable set were solved in Python by engine.explore; nothing here re-derives them
+function ex(st){const e=st.explore.by_dmin_scale[String(cur.dmin)];return {dmin:e.delta_min,adm:new Set(e.admissible),aff:new Set(e.affordable_by_tau[String(cur.tau)])}}
 function nav(){const el=document.getElementById('nav');el.innerHTML='<small>how it decides</small>'+D.scenarios.slice(0,6).map(b).join('')+'<small>compared, stressed, learning</small>'+D.scenarios.slice(6,11).map(b).join('')+'<small>how it protects itself</small>'+D.scenarios.slice(11).map(b).join('');
  function b(s){return `<button class="${s.id===cur.sc?'on':''}" onclick="pick('${s.id}')">${s.title}</button>`}}
 function pick(id){const s=D.scenarios.find(x=>x.id===id);cur.sc=id;cur.tau=0;cur.dmin=0;Object.assign(cur,s.state);cur.world='as_forecast';render()}
@@ -307,10 +346,10 @@ function slider(label,key,arr,f){const v=cur[key];return `<div class="sl"><span>
 function curve(st){const W=520,H=230,L=46,B=34;const tiers=st.tiers;const q=st.q_by_tier;const vals=Object.values(q).map(v=>-v);
  const ils=tiers.map((d,j)=>q[j]==null?null:-q[j]);const ymax=Math.max(...vals)*1.15||1,ymin=Math.min(0,...vals);
  const x=j=>L+(W-L-10)*j/(tiers.length-1),y=v=>H-B-(H-B-14)*(v-ymin)/(ymax-ymin||1);
- const dmin=deltaMin();const eps=D.beliefs[cur.belief];const star=st.star;const costs={};for(const j in q)costs[j]=q[star]-q[j];
+ const e=ex(st);const star=st.star;
  let s=`<svg viewBox="0 0 ${W} ${H}"><line x1="${L}" y1="${H-B}" x2="${W-10}" y2="${H-B}" stroke="#bbb"/>`;
  [0,.5,1].forEach(t=>{const v=ymin+t*(ymax-ymin);s+=`<text x="${L-6}" y="${y(v)+4}" font-size="10" text-anchor="end" fill="#888">${fmt(v)}</text>`});
- tiers.forEach((d,j)=>{const allowed=q[j]!=null;const below=d>st.d_max+1e-9;const inad=allowed&&j!==star&&dmin>0&&logMove(st.d_ref,d)<dmin;const aff=allowed&&j!==star&&!inad&&costs[j]<=cur.tau;
+ tiers.forEach((d,j)=>{const allowed=q[j]!=null;const below=d>st.d_max+1e-9;const inad=allowed&&j!==star&&!e.adm.has(j);const aff=e.aff.has(j);
   if(below)s+=`<rect x="${x(j)-5}" y="14" width="10" height="${H-B-14}" fill="#eee"/>`;
   if(allowed){s+=`<circle cx="${x(j)}" cy="${y(-q[j])}" r="${j===star?7:4.5}" fill="${j===star?'#0b6e4f':aff?'#e6a700':inad?'#c9c4b6':'#5b8def'}" stroke="#fff" stroke-width="1.5"/>`}
   else if(!below)s+=`<circle cx="${x(j)}" cy="${H-B-6}" r="2" fill="#bbb"/>`;
@@ -332,15 +371,15 @@ function pathChart(st){const W=520,H=210,L=40,B=28;const key=systemKey();
 function score(st){const key=systemKey();
  const rows=[[key,'system'],['flat_reference','flat at reference'],['legacy_ramp','legacy ramp']];
  return `<table class="score"><tr><th>policy</th><th>sold</th><th>leftover</th><th>scrap cost</th><th>discount cost</th><th>inventory loss</th></tr>`+rows.map(([k,l])=>{const s=st.paths[k].score;return `<tr class="${k===key?'dp':''}"><td>${l}</td><td>${s.sold}</td><td>${s.leftover}</td><td>${fmt(s.scrap_cost)}</td><td>${fmt(s.discount_cost)}</td><td>${fmt(s.il)}</td></tr>`}).join('')+`</table>`}
-function explore(st){const q=st.q_by_tier,star=st.star,dmin=deltaMin();const rows=Object.keys(q).map(Number).filter(j=>j!==star).map(j=>{const d=st.tiers[j];const cost=q[star]-q[j];const inad=dmin>0&&logMove(st.d_ref,d)<dmin;return {d,cost,inad,aff:!inad&&cost<=cur.tau}});
- const n=rows.filter(r=>r.aff).length;return `<table class="score"><tr><th>alternative</th><th>move from reference (log)</th><th>cost if forced</th><th>status</th></tr>`+rows.map(r=>`<tr><td>${pct(r.d)}</td><td>${logMove(st.d_ref,r.d).toFixed(3)}</td><td>${fmt(r.cost)}</td><td>${r.inad?'excluded: too close to the reference to teach anything':r.aff?'<b style="color:#e6a700">affordable — drawn uniformly</b>':'over budget'}</td></tr>`).join('')+`</table><p style="font-size:13px;color:var(--mute)">${n?`${n} affordable alternative${n>1?'s':''}: one is drawn uniformly at random, and its cost is charged to the day's exploration budget (${(100*D.config.budget_share_of_il).toFixed(0)}% of trailing markdown IL).`:'Nothing affordable at this τ: the system exploits. Zero spend on a priced day raises τ by the clip the next day.'}</p>`}
+function explore(st){const e=ex(st),x=st.explore;const rows=Object.keys(x.cost).map(Number).map(j=>({d:st.tiers[j],move:x.log_move[j],cost:x.cost[j],inad:!e.adm.has(j),aff:e.aff.has(j)}));
+ const n=rows.filter(r=>r.aff).length;return `<table class="score"><tr><th>alternative</th><th>move from reference (log)</th><th>cost if forced</th><th>status</th></tr>`+rows.map(r=>`<tr><td>${pct(r.d)}</td><td>${r.move.toFixed(3)}</td><td>${fmt(r.cost)}</td><td>${r.inad?'excluded: too close to the reference to teach anything (δ_min '+e.dmin.toFixed(3)+')':r.aff?'<b style="color:#e6a700">affordable — drawn uniformly</b>':'over budget'}</td></tr>`).join('')+`</table><p style="font-size:13px;color:var(--mute)">${n?`${n} affordable alternative${n>1?'s':''}: one is drawn uniformly at random, and its cost is charged to the day's exploration budget (${(100*D.config.budget_share_of_il).toFixed(0)}% of trailing markdown IL).`:'Nothing affordable at this τ: the system exploits. Zero spend on a priced day raises τ by the clip the next day.'}</p>`}
 function refuses(){return `<ul class="never">
 <li><b>Refused, not priced best-effort.</b> A state with no cost, a cost above list, no stock, or a forecast path that disagrees with the hours left raises <code>StateRejected</code>. The caller holds the current price and alerts on the rate.</li>
 <li><b>Never below cost.</b> The action set is built from tiers that keep price ≥ cost (grey on the curve is not "not chosen" — it does not exist as an option).</li>
 <li><b>Never a higher price within an episode.</b> Under an anchor the action set holds only tiers at or deeper than the price in force; exploration draws from that set.</li>
 <li><b>Stops itself.</b> Every stop needs ${D.config.persistence_days} consecutive days: realised exploration spend over ${D.config.stop_multiple}× the day's budget, or scrap or margin over their threshold (which sits just above the measured noise floor, so one day is noise — and the τ controller already halves τ the morning after an overspend). When one fires, exploration suspends until a human resumes it; exploitation pricing continues. τ moves at most ${(100*(D.config.tau_adjust_clip[1]-1)).toFixed(0)}% up or ${(100*(1-D.config.tau_adjust_clip[0])).toFixed(0)}% down per day.</li></ul>`}
 function render(){nav();const sc=D.scenarios.find(s=>s.id===cur.sc);const st=state();const m=document.getElementById('main');
- const taus=[0,500,1000,2000,4000,8000];if(!taus.includes(cur.tau))cur.tau=0;
+ const taus=D.taus,scales=D.dmin_scales;if(!taus.includes(cur.tau))cur.tau=0;if(!scales.includes(cur.dmin))cur.dmin=0;
  m.innerHTML=`<h2>${sc.title}<span class="pill">${D.beliefs[cur.belief]<0?'ε = '+D.beliefs[cur.belief]:''}</span></h2><p class="ask">${sc.ask}</p>
  <div class="grid">
  <div class="card"><h3>The shelf</h3>
@@ -348,7 +387,7 @@ function render(){nav();const sc=D.scenarios.find(s=>s.id===cur.sc);const st=sta
   <div class="sl"><span>elasticity belief</span><span class="seg"><button class="${cur.belief==='cold'?'on':''}" onclick="cur.belief='cold';render()">cold start (day one)</button><button class="${cur.belief==='learned'?'on':''}" onclick="cur.belief='learned';render()">learned</button></span><b>ε ${D.beliefs[cur.belief]}</b></div>
   ${cur.sc==='shock'?`<div class="sl"><span>actual demand vs forecast</span><span class="seg">${Object.keys(D.world).map(k=>`<button class="${cur.world===k?'on':''}" onclick="cur.world='${k}';render()">${k.replace('_',' ')}</button>`).join('')}</span><b>×${D.world[cur.world]}</b></div>`:''}
   <div class="sl"><span>exploration budget τ</span><input type="range" min="0" max="${taus.length-1}" value="${taus.indexOf(cur.tau)}" oninput="cur.tau=[${taus}][this.value];render()"><b>${fmt(cur.tau)} won</b></div>
-  <div class="sl"><span>δ_min bias scale</span><input type="range" min="0" max="4" value="${[0,0.05,0.1,0.15,0.3].indexOf(cur.dmin)}" oninput="cur.dmin=[0,0.05,0.1,0.15,0.3][this.value];render()"><b>${cur.dmin===0&&D.config.delta_min_log_bias?'config':cur.dmin}</b></div>
+  <div class="sl"><span>δ_min bias scale</span><input type="range" min="0" max="${scales.length-1}" value="${scales.indexOf(cur.dmin)}" oninput="cur.dmin=D.dmin_scales[this.value];render()"><b>${cur.dmin===0&&D.config.delta_min_log_bias?'config':cur.dmin}</b></div>
   <p style="font-size:12px;color:var(--mute);margin:8px 0 0">List price ${fmt(D.P0)} won · cost ${fmt(D.P0*cur.gamma)} · reference discount ${pct(D.d_ref)} · dispersion r ${D.r.toFixed(2)}</p></div>
  <div class="card"><h3>The decision curve — this hour</h3>${curve(st)}<p style="font-size:13px;margin:8px 0 0">Chosen: <b>${pct(st.tiers[st.star])}</b> off, expected inventory loss <b>${fmt(-st.q_by_tier[st.star])}</b> won over the remaining ${cur.h} hours.</p></div>
  <div class="card"><h3>The path — hour by hour, re-solved from the actual shelf</h3>${pathChart(st)}</div>

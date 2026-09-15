@@ -321,6 +321,9 @@ def test_an_invariant_a_block_names_is_not_reported_as_green(cfg, tmp_path):
         return [r for r in status.collect(c, str(tmp_path))["checks"]
                 if r["check"] == "config mirrors reports"][0]
 
+    # a converged calibration artifact of the test's own: the row must not
+    # depend on whatever artifacts/ holds on this machine
+    cfg = _cfg_with(cfg, tmp_path)
     broken = _copy.deepcopy(cfg)
     broken["baseline_model"]["calibration_fit_trailing_weeks"] = 4
     broken["data"]["split"] = dict(broken["data"]["split"],

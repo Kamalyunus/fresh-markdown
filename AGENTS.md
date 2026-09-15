@@ -19,21 +19,19 @@ statement and the incident that created the rule.
 1a. **Changing the elasticity prior invalidates `rho`, `deff` and the level
    factor** — re-run `fit_dispersion` onward and re-paste `rho`. (§5.6)
 1b. **Drive the chain with `python3 -m ops.advance`, never by hand-running
-   the step list** — it calls `ops.bootstrap_loop` (which iterates steps 3b–5b to
-   the fixed point, 8–9 turns on production data), re-runs after a paste
-   only what read it (a W paste turns the loop with `--check-only`; the
-   rest re-derive a report or nothing), and retrains only when the model is
-   absent or `--retrain` is given. Re-running the step list to settle calibration retrains the
-   baseline (rule 1). (§9.2, Appendix A)
+   the step list** — it calls `ops.bootstrap_loop` (which iterates steps 3b–5b
+   to the fixed point), re-runs after a paste only what read it (a W paste
+   turns the loop with `--check-only`; the rest re-derive a report or
+   nothing), and retrains only when the model is absent or `--retrain` is
+   given. Re-running the step list retrains the baseline (rule 1). (§9.2)
 2. **`posterior.epsilon_max` (−0.05) is a sign constraint, never a bound to
    widen** — positive elasticity must remain unrepresentable. (§5.6)
 3. **A boundary solution is not an estimate** — a fit pinned at a search
    bound means the likelihood ran off the support: the prior searches past
    both bounds and rejects a lower-pinned category to the pool
    (`lower_boundary_categories`; widen `epsilon_min`, never `epsilon_max`);
-   `r_lookup.at_bound`, `calibration.pinned_cells` (every level-factor
-   pin, anchor and weekly, incl. a pinned PARENT category) flag the others;
-   `status`'s `boundary solutions` row READS them all. (§5.5, §5.6, §9.3)
+   `r_lookup.at_bound`, `calibration.pinned_cells` (every pin, a PARENT
+   category's too) flag the others; `status` READS them all. (§5.5, §5.6, §9.3)
 4. **The calibration gate window must be DISJOINT from the fit window** —
    read `fidelity.gate_window`, never assume it. (§9.2)
 5. **Level factors are fit on anchor rows only** over
@@ -106,27 +104,41 @@ And the standing prohibitions:
 - Never re-derive logic that has one home. The homes, and what each
   replaced (a second copy of any of these is a review failure):
   - population filter — `fit.prepare_data.population`; window boundaries
-    — `window_starts` (the ids and the null-counter run drop, rule 15)
+    — `window_starts` (`window_signals.counter_ok`; the ids and every
+    defective-window drop, `defective_windows`, rule 15)
   - episode-scoped cuts — `common.episodes.window_slice`,
     `trailing_weeks_window` (both factor-fit schedules), `week_key`,
     `opening_dates` (the episode's date key: folds, drift windows, the
     schedule), `calendar_days` (the one `n_days`); the hour arithmetic —
-    `hour_discrepancy`; COGS at risk — `prepare_data.episode_cogs`
+    `hour_discrepancy`; the planning horizon at a row — `planning_horizon`
+    (replay, shadow, templates, the feed row); COGS at risk —
+    `prepare_data.episode_cogs`
   - outcome reconciliation — `common.episodes.adjustment_reason`
-  - request → state (Lane B and the simulator) — `engine.state.build_states`;
-    the hour key and the outcome id — `events.pairs.hour_key`, `outcome_id_of`
+  - request → state — `engine.state.canonical_request` (one spelling) and
+    `build_states` (Lane B; a later hour of an episode is the entry
+    decision's stored path sliced, `EventStore.episode_paths`); the worker
+    body — `engine.state.price_one`; per-decision seeding —
+    `common.parallel.keyed_rng`; the hour key and the outcome id —
+    `events.pairs.hour_key`, `outcome_id_of`; id spelling — `ident`; two
+    claims on one key — `colliding_keys`; one decision per hour and one
+    outcome per decision — the STORE (`priced_hours`, `completeness_counts`)
   - scrap, IL, margin at episode grain — `common.metrics.episode_economics`
     (+ `settled`, `daily_rates`; `scrap_rate` is scrap over SUPPLY,
     opening + restocked) over `common.episodes.scrap_units`; live events
     enter it through `daily.monitor.event_frame`. The floors, the live
     guardrail, the business metrics and shadow's budget base all read
     this one frame; the floor and the trigger read one deterioration
-    series — `common.guardrail.deterioration_series`
+    series — `common.guardrail.deterioration_series`; when it can first
+    read — `first_reading_close_days` / `stop_ready_close_days` (the
+    monitor's note, the simulator's readiness); the persistence streak —
+    `daily.monitor.evaluate_guardrail` (shadow's trace reads it)
   - decision↔outcome pairing and the trading day —
     `events.pairs.match_pairs` (`learnable=` excludes failed pushes,
     `learnable_with_stock` also the hours with nothing to sell),
     `decision_day`, `price_matches`; the event-quality gates, windowed
-    over `event_quality_window_days` — `quality_counts`, `quality_rates`
+    over `event_quality_window_days` — `quality_counts` (incl. the decision
+    side: `decisions_colliding_on_hour`, `decisions_without_outcome`),
+    `quality_rates`
   - anchor rows — `common.episodes.is_anchor_row`
   - guardrail deviation and verdicts — `common.guardrail.deviation`,
     `verdict_is_blocking`, `verdict_is_insufficient`
@@ -134,23 +146,30 @@ And the standing prohibitions:
     (`affordable_set`, `spread_costs` and the assurance uniformity check
     all read it; `delta_min` is derived there, never a second knob); their
     costs — `admissible_costs`, priced once per decision
-  - the finiteness test — `engine.decide.finite_number`; the NB pmf table
-    — `engine.demand.nb_pmf_table`; the live episode frame —
+  - the finiteness test and the count checks with the horizon bound —
+    `engine.decide.finite_number`, `count_failures` (request and state);
+    the NB pmf table — `engine.demand.nb_pmf_table`; the censored
+    expectation, exact at every q — `expected_min_demand_inventory_vec`;
+    the table width — `dp.table_width`; the live episode frame —
     `daily.monitor.settled_episodes` (built once per monitor run); the
     week the factor schedule reaches (a held week counts) —
     `fit.train_baseline.schedule_reaches` (the `--apply` gate and
-    `advance`'s re-fit trigger)
+    `advance`'s re-fit trigger); the level estimator — `_solve_level_factors`
+    (anchor fit, schedule, shadow's re-fit, the backtest's W sweep)
   - spread accounting — `engine.explore.SpreadLedger`; the tau controller
     walk — `engine.explore.walk_tau` (production and shadow's trace) and
     whether a day's budget is signal — `budget_held` (the controller's
-    hold, the overspend stop's no-reading, shadow's mean budget, §5.8);
-    the week after a data week — `common.episodes.week_after` (the
-    schedule's appended week, advance's re-fit trigger, the simulator);
-    the backtest's forward simulation — `evaluate.backtest._simulate_arm`
-    (+ `_dp_price`)
+    hold, the overspend stop's no-reading, shadow's mean budget, §5.8; a
+    suspended day and a failed push are no reading — `update.suspended_days`,
+    `is_learnable`); the walked-day ledger — `PosteriorStore.tau_day_walked`;
+    the week after a data week — `common.episodes.week_after`; the
+    backtest's forward simulation — `evaluate.backtest._simulate_arm`
+    (+ `_dp_price`); the simulated shop — `evaluate.pilot_sim.PilotSim`
+    (a pricer strategy; `tools.e2e_cycle` drives it)
   - rho — `common.config.intraclass_correlation`; `m` per batch —
     `deff_from_episodes`
-  - JSON in/out — `common.io.read_json` / `write_json` (NaN-safe)
+  - JSON/rows in/out — `common.io.read_json`/`write_json`,
+    `read_rows`/`write_jsonl` (NaN-safe)
   - what an hour was priced with beyond the artifacts —
     `common.provenance.environment` / `environment_drift`; the config digest — `config_fingerprint`
   - the discount-grid epsilon — `engine.dp.TIER_EPS`; own-data prior
@@ -162,19 +181,14 @@ And the standing prohibitions:
 - **A code change ships with its doc change in the same commit** (which
   docs: the last section of this file). Docs that lag the code are how
   the next agent re-derives what already has a home.
-- Quote the sampling caveat with any sampled-run count — a sample's zero is not the window's.
 - `python3 -m pytest tests/` must pass before any push (a couple of minutes; the
   end-to-end module runs the bootstrap chain in subprocesses).
 
 ## Setup
 
-```bash
-pip install -r requirements.txt
-python3 -m pytest tests/
-```
-
-All commands run from the repo root — `config.yaml` paths are relative to
-it; a module run from elsewhere silently reads/writes the wrong artifacts.
+`pip install -r requirements.txt`, then `python3 -m pytest tests/`. All
+commands run from the repo root — `config.yaml` paths are relative to it; a
+module run from elsewhere silently reads/writes the wrong artifacts.
 
 ## Driving the chain — `ops.advance`, not the step list
 
@@ -205,27 +219,22 @@ phase — what runs, which config keys move, and who moves them:
 | shadow | `evaluate.shadow` on the hold-out, every episode; then `tune --apply` | `tau_initial` | the process, from `shadow.tau_initial_derivation`. The forced rate is the budget's: to change it the owner reads `shadow.exploration_budget_sweep` (forced rate, spend, move, `information_rel` per `budget_share_of_il` × `delta_min_bias_multiple`), sets the pair, and shadow re-runs once |
 | owner | STOP | `max_std_shrink`; `max_mean_step` when its re-price EXCEEDS the gate; a stop threshold only when its floor is `BLOCKED`, `TOO TIGHT`, `LIKELY INERT` or `insufficient history`; `posterior.cold_start_shift_std` never stops (it ships 0.5) but is yours — `tune` reports it with the backtest evidence | you, from `thresholds.json` (advance prints floor, verdict, source) |
 | launch | STOP, then `--fit-calibration` + `seal` | `data.launch_date` | you, on launch day |
-| daily | ingest, `update --calibrate-tau`, monitor, assurance, export, status; STOP at `update --apply` | none | you approve each update. A fired stop condition SUSPENDS exploration (the monitor writes it into the posterior state; `decide` stops drawing; exploitation continues) until a human runs `update --resume-exploration` |
+| daily | ingest, `update --calibrate-tau`, monitor, assurance, export, status — these run even while status is red (a fired stop must keep ingesting or its window never clears); STOP at `update --apply` | none | you approve each update. A fired stop condition SUSPENDS exploration (the monitor writes it into the posterior state; `decide` stops drawing; exploitation continues; tau holds) until a human runs `update --resume-exploration` |
 
 Every stop writes `reports/launch_readiness.md` (`--report` regenerates
-it), a failed step included — that stop is journaled with the step's own
-exit message and `advance` exits 1: what ran per phase, every value the process changed with before,
-after, why and source, the config in force, status, and what is still
-waited on — the handover document, assembled from the journal and tune's
+it), a failed step included (journaled with the step's own exit message,
+`advance` exits 1): what ran per phase, every value the process changed
+with before, after, why and source, the config in force, status, and what
+is still waited on — the handover document, from the journal and tune's
 decision log, never from memory. It never retrains unless the model is
 absent or `--retrain` is given; it re-grades a report only when its bundle
 moved or a config key that report READS moved (`tune.stale_keys`, the one
-routing `status`'s `report vintages` line also uses: W turns the loop,
-`delta_min` re-runs shadow, a stop threshold re-derives thresholds, the
-launch belief re-runs the backtest alone, a training input STOPS for
-`--retrain`, judged per key — pasted together, both re-run; a MEASURED
-paste that writes back what a report measured invalidates nothing; a
-bundle-stale shadow is re-run before tune can BLOCK on it); it refuses to run the same step a third time in one
-invocation; and it stops on every SET BY OWNER null with the evidence. Its daily lane walks tau
-(`daily.update --calibrate-tau`, no operator) and stops at
-`daily.update --apply`, which it never runs: learning is gated daily
-and per cell — a fast category updates the day its batch has the evidence.
-Read its stop before doing anything by hand; the sections below explain the steps it runs.
+routing `status`'s `report vintages` line also uses; a MEASURED paste that
+writes back what a report measured invalidates nothing; a bundle-stale
+shadow is re-run before tune can BLOCK on it); it refuses a third run of
+one step per invocation; and it stops on every SET BY OWNER null with the
+evidence. Its daily lane walks tau and stops at `daily.update --apply`,
+which it never runs. Read its stop before doing anything by hand.
 
 ## Running the bootstrap — use `ops.bootstrap_loop`, not the step list
 
@@ -246,8 +255,7 @@ bundle; `status` gates the pilot (RUNBOOK), never the bootstrap.
 
 **Why this is not optional.** Steps 3b–5 are one TURN of a fixed-point
 iteration (the factor solve consumes `r`; `r`, `rho` and the prior are fitted
-against *calibrated* `mu_ref`): one pass leaves artifacts that disagree and
-a NOT CONVERGED check (owner: 8–9 turns on production; fixture 3–4 — rule 19).
+against *calibrated* `mu_ref`); one pass leaves artifacts that disagree.
 Re-running the list restarts at 3 and RETRAINS THE BASELINE (rule 1).
 
 After a **config paste**, settle without retraining:
@@ -257,11 +265,9 @@ python3 -m ops.bootstrap_loop --check-only   # settle on the artifacts on disk, 
 ```
 
 `--max-turns` (default 20) is a runaway guard, not a budget — the STALL test
-stops a loop three turns without a new best. Reading its output: turn one
-has no `r_lookup` (raw-mu basis; early turns move a lot), and the loop's
-`estimate_prior --fast` drops `fold_spread`, which only widens the std
-FLOOR and cannot move the fixed point; the settled artifact gets a FULL
-prior. (§9.2)
+stops a loop three turns without a new best; turn one has no `r_lookup`
+(raw-mu basis) and `--fast` drops `fold_spread` (a std FLOOR, never the
+fixed point); the settled artifact gets a FULL prior. (§9.2)
 
 ### The steps it runs — for debugging ONE step, not for driving the pipeline
 
@@ -281,17 +287,12 @@ step                                          writes
 11. ops.seal                            artifacts/bundle.json
 ```
 
-Daily production loop: `advance --feed` runs it (ingest → `update
---calibrate-tau` → monitor → assurance → export → status) and stops at
-`daily.update --apply`, the operator gate (rule 10); `RUNBOOK.md` is the
-operator's document, Appendix A the step list.
-
 ## Populations
 
 One prepared parquet; `dp_eligible` + `dp_ineligible_reason` (`cost_missing`
-| `non_priceable` | `negative_window` | `window_too_long` | `outcome_unknown`
-| `final_hour_restock`) flag what the solver cannot price — nothing economic
-is dropped (rule 14). Resolve via `prepare_data.population(d, cfg, which)`:
+| `non_priceable` | `negative_window` | `window_too_long` | `opens_empty`
+| `outcome_unknown` | `final_hour_restock`) flag what the solver cannot
+price — nothing economic is dropped (rule 14). Resolve via `prepare_data.population(d, cfg, which)`:
 
 | Consumer | Population |
 | --- | --- |
@@ -317,7 +318,7 @@ fixture re-derives fixture values — read them, never commit them
 | `calibration_fit_trailing_weeks`, `information_increment`, `calibration_gate_band` | the REPORT that derives each (`tune` names it) | `config mirrors reports` — these cannot be null, so the check is the only thing between a pulled repo and a number from another extract |
 | `exploration.tau_initial` | `reports/shadow.json` → `tau_initial_derivation` (backtest = cross-check only) | `tau_provenance_error` — shadow refuses a stale paste |
 | `exploration.delta_min_log_bias` | `tune` from `backtest.fidelity`, PER CATEGORY as a one-line mapping (own log ratio floored by MAE@W and the gate half-width; `_default` for unseen categories) — null = no floor | `config mirrors reports` |
-| `scrap/margin_deterioration_pct` | `tune` pastes the 3σ trailing-mean floor from `reports/thresholds.json` (owner, 2026-08-30); OWNER only when the verdict is `TOO TIGHT`, `BLOCKED`, `LIKELY INERT` or `insufficient history` — all blocking, none pasted | `guardrail floors` |
+| `scrap/margin_deterioration_pct` | `tune` pastes the 3σ trailing-mean floor from `reports/thresholds.json` (owner, 2026-09-06); OWNER only when the verdict is `TOO TIGHT`, `BLOCKED`, `LIKELY INERT` or `insufficient history` — all blocking, none pasted | `guardrail floors` |
 | `posterior.cold_start_shift_std` | OWNER — launch belief = prior mean − k·std per cell (0.5); read by `init_posterior` and the backtest's DP arm; inert once the posterior has consumed an outcome | `tune` (OWNER reading with `intra_episode_deepening` medians and the like-for-like IL gap) |
 | `data.launch_date` | OWNER — null until launch day; once set, `--fit-calibration` schedules through the latest data (the weekly cron) while every sealed fit keeps its pre-launch scope. Never move `split.test_end` for this | `launch blockers`; `calibration_schedule_current` on every `--apply` |
 
@@ -354,9 +355,9 @@ fixture re-derives fixture values — read them, never commit them
 - `--workers N` (`0` = all cores but one) parallelises backtest, shadow,
   `pilot_sim` and `price_batch` (each hour's batch); reports are
   byte-identical serial or parallel — results return in submission order
-  and only the parent touches the event store. Each decision draws from
-  its own RNG seeded by episode id (the simulator: episode and hour; the
-  batch: the hour key) — order-independent.
+  and only the parent touches the event store; each decision draws its own
+  RNG (`common.parallel.keyed_rng`). Quote the sampling caveat with any
+  sampled-run count — a sample's zero is not the window's.
 - Tests: shared builders live in `tests/conftest.py` (`cfg`,
   `decision_event`/`outcome_event`, `episode_frame`, `_reports`,
   `reports_dir`, `synth_flc` — the synthetic extract, generated once per
@@ -370,11 +371,10 @@ fixture re-derives fixture values — read them, never commit them
   must keep emitting both source inventory conventions — regenerate the
   fixture after any change to them, and read the two printed counts.
 - Leadership deck: `python3 -m tools.scenario_deck --workers 0` writes
-  `reports/scenarios.html` (twelve scenarios, the real solver, this machine's
-  config; ~2 min). Regenerate after any change to `engine/dp.py`,
-  `engine/explore.py`, the tier/entry/δ_min config or the prior; rule 19
-  applies to every number on it — it states what the solver does under a
-  chosen demand input, never what a SKU will sell.
+  `reports/scenarios.html` (the real solver, this machine's config; every
+  figure is solved in Python, the page only reads). Regenerate after any
+  change to `engine/dp.py`, `engine/explore.py`, the tier/entry/δ_min
+  config or the prior; rule 19 applies to every number on it.
 
 ## Maintaining the documents
 

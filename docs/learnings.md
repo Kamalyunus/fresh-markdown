@@ -131,6 +131,30 @@ now. Dates are owner sign-off.
   million-hour counters; compare in numeric hours bounded by the extract's
   own span.
 
+- **Row-scoped drops at the row-defect stages.** The null-key and
+  duplicate-hour drops were row-scoped; with the defect on a window's
+  FIRST hour the rest re-id'd as a clean window opening one hour late,
+  eligible, dp-eligible and scored as an entry row (the gap check only
+  sees interior holes). A defective row whose key is whole drops its
+  whole source window (`defective_windows`); a null quantity is the same
+  drop instead of a cast error before the first waterfall row. And the
+  null-run reading disagreed with the ids on a flat or −2 counter step —
+  it swallowed the neighbouring window; `window_signals.counter_ok` is
+  the one counter clause both read, the run drop keeping only the two
+  tolerances a defective row needs.
+- **An episode that opened empty.** The feed can resume rows after a
+  sell-out; a fragment opening with `q0 = 0` was dp-eligible, the replay
+  could not open it and shadow priced it. It is a flag (`opens_empty`),
+  and `closed_then_resumed` keeps the producer's open question measurable.
+- **The identity was recorded, not asserted.** The design said the stock
+  invariant was asserted on the output; a broken `episode_flow` wrote
+  `holds: False` into the manifest and the run succeeded. The chain
+  asserts it once continuity holds; a bare frame only records it.
+- **A fixture that never crossed midnight.** Every §12a seam path ran on
+  data where the seam could not occur, and 86% of the fixture's final
+  rows carried counter 0 while production's are positive on essentially
+  all: the generator now opens a share of windows in the evening and
+  closes most listings with hours left, and prints both counts.
 - **A mask built before the merge.** `add_ref_rate_features` built its
   anchor mask on the incoming frame's labels, merged (which resets the
   index), then reused the mask — pandas aligned by label, and on the gappy
@@ -165,6 +189,25 @@ now. Dates are owner sign-off.
   bracket; cells now carry `at_bound`. The payload said thin cells were
   "left at 1.0" while the code shrank them toward the parent; and
   `convergence.method` said "dry run" under `--commit-convergence`.
+- **A cell with no anchor rows priced at 1.0.** The level solve emitted
+  only the cells that had anchor rows, so a subcategory absent from a
+  window (thin, or new assortment) priced at raw mu while its category
+  solved to 1.4 — one anchor row with no sales shrank to the parent, none
+  was silently 1.0. Every cell of the window's population is emitted
+  (`held_at_parent`), the parent tables ship in the artifact and the
+  applier waterfalls subcategory → category → 1.0.
+- **Fit by opening week, applied by row week.** The trailing windows cut
+  whole episodes by opening week; the applier read the row's week, so the
+  Monday rows of a Sunday-opened episode were both in week w's fit window
+  and priced by week w's table. The applier keys on the episode's opening
+  week (the live forecast rows, with no episode, read their own date).
+- **A truncated censored expectation.** `E[min(D, q)]` folded the NB tail
+  at `negbin_max_k`, so a shelf deeper than the table was read as
+  `E[min(D, min(q, 25))]`: the sold/predicted ratio pushed above 1 and the
+  factor absorbed a truncation artefact as under-prediction; the DP had
+  the same cap and undervalued clearing a large shelf. The table runs to
+  the shelf, the expectation has a closed form beyond it, and the tail
+  mass is a diagnostic of demand beyond the shelf, not a truncation.
 - **A row-level date cut on the unfiltered frame** once put ineligible rows
   into the level fit, so the gate and the fit solved on different rows.
 - **A failing 5b iterated to `--max-turns`.** When `--check-convergence`
@@ -295,6 +338,36 @@ now. Dates are owner sign-off.
 - **Poisson information overstated NB evidence** ~1.6–1.9×; `k >= inv`
   censoring marked every restock hour censored. The update reads
   `mu·L²·r/(r+mu)` and the shared censoring rule.
+- **A censored row credited with a count's information.** A stocked-out
+  row was observed only as the event `D ≥ q`, and the update credited it
+  the full NB figure: a batch of sell-outs crossed the increment before
+  the evidence justified it. A censored row carries the Bernoulli
+  information of the event it observed, strictly less.
+- **Suspended days walked as under-spend.** While a stop kept exploration
+  suspended, every morning's walk multiplied τ by the clip on the day's
+  zero spend; the resume overspent at once and re-fired the stop. A
+  suspended day (every decision priced with no budget in force) is held.
+- **A failed push spent its expected cost.** The spend side summed
+  `exploration_cost` over every matched forced decision, reported failures
+  included: an integration incident read as an overspend. Only executed
+  pushes spend.
+- **The walk graded days after the stamp.** `tau_calibrated_through` was
+  the only record of what was walked, so a day whose outcomes arrived
+  after a later day was walked sat behind the stamp forever. The commit
+  keeps the walked days; a late day is walked next time and counted (its
+  step is τ-independent, so it lands the walk where a timely one would).
+- **Two writers, whole-state writes.** `--apply` and the monitor each
+  wrote the state they had loaded; a suspension written between the
+  other's load and write was gone. Every write re-reads the file under a
+  lock and applies its change to what is on disk.
+- **History re-priced at today's std.** The overspend series priced every
+  past day's budget at today's widest std; once the posterior narrowed,
+  history read over a budget it never had. Each day takes the std its own
+  decisions were priced with.
+- **A stale schedule refused the walk.** The factor-schedule gate exists
+  so evidence is not banked on stale prices; it also refused
+  `--calibrate-tau`, leaving overspend uncorrected while the cron was
+  down. It refuses `--apply` alone.
 
 ## Evaluation
 
@@ -594,6 +667,83 @@ now. Dates are owner sign-off.
   row's own counter now; and the synthetic fixture never emitted the
   pattern, so the clause had no end-to-end exercise until the generator
   learned to extend windows (a third printed count).
+
+- **Readiness counted twice (2026-09-14).** The simulator judged when a
+  scrap stop MUST have fired from `window + smoothing + persistence`, but
+  the deterioration series it grades yields its first reading only after
+  `window + 2·smoothing − 1` close days (the trailing mean is shifted by
+  the smoothing so the two windows never overlap): a correct machine was
+  graded a silent stop for the smoothing's worth of mornings. The count now lives beside the series
+  (`common.guardrail.first_reading_close_days`, `stop_ready_close_days`)
+  and both the monitor's short-series note and the grader read it. The
+  same pass moved other second readings onto their homes: the sim's bias
+  bound onto `widest_active_std` (every cell in the file once counted, so
+  an unrouted GLOBAL excused any bias); shadow's persistence streak onto
+  `monitor.evaluate_guardrail`; the `counter + 1` horizon onto
+  `episodes.planning_horizon` (four spellings); the deck's `delta_min` and
+  admissible set out of the browser into `engine.explore`; the replay's
+  sample size out of a flag into `tuning.backtest_policy_episodes`; and
+  the integration cycle's shop loop onto the simulator's (`PilotSim` takes
+  a pricer; `e2e_cycle` is a driver) — a second shop had its own
+  rejection sentinel. Two silent paths surfaced beside them: shadow
+  dropped a zero-stock restock-gap hour before recording it (the episode
+  never settled, its decisions stayed in the ledger) and crashed on a
+  window whose every decision day was held; the sim's completeness never
+  read the store's outcome-side quarantine and excused a refused `--apply`
+  under any fault.
+
+- **A request in the producer's dtypes → one spelling first.** The batch
+  caller priced and COMMITTED a parquet request table, then died writing
+  the response (a timestamp is not JSON), and the retry was refused as
+  already priced; a JSONL `"7"` against an int history merged nothing and
+  priced every request on "unknown" features, uncounted; a null cost and
+  an integer category each took the batch down inside the worker. Now
+  every request is canonicalised once (`engine.state.canonical_request`,
+  ids through the hour key's `events.pairs.ident`), the history's ids are
+  read the same way, the response goes through the one NaN-safe row
+  writer, a null price is one rejected row, and a batch priced on no
+  history says so (`requests_with_unknown_features`).
+- **Mid-episode features as of the request day → the entry forecast,
+  sliced.** A later hour of an episode recomputed its two demand-rate
+  features as of ITS day (rule-12 skew) and its `episode_id` never met the
+  history's derived ids anyway. The forecast is made once, at entry; the
+  store keeps each episode's latest path (`episode_paths`) and a later
+  request is that path sliced to the hour — extended only when a restock
+  grew the window, on the opening's features — so serving equals what was
+  forecast, assurance re-solves it, and no history pass runs.
+- **Invariants in the callers → in the store.** "One decision per hour"
+  lived in two callers (each a full parse of the log per batch) and two
+  concurrent batches could both pass it; "one outcome per decision" lived
+  nowhere, so the outcome-id migration handed the learner two outcomes
+  per decision; the contract advertised a stockout-field gate nothing
+  enforced. The store indexes hours and answered decisions, refuses the
+  second of either and counts it, and skips on load what it would have
+  refused; the counts ride into `quality_counts` beside the outcome side.
+- **The daily lane behind the red check.** `advance` stopped on a red
+  `status` before ingest, and the rows that go red after launch (a fired
+  stop, assurance) are refreshed only by the lane it skipped: nothing
+  ingested, the window never diluted, the monitor never re-read — a fired
+  stop deadlocked the lane. The lane runs first; the red stop follows,
+  naming the resume path.
+- **A re-seal that verifies against nothing.** `advance` re-seals under
+  `config` whenever the environment drifted; `seal()` verified with no
+  prior seal, so an artifact hand-edited at the same time became the
+  record under reason `config`. A re-seal's reason now says which
+  artifacts may have moved (none for config/libraries, the calibration
+  for weekly-refit) and refuses the rest.
+- **The W sweep ranked an estimator nobody runs.** `calibration_window_sweep`
+  fit each candidate window with a category-grain sold/pred ratio, while
+  the factor production pastes W into is `_solve_level_factors`
+  (subcategory grain, shrinkage, censored basis, a thinness floor). The
+  ranking could prefer a window for a solver that never sees it. The
+  sweep now calls the one solver on the raw basis fidelity already holds
+  (the frame's mu divided by the factor in force, no second predict) and
+  applies through the same waterfall.
+- **assurance's own `m` → the learner's.** `correlation_drift` averaged
+  every learnable hour of every moved episode as `m`, while the learner
+  deflates by forced outcomes per episode (`deff_from_episodes`): a
+  one-forced-hour world read as six and the alert tripped on a rho error
+  the update never applied. One home for `m`, one population.
 
 ## The lesson under all of it
 

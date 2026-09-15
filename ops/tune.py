@@ -190,6 +190,7 @@ READ_BY = (
 
     ("tuning.cost_ratio_bands", "backtest"),
     ("tuning.step_sensitivity_episodes", "backtest"),
+    ("tuning.backtest_policy_episodes", "backtest"),
 )
 
 
@@ -687,15 +688,21 @@ def _readings(cfg, backtest, shadow):
         # -- so a strict argmin flips between near-tied windows and sends an
         # agent into apply -> check-only forever. Switch only when the
         # candidate beats the CURRENT window materially on the sweep's own
-        # metrics; a near-tie holds the value in force.
+        # metrics (the margins are config: tuning.w_switch_mae_ratio,
+        # tuning.w_switch_band_gain -- they decide whether a MEASURED value
+        # is pasted, so they are recorded in the snapshot like any knob);
+        # a near-tie holds the value in force.
         held = False
         cur_e, want_e = sweep.get(f"trailing_{cur}w"), sweep.get(rec)
         if (want != cur and isinstance(cur_e, dict)
                 and isinstance(want_e, dict)):
+            g = cfg["tuning"]
             better_mae = (want_e.get("mean_abs_log_error", 9e9)
-                          < 0.9 * cur_e.get("mean_abs_log_error", 0))
+                          < float(g["w_switch_mae_ratio"])
+                          * cur_e.get("mean_abs_log_error", 0))
             better_band = (want_e.get("share_weeks_in_band", 0)
-                           >= cur_e.get("share_weeks_in_band", 1) + 0.05)
+                           >= cur_e.get("share_weeks_in_band", 1)
+                           + float(g["w_switch_band_gain"]))
             held = not (better_mae or better_band)
         out.append(_finding(
             ("baseline_model", "calibration_fit_trailing_weeks"),
@@ -801,9 +808,11 @@ def set_scalar(text, path, value):
     return "".join(lines)
 
 
-def apply(report, config_path="config.yaml", out_dir="artifacts"):
+def apply(report, config_path="config.yaml", out_dir="artifacts", keys=None):
     """Paste the MEASURED values, back up the config, write the decision
-    log. OWNER values are never touched."""
+    log. OWNER values are never touched. `keys`, when given, is the exact
+    set of dotted keys to paste (ops.advance names the plan's); every
+    other ACT finding is left as it is."""
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     os.makedirs(out_dir, exist_ok=True)
     backup = os.path.join(out_dir, f"config_backup_{stamp}.yaml")
@@ -812,7 +821,8 @@ def apply(report, config_path="config.yaml", out_dir="artifacts"):
     with open(config_path) as f:
         text = f.read()
     applied, failed = [], []
-    for f_ in report["to_paste"]:
+    to_paste = [f_ for f_ in report["to_paste"] if keys is None or f_["key"] in set(keys)]
+    for f_ in to_paste:
         path = tuple(f_["key"].split("."))
         if f_["recommended"] is None:
             failed.append(dict(f_, error="the report carries no value to "

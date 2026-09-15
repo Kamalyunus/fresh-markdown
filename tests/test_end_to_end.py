@@ -149,6 +149,17 @@ def test_every_episode_has_a_monotone_window_counter(workspace):
     ge = d[d.dp_eligible & ~d.episode_id.isin(extended)].groupby("episode_id")
     first, n = ge.hours_remaining.first(), ge.size()
     assert (first >= n - 1).all()
+    # the extended windows' own invariant: after the last up-step the
+    # counter runs down one per row, so the rows since it never exceed
+    # that step's counter + 1 (the up-step row itself included)
+    ext = d[d.dp_eligible & d.episode_id.isin(extended)].copy()
+    ext["_up"] = (step.loc[ext.index].gt(-1.0) & prev_restock.loc[ext.index]).astype(int)
+    ext["_seg"] = ext.groupby("episode_id")["_up"].cumsum()
+    last_up = ext[ext._up == 1].groupby("episode_id").tail(1).set_index("episode_id")
+    tail = ext[ext._seg == ext.groupby("episode_id")["_seg"].transform("max")]
+    since = tail.groupby("episode_id").size()
+    assert (since <= last_up.hours_remaining.reindex(since.index) + 1).all()
+    assert (tail.groupby("episode_id").hours_remaining.diff().dropna() == -1.0).all()
     assert not d.duplicated(
         subset=["sku_id", "fc", "date", "hour_of_day"]).any()
 
@@ -191,6 +202,14 @@ def test_prior_artifact_within_bounds(workspace):
                     "a wrong-sign category must take the POOLED density"
                 assert max(v["unconstrained_argmax"].values()) >= -0.05, \
                     "wrong_sign must be decided on the UNCONSTRAINED peak"
+            if v.get("boundary") is not None:
+                # rule 3: a lower-boundary category is rejected to the pool
+                # exactly as a wrong-signed one, and named in the artifact
+                assert v["boundary"] == "lower"
+                assert abs(v["mean"] - prior["pooled"]["pooled_mean"]) < 1e-3, \
+                    "a lower-boundary category must take the POOLED density"
+                assert cat in prior["lower_boundary_categories"]
+                assert cat not in prior["pooled"]["pooled_categories"]
             # a prior of zero width is a frozen posterior -- bounded_step can
             # never move it, whatever evidence arrives
             assert v["std"] > 0, f"{cat} has a zero-width prior"
@@ -450,8 +469,12 @@ def test_fit_calibration_cli(workspace):
     assert factors and all(v > 0 for v in factors.values())
     assert calib["grain"] in ("subcategory", "category")
     # every cell must sit between its own raw fit and its parent: shrinkage
-    # pulls toward the parent, it never extrapolates past either
+    # pulls toward the parent, it never extrapolates past either; a cell
+    # with no anchor row in the window IS its parent, and says so
     for key, info in calib["detail"].items():
+        if info.get("held_at_parent"):
+            assert info["anchor_rows"] == 0 and factors[key] == info["parent_factor"], key
+            continue
         lo, hi = sorted([info["raw_factor"], info["parent_factor"]])
         assert lo - 1e-6 <= factors[key] <= hi + 1e-6, key
     # a thin cell must sit nearer its parent than a data-rich one does
@@ -879,11 +902,14 @@ def test_an_unreconciled_hour_becomes_shrink_not_a_drop(workspace, tmp_path):
     clean, clean_wf = load_and_filter("data/flc.parquet", cfg)
     clean_eps = {t[0]: t[2] for t in clean_wf}
 
-    # one unit vanishes mid-episode
+    # one unit vanishes mid-episode, from an hour that keeps stock after it:
+    # a shortfall that EMPTIES the shelf is a write-off zero, which closes
+    # the window (the next hour opens a new episode by rule), not shrink
     holed = raw.copy()
-    row = holed.index[len(holed) // 2]
+    row = next(i for i in holed.index[len(holed) // 2:]
+               if holed.at[i, "inventory"] - holed.at[i, "units_sold"] >= 2)
     start, sold = holed.at[row, "inventory"], holed.at[row, "units_sold"]
-    holed.at[row, "ending_inventory"] = max(start - sold - 1, 0)
+    holed.at[row, "ending_inventory"] = start - sold - 1
     # keep the chain continuous, or the CONTINUITY rule takes it first
     nxt = holed.index[holed.index.get_loc(row) + 1]
     same = (holed.at[nxt, "skuseq"] == holed.at[row, "skuseq"]
@@ -1133,8 +1159,8 @@ def test_a_set_launch_date_schedules_factors_past_the_gate(workspace, tmp_path):
     # at the anchor because its trailing week was thin (the one reading the
     # --apply gate and advance take, schedule_reaches); a thin last week
     # on a small fixture is not a missed cron
-    assert schedule_reaches(live) == priced_week, live["weeks_unfitted_held_at_1"]
-    assert priced_week in live["by_week"] or priced_week in live["weeks_unfitted_held_at_1"]
+    assert schedule_reaches(live) == priced_week, live["weeks_unfitted_held_at_anchor"]
+    assert priced_week in live["by_week"] or priced_week in live["weeks_unfitted_held_at_anchor"]
     assert live["scope"].startswith("production")
 
 

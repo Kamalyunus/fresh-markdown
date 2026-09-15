@@ -2,7 +2,6 @@
 the noise floor measured on the same series the monitor triggers on."""
 
 import copy
-import inspect
 import json
 
 import numpy as np
@@ -38,17 +37,25 @@ def test_the_inert_multiple_is_read_from_config(cfg):
     # the keys tune and status read are still there, and constant by design
     assert rec["binding_floor"] == rec["trailing_floor"] == floor
     assert rec["binding_basis"] == "trailing" and rec["binding_label"] == "3-sigma"
-    assert "3 * floor" not in inspect.getsource(dt.recommend_thresholds)
+    # the multiple is the config's: moving it alone moves the verdict
+    # across the same floor
+    cfg["tuning"]["guardrail_inert_floor_multiple"] = 4.9
+    assert "LIKELY INERT" in dt.recommend_thresholds(_trailing(floor), cfg)["scrap_rate"]["verdict"]
+    cfg["tuning"]["guardrail_inert_floor_multiple"] = 5.1
+    assert dt.recommend_thresholds(_trailing(floor), cfg)["scrap_rate"]["verdict"].startswith("OK")
 
 
 def test_the_noise_block_measures_and_points_at_the_one_verdict(cfg):
     """guardrail_noise carried a second `verdict()` that re-graded the
-    threshold with its own wording; recommend_thresholds is the grader."""
-    src = inspect.getsource(dt.guardrail_noise)
-    assert "def verdict" not in src and "TOO TIGHT" not in src
-    assert "from common import episodes" not in inspect.getsource(dt)
-
+    threshold with its own wording; recommend_thresholds is the grader,
+    so the noise block carries no verdict of its own on any series --
+    a threshold far under the floor included."""
     cfg = copy.deepcopy(cfg)
+    cfg["monitoring"]["stop_conditions"]["scrap_deterioration_pct"] = 1e-6
+    for metric, block in dt.guardrail_noise(_daily_frame(), cfg).items():
+        if isinstance(block, dict):
+            assert "verdict" not in block
+            assert not any("TOO TIGHT" in str(v) for v in block.values())
     # three closed one-hour episodes on three days: far too short a series
     d = episode_frame(
         [("e1", "2026-03-01"), ("e2", "2026-03-02"), ("e3", "2026-03-03")],
@@ -113,7 +120,11 @@ def test_outlier_dominance_uses_the_configured_sigma_ratio():
     tight = dt._sigma_summary(rel, outlier_ratio=1e6)
     assert loose["outlier_dominated"] and not tight["outlier_dominated"]
     assert loose["three_sigma"] == tight["three_sigma"]
-    assert "2 * sigma_robust" not in inspect.getsource(dt._sigma_summary)
+    # the ratio is the argument's, not a literal: the same series flips
+    # exactly where the configured ratio crosses raw / robust
+    raw_over_robust = loose["three_sigma"] / loose["three_sigma_robust"]
+    assert dt._sigma_summary(rel, outlier_ratio=raw_over_robust * 0.99)["outlier_dominated"]
+    assert not dt._sigma_summary(rel, outlier_ratio=raw_over_robust * 1.01)["outlier_dominated"]
 
 
 def test_the_consistent_band_is_read_from_config(cfg, tmp_path):
@@ -133,8 +144,56 @@ def test_the_consistent_band_is_read_from_config(cfg, tmp_path):
     out = dt.bounded_step(cfg)
     assert out["verdict"].startswith("CONSISTENT")
     assert out["consistent_band_std"] == [0.0, 10.0]
-    src = inspect.getsource(dt.bounded_step)
-    assert "0.7 <=" not in src and "<= 1.4" not in src
+    # the band is the config's on both ends: a band that excludes the
+    # surprise the rails trip at is not CONSISTENT, whatever the shipped one says
+    surprise = out["mean_rail_clips_above_pull_of_std"]
+    cfg["tuning"]["bounded_step_consistent_band"] = [surprise * 1.01, surprise * 2]
+    assert not dt.bounded_step(cfg)["verdict"].startswith("CONSISTENT")
+    cfg["tuning"]["bounded_step_consistent_band"] = [surprise * 0.5, surprise * 0.99]
+    assert not dt.bounded_step(cfg)["verdict"].startswith("CONSISTENT")
+
+
+def test_the_first_reading_comes_when_the_series_arithmetic_says():
+    """The deterioration series is empty until window + 2 x smoothing - 1
+    consecutive close days: `smoothing` to fill the first smoothed value,
+    `window` smoothed values for the trailing mean, shifted by `smoothing`
+    more so the two never overlap. `first_reading_close_days` is that
+    count, from the series itself; `stop_ready_close_days` adds the
+    persistence -- and the monitor's trigger fires on exactly that many
+    days, not one fewer. The simulator's readiness once counted
+    window + smoothing + persistence and graded a correct machine as a
+    silent stop."""
+    from common import guardrail
+    from daily.monitor import evaluate_guardrail
+
+    window, smooth, persist = 5, 3, 2
+    first = guardrail.first_reading_close_days(smooth, window)
+    assert first == window + 2 * smooth - 1
+
+    def series(n, high_last=0):
+        days = pd.date_range("2026-01-01", periods=n)
+        vals = [0.1] * (n - high_last) + [1.0] * high_last
+        return pd.Series(vals, index=[str(d.date()) for d in days])
+
+    dev = lambda n, k=0: guardrail.deterioration_series(     # noqa: E731
+        series(n, k), smooth, window, True, guardrail.RELATIVE)
+    assert len(dev(first - 1)) == 0 and len(dev(first)) == 1
+    assert len(dev(first + 4)) == 5
+
+    ready = guardrail.stop_ready_close_days(smooth, window, persist)
+    assert ready == first + persist - 1
+    # a level change filling the last `persist` readings: the trigger
+    # fires on `ready` days and cannot one day earlier
+    high = smooth + persist - 1                   # change_visible_close_days
+    assert guardrail.change_visible_close_days(smooth, persist) == high
+    fired = evaluate_guardrail({"by_day": dev(ready, high).to_dict()}, 0.5, persist)
+    assert fired["fired"] and fired["consecutive_days_over"] == persist
+    short = evaluate_guardrail({"by_day": dev(ready - 1, high).to_dict()}, 0.5, persist)
+    assert not short["fired"]
+    # the monitor's short-series note names the count from the same home
+    empty = evaluate_guardrail({"by_day": {}, "first_reading_after_close_days": first},
+                               0.5, persist)
+    assert f"after {first} consecutive close days" in empty["status"]
 
 
 def _events_of(d):

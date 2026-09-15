@@ -31,7 +31,6 @@ Run: python3 -m evaluate.pilot_sim [--days 21] [--epsilon-true -1.2]
 
 import argparse
 import copy
-import hashlib
 import json
 import os
 import shutil
@@ -44,18 +43,18 @@ import pyarrow.parquet as pq
 import yaml
 
 from common import episodes, metrics, provenance
+from common import guardrail as guard
 from common.config import load_config, reference_discount
 from common.io import read_json, write_json
 from daily import assurance, export_events, monitor
 from daily import ingest_outcomes as ingest
 from daily import update
 from engine import dp as dp_mod
-from engine.decide import StateRejected, decide
 from engine.posterior import PosteriorStore
 from events.store import EventStore
 from evaluate.pilot_world import FEED_SCHEMA, FAULTS, World, parse_faults
-from engine.state import (HISTORY_COLS as HIST_COLS, BufferStore, FrozenCells,
-                          hour_grid, ref_rate_features)
+from engine.state import (HISTORY_COLS as HIST_COLS, hour_grid, price_one,
+                          ref_rate_features)
 from common.parallel import resolve_workers
 from fit import prepare_data
 from fit.train_baseline import BaselineModel, fit_level_calibration, schedule_reaches
@@ -171,44 +170,34 @@ TRUTH_COLS = ("episode_id", "template_id", "arm", "date", "hour_of_day",
               "original_price", "offered_price", "cost", "category", "fc",
               "sku_id", "dp_eligible", "shelf_discount", "mu_true",
               "mu_ref_world", "mu_ref_agent")
-def _decision_rng(seed, episode_id, t):
-    """One generator per (episode, hour), from the ids alone: the draw does
-    not depend on which worker prices it or in what order."""
-    h = hashlib.blake2b(str(episode_id).encode(), digest_size=8).digest()
-    return np.random.default_rng([int(seed), int.from_bytes(h, "big"), int(t)])
 
 
-def _price_one(item, ctx):
-    """One decision in a worker: pure -- the state, the tick's posterior
-    snapshot and tau, a generator seeded from the episode and the hour, so
-    serial and parallel runs price identically. Returns the event or the
-    rejection; the parent commits the event and runs the shop."""
-    state, (episode_id, t) = item
-    rng = _decision_rng(ctx["seed"], episode_id, t)
-    store = BufferStore()
-    try:
-        # unlike shadow's rehearsal, a simulated pilot IS suspended when the
-        # monitor says so
-        evt = decide(state, FrozenCells(ctx["cells"], ctx["suspended"]), store,
-                     ctx["cfg"], rng, ctx["tau"], ctx["model_version"],
-                     config_digest=ctx["digest"])
-    except StateRejected as e:
-        return {"evt": None, "rejected": str(e)}
-    return {"evt": evt, "rejected": None}
-
-
+# the worker body is engine.state.price_one (Lane B's batch caller shares
+# it): one decision, pure, its draw seeded by the item's key -- here the
+# episode and its hour (common.parallel.keyed_rng), so serial and parallel
+# runs price identically. Unlike shadow's rehearsal a simulated pilot IS
+# suspended when the monitor says so: the tick's ctx carries the record
 def _price_chunk(args):
     items, ctx = args
-    return [_price_one(it, ctx) for it in items]
+    return [price_one(it, ctx) for it in items]
 
 
 # ---------------------------------------------------------------- simulator
 
 class PilotSim:
+    """The shop and engineering's side of the loop. `pricer` is how an
+    hour's pilot states get their decisions: None runs engine.decide in
+    the workers (`_price_pilot`, the rehearsal); tools.e2e_cycle passes
+    one that goes through ops.price_batch, so the integration cycle and
+    the simulator share one shop -- the shelf, the demand draw, the feed
+    row, the twins -- and differ only in who prices."""
+
     def __init__(self, cfg, world, sim_dir, config_path, days, episodes_per_day,
-                 sim_settings, seed=0, raw_path=None, prepared=None, workers=None):
+                 sim_settings, seed=0, raw_path=None, prepared=None, workers=None,
+                 pricer=None):
         self.cfg, self.world, self.sim_dir = cfg, world, sim_dir
         self.config_path = config_path
+        self.pricer = pricer or self._price_pilot
         # the simulator's own knobs (pilot_sim.yaml `grading`), never the
         # system's: the lane's hour, the history margin, the grading bands
         self.grading = {k: sim_settings[k] for k in SIM_KEYS["grading"]}
@@ -303,25 +292,34 @@ class PilotSim:
         due = [ep for ep in self.open if ep["grid"][ep["t"]] == (date, hour)]
         pilot = [ep for ep in due if ep["arm"] == "pilot"]
         if pilot:
-            cats = {ep["template"]["category"] for ep in pilot}
-            ctx = {"cfg": self.cfg, "tau": self.posterior.tau(self.cfg),
-                   "cells": {c: self.posterior.get(c) for c in cats},
-                   "suspended": self.posterior.exploration_suspended(),
-                   "model_version": self.model.version, "digest": self.digest,
-                   "seed": self.seed}
-            items = [(self._pilot_state(ep), (ep["episode_id"], ep["t"])) for ep in pilot]
-            for ep, res in zip(pilot, self._map(items, ctx)):
+            for ep, res in zip(pilot, self.pricer(pilot, k, date, hour)):
                 self._pilot_hour(ep, k, res)
         for ep in due:
             if ep["arm"] == "legacy":
                 self._legacy_hour(ep, k)
+
+    def _price_pilot(self, pilot, k, date, hour):
+        """The default pricer: every due pilot state through engine.decide
+        in the workers against one posterior snapshot and one tau. A
+        pricer returns one `{"evt", "rejected"}` per episode in order --
+        `committed` True when it already wrote the event through the
+        store itself (ops.price_batch does), so the shop does not emit it
+        twice."""
+        cats = {ep["template"]["category"] for ep in pilot}
+        ctx = {"cfg": self.cfg, "tau": self.posterior.tau(self.cfg),
+               "cells": {c: self.posterior.get(c) for c in cats},
+               "suspended": self.posterior.exploration_suspended(),
+               "model_version": self.model.version, "digest": self.digest,
+               "seed": self.seed}
+        items = [(self._pilot_state(ep), (ep["episode_id"], ep["t"])) for ep in pilot]
+        return self._map(items, ctx)
 
     def _map(self, items, ctx):
         """`[_price_one(it, ctx) for it in items]`, chunked across the pool
         held for the run (one executor per hour would fork 500 times a
         run); results in submission order."""
         if self.pool is None or len(items) < 2 * self.workers:
-            return [_price_one(it, ctx) for it in items]
+            return [price_one(it, ctx) for it in items]
         size = max(len(items) // (self.workers * 4), 1)
         batches = [items[i:i + size] for i in range(0, len(items), size)]
         out = []
@@ -363,19 +361,28 @@ class PilotSim:
             self.busy.add(key)
             self._twin_of[(arm, t["template_id"], date)] = \
                 "legacy" if arm == "pilot" else "pilot"
+        self.open_templates(k, date, [
+            (arm, t, self._twin_of.pop((arm, t["template_id"], date), None))
+            for arm, temps in (("pilot", pilot), ("legacy", legacy)) for t in temps])
+
+    def open_templates(self, k, date, picks):
+        """Open `picks` -- (arm, template, twin arm or None) -- on `date`:
+        the ids and grids, the episode's shock (drawn at its first opening
+        and shared by its twin, so the pair sees the same world), the two
+        demand-rate features by the one home and one prediction per model
+        for the day's openings. `_sample_day` picks for the rehearsal;
+        tools.e2e_cycle hands the shop its own picks."""
         openings = []
-        for arm, temps in (("pilot", pilot), ("legacy", legacy)):
-            for t in temps:
-                eid = f"sim|{arm}|{t['sku_id']}|{t['fc']}|{date}T{t['opening_hour']:02d}"
-                # the episode's shock is drawn at its first opening and
-                # shared by its twin: the pair sees the same world
-                if t["template_id"] not in self.shock_by_template:
-                    self.shock_by_template[t["template_id"]] = self.world.episode_shock()
-                openings.append({"arm": arm, "episode_id": eid, "template": t,
-                                 "grid": hour_grid(date, t["opening_hour"], t["n_hours"]),
-                                 "t": 0, "q": t["q0"], "anchor": None, "day": k,
-                                 "shock": self.shock_by_template[t["template_id"]],
-                                 "twin": self._twin_of.pop((arm, t["template_id"], date), None)})
+        for arm, t, twin in picks:
+            eid = f"sim|{arm}|{t['sku_id']}|{t['fc']}|{date}T{t['opening_hour']:02d}"
+            if t["template_id"] not in self.shock_by_template:
+                self.shock_by_template[t["template_id"]] = self.world.episode_shock()
+            openings.append({"arm": arm, "episode_id": eid, "template": t,
+                             "grid": hour_grid(date, t["opening_hour"], t["n_hours"]),
+                             "t": 0, "q": t["q0"], "anchor": None, "day": k,
+                             "shock": self.shock_by_template[t["template_id"]],
+                             "twin": twin})
+            self.busy.add((t["sku_id"], t["fc"]))
         # the two demand-rate features, point-in-time, by the one home
         stub = pd.DataFrame([{
             "episode_id": o["episode_id"], "sku_id": o["template"]["sku_id"],
@@ -442,8 +449,9 @@ class PilotSim:
         if res["evt"] is not None:
             evt = res["evt"]
             # the store validates on emit: a refused event is quarantined,
-            # and an hour priced but never stored is graded (hourly_engine)
-            if not self.store.emit_decision(evt):
+            # and an hour priced but never stored is graded (hourly_engine);
+            # a pricer that committed through the store itself says so
+            if not res.get("committed") and not self.store.emit_decision(evt):
                 self.quarantined += 1
             applied = float(evt["applied_discount"])
             if ep["anchor"] is not None and applied < ep["anchor"] - dp_mod.TIER_EPS:
@@ -556,11 +564,11 @@ class PilotSim:
         outcomes, rep = ingest.build_outcomes(store.load_decisions(), feed,
                                               ingest.load_failures(failures))
         emitted = sum(store.emit_outcome(o) for o in outcomes)
-        lane["ingest"] = {k_: rep[k_] for k_ in (
-            "decisions", "decisions_outside_feed_range", "outcomes_built",
-            "decisions_without_feed_row", "feed_duplicate_hours",
-            "unusable_feed_rows", "push_failures_applied",
-            "push_failures_unmatched")}
+        # every COUNT the ingester reports (its example lists dropped), so a
+        # gap it learns to name -- colliding decisions, an unusable row --
+        # reaches the grader without a list here to extend; plus the
+        # store's side: outcomes accepted and outcomes quarantined
+        lane["ingest"] = {k_: v for k_, v in rep.items() if not isinstance(v, (list, dict))}
         lane["ingest"].update(emitted=int(emitted),
                               quarantined=store.quarantined_this_run,
                               feed_rows=int(len(feed)))
@@ -625,6 +633,9 @@ class PilotSim:
         lane["posterior"] = {c: {"mean": r["mean"], "std": r["std"], "n_obs": r["n_obs"],
                                  "version": r["version"]}
                              for c, r in self.posterior.state["cells"].items()}
+        # the routing, so a reader of the cells takes the widest std over
+        # the cells a category reaches (an unrouted GLOBAL never narrows)
+        lane["cell_of"] = dict(self.posterior.state["cell_of"])
         lane["tau_in_force"] = self.posterior.tau(cfg)
         return lane
 
@@ -649,10 +660,36 @@ class PilotSim:
                "schedule_end": schedule_reaches(sched),
                "last_fitted_week": max(sched["by_week"]) if sched["by_week"] else None,
                "weeks_fitted": sched["weeks_fitted"],
-               "weeks_unfitted_held_at_1": sched["weeks_unfitted_held_at_1"],
-               "scope": sched["scope"], "prepared_rows": int(len(d))}
+               "weeks_unfitted_held_at_anchor": sched["weeks_unfitted_held_at_anchor"],
+               "scope": sched["scope"], "prepared_rows": int(len(d)),
+               "anchor_rows_by_arm": self._anchor_rows_by_arm(schedule_reaches(sched))}
         self.lane_c_runs.append(run)
         return run
+
+    def _anchor_rows_by_arm(self, week):
+        """The anchor rows (episodes.is_anchor_row, the one mask the level
+        fit reads) in the trailing window the factors for `week` are fit
+        on, per arm, over every simulated hour. Production's re-fit sees
+        the whole feed -- every shelf in the FC, system-priced or not --
+        and the legacy arm stands in for the rest of the shop; a pilot
+        covering the whole FC has only the pilot column, so
+        `pilot_alone_below_min` says whether that pilot's own rows would
+        clear calibration_min_anchor_rows or hold the week at the anchor."""
+        bm = self.cfg["baseline_model"]
+        truth = self.truth()
+        if truth.empty or not week:
+            return None
+        d_ref = {c: reference_discount(self.cfg, c) for c in truth.category.unique()}
+        d = truth.assign(total_discount=truth.shelf_discount.astype(float),
+                         d_ref=truth.category.map(d_ref))
+        window, _ = episodes.trailing_weeks_window(
+            d, week, bm["calibration_fit_trailing_weeks"])
+        anchor = window[episodes.is_anchor_row(window, self.tier_step)]
+        by_arm = {arm: int(n) for arm, n in anchor.groupby("arm").size().items()}
+        pilot = by_arm.get("pilot", 0)
+        return {"week": week, "pilot": pilot, "legacy": by_arm.get("legacy", 0),
+                "min_anchor_rows": bm["calibration_min_anchor_rows"],
+                "pilot_alone_below_min": pilot < bm["calibration_min_anchor_rows"]}
 
     def _write_raw_sim(self, path):
         """The raw extract plus every feed row so far, in the source schema,
@@ -886,22 +923,38 @@ def grade(rep, cfg, sim_settings):
         out.append({"name": name, "expected": dict(EXPECTATIONS)[name],
                     "verdict": _verdict(ok, measured), "observed": observed})
 
-    # every pilot hour is a decision, a rejection or a quarantined event
+    # every pilot hour is a decision, a rejection or a quarantined event --
+    # on BOTH sides of the store: a decision it refused, and an outcome
+    # the ingester built that it refused (a contract defect the shadow
+    # gate would read as incompleteness must read the same here)
+    ing = [d["ingest"] for d in days]
     quarantined = int(eng.get("quarantined", 0))
+    outcomes_quarantined = sum(int(i.get("quarantined", 0)) for i in ing)
     accounted = eng["decisions"] + eng["rejected_total"] + quarantined
     add("hourly_engine", eng["decisions"] > 0 and eng["rejected_total"] == 0
-        and quarantined == 0 and eng["pilot_hours"] == accounted,
+        and quarantined == 0 and outcomes_quarantined == 0
+        and eng["pilot_hours"] == accounted,
         {"decisions": eng["decisions"], "rejected": eng["rejected"],
-         "quarantined": quarantined, "pilot_hours": eng["pilot_hours"]})
+         "quarantined": quarantined, "outcomes_quarantined": outcomes_quarantined,
+         "pilot_hours": eng["pilot_hours"]})
     add("price_monotone_within_episode", eng["violations"]["price_rose_within_episode"] == 0,
         eng["violations"])
     add("never_below_cost", eng["violations"]["below_cost"] == 0, eng["violations"])
 
-    ing = [d["ingest"] for d in days]
+    # completeness on the shadow gate's population: outcomes the store
+    # ACCEPTED per decision the feed could answer for -- whatever kept an
+    # outcome from landing (no feed row, two decisions claiming one hour,
+    # an unusable row, a quarantined outcome) is a gap, and the ingester's
+    # counts are summed generically so a newly named cause reaches the
+    # report without a list here to extend
     due = sum(i["decisions"] - i["decisions_outside_feed_range"] for i in ing)
-    built = sum(i["outcomes_built"] for i in ing)
-    gaps = sum(i["decisions_without_feed_row"] for i in ing)
-    completeness = built / (built + gaps) if built + gaps else None
+    landed = sum(i["emitted"] for i in ing)
+    counts = {}
+    for i in ing:
+        for key, v in i.items():
+            if isinstance(v, (int, np.integer)) and not isinstance(v, (bool, np.bool_)):
+                counts[key] = counts.get(key, 0) + int(v)
+    completeness = landed / due if due else None
     floor = cfg["monitoring"]["shadow_gate"]["min_event_completeness"]
     # a missing row and a duplicated hour (ingest matches neither state)
     # both cost the decision its outcome: a gap is expected once their
@@ -912,7 +965,8 @@ def grade(rep, cfg, sim_settings):
     add("outcome_completeness", ok,
         {"completeness": round(completeness, 4) if completeness is not None else None,
          "floor": floor, "fault_expects_a_gap": expect_gap,
-         "fault_gap_rate": round(gap_rate, 4), "decisions_due": due},
+         "fault_gap_rate": round(gap_rate, 4), "decisions_due": due,
+         "outcomes_landed": landed, "ingest_counts": counts},
         measured=completeness is not None)
 
     # per gate, by name: the calibration gate is graded by
@@ -949,7 +1003,11 @@ def grade(rep, cfg, sim_settings):
     if days:
         weeks = episodes.week_key(pd.Series([d["date"] for d in days]))
         for d, wk in zip(days, weeks):
-            std_by_week[wk] = max(r["std"] for r in d["posterior"].values())
+            # the widest std among the cells a category REACHES (the one
+            # reading the budget and the flat-std alert take): an
+            # unrouted GLOBAL keeps its launch std and would excuse any bias
+            std_by_week[wk] = PosteriorStore.widest_active_std(
+                d["posterior"], d.get("cell_of") or {})
     off = {}
     for wk, v in level.items():
         bias, std = v.get("implied_elasticity_bias"), std_by_week.get(wk)
@@ -1007,15 +1065,20 @@ def grade(rep, cfg, sim_settings):
     causes.update({"scrap_deterioration_pct": ("demand_shock",),
                    "margin_deterioration_pct": ("demand_shock",)})
     unexpected = [n for n in fired if not any(f in faults for f in causes.get(n, ()))]
-    # the guardrail compares against its own trailing window, smoothed,
-    # over persistence_days: a shock can only be seen once the run is
-    # that long past it (the monitor's series starts at launch)
+    # the scrap guardrail can only have fired once its series (which
+    # starts at launch; one close day per lane morning) holds
+    # persistence_days readings -- common.guardrail.stop_ready_close_days,
+    # the series' own arithmetic, never a second count of it -- and the
+    # shock has filled that many fully-shocked smoothed readings, counted
+    # from the first close day wholly after the shock day
     mc, sc = cfg["monitoring"], cfg["monitoring"]["stop_conditions"]
     shock_day = faults["demand_shock"][0] if "demand_shock" in faults else None
-    settle = max(sc["deterioration_smoothing_days"].values()) + sc["persistence_days"]
+    smooth, persist = sc["deterioration_smoothing_days"]["scrap"], sc["persistence_days"]
+    ready_days = guard.stop_ready_close_days(smooth, mc["guardrail_noise_window_days"], persist)
     guardrail_ready = (shock_day is not None
-                       and len(days) >= mc["guardrail_noise_window_days"] + settle
-                       and len(days) >= shock_day + settle + 1)
+                       and len(days) >= ready_days
+                       and len(days) >= shock_day + 1
+                       + guard.change_visible_close_days(smooth, persist))
     expected_missing = [stop_of_gate[g] for g, exp in expect_by_gate.items()
                         if exp and stop_of_gate[g] not in fired]
     if "demand_shock" in faults and guardrail_ready \
@@ -1033,6 +1096,7 @@ def grade(rep, cfg, sim_settings):
     add("stops_only_on_faults", not unexpected and not expected_missing,
         {"fired": fired, "unexpected": unexpected, "expected_but_silent": expected_missing,
          "guardrail_window_reached": guardrail_ready if shock_day is not None else None,
+         "guardrail_ready_after_close_days": ready_days,
          "scrap_deviation_latest": scrap.get("latest"), "scrap_floor": scrap.get("threshold"),
          "shock_seen_but_under_the_floor": under_floor},
         measured=bool(days) and (shock_day is None or guardrail_ready or bool(unexpected))
@@ -1089,12 +1153,31 @@ def grade(rep, cfg, sim_settings):
 
     cadence = int(cfg["learning"]["update_cadence_days"])
     expected_applies = sum(1 for d in days if d["day"] % cadence == 0)
-    refused = [d["date"] for d in days if d.get("apply", {}).get("refused")]
-    fault_refusal = expect_fail
+    # a refusal is the fault's doing only when EVERY gate that failed that
+    # morning is one a fault in force is expected to fail (the same
+    # per-gate expectation the gates and the stops are graded on); a
+    # refusal on the calibration gate, or on a gate no fault reaches, is a
+    # lane that does not apply. And an apply that neither applied nor
+    # refused is silent, whatever the cadence count says
+    excused = {g for g, exp in expect_by_gate.items() if exp}
+    refused, unexplained, silent = [], [], []
+    for d in days:
+        app = d.get("apply")
+        if not app:
+            continue
+        if app.get("refused"):
+            refused.append(d["date"])
+            failing = [g for g, ok in d["gates"].items() if ok is False]
+            if not failing or not set(failing) <= excused:
+                unexplained.append({"date": d["date"], "gates_failed": failing,
+                                    "refused": app["refused"]})
+        elif not app.get("applied"):
+            silent.append(d["date"])
     add("apply_ran_on_cadence", len(applies) == expected_applies
-        and (not refused or fault_refusal),
+        and not unexplained and not silent,
         {"applies": len(applies), "expected": expected_applies, "refused_on": refused,
-         "fault_explains_refusal": fault_refusal}, measured=bool(days))
+         "refusals_no_fault_explains": unexplained, "neither_applied_nor_refused": silent,
+         "gates_a_fault_excuses": sorted(excused)}, measured=bool(days))
     return out
 
 

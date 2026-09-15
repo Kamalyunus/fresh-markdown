@@ -6,6 +6,8 @@ from ops import tune
 import copy
 import json
 import sys
+
+import pytest
 from common.provenance import config_fingerprint
 
 
@@ -135,9 +137,78 @@ def test_the_daily_lane_ends_at_the_operator_gate_never_past_it():
     assert steps[-1]["kind"] == "stop" and "--apply" in steps[-1]["detail"][0]
 
 
-def test_a_red_status_stops_before_the_daily_lane():
-    steps = advance.plan(_state(status={"failing": ["exploration tau"], "checks": []}))
+def test_a_red_status_runs_the_daily_lane_then_stops_with_the_resume_path():
+    """The status rows that go red after launch (a fired stop, assurance)
+    are refreshed only by the daily lane. Stopping on them BEFORE ingest
+    deadlocked the lane: nothing ingested, the windowed rate never
+    diluted, no fresh monitor for whoever investigated. The lane runs, then
+    the stop names the red rows and the one path that lifts a suspension."""
+    steps = advance.plan(_state(feed="feed.parquet",
+                                status={"failing": ["stop conditions"], "checks": []}))
+    mods = [s["args"][0] for s in steps if s["kind"] == "run"]
+    assert mods == ["daily.ingest_outcomes", "daily.update", "daily.monitor",
+                    "daily.assurance", "daily.export_events", "ops.status"]
+    stop = steps[-1]
+    assert stop["kind"] == "stop" and "red" in stop["why"]
+    assert "stop conditions" in stop["detail"]
+    assert any("--resume-exploration" in d for d in stop["detail"])
+    # never past the red rows to the operator gate
+    assert not any("--apply" in d for d in stop["detail"])
+    assert sum(1 for s in steps if s["kind"] == "stop") == 1
+    # with nothing to run the red stop still names the resume path
+    steps = advance.plan(_state(events=False,
+                                status={"failing": ["exploration tau"], "checks": []}))
     assert steps[0]["kind"] == "stop" and "exploration tau" in steps[0]["detail"]
+
+
+def test_execute_pastes_exactly_the_keys_the_plan_named(cfg, tmp_path, monkeypatch):
+    """plan() sets a ghost shadow's tau aside (keys=['dispersion.rho']);
+    execute() pasted every ACT finding regardless, so the ghost tau was
+    pasted, then re-pasted after shadow re-ran -- an extra digest move and
+    re-seal round. The paste step carries the keys and execute pastes
+    those and nothing else."""
+    import shutil
+    from conftest import ROOT
+    config_path = tmp_path / "config.yaml"
+    shutil.copyfile(f"{ROOT}/config.yaml", config_path)
+    findings = [{"key": "dispersion.rho", "class": tune.PASTE, "status": tune.ACT,
+                 "current": cfg["dispersion"]["rho"], "recommended": 0.4242,
+                 "evidence": "e", "source": "s"},
+                {"key": "exploration.tau_initial", "class": tune.PASTE, "status": tune.ACT,
+                 "current": cfg["exploration"]["tau_initial"], "recommended": 999.0,
+                 "evidence": "e", "source": "s"}]
+    monkeypatch.setattr(advance.tune, "collect", lambda *a, **k: {
+        "findings": findings, "blocked": False, "to_paste": findings,
+        "owner_decisions": []})
+    real_apply = tune.apply
+    monkeypatch.setattr(advance.tune, "apply",
+                        lambda rep, path, keys=None: real_apply(
+                            rep, path, out_dir=str(tmp_path / "artifacts"), keys=keys))
+    steps = [{"kind": "paste", "label": "tune --apply", "phase": "tune",
+              "reevaluate": True, "keys": ["dispersion.rho"]}]
+    advance.execute(steps, str(config_path), str(tmp_path), journal=str(tmp_path / "j.json"))
+    pasted = advance.load_config(str(config_path))
+    assert pasted["dispersion"]["rho"] == 0.4242
+    assert pasted["exploration"]["tau_initial"] == cfg["exploration"]["tau_initial"]
+    entry = json.loads((tmp_path / "j.json").read_text())["runs"][-1]
+    assert entry["ran"][0]["pasted"] == ["dispersion.rho"]
+
+
+def test_init_posterior_refuses_to_overwrite_learning_state_without_force(cfg, tmp_path, monkeypatch):
+    """artifacts/posterior.json is production learning state: the
+    process re-inits it only before launch (advance), and a hand run
+    without --force must refuse rather than discard it."""
+    import sys
+    from ops import init_posterior
+    path = tmp_path / "posterior.json"
+    path.write_text("{}")
+    c = {**cfg, "posterior": {**cfg["posterior"], "path": str(path)}}
+    monkeypatch.setattr(init_posterior, "load_config", lambda p: c)
+    monkeypatch.setattr(sys, "argv", ["init_posterior"])
+    with pytest.raises(SystemExit) as exc:
+        init_posterior.main()
+    assert "--force" in str(exc.value)
+    assert path.read_text() == "{}"                        # untouched
 
 
 def test_render_marks_the_current_phase():

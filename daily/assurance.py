@@ -15,7 +15,7 @@ from scipy.stats import chi2 as chi2_dist
 from scipy.stats import nbinom
 
 from common import episodes
-from common.config import (design_effect, intraclass_correlation,
+from common.config import (deff_from_episodes, intraclass_correlation,
                            load_config)
 from events.store import EventStore
 from events.pairs import learnable_with_stock, is_restocked
@@ -224,7 +224,13 @@ def correlation_drift(decisions, outcomes, cfg, pairs=None):
     basis as fit.fit_dispersion: residuals against raw mu at the working
     elasticity (per-category prior means via the shared helper), never the
     moved posterior -- a basis mismatch would read as drift and fire the
-    alert. `pairs` as in dispersion_fit."""
+    alert. The verdict is on deff, at the clustering the LEARNER deflates
+    by: `m` is the mean number of FORCED outcomes per episode over the
+    pairs it learns from (common.config.deff_from_episodes, the one home;
+    exploit hours and restocked hours are not in it), so the reading
+    moves with the forced share exactly as every update's divisor does --
+    an m of its own (every learnable hour) once read a one-forced-hour
+    world as six. `pairs` as in dispersion_fit."""
     from fit.fit_dispersion import _working_elasticity
 
     ac = cfg["assurance"]
@@ -251,21 +257,25 @@ def correlation_drift(decisions, outcomes, cfg, pairs=None):
     rho_live = intraclass_correlation(resid, groups,
                                       cfg["dispersion"]["rho_clip_max"])
 
-    moved = [v for v in usable.values() if len({round(dd, 6) for _, dd in v}) > 1]
-    hours = float(np.mean([len(v) for v in (moved or list(usable.values()))]))
-    deff_live = design_effect(rho_live, hours)
-
+    # the learner's population: the forced outcomes among the pairs it
+    # learns from (a restocked hour has no single q and is left out there
+    # too), grouped by episode -- the ids deff_from_episodes counts
+    forced_ids = [d["episode_id"] for d, o in pairs
+                  if d.get("is_exploration") and not is_restocked(o)]
     rho_frozen = cfg["dispersion"]["rho"]
     # both sides at the LIVE clustering (m is measured per batch wherever
     # deff is applied), so the verdict prices the one frozen term -- rho --
     # by the consequence it has today; rho_drift says which term moved
-    deff_frozen = design_effect(rho_frozen, hours)
+    deff_live = deff_from_episodes(rho_live, forced_ids)
+    deff_frozen = deff_from_episodes(rho_frozen, forced_ids)
+    hours = (len(forced_ids) / len(set(forced_ids))) if forced_ids else 1.0
     deff_drift = abs(deff_live - deff_frozen) / max(deff_frozen, 1e-9)
     return {
         "episodes": len(usable),
         "rho_live": round(rho_live, 4),
         "rho_frozen": round(float(rho_frozen), 4),
         "rho_drift": round(abs(rho_live - rho_frozen), 4),
+        "forced_outcomes": len(forced_ids),
         "mean_forced_hours_live": round(hours, 3),
         "deff_live": round(deff_live, 3),
         "deff_frozen": round(deff_frozen, 3),

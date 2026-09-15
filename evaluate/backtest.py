@@ -13,7 +13,8 @@ import argparse
 from common.config import load_config
 from common.io import read_json, write_json
 from common.provenance import config_fingerprint
-from fit.train_baseline import BaselineModel
+from fit.train_baseline import (BaselineModel, _solve_level_factors,
+                                category_factors)
 import numpy as np
 import pandas as pd
 from scipy.stats import binomtest
@@ -91,10 +92,22 @@ def _fidelity_metrics(d):
     }
 
 
-def calibration_window_sweep(d, cfg):
-    """Rolling-origin sweep of the calibration fit window: per-category factors
-    fit on the CALENDAR weeks [t-W, t), applied to week t. When the level
-    trends, longer windows are MORE stale, not more accurate.
+def calibration_window_sweep(d, cfg, r_lookup=None):
+    """Rolling-origin sweep of the calibration fit window: factors fit on
+    the CALENDAR weeks [t-W, t), applied to week t. When the level trends,
+    longer windows are MORE stale, not more accurate.
+
+    Each candidate window is fit by `fit.train_baseline._solve_level_factors`
+    -- the estimator production runs (subcategory grain, shrinkage toward
+    the parent, the censored basis when `r_lookup` is given, the
+    `calibration_min_anchor_rows` floor) -- and applied through the same
+    waterfall (`BaselineModel.level_lookup`); a sweep with its own
+    category-grain ratio ranked a different estimator from the one W is
+    pasted into. The frame carries the solve's basis already: the RAW
+    `mu_ref_hat` (fidelity divides its predicted mu by the factor in force
+    rather than predicting twice) and, on the censored basis, `r_val`. A
+    window too thin to fit scores that week uncalibrated -- as production
+    holds the anchor -- and is counted (`weeks_too_thin`).
 
     Every row -- `uncalibrated` included -- is scored on the SAME evaluation
     weeks: those with the longest window's span behind them (one burn-in for
@@ -113,21 +126,25 @@ def calibration_window_sweep(d, cfg):
     `recommended_fit_window` stays the best CALIBRATED window and the reading
     is carried separately.
     """
-    band = cfg["baseline_model"]["calibration_gate_band"]
+    bm = cfg["baseline_model"]
+    band = bm["calibration_gate_band"]
     tier_step = cfg["pricing"]["tier_step"]
-    windows = cfg["baseline_model"]["calibration_window_sweep_weeks"]
+    max_k = cfg["pricing"]["negbin_max_k"]
+    windows = bm["calibration_window_sweep_weeks"]
     train_end = pd.Timestamp(cfg["data"]["split"]["train_end"])
 
-    anchor = episodes.is_anchor_row(d, tier_step)
+    frame = d.copy()
+    if "subcategory" not in frame:            # a category-grain frame: one cell per category
+        frame["subcategory"] = frame["category"]
+    anchor = episodes.is_anchor_row(frame, tier_step)
     if not anchor.any():
         return "NOT RUN -- no anchor rows"
     # the episode's week, never the row's: a row-level week cut puts a
     # Sunday-opening episode's Monday rows in the next week
-    a = d[anchor].assign(week=episodes.week_key(episodes.opening_dates(d)[anchor]))
-    cw = (a.groupby(["category", "week"], observed=True)
-          .agg(sold=("units_sold", "sum"), pred=("predicted_units", "sum"))
-          .reset_index())
-    weeks = sorted(cw.week.unique())
+    frame["week"] = episodes.week_key(episodes.opening_dates(frame))
+    week_start = pd.to_datetime(frame.week)
+    a = frame[anchor]
+    weeks = sorted(a.week.unique())
     starts = {w: pd.Timestamp(w) for w in weeks}
     longest = max(list(windows) + [1])
     burn_in = starts[weeks[0]] + pd.Timedelta(weeks=longest)
@@ -138,38 +155,59 @@ def calibration_window_sweep(d, cfg):
                 f"behind the longest window ({longest}w) and past "
                 f"split.train_end ({train_end.date()})")
 
-    def summarise(ratios):
+    def predicted(rows, factor):
+        """The week's anchor prediction at `factor`, on the basis the solve
+        used: E[min(f*mu, q)] when r is attached, f*mu otherwise."""
+        mu = factor * rows["mu_ref_hat"].to_numpy()
+        if r_lookup is None:
+            return float(mu.sum())
+        return float(expected_min_demand_inventory_vec(
+            mu, rows["r_val"].to_numpy(), rows["starting_inventory"].to_numpy(),
+            max_k).sum())
+
+    def summarise(ratios, too_thin=None):
         arr = np.array(ratios)
-        return {
+        out = {
             "eval_weeks": int(len(arr)),
             "median_anchor_ratio": round(float(np.median(arr)), 4),
             "share_weeks_in_band": round(
                 float(((arr >= band[0]) & (arr <= band[1])).mean()), 4),
             "mean_abs_log_error": round(float(np.mean(np.abs(np.log(arr)))), 4),
         }
+        if too_thin is not None:
+            out["weeks_too_thin"] = too_thin
+        return out
+
+    too_thin = {}
 
     def ratios_for(window):
         """{week: anchor ratio} -- KEYED, so windows can be compared week by
         week rather than only in aggregate."""
         out = {}
+        too_thin[window] = []
         for t in eval_weeks:               # the SAME weeks for every row
-            cur = cw[cw.week == t]
-            if window == 0:
-                factor = None
-            else:
+            cur = a[a.week == t]
+            f = np.ones(len(cur))
+            if window:
                 # CALENDAR weeks behind t, not the `window` weeks that
                 # happen to precede it in the list: across a gap the
                 # latter fits post-gap weeks on pre-gap ones
                 lo = starts[t] - pd.Timedelta(weeks=window)
-                fit_weeks = [w for w in weeks if lo <= starts[w] < starts[t]]
-                fit = (cw[cw.week.isin(fit_weeks)]
-                       .groupby("category", observed=True)[["sold", "pred"]].sum())
-                factor = fit.sold / fit.pred.replace(0, np.nan)
-            f = (np.ones(len(cur)) if factor is None
-                 else cur.category.map(factor).fillna(1.0).to_numpy())
-            adj = float((cur.pred.to_numpy() * f).sum())
+                fit_rows = frame[(week_start >= lo) & (week_start < starts[t])]
+                fitted = _solve_level_factors(
+                    fit_rows, None, bm["calibration_shrinkage_units"],
+                    bm["calibration_min_anchor_rows"], tier_step, max_k,
+                    r_lookup, predicted=True, cfg=cfg) if len(fit_rows) else None
+                if fitted is None:         # too thin: production holds the anchor
+                    too_thin[window].append(str(t))
+                else:
+                    f = BaselineModel.level_lookup(
+                        fitted[0], category_factors(fitted[4]),
+                        cur["subcategory"].astype(str), cur["category"].astype(str))
+            adj = sum(predicted(g, fac) for fac, g in
+                      cur.groupby(f, sort=False)) if len(cur) else 0.0
             if adj > 0:
-                out[str(t)] = float(cur.sold.sum() / adj)
+                out[str(t)] = float(cur.units_sold.sum() / adj)
         return out
 
     def paired_vs(window_ratios, base_ratios):
@@ -202,7 +240,7 @@ def calibration_window_sweep(d, cfg):
     for w in windows:
         r = ratios_for(w)
         if r:
-            row = summarise(list(r.values()))
+            row = summarise(list(r.values()), too_thin=too_thin[w])
             if base:
                 row["paired_vs_uncalibrated"] = paired_vs(r, base)
             result[f"trailing_{w}w"] = row
@@ -337,7 +375,13 @@ def fidelity(d, cfg, model, prior, r_lookup):
         }
 
     # how long should the level factor's fit window be? measured, not assumed
-    block["calibration_window_sweep"] = calibration_window_sweep(d, cfg)
+    # on the RAW basis the solve reads: the frame's mu is the level in force
+    # (frozen at the gate), so divide it out rather than predict again
+    with _coverage_preserved(model):
+        in_force = model.level_factors(d)
+    block["calibration_window_sweep"] = calibration_window_sweep(
+        d.assign(mu_ref_hat=d.mu_ref_hat.to_numpy() / in_force, r_val=d.r),
+        cfg, r_lookup=r_lookup)
 
     # gate metric: level_at_anchor judges only the artifact's LEVEL at the
     # reference price (pooled_ratio embeds the prior; fallback only)
@@ -508,7 +552,7 @@ def _dp_price(e, cfg, eps_belief, spread_sink=None):
     dmin = explore.delta_min(cfg, eps_belief, e["category"])
 
     def price_at(t, q_int, anchor):
-        horizon = int(e["counter"][t]) + 1          # this hour included
+        horizon = episodes.planning_horizon(e["counter"][t])
         try:
             res = dp_mod.solve(p0, cost, q_int, list(e["mu_ref_path"][t:t + horizon]),
                                e["d_ref"], eps_belief, e["r"], cfg,
@@ -700,11 +744,17 @@ def step_sensitivity(replayed, cfg, seed=0):
     return out
 
 
-def policy_replay(d_pred, cfg, max_episodes=2000, seed=0, workers=None):
+def policy_replay(d_pred, cfg, max_episodes=None, seed=0, workers=None):
     """Design 5.14 policy block plus the q-spread distribution for the tau
     cross-check; replays the same engine.dp path production uses. Takes
-    `_attach_predictions` output over the dp_eligible population."""
+    `_attach_predictions` output over the dp_eligible population.
+    `max_episodes` is the replay's sample (`tuning.backtest_policy_episodes`
+    unless the caller overrides it -- a config key, so the sample every
+    policy figure and the tau cross-check sit on is in the report's
+    config fingerprint, never a flag the report cannot see)."""
     rng = np.random.default_rng(seed)
+    if max_episodes is None:
+        max_episodes = int(cfg["tuning"]["backtest_policy_episodes"])
 
     # dp_eligible means CLOSED (prepare_data's outcome_unknown gate). An
     # unclosed episode would truncate the actual arm while the simulated arms
@@ -861,7 +911,10 @@ def main():
     ap.add_argument("--input", required=True)
     ap.add_argument("--out", default="reports/backtest.json")
     ap.add_argument("--config", default="config.yaml")
-    ap.add_argument("--policy-episodes", type=int, default=2000)
+    ap.add_argument("--policy-episodes", type=int, default=None,
+                    help="episodes the policy replay samples; default: "
+                         "tuning.backtest_policy_episodes (the config is the "
+                         "record -- a flag here is for one exploratory run)")
     ap.add_argument("--workers", type=int, default=None,
                     help="processes for the episode replay. 0 = every core "
                          "but one. Episodes are independent and the replay is "

@@ -363,3 +363,31 @@ def test_the_controller_holds_tau_until_the_il_base_spans_its_window(cfg):
     # a zero budget still holds, and says so
     _, empty = walk_tau(100.0, ["2026-09-02"], lambda d, t: 5.0, {}, 1.0, cfg)
     assert empty[0]["held"] == "no trailing IL" and empty[0]["tau_after"] == 100.0
+
+
+def test_a_suspended_day_is_held_and_the_resume_does_not_overspend_for_it(cfg):
+    """Seven suspended mornings once multiplied tau by the clip each: the
+    walk read the suspension's zero spend as under-spend. A suspended day
+    is a held day (`explore.SUSPENDED`), so the tau in force on the resume
+    is the one the last graded day left."""
+    from engine.explore import SUSPENDED, budget_held, walk_tau
+
+    cfg["exploration"]["budget_il_window_days"] = 1
+    il = {f"2026-09-{d:02d}": 1000.0 for d in range(1, 12)}
+    days = [f"2026-09-{d:02d}" for d in range(2, 9)]             # seven
+    lo, hi = cfg["exploration"]["tau_adjust_clip"]
+    tau, rows = walk_tau(100.0, days, lambda d, t: 0.0, il, 1.0, cfg,
+                         suspended_days=days)
+    assert tau == 100.0 and all(r["held"] == SUSPENDED for r in rows)
+    assert all(r["budget"] > 0 for r in rows), "the budget was there; the draw was not"
+    # without the suspension the same seven zero-spend days ratchet by the clip
+    up, _ = walk_tau(100.0, days, lambda d, t: 0.0, il, 1.0, cfg)
+    assert up == pytest.approx(100.0 * hi ** 7)
+    # the day exploration resumes is graded as usual: its overspend halves tau
+    resumed = days + ["2026-09-09"]
+    end, rows = walk_tau(100.0, resumed, lambda d, t: 1e6, il, 1.0, cfg,
+                         suspended_days=days)
+    assert rows[-1]["held"] is None and end == pytest.approx(100.0 * lo)
+    # the composite reads the suspension first, whatever the base says
+    assert budget_held({}, "2026-09-02", 0.0, cfg, suspended=True) == SUSPENDED
+    assert budget_held({}, "2026-09-02", 0.0, cfg) == "no trailing IL"

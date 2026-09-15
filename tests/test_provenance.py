@@ -328,6 +328,46 @@ def test_archive_refuses_a_copy_that_does_not_match_the_seal(cfg, tmp_path):
         provenance.archive(cfg, sealed, config_path=str(conf))
 
 
+def test_a_config_reseal_refuses_an_artifact_that_moved_since_the_previous_seal(cfg, tmp_path):
+    """`advance` re-seals under `config`/`libraries` on its own whenever the
+    environment drifted. seal() verified with NO prior seal, so a prior
+    hand-edited at the same time was blessed as the record under reason
+    `config` -- the automatic path erased exactly the red row rule 18 says
+    only a deliberate re-seal may clear. A re-seal's reason says which
+    artifacts may have moved: none for config/libraries, the calibration
+    for weekly-refit; a fit reason or none seals the set as it stands."""
+    from common.io import write_json
+    _full_bundle(cfg)
+    _artifact(cfg, ("baseline_model", "calibration_factor_path"), {"factors": {"A": 1.0}}, BUNDLE)
+    write_json(cfg["artifacts"]["bundle_path"], seal_mod.seal(cfg, reason="bootstrap"))
+
+    # the environment moved AND someone edited the prior (stamp intact)
+    cfg["exploration"]["budget_share_of_il"] = 0.02
+    _artifact(cfg, ("posterior", "prior", "path"), {"source": "hand-edited"}, BUNDLE)
+    assert provenance.verify(cfg)["verdict"] == "PASS"       # stamps alone see nothing
+    for reason in ("config", "libraries"):
+        with pytest.raises(SystemExit) as exc:
+            seal_mod.seal(cfg, reason=reason)
+        assert "prior" in str(exc.value) and reason in str(exc.value)
+    with pytest.raises(SystemExit):
+        seal_mod.seal(cfg, reason="weekly-refit")             # the prior is not the calibration
+    # the reason that made the change seals it, deliberately
+    assert seal_mod.seal(cfg, reason="check-only")["bundle"] == BUNDLE
+    assert seal_mod.seal(cfg)["bundle"] == BUNDLE
+
+    # a weekly re-fit moves the calibration alone: sealed under its reason
+    write_json(cfg["artifacts"]["bundle_path"], seal_mod.seal(cfg, reason="check-only"))
+    _artifact(cfg, ("baseline_model", "calibration_factor_path"), {"factors": {"A": 1.1}}, BUNDLE)
+    assert seal_mod.seal(cfg, reason="weekly-refit")["bundle"] == BUNDLE
+    with pytest.raises(SystemExit) as exc:
+        seal_mod.seal(cfg, reason="config")
+    assert "calibration" in str(exc.value)
+    # nothing moved: a config re-seal is what advance runs
+    write_json(cfg["artifacts"]["bundle_path"], seal_mod.seal(cfg, reason="weekly-refit"))
+    cfg["exploration"]["budget_share_of_il"] = 0.03
+    assert seal_mod.seal(cfg, reason="config")["bundle"] == BUNDLE
+
+
 def test_a_numpy_bool_is_written_as_a_json_bool(tmp_path):
     """`json_safe` let np.bool_ through to `default=str`, so an artifact flag
     computed with numpy comparison read back as the STRING "False" -- which

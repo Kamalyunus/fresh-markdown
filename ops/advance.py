@@ -326,11 +326,12 @@ def plan(st):
                       [f"schedule ends {st['schedule_end']}, this week is "
                        f"{st['this_week']} -- refresh data/prepared.parquet "
                        "(download_flc + prepare_data), then run again"])]
-    if st["status"]["failing"]:
-        return [_stop("launch", "status is red",
-                      [f"{c}" for c in st["status"]["failing"]])]
 
-    # 8. daily lane, up to the human gate
+    # 8. daily lane, up to the human gate -- BEFORE the red check: the
+    #    status rows that go red after launch (a fired stop, assurance)
+    #    are the ones only this lane refreshes. Stopping on them first
+    #    ingested nothing, so the windowed rate never diluted and the
+    #    monitor never re-read; a fired stop deadlocked the lane
     if st["feed"]:
         steps.append(_run("ingest outcomes",
                           ["daily.ingest_outcomes", "--feed", st["feed"]],
@@ -342,6 +343,18 @@ def plan(st):
                   _run("assurance", ["daily.assurance"], phase="daily"),
                   _run("export events", ["daily.export_events"], phase="daily"),
                   _run("status", ["ops.status"], phase="daily", fatal=False)]
+    if st["status"]["failing"]:
+        steps.append(_stop("daily", "status is red -- investigate before the "
+                           "operator gate", [f"{c}" for c in st["status"]["failing"]] + [
+            "a fired stop condition SUSPENDED exploration (exploitation "
+            "pricing continues); the lane above re-ran the monitor, so `fired` "
+            "now reads the trailing window -- it clears on its own once the "
+            "rate or the streak is back under the threshold, but the "
+            "suspension it left stands until a human runs",
+            "python3 -m daily.update --resume-exploration   (after reading "
+            "monitor.stop_conditions and the assurance report)",
+            "every other red row names its own remedy: python3 -m ops.status"]))
+        return steps
     steps.append(_stop("daily", "LAUNCHED -- the operator gate is yours",
                        [f"python3 -m daily.update --apply   every "
                         f"{st['cadence']} days (learning.update_cadence_days); "
@@ -393,8 +406,10 @@ def execute(steps, config_path, root="reports", journal=JOURNAL):
             entry["ran"].append({"label": s["label"],
                                  "command": "python3 -m " + " ".join(s["args"])})
         elif s["kind"] == "paste":
+            # exactly the keys the plan named: a ghost shadow's tau is set
+            # aside in plan(), and pasting every ACT finding here wrote it
             res = tune.apply(tune.collect(load_config(config_path), root),
-                             config_path)
+                             config_path, keys=s["keys"])
             for f_ in res["applied"]:
                 print(f"  pasted    {f_['key']} = {f_['recommended']}")
             for f_ in res["failed"]:

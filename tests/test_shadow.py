@@ -101,6 +101,122 @@ def test_the_trace_streak_counts_consecutive_calendar_days(cfg):
     assert contiguous["days_stop_condition_fires"] == 1
 
 
+def test_the_trace_reads_the_monitors_persistence_rule_not_a_copy(cfg, monkeypatch):
+    """The streak is daily.monitor.evaluate_guardrail on the readings
+    walked so far: when the monitor's rule moves, the launch record's
+    'survives launch' moves with it. A copy of the rule inside the trace
+    would keep grading a controller production no longer runs."""
+    from evaluate import shadow
+
+    calls = []
+
+    def fires_on_sight(block, threshold, persistence_days):
+        calls.append((dict(block["by_day"]), threshold, persistence_days))
+        return {"fired": True, "consecutive_days_over": 9}
+
+    monkeypatch.setattr(shadow, "evaluate_guardrail", fires_on_sight)
+    led = SpreadLedger()
+    for day in ("2026-08-10", "2026-08-11"):
+        led.add(day, [10.0, 20.0])
+    base = {f"2026-08-{d:02d}": 100.0 for d in range(2, 10)}
+    trace = shadow._controller_trace(led, base, tau0=1000.0, widest_std=1.0,
+                                     cfg=cfg, window_days=2)
+    assert [r["stop_condition_fires"] for r in trace["by_day"]] == [True, True]
+    assert [r["days_over"] for r in trace["by_day"]] == [9, 9]
+    assert trace["verdict"].startswith("exploration suspends")
+    # the monitor saw the prefix walked so far, with the config's multiple
+    sc = cfg["monitoring"]["stop_conditions"]
+    assert [sorted(c[0]) for c in calls] == [["2026-08-10"], ["2026-08-10", "2026-08-11"]]
+    assert all(c[1:] == (sc["exploration_cost_vs_budget"], sc["persistence_days"])
+               for c in calls)
+
+
+def test_a_zero_stock_hour_is_kept_so_the_episode_settles(cfg, monkeypatch):
+    """A restock gap -- a zero-start row between a sell-out and the
+    arrival -- takes no decision, but its row carries the arrival: skipped
+    before the hour was recorded, the frame handed to episode_economics
+    saw supply = opening, the identity failed and `settled` dropped the
+    whole episode while its decisions sat in the ledger. Every episode the
+    ledger prices now settles."""
+    from common import metrics
+    from evaluate import shadow
+
+    def fake_decide(state, posterior, store, cfg, rng, tau, model_version,
+                    spread_sink=None):
+        evt = {"decision_id": f"d-{state['hour_of_day']}", "applied_discount": 0.30,
+               "applied_price": state["original_price"] * 0.7, "cost": state["cost"],
+               "is_exploration": False, "affordable_set_size": 1,
+               "reference_discount": 0.30, "epsilon_posterior_mean": -1.0,
+               "solver_latency_s": 0.0}
+        store.emit_decision(evt)
+        return evt
+
+    monkeypatch.setattr(shadow, "decide", fake_decide)
+    # sells out, 3 arrive on a zero-start row, one sells, two written off
+    g = _hours("e", "2026-08-10", 4, q0=5)
+    g["starting_inventory"] = [5, 0, 3, 2]
+    g["units_sold"] = [5, 0, 1, 0]
+    g["ending_inventory"] = [0, 3, 2, 0]
+    g["r"], g["mu_ref_hat"], g["is_observed"] = 1.0, 2.0, True
+    ep = dict({c: g[c].to_numpy() for c in shadow.EP_COLS}, episode_id="e")
+    ctx = {"cfg": cfg, "tau": None, "model_version": "x", "seed": 0,
+           "cal_grain": "category", "cells": {"FRUIT": None}}
+    out = shadow._shadow_one(ep, ctx)
+    assert len(out["events"]) == 3                      # no decision on the empty hour
+    assert [h["hour_of_day"] for h in out["hours"]] == [9, 10, 11, 12]
+    econ, excluded = metrics.settled(metrics.episode_economics(pd.DataFrame(out["hours"])))
+    assert excluded["episodes_excluded_not_closed"] == 0
+    assert econ.supply.iloc[0] == 8 and econ.scrap.iloc[0] == 2
+
+
+def test_every_hour_plans_over_the_rows_own_counter(cfg, monkeypatch):
+    """The horizon at a row is episodes.planning_horizon of ITS counter
+    (this hour included), never the rows the episode turned out to have:
+    the state's hours_remaining and the length of its mu_ref_path agree
+    with it on every hour, a restock-extended tail included."""
+    from evaluate import shadow
+
+    seen = []
+
+    def fake_decide(state, posterior, store, cfg, rng, tau, model_version,
+                    spread_sink=None):
+        seen.append((state["hours_remaining"], len(state["mu_ref_path"])))
+        evt = {"decision_id": f"d-{state['hour_of_day']}", "applied_discount": 0.30,
+               "applied_price": state["original_price"] * 0.7, "cost": state["cost"],
+               "is_exploration": False, "affordable_set_size": 1,
+               "reference_discount": 0.30, "epsilon_posterior_mean": -1.0,
+               "solver_latency_s": 0.0}
+        store.emit_decision(evt)
+        return evt
+
+    monkeypatch.setattr(shadow, "decide", fake_decide)
+    g = _hours("e", "2026-08-10", 3, tail=4)             # counters 6, 5, 4
+    g["r"], g["mu_ref_hat"], g["is_observed"] = 1.0, 2.0, True
+    ep = dict({c: g[c].to_numpy() for c in shadow.EP_COLS}, episode_id="e")
+    ctx = {"cfg": cfg, "tau": None, "model_version": "x", "seed": 0,
+           "cal_grain": "category", "cells": {"FRUIT": None}}
+    shadow._shadow_one(ep, ctx)
+    want = [episodes.planning_horizon(c) for c in g.hours_remaining]
+    assert want == [7, 6, 5]
+    # the path is cut at the frame's end, the horizon is the counter's
+    assert [h for h, _ in seen] == want
+    assert [n for _, n in seen] == [min(h, 3 - t) for t, h in enumerate(want)]
+    assert episodes.window_counter(episodes.planning_horizon(6)) == 6
+
+
+def test_the_worker_prices_against_the_one_frozen_cell_snapshot():
+    """The read-only cell snapshot a shadow worker prices against is
+    engine.state.FrozenCells -- the one Lane B and the simulator use --
+    with no suspension record, since a rehearsal never suspends."""
+    from engine.state import FrozenCells
+    from evaluate import shadow
+    assert shadow.FrozenCells is FrozenCells
+    cells = FrozenCells({"MEAT": {"mean": -1.0, "std": 0.4}})
+    assert cells.exploration_suspended() is None
+    with pytest.raises(KeyError):
+        cells.get("NOT_A_CATEGORY")
+
+
 def test_deeper_and_shallower_hours_are_counted_with_their_sign(
         cfg, tmp_path, monkeypatch):
     """`share_hours_recommending_deeper_than_legacy_price` was the unsigned
@@ -463,6 +579,40 @@ def test_the_aggregate_budget_is_the_mean_over_the_windows_decision_days(
     assert b["daily_budget"] == pytest.approx(
         np.mean([r["budget"] for r in tr["by_day"]]), abs=0.1)
     assert "decision days" in b["budget_basis"]
+
+
+def test_a_window_with_no_budget_base_is_reported_not_a_crash(
+        cfg, tmp_path, monkeypatch):
+    """Every decision day held (the trailing IL seed never spans
+    budget_il_window_days: a thin extract, a short explicit range) once
+    reached `daily_budget > 0` with None after the whole decision loop had
+    run and the store was written -- a TypeError, not a verdict. The
+    report says NO BUDGET BASE, grades nothing against a budget, and the
+    trace still walks with tau held."""
+    from common.io import write_json
+    from evaluate import shadow
+    cfg = _harness_cfg(cfg, tmp_path)
+    # a base the seed can never fill; day one is held, so the launch tau
+    # falls back to the paste, checked against this run's own out path
+    cfg["exploration"] = dict(cfg["exploration"], budget_il_window_days=30,
+                              tau_initial=5.0)
+    out = str(tmp_path / "shadow.json")
+    write_json(out, {"tau_initial_derivation": {"tau_initial": 5.0}})
+    report = _run_shadow(cfg, _shadow_frame(), _Applier(cfg), monkeypatch,
+                         shadow_path=out)
+    b = report["exploration_budget_would_be"]
+    assert b["daily_budget"] is None and b["spend_over_budget"] is None
+    assert b["verdict"].startswith("NO BUDGET BASE")
+    assert b["tau_recommended"] is None
+    tr = b["tau_controller_trace"]
+    assert tr["days_simulated"] > 0 and all(r["held"] for r in tr["by_day"])
+    assert b["decision_days_held"] == tr["days_simulated"]
+    assert tr["tau_end"] == tr["tau_start"] == 5.0
+    assert "note" in report["exploration_budget_sweep"]
+    assert report["tau_initial_derivation"]["fallback"]
+    # the console summary prints it rather than formatting None
+    assert any("every decision day held" in text for _, text in shadow._summary(report)
+               if text)
 
 
 def test_the_pre_window_seed_is_scaled_to_the_sample(cfg, tmp_path, monkeypatch):

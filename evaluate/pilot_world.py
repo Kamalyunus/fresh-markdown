@@ -23,6 +23,7 @@ or on the push, never inside the agent (`FAULTS` names them).
 import numpy as np
 import pandas as pd
 
+from common import episodes
 from common.config import reference_discount
 from common.io import read_json
 # the request -> state helpers are engine.state's: the one home Lane B
@@ -93,7 +94,7 @@ def episode_templates(prepared, cfg, opened_from=None):
     out = []
     for eid, g in d.groupby("episode_id", sort=False):
         first = g.iloc[0]
-        n = int(first.hours_remaining) + 1            # hours in the window
+        n = episodes.planning_horizon(first.hours_remaining)   # hours in the window
         path = [float(x) for x in g.total_discount]
         path += [path[-1]] * (n - len(path))           # sold out early: hold
         out.append({
@@ -201,7 +202,8 @@ class World:
             "final_price": float(realised) if sold > 0 else 0.0,
             "cogs_wo_vat": float(template["cost"]),
             "ending_inventory": float(ending),
-            "flc_window": float(hours_remaining - 1),
+            # the source's counter for this hour: planning_horizon's inverse
+            "flc_window": float(episodes.window_counter(hours_remaining)),
             "category": template["category"], "subcategory": template["subcategory"],
         }
 

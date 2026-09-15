@@ -752,12 +752,38 @@
           it, the one way the bootstrap computed them.</li>
       <li>One batch per hour. A request for an hour the store already holds a decision for is refused
           (<code>already_priced</code>) — a retried batch never puts two prices on one feed row; two
-          requests for one hour in the same batch are both refused (<code>duplicate_request</code>).</li>
+          requests for one hour in the same batch are both refused (<code>duplicate_request</code>).
+          The event store itself holds one decision per hour: a second one is refused there too,
+          whatever path it took.</li>
+      <li>Every request is read in ONE spelling before anything else looks at it: ids as the hour
+          key spells them (an id your table reads back as <code>7.0</code>, a JSONL <code>"7"</code>
+          and an integer <code>7</code> name one SKU; the same for <code>fc</code>,
+          <code>episode_id</code> and <code>category</code>), the <code>date</code> as
+          <code>YYYY-MM-DD</code> (a parquet timestamp column prices and writes), counts as
+          integers. A null <code>original_price</code> or <code>cost</code>, or one that is not a
+          number, rejects that row before the engine; a zero, a negative or a cost above list is
+          the engine's rejection, per row.</li>
+      <li><b>A later hour of an episode is priced on the entry forecast.</b> The demand path is
+          predicted ONCE, at the episode's first decision; a request that carries a
+          <code>current_discount</code> for an <code>episode_id</code> the store knows is priced
+          on that stored path, sliced to the hour — so what the shelf is priced on never changes
+          mid-window and the assurance re-solve reproduces it. Only a restock that grew
+          <code>hours_remaining</code> extends the path, by prediction on the features as of the
+          episode's opening. A later request for an episode the store has never priced (a listing
+          already on clearance when the pilot started) gets a fresh forecast and is counted
+          (<code>non_entry_requests_without_stored_path</code> in the batch report). This is one
+          more reason the id must stay stable across midnight: a new id mid-window is a new
+          forecast.</li>
+      <li>The batch report (<code>--report</code>) also counts
+          <code>requests_with_unknown_features</code>: fresh forecasts with no history behind them
+          (the model prices those as "unknown"). A whole batch reading so means the
+          <code>--history</code> table does not meet the requests — an id spelling, or a table cut
+          before the trailing window.</li>
       <li>A state the engine rejects comes back as <code>rejected</code> with the reason — the
           <code>StateRejected</code> path below, per row; your fallback applies to that row.</li>
       <li>Call it as it is (a file drop per hour) or lift the service out of it:
-          <code>engine.state.build_states</code> is the one request → state; the rest of the module
-          is plumbing.</li>
+          <code>engine.state.build_states</code> is the one request → state (it returns the states
+          and the two counts above); the rest of the module is plumbing.</li>
     </ul>
     <p>
       Before any of it exists on your side, <code>python3 -m tools.e2e_cycle</code> runs one whole
@@ -829,7 +855,7 @@
         <tr><td class="f">exploration_cost</td><td class="ex">2385.0286259173663</td><td>Expected IL given up to run it. Zero when not exploring.</td></tr>
         <tr><td class="f">affordable_set_size</td><td class="ex">3</td><td>How many alternatives were within budget.</td></tr>
         <tr><td class="f">tau_current</td><td class="ex">3202.33</td><td>The exploration budget in force, in won. <code>null</code> while exploration is suspended by a stop condition: the decision was priced at the optimum with no draw. A long-lived caller holds one <code>PosteriorStore</code> and calls <code>reload()</code> once per decision batch, before its first <code>decide()</code>: the monitor's suspension and <code>daily.update</code>'s cells and tau are written to the same file by other processes and are invisible to the handle until then; <code>decide()</code> itself never re-reads the file.</td></tr>
-        <tr><td class="f">delta_min</td><td class="ex">0.2124</td><td>The smallest distance from the reference discount, in log price, a forced tier may sit at (level-bias scale over |ε|); tiers closer to the reference were neither drawn nor budgeted — the learner reads outcomes against <code>reference_mu</code>. 0 before the scale is measured.</td></tr>
+        <tr><td class="f">delta_min</td><td class="ex">0.1459</td><td>The smallest distance from the reference discount, in log price, a forced tier may sit at (level-bias scale over |ε|); tiers closer to the reference were neither drawn nor budgeted — the learner reads outcomes against <code>reference_mu</code>. 0 before the scale is measured.</td></tr>
 
         <tr class="grouphead"><td colspan="3">Inputs that make it reproducible — 7</td></tr>
         <tr><td class="f">epsilon_posterior_mean</td><td class="ex">-1.0</td><td>The learned price response. Always negative.</td></tr>
@@ -877,7 +903,7 @@
         <tr><th>Field</th><th>Source</th><th>Type</th><th>Example</th><th>Rule</th></tr>
       </thead>
       <tbody>
-        <tr><td class="f">outcome_id</td><td><span class="tag">derived</span></td><td class="t">string</td><td class="ex">"feed-SKU-88213|FC-04|2026-08-19T18"</td><td>The hour's key — <code>feed-&lt;sku_id&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code> — so you can name the outcome a feed row will produce before it exists, and re-ingesting the same feed dedups instead of double-counting. Two decisions priced for one hour (a retried batch) match neither: counted as <code>decisions_colliding_on_hour</code>, and completeness falls by both.</td></tr>
+        <tr><td class="f">outcome_id</td><td><span class="tag">derived</span></td><td class="t">string</td><td class="ex">"feed-SKU-88213|FC-04|2026-08-19T18"</td><td>The hour's key — <code>feed-&lt;sku_id&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code> — so you can name the outcome a feed row will produce before it exists, and re-ingesting the same feed dedups instead of double-counting. Two decisions priced for one hour (a retried batch) match neither: counted as <code>decisions_colliding_on_hour</code>, and completeness falls by both. The store holds ONE outcome per decision: a second one naming a decision already answered (an id scheme that moved, a re-ingest under another key) is refused and counted (<code>outcomes_per_decision_over_one</code>); the first one stands.</td></tr>
         <tr><td class="f">decision_id</td><td><span class="tag">derived</span></td><td class="t">string</td><td class="ex">"faf79b6c-fde0-…"</td><td>The decision the feed row matched on (SKU, FC, date, hour).</td></tr>
         <tr><td class="f">units_sold</td><td><span class="tag you">feed</span></td><td class="t">int ≥ 0</td><td class="ex">0</td><td><strong>Zero-sale hours count.</strong> They are roughly three quarters of all hours and they are evidence, not noise — the feed carries them already.</td></tr>
         <tr><td class="f">starting_inventory</td><td><span class="tag you">feed</span></td><td class="t">int ≥ 0</td><td class="ex">2</td><td>The feed's inventory at the top of the hour. Should equal the decision's <code>q_remaining</code>.</td></tr>
@@ -1215,10 +1241,11 @@
         <tr><th>Gate</th><th class="n">Threshold</th><th>What breaches it</th></tr>
       </thead>
       <tbody>
-        <tr><td class="f">event completeness</td><td class="t n">≥ 99%</td><td>Outcomes landing per decision. A priced hour missing from the feed, a feed hour the ingester cannot interpret, or two decisions priced for one hour (a retried batch: neither matched, <code>decisions_colliding_on_hour</code>) shows up here first.</td></tr>
+        <tr><td class="f">event completeness</td><td class="t n">≥ 99%</td><td>Outcomes landing per decision. A priced hour missing from the feed, a feed hour the ingester cannot interpret, or two decisions priced for one hour (a retried batch: neither matched, <code>decisions_colliding_on_hour</code>) shows up here first. The decision side is counted in production too, in the monitor's safety block over the trailing window: <code>decisions_colliding_on_hour</code>, and <code>decisions_without_outcome</code> — decisions on a day the feed has already answered for (<code>decisions_answered_through</code>, over <code>decisions_on_answered_days</code>) that no outcome names; today's decisions are pending, not gaps.</td></tr>
+        <tr><td class="f">outcomes per decision</td><td class="t n">exactly 1</td><td>The store refuses a second outcome for a decision it already holds one for and counts it (<code>outcomes_per_decision_over_one</code>, in the ingest report and the monitor's safety block); the learner never consumes two outcomes for one hour.</td></tr>
         <tr><td class="f">duplicate or unmatched</td><td class="t n">≤ 1%</td><td>Outcomes with no matching decision over the finalized outcomes of the trailing <code>event_quality_window_days</code> (14) of trading days, plus repeated ids counted all-time (a duplicate line has no trading day; a producer that re-appends one is broken, not an incident that ages out). The mismatch rate reads the same window, so one incident stops re-firing a lifted stop once history dilutes it.</td></tr>
         <tr><td class="f">price mismatch</td><td class="t n">≤ 1%</td><td>Outcomes whose offered price (from the feed) differs from the decision's by more than <code>1e-6</code>. This is the "did the agent's price actually go live" check — it catches silent push failures your failures table missed; a failure you reported shows the old price by definition and is counted apart (<code>push_failures_reported</code>), never as a mismatch.</td></tr>
-        <tr><td class="f">missing stockout field</td><td class="t n">exactly 0</td><td>Any outcome at all without <code>is_stockout</code>.</td></tr>
+        <tr><td class="f">missing stockout field</td><td class="t n">exactly 0</td><td>Any outcome at all without <code>is_stockout</code>. Enforced by the store: such an outcome never lands (refused on emit with the reason in the quarantine, skipped on load) and is counted — <code>missing_stockout_field</code>, in the ingest report and the monitor's safety block. Every outcome the ingester builds carries the field, so a non-zero count means a line reached <code>outcomes.jsonl</code> by another route.</td></tr>
       </tbody>
     </table>
   </div>

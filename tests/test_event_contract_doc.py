@@ -49,6 +49,40 @@ def test_every_required_outcome_field_is_documented():
         "event is what the feed ingester stores -- it must be whole.")
 
 
+def test_the_worked_episode_is_one_example_not_two():
+    """Section 04's field table and section 06's payload describe the same
+    17:00 entry decision; a hand-patched number in one of them means the
+    page contradicts its own claim that the episode was captured, not
+    typed. delta_min is the field that drifted."""
+    with open(DOC) as f:
+        html = f.read()
+    table = re.search(r'<td class="f">delta_min</td><td class="ex">([0-9.]+)</td>', html)
+    payload = re.search(r'"delta_min": ([0-9.]+),', html)
+    assert table and payload, "delta_min must appear in the section 04 table and the section 06 payload"
+    assert table.group(1) == payload.group(1)
+
+
+def test_the_completeness_counts_the_doc_names_are_the_ones_the_code_reports():
+    """Section 07 names the counts an integration is graded on; each must
+    be a key the code writes -- an advertised gate nothing enforces (the
+    stockout row once) sends engineering to scope against a phantom."""
+    from conftest import load_config
+    from events.pairs import quality_counts
+    from events.store import EventStore
+
+    with open(DOC) as f:
+        html = f.read()
+    gates = html[html.index('<section id="gates">'):html.index('<section id="feasibility">')]
+    reported = set(quality_counts([], [], load_config()))
+    store_counts = set(EventStore(load_config(), root=os.path.join(
+        os.path.dirname(DOC), "..", "tests", "__pycache__", "_doc_store")).completeness_counts)
+    for name in ("decisions_colliding_on_hour", "decisions_without_outcome",
+                 "outcomes_per_decision_over_one", "missing_stockout_field"):
+        assert f"<code>{name}</code>" in gates, f"section 07 must name {name}"
+        assert name in reported, f"quality_counts must report {name}"
+    assert "missing_stockout_field" in store_counts
+
+
 def test_the_doc_invents_no_fields():
     """A field the doc names but the system does not know is worse than a
     missing one: it gets built, sent, and silently ignored."""

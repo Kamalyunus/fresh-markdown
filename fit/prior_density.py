@@ -39,13 +39,17 @@ def scored_rows(frame):
     return entry[entry.starting_inventory >= 1].copy()
 
 
-def hour_multipliers(mu, cell, k, censored, min_rows=1):
+def hour_multipliers(mu, cell, k, censored, min_rows=1, bounds=None):
     """Multiplicative time-cell fixed effects profiled out by first-moment
     matching on uncensored rows -- family-agnostic (Poisson and NB alike).
     Thin cells (under `min_rows` uncensored rows) fall back to 1.0 -- a small
     cell absorbs the price response itself; returns (multipliers, fallback
-    share). `cell` is integer codes (or labels, factorised here): a caller
-    profiling a whole grid factorises once and this runs on bincount."""
+    share). `bounds` = `posterior.prior.time_cell_multiplier_bounds`, the
+    clamp on a fitted cell's multiplier (it bounds the fixed effects and so
+    |eps| on the controlled arm -- a tunable, read from config by `curve`);
+    None leaves the ratio unclamped. `cell` is integer codes (or labels,
+    factorised here): a caller profiling a whole grid factorises once and
+    this runs on bincount."""
     codes = np.asarray(cell)
     if codes.dtype.kind not in "iu":
         codes = pd.factorize(codes)[0]
@@ -60,7 +64,9 @@ def hour_multipliers(mu, cell, k, censored, min_rows=1):
                          minlength=n_cells)
     fitted = size >= max(int(min_rows), 1)
     m = np.ones(n_cells)
-    m[fitted] = np.clip(sum_k[fitted] / sum_mu[fitted], 0.05, 20.0)
+    ratio = sum_k[fitted] / sum_mu[fitted]
+    m[fitted] = ratio if bounds is None else np.clip(
+        ratio, float(bounds[0]), float(bounds[1]))
     return m[codes], float(np.mean(~fitted[codes]))
 
 
@@ -71,12 +77,12 @@ def time_cell(g):
 
 
 def loglik(eps, base, log_ratio, k, censored, floor, controlled, cell, const,
-           min_cell=1):
+           min_cell=1, bounds=None):
     """Censored Poisson log-likelihood at one elasticity -- QMLE consistent
     for the mean, so no dispersion parameter (no r) enters this step."""
     mu = np.clip(base * np.exp(eps * log_ratio), floor, None)
     if controlled:
-        mult, _ = hour_multipliers(mu, cell, k, censored, min_cell)
+        mult, _ = hour_multipliers(mu, cell, k, censored, min_cell, bounds)
         mu = np.clip(mu * mult, floor, None)
     exact = k * np.log(mu) - mu - const
     tail = poisson.logsf(np.maximum(k, 1) - 1, mu)
@@ -91,12 +97,13 @@ def curve(g, mu_ref, grid, controlled, cfg):
     censored = g.censored.to_numpy()
     cell = pd.factorize(time_cell(g))[0]      # once, not per grid point
     min_cell = int(pc.get("min_rows_per_time_cell", 1))
+    bounds = pc["time_cell_multiplier_bounds"]
     log_ratio = np.log((1 - g.total_discount.to_numpy())
                        / (1 - g.d_ref.to_numpy()))
     floor = cfg["pricing"]["demand_floor"]
     const = gammaln(k + 1)
     return np.array([loglik(e, mu_ref, log_ratio, k, censored, floor,
-                            controlled, cell, const, min_cell)
+                            controlled, cell, const, min_cell, bounds)
                      for e in grid])
 
 
@@ -221,6 +228,11 @@ def search_grid(grid, cfg):
 # A tolerance on floating-point noise, not a tunable.
 _FLAT_TOL_REL = 1e-9
 
+# A category whose scored rows all sit at one discount has a log-ratio sd of
+# exactly zero up to float noise; below this it is "no price variation".
+# Float noise, not a tunable.
+_NO_VARIATION_TOL = 1e-9
+
 
 def unconstrained_peaks(curves, wide, fit_start):
     """Each arm's unconstrained peak, searched PAST both policy bounds: a
@@ -324,7 +336,7 @@ def estimate(d, cfg, model, fast=False):
             # fires; epsilon_max never (design 5.6).
             "boundary": "lower" if pinned else None,
             "pinned_arms": pinned,
-            "no_price_variation": c["log_ratio_sd"] < 1e-9,
+            "no_price_variation": c["log_ratio_sd"] < _NO_VARIATION_TOL,
         }
 
     def takes_pool(cat):

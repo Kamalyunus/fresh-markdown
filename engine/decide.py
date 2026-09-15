@@ -11,7 +11,7 @@ import uuid
 import numpy as np
 import pandas as pd
 
-from common.config import reference_discount
+from common.config import ConfigError, reference_discount
 from common.provenance import config_fingerprint
 from engine import dp as dp_mod
 from engine import explore
@@ -52,20 +52,45 @@ def integer(v):
             and not isinstance(v, (bool, np.bool_)))
 
 
-def validate_state(s, tiers, anchor_discount, mu_ref_path):
+def is_count(v):
+    """A count as a table hands it over: an integer, or a finite float that
+    IS an integer (a parquet integer column with a null in it reads back as
+    float). bool is excluded; the finiteness test is `finite_number`."""
+    return integer(v) or (finite_number(v) and float(v) == int(v))
+
+
+def count_failures(rec, cfg):
+    """The three count checks a request and a state share -- `q`,
+    `hours_remaining`, `hour_of_day` -- and the horizon bound: the DP
+    plans `hours_remaining` stages, so a counter defect (a feed emitting
+    minutes) must be refused here, by the same `data.max_window_hours`
+    prepare_data flags offline, never priced as a twenty-year episode.
+    The ONE home for these: `engine.state.validate_request` (the request)
+    and `validate_state` (the state) both read it. Returns [] when every
+    count is a count."""
+    failures = []
+    q, hours, hour = rec.get("q"), rec.get("hours_remaining"), rec.get("hour_of_day")
+    if not (is_count(q) and q >= 0):
+        failures.append("q must be a non-negative integer")
+    cap = int(cfg["data"]["max_window_hours"])
+    if not (is_count(hours) and hours >= 1):
+        failures.append("hours_remaining must be an integer >= 1")
+    elif hours > cap:
+        failures.append(f"hours_remaining must not exceed data.max_window_hours "
+                        f"({cap}); got {int(hours)}")
+    # the key ingest matches feed rows on: one hour of one trading day
+    if not (is_count(hour) and 0 <= hour <= 23):
+        failures.append("hour_of_day must be an integer in 0..23")
+    return failures
+
+
+def validate_state(s, tiers, anchor_discount, mu_ref_path, cfg):
     """Every check but the economics (economics_failures runs first, because
     `tiers` is built from its verdict). `anchor_discount` is the caller's
     `current_discount` AS GIVEN -- judged here, cast only once it passed."""
-    failures = []
-    if not (integer(s["q"]) and s["q"] >= 0):
-        failures.append("q must be a non-negative integer")
-    if not (integer(s["hours_remaining"]) and s["hours_remaining"] >= 1):
-        failures.append("hours_remaining must be an integer >= 1")
-    # the key ingest matches feed rows on: one hour of one trading day
-    if not (integer(s.get("hour_of_day")) and 0 <= s["hour_of_day"] <= 23):
-        failures.append("hour_of_day must be an integer in 0..23")
+    failures = count_failures(s, cfg)
     if anchor_discount is not None and not finite_number(anchor_discount):
-        failures.append("p_current must be a finite number")
+        failures.append("current_discount must be a finite number")
     # r parameterises every pmf the DP sums: None is a TypeError in the
     # solver and inf a NaN Q, neither of which is a rejection
     if not (finite_number(s["r"]) and s["r"] > 0):
@@ -121,7 +146,7 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
     failures = economics_failures(s["original_price"], s["cost"])
     tiers, d_max = ([], float("nan")) if failures else dp_mod.feasible_tiers(
         s["original_price"], s["cost"], cfg["pricing"]["tier_step"])
-    failures += validate_state(s, tiers, anchor, s["mu_ref_path"])
+    failures += validate_state(s, tiers, anchor, s["mu_ref_path"], cfg)
     if failures:
         raise StateRejected("; ".join(failures))
     if not entry:
@@ -129,6 +154,15 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
 
     cell = posterior_store.get(s["category"])
     eps = cell["mean"]
+    # the smallest informative move for THIS cell: tiers closer to the
+    # REFERENCE discount than this are neither drawn nor priced into tau
+    # (explore.admissible -- cost is measured from p*, information from
+    # d_ref). A floor mapping that names neither the category nor
+    # `_default` refuses THIS row, by name -- never the whole batch
+    try:
+        dmin = explore.delta_min(cfg, eps, s["category"])
+    except ConfigError as e:
+        raise StateRejected(str(e))
 
     # same contract for the solver: a state it cannot price (an empty shelf
     # between snapshot and call) is rejected, never a bare ValueError
@@ -142,10 +176,6 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
     # explorability is judged on the actions allowed AT THIS DECISION
     # (result.q_by_tier), never on the size of the full grid
     explorable = len(result.q_by_tier) >= cfg["exploration"]["min_feasible_tiers"]
-    # the smallest informative move for THIS cell: tiers closer to the
-    # REFERENCE discount than this are neither drawn nor priced into tau
-    # (explore.admissible -- cost is measured from p*, information from d_ref)
-    dmin = explore.delta_min(cfg, eps, s["category"])
     # one cost table for the ledger and the draw -- the same set, priced once
     costs = explore.admissible_costs(result, dmin)
     if spread_sink is not None and explorable:
@@ -217,6 +247,9 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
         "config_digest": (config_fingerprint(cfg)["digest"]
                           if config_digest is None else str(config_digest)),
         "solver_latency_s": result.solver_latency_s,
+        # demand mass past the DP's table, which ends at or beyond the shelf
+        # (engine.dp.table_width): a diagnostic of demand the shelf could
+        # not have met, never a truncation of what it sells
         "nb_tail_mass_max": result.tail_mass_max,
         "timestamp": pd.Timestamp.now("UTC").isoformat(),
     }

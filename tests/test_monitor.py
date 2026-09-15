@@ -292,6 +292,95 @@ def test_price_mismatch_is_a_rate_over_compared_pairs(cfg):
     assert not stop_conditions(calm, {}, {}, {}, cfg)["fired"]["price_mismatch"]
 
 
+def test_the_safety_block_carries_the_decision_side_of_completeness(cfg, tmp_path):
+    """`decisions_colliding_on_hour` and decisions without an outcome lived
+    only in ingest's stdout; the monitor and the simulator's grade had no
+    decision-side term, so a retried batch could not fail completeness.
+    quality_counts reads them from the store: colliding decisions in the
+    window, decisions on an ANSWERED day (one the feed produced an outcome
+    for) that no outcome names, and what the store refused all-time."""
+    import json
+    from conftest import decision_event, outcome_event
+    from daily.monitor import safety_metrics
+    from events.store import EventStore
+
+    root = tmp_path / "events"
+    root.mkdir()
+    with open(root / "decisions.jsonl", "w") as f:
+        f.write(json.dumps(decision_event(decision_id="D1")) + "\n")                 # answered
+        f.write(json.dumps(decision_event(decision_id="D2", hour_of_day=18)) + "\n")  # no outcome
+        f.write(json.dumps(decision_event(decision_id="D3", hour_of_day=19)) + "\n")  # collide
+        f.write(json.dumps(decision_event(decision_id="D4", hour_of_day=19)) + "\n")  # collide
+        f.write(json.dumps(decision_event(decision_id="D5", date="2026-08-20")) + "\n")  # pending
+    with open(root / "outcomes.jsonl", "w") as f:
+        f.write(json.dumps(outcome_event(outcome_id="O1", decision_id="D1")) + "\n")
+        f.write(json.dumps(outcome_event(outcome_id="O1-again", decision_id="D1")) + "\n")
+    store = EventStore(cfg, root=str(root))
+    s = safety_metrics(store, store.load_decisions(), store.load_outcomes(), cfg=cfg)
+    assert s["decisions_colliding_on_hour"] == 2
+    assert s["decisions_answered_through"] == "2026-08-19"
+    assert s["decisions_on_answered_days"] == 4                # D5's day is pending
+    assert s["decisions_without_outcome"] == 3                 # D2, D3, D4
+    assert s["outcomes_per_decision_over_one"] == 1
+    assert s["missing_stockout_field"] == 0
+    # windowed like the compared pairs: a collision that aged out is gone
+    cfg["monitoring"]["stop_conditions"]["event_quality_window_days"] = 1
+    s = safety_metrics(store, store.load_decisions(), store.load_outcomes(), cfg=cfg)
+    assert s["decisions_colliding_on_hour"] == 0 and s["decisions_without_outcome"] == 0
+
+
+def test_the_realised_vs_predicted_sold_ratio_is_revenue_over_expected_revenue(cfg):
+    """The daily continuation of the calibration diagnostic (design 5.12):
+    realised original_price x units_sold over the decisions' own
+    expected_denominator, over the matched pairs -- never a mean of
+    per-hour ratios, and None with nothing matched."""
+    from daily.monitor import safety_metrics
+
+    class _Store:
+        duplicate_counts = {"decision": 0, "outcome": 0}
+
+        def load_quarantine(self):
+            return []
+
+    decisions = [{"decision_id": "D1", "date": "2026-08-19", "applied_price": 900.0,
+                  "expected_denominator": 1000.0, "original_price": 1000.0},
+                 {"decision_id": "D2", "date": "2026-08-19", "applied_price": 900.0,
+                  "expected_denominator": 3000.0, "original_price": 1000.0},
+                 {"decision_id": "D3", "date": "2026-08-19", "applied_price": 900.0,
+                  "expected_denominator": 5000.0, "original_price": 1000.0}]
+    outcomes = [{"decision_id": "D1", "applied_price": 900.0, "units_sold": 2,
+                 "is_stockout": False},
+                {"decision_id": "D2", "applied_price": 900.0, "units_sold": 0,
+                 "is_stockout": False}]
+    s = safety_metrics(_Store(), decisions, outcomes, cfg=cfg)
+    # (1000 x 2 + 1000 x 0) / (1000 + 3000); D3 has no outcome and is not in it
+    assert s["realised_vs_predicted_sold_ratio"] == pytest.approx(0.5)
+    assert safety_metrics(_Store(), decisions, [], cfg=cfg)["realised_vs_predicted_sold_ratio"] is None
+
+
+def test_the_affordable_set_empty_rate_reads_budgeted_decisions_only(cfg, tmp_path):
+    """The leading indicator of a non-explorable catalogue (design 5.12):
+    the share of decisions priced WITH a budget whose affordable set was
+    empty. A suspended decision (tau_current None) has no budget to afford
+    anything with and must not read as an empty set."""
+    from conftest import decision_event
+    from daily.monitor import learning_metrics
+    from engine.posterior import PosteriorStore
+
+    posterior = PosteriorStore.initialise(
+        cfg, {"vegetables": {"mean": -1.0, "std": 0.6}}, {"vegetables": 500},
+        path=str(tmp_path / "posterior.json"))
+    decisions = [decision_event(decision_id="a", affordable_set_size=0),
+                 decision_event(decision_id="b", affordable_set_size=3),
+                 decision_event(decision_id="c", affordable_set_size=0),
+                 decision_event(decision_id="d", affordable_set_size=2),
+                 decision_event(decision_id="e", affordable_set_size=0, tau_current=None)]
+    out = learning_metrics(decisions, posterior, cfg)
+    assert out["affordable_set_empty_rate"] == pytest.approx(0.5)
+    suspended = [decision_event(decision_id="e", affordable_set_size=0, tau_current=None)]
+    assert learning_metrics(suspended, posterior, cfg)["affordable_set_empty_rate"] is None
+
+
 def test_the_overspend_stop_takes_no_reading_while_the_il_base_is_short(cfg):
     """The stop compares the same budget the controller prices from, by the
     same rule (explore.budget_base_ready): a base shorter than its window

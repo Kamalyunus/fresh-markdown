@@ -80,6 +80,114 @@ def test_a_failed_append_leaves_no_id_behind_so_the_retry_is_not_a_duplicate(cfg
     assert store.duplicate_counts["decision"] == 1
 
 
+# ------------------------------------------------ one decision per hour
+def test_a_second_decision_for_a_priced_hour_is_refused_and_counted(cfg, tmp_path):
+    """Two callers each re-derived "is this hour priced?" from a full parse
+    of the log, and two concurrent batches could both pass it. The store
+    holds the index (`priced_hours`) and refuses the second decision like
+    a duplicate id -- counted, never a second price on one feed row."""
+    store = _store(cfg, tmp_path)
+    assert store.emit_decision(decision_event(decision_id="D1"))
+    assert ("S0", "FC-04", "2026-08-19", 17) in store.priced_hours
+    assert not store.emit_decision(decision_event(decision_id="D2"))   # same hour
+    assert store.completeness_counts["decisions_on_priced_hour"] == 1
+    assert store.duplicate_counts["decision"] == 0                    # a different id
+    assert [d["decision_id"] for d in store.load_decisions()] == ["D1"]
+    # the id spelling is the hour key's: 7 and "7" are one hour
+    assert store.emit_decision(decision_event(decision_id="D3", sku_id=7, hour_of_day=18))
+    assert not store.emit_decision(decision_event(decision_id="D4", sku_id="7", hour_of_day=18))
+    # a foreign writer's collision is COUNTED on load and both lines stay
+    # (ingest matches neither and names them decisions_colliding_on_hour)
+    root = tmp_path / "foreign"
+    root.mkdir()
+    with open(root / "decisions.jsonl", "w") as f:
+        f.write(json.dumps(decision_event(decision_id="A")) + "\n")
+        f.write(json.dumps(decision_event(decision_id="B")) + "\n")
+    foreign = EventStore(cfg, root=str(root))
+    assert foreign.completeness_counts["decisions_on_priced_hour"] == 1
+    assert [d["decision_id"] for d in foreign.load_decisions()] == ["A", "B"]
+
+
+def test_a_decision_naming_no_hour_is_quarantined_not_stored(cfg, tmp_path):
+    store = _store(cfg, tmp_path)
+    assert not store.emit_decision(decision_event(hour_of_day=float("nan")))
+    assert not store.emit_decision(decision_event(decision_id="D2", sku_id=None))
+    assert store.quarantined_this_run == 2
+    assert all("hour" in q["problems"][0] for q in store.load_quarantine())
+    assert store.load_decisions() == []
+
+
+def test_the_store_keeps_each_episodes_latest_forecast_and_its_opening(cfg, tmp_path):
+    """A later request of an episode is priced on the path the store holds
+    for it (engine.state.build_states slices it): the latest decision's
+    hour and path, and the hour the episode opened -- kept from the entry
+    decision through every later one, and rebuilt on load."""
+    store = _store(cfg, tmp_path)
+    store.emit_decision(decision_event(decision_id="D1", hours_remaining=3,
+                                       mu_ref_path=[0.9, 0.7, 0.5]))
+    store.emit_decision(decision_event(decision_id="D2", hour_of_day=18, is_entry=False,
+                                       hours_remaining=2, mu_ref_path=[0.7, 0.5]))
+    p = store.episode_paths["EP0"]
+    assert (p["date"], p["hour_of_day"], p["hours_remaining"]) == ("2026-08-19", 18, 2)
+    assert p["mu_ref_path"] == [0.7, 0.5] and p["opened"] == ("2026-08-19", 17)
+    assert EventStore(cfg, root=store.root).episode_paths["EP0"] == p
+
+
+# ------------------------------------------------ one outcome per decision
+def test_a_second_outcome_for_a_decision_is_refused_on_emit_and_skipped_on_load(cfg, tmp_path):
+    """The outcome id moved from `feed-<uuid>` to the hour's key: a store
+    holding old outcomes got a SECOND outcome per decision on re-ingest and
+    daily.update consumed both. The invariant lives in the store: indexed
+    by decision_id, the first outcome stands, every later one is counted."""
+    store = _store(cfg, tmp_path)
+    assert store.emit_outcome(_outcome(outcome_id="feed-old-uuid", decision_id="D0"))
+    assert not store.emit_outcome(_outcome(outcome_id="feed-S0|FC-04|2026-08-19T17",
+                                           decision_id="D0"))
+    assert store.completeness_counts["outcomes_per_decision_over_one"] == 1
+    assert store.duplicate_counts["outcome"] == 0 and store.quarantined_this_run == 0
+    assert [o["outcome_id"] for o in store.load_outcomes()] == ["feed-old-uuid"]
+    # written directly by a foreign producer: counted once per store, and
+    # the learner's view holds one outcome per decision
+    root = tmp_path / "foreign"
+    root.mkdir()
+    with open(root / "outcomes.jsonl", "w") as f:
+        f.write(json.dumps(_outcome(outcome_id="feed-old", decision_id="D0")) + "\n")
+        f.write(json.dumps(_outcome(outcome_id="feed-new", decision_id="D0")) + "\n")
+        f.write(json.dumps(_outcome(outcome_id="O1", decision_id="D1")) + "\n")
+    foreign = EventStore(cfg, root=str(root))
+    assert foreign.completeness_counts["outcomes_per_decision_over_one"] == 1
+    assert [o["outcome_id"] for o in foreign.load_outcomes()] == ["feed-old", "O1"]
+    # and the learner sees exactly one outcome for D0
+    from engine.posterior import PosteriorStore
+    posterior = PosteriorStore.initialise(
+        cfg, {"vegetables": {"mean": -1.0, "std": 0.6}}, {"vegetables": 10**6},
+        path=str(tmp_path / "posterior.json"))
+    with open(root / "decisions.jsonl", "w") as f:
+        f.write(json.dumps(decision_event(decision_id="D0")) + "\n")
+    batch = upd.collect_batch(EventStore(cfg, root=str(root)), posterior, cfg)
+    assert [o["outcome_id"] for _, o in batch["pairs"]] == ["feed-old"]
+
+
+def test_an_outcome_without_is_stockout_never_lands_and_is_counted(cfg, tmp_path):
+    """Contract 07 advertises "missing stockout field -- exactly 0". The
+    store is what enforces it: refused on emit (quarantined with the
+    reason), skipped on load, counted either way in
+    `missing_stockout_field`, which ingest and the monitor report."""
+    store = _store(cfg, tmp_path)
+    bare = {k: v for k, v in _outcome().items() if k != "is_stockout"}
+    assert not store.emit_outcome(bare)
+    assert store.completeness_counts["missing_stockout_field"] == 1
+    assert "is_stockout" in store.load_quarantine()[0]["problems"][0]
+    root = tmp_path / "foreign"
+    root.mkdir()
+    with open(root / "outcomes.jsonl", "w") as f:
+        f.write(json.dumps(bare) + "\n")
+        f.write(json.dumps(_outcome(outcome_id="O1", decision_id="D1")) + "\n")
+    foreign = EventStore(cfg, root=str(root))
+    assert foreign.completeness_counts["missing_stockout_field"] == 1
+    assert [o["outcome_id"] for o in foreign.load_outcomes()] == ["O1"]
+
+
 # ------------------------------------------------------------------- the date
 @pytest.mark.parametrize("bad", [
     "2026-8-19", "20260819", "2026-08-19T17:00:00", "2026-13-01", "2026-02-30",
@@ -143,8 +251,9 @@ def test_a_torn_last_line_is_quarantined_and_the_store_stays_readable(cfg, tmp_p
     assert "unparseable" in q[0]["problems"][0] and "line 2" in q[0]["problems"][0]
     assert q[0]["event"]["raw_line"] == torn
 
-    # the next event lands on its own line and reads back
-    assert store.emit_decision(decision_event(decision_id="D-next"))
+    # the next event (another hour: the store holds one decision per hour)
+    # lands on its own line and reads back
+    assert store.emit_decision(decision_event(decision_id="D-next", hour_of_day=18))
     assert [d["decision_id"] for d in store.load_decisions()] == ["D-good", "D-next"]
 
     # a fresh store over the same files does not quarantine the same line twice
@@ -219,5 +328,5 @@ def test_a_torn_line_split_inside_a_multibyte_character_is_quarantined(cfg, tmp_
     assert [d["decision_id"] for d in store.load_decisions()] == ["D-good"]
     assert store.quarantined_this_run == 1
     assert "unparseable" in store.load_quarantine()[0]["problems"][0]
-    assert store.emit_decision(decision_event(decision_id="D-next"))
+    assert store.emit_decision(decision_event(decision_id="D-next", hour_of_day=18))
     assert [d["decision_id"] for d in store.load_decisions()] == ["D-good", "D-next"]

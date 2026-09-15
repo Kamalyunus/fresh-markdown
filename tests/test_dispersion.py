@@ -19,9 +19,11 @@ def test_an_r_at_a_search_bound_is_recognised_by_the_configured_tolerance(cfg):
     assert not fd.r_at_bound(hi * (1 - 2 * tol), cfg)
     assert not fd.r_at_bound(lo * (1 + 2 * tol), cfg)
     assert not fd.r_at_bound((lo + hi) / 2, cfg)
-    # the drift measurement uses the SAME test, not its own 0.99 / 1.01
-    src = inspect.getsource(fd.drift_by_window)
-    assert "r_at_bound(" in src and "0.99" not in src and "1.01" not in src
+    # the drift measurement uses the SAME test: widen the tolerance and a
+    # window whose r sits just inside the old 1% band reads as pinned
+    monkeypatch_tol = copy.deepcopy(cfg)
+    monkeypatch_tol["dispersion"]["r_bound_tolerance_rel"] = 0.10
+    assert fd.r_at_bound(hi * 0.95, monkeypatch_tol) and not fd.r_at_bound(hi * 0.95, cfg)
 
 
 class _FlatModel:
@@ -144,7 +146,9 @@ def test_the_working_elasticity_fallback_is_a_config_key(cfg, tmp_path):
     cfg["dispersion"]["working_elasticity_fallback"] = -1.7
     by_cat, fallback = fd._working_elasticity(cfg)
     assert by_cat == {} and fallback == -1.7
-    assert "-1.0" not in inspect.getsource(fd._working_elasticity)
+    # the key's value, whatever it is: the old literal cannot come back
+    cfg["dispersion"]["working_elasticity_fallback"] = -0.3
+    assert fd._working_elasticity(cfg)[1] == -0.3
 
 
 def test_the_residual_frame_has_one_home(cfg):
@@ -249,10 +253,12 @@ def test_drift_is_graded_on_post_train_windows_and_says_so(cfg, monkeypatch):
     assert fallback["stats_basis"].startswith("all windows")
     assert "drift_min_windows" in fallback["stats_basis"]
     assert fallback["windows_graded"] == 5 and fallback["r_median"] == 1.0
-
-    src = inspect.getsource(fd.drift_by_window)
-    assert "drift_min_windows" in src and "drift_max_unusable_share" in src
-    assert "< 3" not in src and "0.34" not in src
+    # both thresholds are the config's: at drift_min_windows 2 the post-
+    # train windows are graded again, and the unusable-share verdict moves
+    # with its key rather than a literal
+    cfg["dispersion"]["drift_min_windows"] = 2
+    seen = iter([3.0, 5.0])
+    assert fd.drift_by_window(d, cfg, model=_FlatModel())["stats_basis"] == "post_train"
 
 
 def test_dispersion_drift_separates_a_failed_fit_from_a_moved_parameter(

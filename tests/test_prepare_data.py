@@ -231,38 +231,96 @@ def test_population_resolves_the_config_default(cfg):
         population(d, cfg, "whatever")
 
 
-def test_the_artifact_fits_read_the_config_and_the_dp_side_does_not():
-    """The choice exists for the frozen artifacts. For the DP it is a
-    precondition -- an ineligible episode has no feasible tier at all.
-    And each fit stays inside its own split: bounded already -- asserted so
-    they stay that way."""
-    from fit import train_baseline, fit_dispersion, prior_density
+def _split_spy(monkeypatch, module, seen):
+    """Route `module`'s split_frames / population through spies that record
+    which window and which population each fit asked for, handing back
+    the frame itself (the rows are not the point here)."""
+    def split_frames(d, cfg):
+        class _Splits(dict):
+            def __getitem__(self, key):
+                seen.append(("split", key))
+                return d
+        return _Splits()
+
+    def population(d, cfg, which=None):
+        seen.append(("population", which or "eligible"))
+        return d
+    monkeypatch.setattr(module, "split_frames", split_frames)
+    monkeypatch.setattr(module, "population", population)
+
+
+def test_the_artifact_fits_read_the_eligible_population_of_their_own_split(
+        cfg, monkeypatch):
+    """The choice exists for the frozen artifacts: each fit reads the
+    `eligible` population (the config default) of ITS split -- the baseline
+    on train, dispersion on calib, the prior's curves on the window named,
+    fitted on train and scored on calib. Observed on the calls, never on
+    the source text."""
+    from fit import fit_dispersion, prior_density, train_baseline
+
+    # the baseline: train split, eligible population, then LightGBM
+    seen = []
+    _split_spy(monkeypatch, train_baseline, seen)
+    fitted = {}
+
+    class _Booster:
+        def save_model(self, path):
+            fitted["path"] = path
+
+    monkeypatch.setattr(train_baseline.lgb, "train", lambda *a, **k: _Booster())
+    monkeypatch.setattr(train_baseline.lgb, "Dataset", lambda X, label, categorical_feature: None)
+    monkeypatch.setattr(train_baseline.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr("builtins.open", lambda *a, **k: __import__("io").StringIO())
+    d = _hourly_rows().assign(category="MEAT", subcategory="PORK", cost=4000.0,
+                              original_price=10_000.0, sku_ref_sales_rate_30d=1.0,
+                              prior_episode_ref_sales_rate=1.0)
+    train_baseline.train(d, cfg)
+    assert seen == [("split", "train"), ("population", "eligible")]
+
+    # the prior: the window it is asked for, eligible; the fit on train and
+    # the held-out score on calib, never the same window
+    seen = []
+    _split_spy(monkeypatch, prior_density, seen)
+    monkeypatch.setattr(prior_density, "scored_rows", lambda f: f.head(0))
+    prior_density.build_curves(d, cfg, None, np.linspace(-3, -0.05, 5), "calib")
+    assert seen == [("split", "calib"), ("population", "eligible")]
+    windows = []
+    monkeypatch.setattr(prior_density, "build_curves",
+                        lambda d, c, m, g, w: windows.append(w) or {})
+    monkeypatch.setattr(prior_density, "fold_spread", lambda *a, **k: {})
+    with pytest.raises(SystemExit):
+        prior_density.estimate(d, cfg, None, fast=True)
+    assert windows == ["train"]
+    windows.clear()
+    prior_density.holdout_comparison(d, cfg, None, np.linspace(-3, -0.05, 5), {})
+    assert windows == ["calib"]
+
+    # dispersion: the calib split, eligible
+    seen = []
+    _split_spy(monkeypatch, fit_dispersion, seen)
+    monkeypatch.setattr(fit_dispersion, "_working_elasticity", lambda c: ({}, -1.0))
+    calib = d.assign(d_ref=0.25, episode_eligible=True, dp_eligible=True,
+                     ending_inventory=lambda f: f.starting_inventory - f.units_sold)
+
+    class _Flat:
+        @staticmethod
+        def predict_mu_ref(rows, raw=False):
+            return np.full(len(rows), 2.0)
+    fit_dispersion.fit_dispersion(calib, cfg, model=_Flat())
+    assert seen[:2] == [("split", "calib"), ("population", "eligible")]
+
+
+def test_the_dp_side_reads_dp_eligible_explicitly():
+    """For the DP the population is a precondition -- an ineligible episode
+    has no feasible tier at all -- so the backtest and shadow name it
+    rather than take the config default. (Named, not pinned to source:
+    the population call is the one architecture rule here.)"""
     from evaluate import backtest as bt
     from evaluate import shadow
-
-    train = inspect.getsource(train_baseline.train)
-    disp = inspect.getsource(fit_dispersion.fit_dispersion)
-    curves = inspect.getsource(prior_density.build_curves)
-    for name, src in (("train", train), ("fit_dispersion", disp),
-                      ("build_curves", curves)):
-        assert "population(" in src, name
 
     for fn in (bt.main, shadow.run_shadow):
         src = inspect.getsource(fn)
         assert 'population(d, cfg, "dp_eligible")' in src, fn.__qualname__
-
-    assert 'splits["train"]' in train
-    assert 'split_frames(d, cfg)["calib"]' in disp
-    assert 'split_frames(d, cfg)[window]' in curves, (
-        "the prior must take its rows from a named split, so the fit window "
-        "and the held-out window cannot silently be the same one")
-    assert '"train"' in inspect.getsource(prior_density.estimate), \
-        "the prior fit must be built on the TRAIN window"
-    hold = inspect.getsource(prior_density.holdout_comparison)
-    assert 'window = "calib"' in hold, \
-        "the held-out comparison must score the calib window"
-    assert 'build_curves(d, cfg, model, grid, "train")' not in hold, \
-        "the held-out comparison must not score the window the prior was fitted on"
 
 
 def test_the_cost_floor_is_not_a_population_choice():
@@ -1033,7 +1091,8 @@ def test_a_restock_extended_window_is_one_episode():
                start=[5, 4, 3, 6, 5], sold=[1, 1, 1, 1, 1], end=[4, 3, 6, 5, 4])
     assert assign_episode_ids(d).nunique() == 1
     assert counter_step_detail(d) == {"up_steps_at_one_hour": 1, "restock_continued": 1,
-                                      "closed_new_window": 0, "reset_new_window": 0}
+                                      "closed_new_window": 0, "reset_new_window": 0,
+                                      "closed_then_resumed": 0}
     # the same up-step with NO stock arriving the hour before is a reset:
     # two back-to-back windows, two ids
     reset = d.copy()
@@ -1085,3 +1144,209 @@ def test_the_null_counter_run_reads_the_same_boundaries():
                     start=[7, 6, 5, 9, 8], sold=[1, 1, 5, 1, 1], end=[6, 5, 0, 8, 7])
     mask, detail = null_counter_windows(closed)
     assert list(mask) == [False, False, False, True, True] and detail["windows"] == 1
+
+
+# ------------------------------------------ the row-defect stages, per stage
+
+def _source_window(sku, start_hour, n, day="2026-03-02", fc="F1", inv0=10,
+                   discount=25.0, price=10_000.0, category="MEAT",
+                   subcategory="PORK"):
+    """One clean source window in the extract's own schema: `n` hours from
+    `start_hour`, selling one an hour, the write-off sentinel on its last
+    row; discount in PERCENT, as the source emits it."""
+    import datetime as dt
+    rows, inv = [], inv0
+    for i in range(n):
+        end = inv - 1 if i < n - 1 else 0
+        rows.append(dict(date=dt.date.fromisoformat(day), hour=start_hour + i,
+                         skuseq=sku, fc=fc, inventory=float(inv), discount=discount,
+                         units_sold=1, normal_asp=price, final_price=price * (1 - discount / 100),
+                         cogs_wo_vat=4000.0, ending_inventory=float(end),
+                         flc_window=float(n - 1 - i), category=category,
+                         subcategory=subcategory))
+        inv = end
+    return rows
+
+
+def _extract(tmp_path, rows, name="raw.parquet"):
+    from tools.make_dummy_flc import SCHEMA
+    df = pd.DataFrame(rows)[[f.name for f in SCHEMA]]
+    path = tmp_path / name
+    pq.write_table(pa.Table.from_pandas(df, schema=SCHEMA, preserve_index=False), str(path))
+    return str(path)
+
+
+def _stage(wf, label):
+    return next(t for t in wf if t[0] == label)
+
+
+def test_a_defective_first_hour_drops_its_whole_window_not_a_fragment(cfg, tmp_path):
+    """A duplicated or null-quantity row on a window's FIRST hour was
+    dropped alone, and the rest of the window re-id'd as a clean window
+    opening one hour late -- eligible, dp-eligible, and scored as an ENTRY
+    row by the prior (the leak gap_split_windows exists to prevent; it only
+    sees interior holes). The whole window goes, and is counted."""
+    clean = _source_window(1, 10, 6) + _source_window(2, 10, 6) + _source_window(3, 10, 6)
+    dup = _source_window(2, 10, 6)[:1]                      # sku 2's first hour, twice
+    null_q = _source_window(3, 10, 6)
+    dirty = clean + dup
+    dirty[12]["inventory"] = None                           # sku 3's first hour
+    assert dirty[12]["skuseq"] == 3 and dirty[12]["hour"] == 10
+    d, wf = load_and_filter(_extract(tmp_path, dirty), cfg)
+    assert sorted(d.episode_id.unique()) == ["1|F1|2026-03-02T10"]
+    assert not d.episode_id.str.endswith("T11").any()
+    nulls = _stage(wf, "null_key_rows_dropped")[4]
+    assert nulls["null_quantity_rows"] == 6 and nulls["null_quantity_windows_dropped"] == 1
+    assert nulls["null_counter_rows"] == 0 and nulls["rows_dropped"] == 6
+    dups = _stage(wf, "duplicate_hour_rows_dropped")[4]
+    assert dups == {"duplicate_hour_rows": 2, "rows_dropped": 7, "windows_dropped": 1,
+                    "note": dups["note"]}
+    assert _stage(wf, "duplicate_hour_rows_dropped")[1] == 6
+    # a null in any quantity column is a counted drop, never a cast error
+    for col in ("units_sold", "ending_inventory"):
+        rows = _source_window(1, 10, 6) + _source_window(2, 10, 6)
+        rows[8][col] = None                                  # sku 2, mid-window
+        d, wf = load_and_filter(_extract(tmp_path, rows, f"{col}.parquet"), cfg)
+        assert sorted(d.episode_id.unique()) == ["1|F1|2026-03-02T10"]
+        assert _stage(wf, "null_key_rows_dropped")[4]["null_quantity_windows_dropped"] == 1
+    assert len(null_q) == 6
+
+
+def test_the_null_run_drop_reads_the_ids_boundaries_on_flat_and_minus_two_steps():
+    """Counters [3, NaN, 1, 1, 0]: the ids split at the flat step (no
+    restock, EPISODE_RULE), so the null's window is the first three rows
+    and the two after it are their own window -- the run drop once
+    swallowed all five. `window_signals.counter_ok` is the one clause."""
+    from fit.prepare_data import (assign_episode_ids, null_counter_windows,
+                                  window_signals, window_starts)
+
+    d = _shelf(hours=[10, 11, 12, 13, 14], counters=[3.0, np.nan, 1.0, 1.0, 0.0],
+               start=[5] * 5, sold=[0] * 5, end=[5] * 5)
+    assert list(window_signals(d)["counter_ok"]) == [False, False, False, False, True]
+    assert list(window_starts(d)) == [True, True, True, True, False]
+    assert assign_episode_ids(d).nunique() == 4
+    mask, detail = null_counter_windows(d)
+    assert list(mask) == [True, True, True, False, False] and detail["windows"] == 1
+    # a -2 step between two readable counters is a new window too
+    skip = _shelf(hours=[10, 11, 12, 13, 14], counters=[4.0, np.nan, 2.0, 0.0, 6.0],
+                  start=[5] * 5, sold=[0] * 5, end=[5] * 5)
+    mask, _ = null_counter_windows(skip)
+    assert list(mask) == [True, True, True, False, False]
+    assert list(window_starts(skip)) == [True, True, True, True, True]
+
+
+def test_an_episode_opening_on_an_empty_shelf_is_flagged_not_priced(cfg):
+    """The feed resumed rows after a sell-out: `(5,5,0),(0,0,3),(3,1,2)`
+    made a dp_eligible episode with q0 = 0 that the backtest arm could not
+    open and shadow priced. It is `opens_empty` (dp-ineligible, counted)
+    and `counter_up_steps.closed_then_resumed` keeps C3's question
+    measurable."""
+    from fit.prepare_data import assign_episode_ids, counter_step_detail
+
+    d = _shelf(hours=[10, 11, 12, 13], counters=[3.0, 2.0, 1.0, 0.0],
+               start=[5, 0, 3, 2], sold=[5, 0, 1, 2], end=[0, 3, 2, 0])
+    d["episode_id"] = assign_episode_ids(d)
+    assert d.episode_id.nunique() == 2
+    assert counter_step_detail(d)["closed_then_resumed"] == 1
+    for col, val in (("cost", 4000.0), ("original_price", 10_000.0),
+                     ("total_discount", 0.25), ("category", "MEAT")):
+        d[col] = val
+    d["offered_price"] = d.original_price * (1 - d.total_discount)
+    d["d_max"] = 1.0 - d.cost / d.original_price
+    tagged, detail = tag_dp_eligibility(d, cfg)
+    resumed = tagged[tagged.hour_of_day >= 11]
+    assert (resumed.dp_ineligible_reason == "opens_empty").all()
+    assert not resumed.dp_eligible.any()
+    assert tagged[tagged.hour_of_day == 10].dp_eligible.all()
+    assert detail["opens_empty"]["episodes"] == 1
+    assert "opens_empty" in [n for n, _ in DP_INELIGIBLE]
+    # the backtest and shadow read dp_eligible, so it is priced by neither
+    assert set(population(tagged, cfg, "dp_eligible").hour_of_day) == {10}
+
+
+def test_the_chain_asserts_the_episode_identity_on_its_output(cfg, tmp_path, monkeypatch):
+    """The design says the identity is asserted; the code only recorded
+    `holds: False`. A broken episode_flow now stops the run with the
+    count, on the chain's output where continuity makes it provable."""
+    from common import episodes
+    from fit import prepare_data as pdm
+
+    rows = _source_window(1, 10, 6) + _source_window(2, 10, 6)
+    path = _extract(tmp_path, rows)
+    d, wf = load_and_filter(path, cfg)
+    identity = _stage(wf, "dp_eligible")[4]["flow_identity"]
+    assert identity["holds"] and identity["violations"] == 0
+
+    real = episodes.flow_identity_violations
+
+    def broken(d, flow=None):
+        return (flow if flow is not None else episodes.episode_flow(d)).head(1)
+    monkeypatch.setattr(pdm.episodes, "flow_identity_violations", broken)
+    with pytest.raises(AssertionError, match="fails on 1 episode"):
+        load_and_filter(path, cfg)
+    monkeypatch.setattr(pdm.episodes, "flow_identity_violations", real)
+    # a bare frame that is not continuous is recorded, not asserted
+    _, detail = tag_dp_eligibility(_frame(starting_inventory=[12, 20],
+                                          ending_inventory=[9, 0]), cfg)
+    assert detail["flow_identity"]["holds"] is False
+
+
+def test_the_unclosed_residue_is_located_and_the_sentinel_check_named(cfg):
+    """Contract C2's self-check (`final_rows_without_closure_sentinel`) and
+    design 12a's `not_closed_by_month` / `by_category` were named in the
+    docs and written by nothing."""
+    unclosed = _frame(episode_id="u", ending_inventory=[9, 7], date="2026-02-15")
+    later = _frame(episode_id="edge", ending_inventory=[9, 7], date="2026-03-01")
+    d = pd.concat([_frame(), unclosed, later], ignore_index=True)
+    d["category"] = ["MEAT", "MEAT", "FRUIT", "FRUIT", "MEAT", "MEAT"]
+    _, detail = tag_dp_eligibility(d, cfg)
+    edge = detail["edge_truncated"]
+    assert edge["final_rows_without_closure_sentinel"] == 2 == edge["episodes_unclosed"]
+    # the one that ended inside the data is the residue; the edge one is not
+    assert edge["episodes_unclosed_not_edge"] == 1
+    assert edge["not_closed_by_month"] == {"2026-02": 1}
+    assert edge["not_closed_by_category"] == {"FRUIT": 1}
+
+
+def test_each_row_scoped_integrity_stage_drops_what_it_names(cfg, tmp_path):
+    """discount_out_of_range_dropped, negative_quantities_dropped,
+    null_category_dropped and zero_base_price_dropped, each on a
+    constructed extract: the stage drops the whole window it names and
+    nothing else, and the discount is percent in, fraction out, once
+    (rule 11)."""
+    base = _source_window(1, 10, 6)
+    bad_disc = _source_window(2, 10, 6, discount=250.0)   # out of [0, 100]
+    bad_disc[3]["discount"] = 25.0                         # one good hour: still whole
+    neg = _source_window(3, 10, 6)
+    neg[2]["units_sold"] = -1
+    no_cat = _source_window(4, 10, 6)
+    no_cat[4]["category"] = None
+    no_sub = _source_window(5, 10, 6)
+    no_sub[0]["subcategory"] = None
+    no_price = _source_window(6, 10, 6, price=0.0)         # never priced
+    filled = _source_window(7, 10, 6)
+    filled[0]["normal_asp"] = 0.0                          # priced from hour 2 on
+    filled[5]["normal_asp"] = 0.0
+    rows = base + bad_disc + neg + no_cat + no_sub + no_price + filled
+    d, wf = load_and_filter(_extract(tmp_path, rows), cfg)
+    kept = {int(s.split("|")[0]) for s in d.episode_id.unique()}
+    assert kept == {1, 7}
+    labels = [t[0] for t in wf]
+    counts = {t[0]: t[2] for t in wf}
+    assert counts["exclusion_window_removed"] == 7
+    assert counts["discount_out_of_range_dropped"] == 6
+    assert counts["negative_quantities_dropped"] == 5
+    assert counts["episode_universe"] == 5
+    assert counts["null_category_dropped"] == 3
+    assert counts["zero_base_price_dropped"] == 2
+    assert labels.index("null_category_dropped") < labels.index("zero_base_price_dropped")
+    # percent -> fraction exactly once: the source's 25 is 0.25 here
+    assert (d.total_discount == 0.25).all()
+    assert (d.offered_price == 7500.0).all()
+    # the base price is filled WITHIN the episode (ffill then bfill), so
+    # sku 7's zeroed first and last hours carry its price
+    seven = d[d.sku_id == 7]
+    assert (seven.original_price == 10_000.0).all() and len(seven) == 6
+    # a discount already a fraction at source would read 0.0025 -- inside
+    # the range, so the stage cannot catch that; 250% cannot be a fraction
+    assert not (d.total_discount > 1).any()

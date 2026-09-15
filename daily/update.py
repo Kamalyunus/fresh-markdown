@@ -24,7 +24,7 @@ from events.pairs import (match_pairs, decision_day, is_learnable, has_stock,
                           is_restocked, quality_counts, quality_rates)
 from engine import explore
 from engine.posterior import PosteriorStore, bounded_step
-from fit.train_baseline import schedule_reaches
+from fit.train_baseline import schedule_reaches, weeks_held_at_anchor
 
 
 def collect_batch(store, posterior, cfg):
@@ -139,11 +139,14 @@ def grid_update(pairs, cell_record, cfg):
     }
 
     # NB Fisher information at the pre-update mean: mu * L^2 * r/(r+mu),
-    # never the Poisson mu * L^2 (design 5.11)
+    # never the Poisson mu * L^2 (design 5.11) -- and on a CENSORED row
+    # the information of the event actually observed (D >= q), which is
+    # strictly less; crediting the uncensored figure overstated evidence
+    # exactly where sell-outs dominate the batch
     mu_at_mean = np.clip(mu0 * np.exp(cell_record["mean"] * log_ratio),
                          cfg["pricing"]["demand_floor"], None)
-    information = float(np.sum(
-        mu_at_mean * log_ratio ** 2 * r / (r + mu_at_mean)))
+    information = float(np.sum(row_information(
+        mu_at_mean, r, log_ratio, inv, censored)))
     # deff at THIS batch's clustering: how many forced outcomes each
     # episode actually contributed, not a frozen paste
     batch_deff = deff_from_episodes(
@@ -159,23 +162,66 @@ def grid_update(pairs, cell_record, cfg):
     }
 
 
+def row_information(mu, r, log_ratio, inv, censored):
+    """Fisher information about epsilon per row, at `mu` (design 5.11).
+
+    An uncensored count carries mu * L^2 * r/(r+mu). A censored row was
+    observed only as the event D >= q (the shelf emptied), a Bernoulli
+    with S = P(D >= q): its information is (dS/deps)^2 / (S (1 - S)), with
+    dS/dmu = r/(r+mu) * (P(D' >= q-1) - P(D >= q)) for D' ~ NB(r+1, mu)
+    (k P(D=k) = mu P(D'=k-1)) and dmu/deps = mu L. A certain event (S at
+    0 or 1) teaches nothing and reads 0."""
+    mu = np.asarray(mu, dtype=float)
+    r = np.asarray(r, dtype=float)
+    L = np.asarray(log_ratio, dtype=float)
+    censored = np.asarray(censored, dtype=bool)
+    exact = mu * L ** 2 * r / (r + mu)
+    if not censored.any():
+        return exact
+    q = np.maximum(np.asarray(inv, dtype=float), 1.0)
+    p = r / (r + mu)
+    s = nbinom.sf(q - 1, r, p)                         # P(D >= q)
+    ds_dmu = r / (r + mu) * (nbinom.sf(q - 2, r + 1, p) - s)
+    var = s * (1.0 - s)
+    event = np.divide((ds_dmu * mu * L) ** 2, var,
+                      out=np.zeros_like(exact), where=var > 0)
+    return np.where(censored, event, exact)
+
+
 def finalized_days(decisions, outcomes, pairs=None):
     """ONE pass over the matched pairs, keyed on the TRADING day the decision
     priced (events.pairs.decision_day, never the UTC clock of
     `finalized_at`). Every stored outcome is final -- `finalized_at` is in
     events.store.OUTCOME_REQUIRED -- so a matched pair is a priced day.
     Returns (priced_days ascending, {day: realised exploration spend} over
-    the forced decisions) -- the day key and the spend the tau controller
-    and the monitor's stop condition both read, so the correction and its
-    backstop cannot drift apart. `pairs` is match_pairs(decisions, outcomes)
-    if the caller already built it."""
+    the forced decisions whose push EXECUTED -- a failed push
+    (events.pairs.is_learnable) left the old price on the shelf, so its
+    expected sacrifice was never spent) -- the day key and the spend the
+    tau controller and the monitor's stop condition both read, so the
+    correction and its backstop cannot drift apart. `pairs` is
+    match_pairs(decisions, outcomes) if the caller already built it."""
     days, spend = set(), {}
     for d, o in (match_pairs(decisions, outcomes) if pairs is None else pairs):
         day = decision_day(d)
         days.add(day)
-        if d.get("is_exploration"):
+        if d.get("is_exploration") and is_learnable(o):
             spend[day] = spend.get(day, 0.0) + float(d["exploration_cost"])
     return sorted(days), spend
+
+
+def suspended_days(decisions):
+    """The trading days on which NO decision had a budget in force: every
+    decision priced that day carries `tau_current` None (engine.decide
+    records None while the store holds a suspension). The controller holds
+    tau on such a day (explore.budget_held) -- nothing was drawn, so its
+    zero spend is no reading. A day with any budgeted decision is graded."""
+    budgeted, seen = set(), set()
+    for d in decisions:
+        day = decision_day(d)
+        seen.add(day)
+        if d.get("tau_current") is not None:
+            budgeted.add(day)
+    return sorted(seen - budgeted)
 
 
 def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None,
@@ -208,26 +254,30 @@ def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None,
         return block
     through = priced_days[-1]
     done = posterior.tau_calibrated_through()
-    if done == through:
-        block["skipped"] = f"already calibrated through {through}"
-        block["through_date"] = through
-        return block
 
-    # EVERY closed day since the last calibration, in order, one step each
-    # -- design 5.8 is a daily walk, and a weekly batch is seven steps, not
-    # one graded day and six skipped. Each day's spend is graded against
-    # the budget priced from the days before it. Zero realised spend on a
+    # EVERY closed day not yet graded, in order, one step each -- design
+    # 5.8 is a daily walk, and a weekly batch is seven steps, not one
+    # graded day and six skipped. Each day's spend is graded against the
+    # budget priced from the days before it. Zero realised spend on a
     # priced day is NOT skipped: nothing was affordable, which is exactly
     # the under-spend the rule raises tau on, and the only way a tau cut
-    # below the smallest spread ever recovers.
-    days = [d for d in priced_days if done is None or d > str(done)]
+    # below the smallest spread ever recovers. A day whose outcomes arrived
+    # after a later day was walked (PosteriorStore.tau_day_walked) is
+    # graded now and counted: each step's factor is tau-independent, so a
+    # late day lands the walk where a timely one would have.
+    days = [d for d in priced_days if not posterior.tau_day_walked(d)]
+    late = [d for d in days if done is not None and d <= str(done)]
     if not days:
-        # the posterior says tau is calibrated PAST the store's latest priced
-        # day: the store is behind (restored from an older copy, or pointed
-        # at the wrong directory). Nothing to walk -- report, never index
-        block["skipped"] = (f"posterior is calibrated through {done}, ahead "
-                            f"of the store's latest priced day {through}; "
-                            "no day to walk")
+        if done is not None and str(done) > through:
+            # the posterior says tau is calibrated PAST the store's latest
+            # priced day: the store is behind (restored from an older copy,
+            # or pointed at the wrong directory). Nothing to walk --
+            # report, never index
+            block["skipped"] = (f"posterior is calibrated through {done}, "
+                                f"ahead of the store's latest priced day "
+                                f"{through}; no day to walk")
+        else:
+            block["skipped"] = f"already calibrated through {through}"
         block["through_date"] = through
         return block
     business = business_metrics(decisions, outcomes,
@@ -245,11 +295,16 @@ def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None,
         widest_std = posterior.widest_std()
     tau_end, rows = explore.walk_tau(
         tau_now, days, lambda day, _tau: spend_by_day.get(day, 0.0),
-        il_by_day, widest_std, cfg)
+        il_by_day, widest_std, cfg, suspended_days=suspended_days(decisions))
     last = rows[-1]
     block.update({
         "through_date": through,
         "days_walked": len(rows),
+        "walked_days": [r["day"] for r in rows],
+        # priced days whose outcomes arrived after a later day had been
+        # walked: graded on this walk, never skipped (design 5.8)
+        "days_walked_before_outcomes": len(late),
+        "late_outcome_days": late,
         "by_day": rows,
         # the last day walked, for the printed line
         "realised_exploration_cost": last["spend"],
@@ -295,7 +350,7 @@ def calibration_current(cfg, today=None):
     week = pd.Timestamp(now).tz_localize(None) if now.tzinfo else now
     week = episodes.week_start(week).strftime("%Y-%m-%d")
     ok = week <= last
-    held = week in (sched.get("weeks_unfitted_held_at_1") or [])
+    held = week in weeks_held_at_anchor(sched)
     return {
         "value": week,
         "threshold": f"<= {last} (last week the schedule covers)",
@@ -330,6 +385,11 @@ def run(cfg, apply=False, events_root=None, posterior_path=None, today=None,
     gates["calibration_schedule_current"] = calibration_current(cfg, today)
 
     hard_fail = [name for name, g in gates.items() if not g["pass"]]
+    # the tau walk moves on SPEND: a stale factor schedule is a reason not
+    # to bank evidence about the wrong model (--apply), not a reason to
+    # leave yesterday's overspend uncorrected. The event-quality gates
+    # refuse both -- with mismatched prices the spend itself is unreliable
+    tau_fail = [n for n in hard_fail if n != "calibration_schedule_current"]
     report = {"event_quality_gates": gates, "cells": {}, "applied": False,
               "batch": {k: batch[k] for k in ("excluded_no_stock",
                                               "excluded_restock")},
@@ -394,15 +454,20 @@ def run(cfg, apply=False, events_root=None, posterior_path=None, today=None,
     # tau is committed by --apply AND by --calibrate-tau: it moves on spend,
     # not evidence, so it needs no operator and must not wait for the
     # learning cadence (weekly --apply with a daily tau)
-    if (apply or calibrate_tau) and hard_fail:
+    if apply and hard_fail:
         report["refused"] = (f"hard gate(s) failed: {hard_fail}; "
                              "no update applied")
-    elif apply or calibrate_tau:
+    elif calibrate_tau and tau_fail:
+        report["refused"] = (f"hard gate(s) failed: {tau_fail}; "
+                             "tau not walked")
+    if (apply or calibrate_tau) and not tau_fail:
         tc = report["tau_calibration"]
         if tc["commit"]:
-            posterior.commit_tau(tc["tau_after"], tc["through_date"])
+            posterior.commit_tau(tc["tau_after"], tc["through_date"],
+                                 days=tc["walked_days"])
         report["tau_committed"] = bool(tc["commit"])
-        report["applied"] = bool(apply)
+    if apply and not hard_fail:
+        report["applied"] = True
 
     # the HUMAN gate on exploration (design 5.12): a fired stop condition
     # suspends forced exploration and nothing resumes it automatically --
@@ -461,16 +526,18 @@ def main():
                  f"last day spent {tc['realised_exploration_cost']} of "
                  f"{tc['budget']}") + ")"
               + ("  [CLIP BOUND]" if tc.get("clipped") else "")
-              + (f"  [{len(tc['held_days'])} day(s) held]" if tc["held_days"] else ""))
+              + (f"  [{len(tc['held_days'])} day(s) held]" if tc["held_days"] else "")
+              + (f"  [{tc['days_walked_before_outcomes']} day(s) whose outcomes "
+                 "arrived late]" if tc.get("days_walked_before_outcomes") else ""))
 
     if "refused" in report:
         print("REFUSED:", report["refused"])
-    elif report["applied"]:
+    if report["applied"]:
         print("applied bounded posterior updates")
     elif report.get("tau_committed"):
         print("tau committed; posterior cells untouched -- --apply is the "
               "operator gate")
-    else:
+    elif "refused" not in report:
         print("monitor only -- rerun with --apply to commit")
 
     if "exploration_resumed" in report:

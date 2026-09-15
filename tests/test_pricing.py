@@ -336,12 +336,15 @@ def test_a_mapping_without_the_category_or_a_default_is_an_error_not_no_floor():
     """A per-category mapping that names neither the category nor `_default`
     is a broken paste; reading it as "no floor" would silently let the
     uninformative tiers back into the draw."""
+    from common.config import ConfigError
     broken = dict(CFG, exploration=dict(CFG["exploration"],
                                         delta_min_log_bias={"MEAT": 0.12}))
     assert explore.delta_min(broken, -1.0, "MEAT") == pytest.approx(0.12)
-    with pytest.raises(KeyError, match="_default"):
+    # a config defect, named as one (engine.decide turns it into a per-row
+    # rejection): never a bare KeyError that takes a whole batch down
+    with pytest.raises(ConfigError, match="_default"):
         explore.delta_min(broken, -1.0, "FRUIT")
-    with pytest.raises(KeyError):
+    with pytest.raises(ConfigError):
         explore.delta_min(broken, -1.0)               # no category, no default
 
 

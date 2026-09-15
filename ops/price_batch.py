@@ -5,18 +5,22 @@ requests of one hour in, a decision per request out -- the price to apply,
 or a rejection with its reason, never a best-effort price. Everything the
 engine needs beyond the request is resolved here, by the one home for
 each: the state (engine.state.build_states -- the frozen model's
-`mu_ref_path`, its two demand-rate features computed point-in-time over
-the trailing history, `r` from the lookup), the posterior and tau (ONE
-`PosteriorStore` read per batch, so a suspension or an --apply landed by
-another process is seen before the first decision), the config digest
-(computed once per batch), the event store (every priced decision is
-committed before its price is returned -- an hour that is not in the
-record is not priced).
+`mu_ref_path`: a fresh forecast for an entry request on the two
+demand-rate features computed point-in-time over the trailing history, the
+stored forecast sliced for a later hour of a known episode; `r` from the
+lookup), the posterior and tau (ONE `PosteriorStore` read per batch, so a
+suspension or an --apply landed by another process is seen before the
+first decision), the config digest (computed once per batch), the event
+store (every priced decision is committed before its price is returned --
+an hour that is not in the record is not priced; the store itself refuses
+a second decision for a priced hour).
 
 Row-scoped, never batch-scoped: a request that cannot become a state, a
 state the engine rejects, a duplicate of another request's hour, or an
 hour the store already holds a decision for, costs that request and is
 returned as `rejected` with the reason; the rest of the batch prices.
+Every request is read in one spelling (engine.state.canonical_request),
+so a parquet timestamp or an id read back as 7.0 prices and writes.
 
 Run: python3 -m ops.price_batch --requests <hour.jsonl|.parquet|.csv>
         --history <hourly FLC parquet, the table ingest reads>
@@ -24,22 +28,19 @@ Run: python3 -m ops.price_batch --requests <hour.jsonl|.parquet|.csv>
 """
 
 import argparse
-import hashlib
-import json
-import os
+from collections import Counter
 
-import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from common.config import load_config
-from common.io import read_json, write_json
+from common.io import read_json, read_rows, write_json, write_jsonl
 from common.parallel import map_episodes
 from common.provenance import config_fingerprint
-from engine.decide import StateRejected, decide
 from engine.posterior import PosteriorStore
-from engine.state import (HISTORY_COLS, REQUEST_FIELDS, BufferStore, FrozenCells,
-                          build_states, validate_request)
-from events.pairs import hour_key
+from engine.state import (HISTORY_COLS, REQUEST_FIELDS, build_states,
+                          canonical_request, price_one, validate_request)
+from events.pairs import colliding_keys, hour_key, ident_series
 from events.store import EventStore
 from fit import prepare_data
 from fit.train_baseline import BaselineModel
@@ -54,36 +55,21 @@ RESPONSE_FIELDS = ("episode_id", "sku_id", "fc", "date", "hour_of_day",
 # ----------------------------------------------------------------- inputs
 
 def read_requests(path):
-    """Requests as a list of dicts, from JSONL (one object per line; a
-    line that is not one is a request with no fields, rejected below and
-    never a batch-wide raise), parquet or CSV (one row each, in the
-    contract's column names; a null cell reads as None)."""
-    if path.endswith(".parquet"):
-        frame = pd.read_parquet(path)
-    elif path.endswith(".csv"):
-        frame = pd.read_csv(path)
-    else:
-        rows = []
-        with open(path) as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    obj = {}
-                rows.append(obj if isinstance(obj, dict) else {})
-        return rows
-    frame = frame.astype(object).where(frame.notna(), None)
-    return frame.to_dict("records")
+    """Requests as a list of dicts (common.io.read_rows): JSONL, parquet or
+    CSV in the contract's column names; a line that is not an object is a
+    request with no fields, rejected below and never a batch-wide raise;
+    a null cell reads as None."""
+    return read_rows(path)
 
 
 def load_history(path, cfg):
     """The feature service's history in HISTORY_COLS: a prepared parquet
     is read as is; the hourly FLC table in the source schema goes through
     the one chain (prepare_data.load_and_filter), so a feature is computed
-    on the rows the bootstrap would have computed it on."""
-    cols = set(pd.read_parquet(path).columns) if path.endswith(".parquet") else set()
+    on the rows the bootstrap would have computed it on. Ids come back in
+    the hour key's spelling (events.pairs.ident_series), the day as
+    `YYYY-MM-DD`."""
+    cols = set(pq.read_schema(path).names) if path.endswith(".parquet") else set()
     if {"episode_id", "total_discount", "starting_inventory"} <= cols:
         hist = pd.read_parquet(path, columns=list(HISTORY_COLS))
     else:
@@ -91,65 +77,40 @@ def load_history(path, cfg):
         hist = hist[list(HISTORY_COLS)]
     hist = hist.copy()
     hist["date"] = pd.to_datetime(hist["date"]).dt.strftime("%Y-%m-%d")
+    for col in ("sku_id", "fc"):
+        hist[col] = ident_series(hist[col])
     return hist.reset_index(drop=True)
 
 
-def plan(requests, priced_keys=()):
+def plan(requests, priced_keys, cfg):
     """Which requests become states, and which are refused before the
     engine sees them: a request missing what a state needs
     (validate_request), two requests for one hour (two states for one
-    hour -- neither is preferable, the rule ingest applies to the feed),
-    and an hour the store already holds a decision for (a retry of a
+    hour -- neither is preferable, the rule ingest applies to the feed:
+    events.pairs.colliding_keys), and an hour the store already holds a
+    decision for (`priced_keys`, the store's own index; a retry of a
     priced hour would put two decisions on one feed row). Returns
-    (to_price [(index, request, key)], rejected {index: reason})."""
+    (to_price [(index, canonical request, key)], rejected {index: reason})
+    -- the requests handed on are in the one spelling
+    (engine.state.canonical_request)."""
     rejected, keyed = {}, []
     for i, r in enumerate(requests):
-        problems = validate_request(r)
+        problems = validate_request(r, cfg)
         if problems:
             rejected[i] = "; ".join(problems)
             continue
-        try:
-            k = hour_key(r["sku_id"], r["fc"], r["date"], r["hour_of_day"])
-        except (TypeError, ValueError) as exc:
-            rejected[i] = f"unkeyable request: {exc}"
-            continue
-        keyed.append((i, r, k))
-    seen = {}
-    for i, r, k in keyed:
-        seen[k] = seen.get(k, 0) + 1
+        c = canonical_request(r)
+        keyed.append((i, c, hour_key(c["sku_id"], c["fc"], c["date"], c["hour_of_day"])))
+    twice = colliding_keys(k for _, _, k in keyed)
     to_price = []
     for i, r, k in keyed:
-        if seen[k] > 1:
+        if k in twice:
             rejected[i] = "duplicate_request: two requests for one hour"
         elif k in priced_keys:
             rejected[i] = "already_priced: the store holds a decision for this hour"
         else:
             to_price.append((i, r, k))
     return to_price, rejected
-
-
-# ----------------------------------------------------------------- worker
-
-def _decision_rng(seed, key):
-    """One generator per (seed, hour key): the draw does not depend on
-    which worker prices the request or in what order."""
-    h = hashlib.blake2b("|".join(map(str, key)).encode(), digest_size=8).digest()
-    return np.random.default_rng([int(seed), int.from_bytes(h, "big")])
-
-
-def _price_one(item, ctx):
-    """One decision in a worker: pure -- the state, the batch's posterior
-    snapshot and tau, a generator seeded from the hour. Returns the event
-    or the rejection; the parent commits."""
-    state, key = item
-    store = BufferStore()
-    try:
-        evt = decide(state, FrozenCells(ctx["cells"], ctx["suspended"]), store,
-                     ctx["cfg"], _decision_rng(ctx["seed"], key), ctx["tau"],
-                     ctx["model_version"], config_digest=ctx["digest"])
-    except StateRejected as e:
-        return {"evt": None, "rejected": str(e)}
-    return {"evt": evt, "rejected": None}
 
 
 # ------------------------------------------------------------------ batch
@@ -169,63 +130,66 @@ def run(cfg, requests, history, workers=None, seed=0, store=None, model=None,
     if r_lookup is None:
         raise FileNotFoundError(cfg["dispersion"]["r_lookup_path"])
 
-    priced = set()
-    for d in store.load_decisions():
-        try:
-            priced.add(hour_key(d["sku_id"], d["fc"], d["date"], d["hour_of_day"]))
-        except (KeyError, TypeError, ValueError):
-            continue
-    to_price, rejected = plan(requests, priced)
+    to_price, rejected = plan(requests, store.priced_hours, cfg)
+    canon = {i: r for i, r, _ in to_price}
 
-    states = build_states([r for _, r, _ in to_price], history, cfg, model, r_lookup)
-    cats = sorted({r["category"] for _, r, _ in to_price})
+    # the history the batch's features read: this batch's SKUs only (the
+    # trailing table is every SKU ever fed; the features are per SKU),
+    # matched in the one id spelling whatever dtype the caller's table has
+    skus = {r["sku_id"] for r in canon.values()}
+    mine = history[ident_series(history.sku_id).isin(skus)] if len(history) else history
+    states, notes = build_states(list(canon.values()), mine, cfg, model, r_lookup,
+                                 episode_paths=store.episode_paths)
+    cats = sorted({r["category"] for r in canon.values()})
     ctx = {"cfg": cfg, "cells": {c: posterior.get(c) for c in cats},
            "suspended": posterior.exploration_suspended(),
            "tau": posterior.tau(cfg), "seed": int(seed),
            "model_version": model.schema["model_version"],
            "digest": config_fingerprint(cfg)["digest"]}
-    results = map_episodes(_price_one, [(s, k) for s, (_, _, k) in zip(states, to_price)],
+    results = map_episodes(price_one, [(s, k) for s, (_, _, k) in zip(states, to_price)],
                            ctx, workers=workers)
 
-    events, quarantined, engine_rejected = [], 0, {}
-    priced_rows = {}
+    priced, engine_rejected, quarantined = {}, Counter(), 0
     for (i, r, k), res in zip(to_price, results):
         if res["evt"] is None:
             rejected[i] = res["rejected"]
-            engine_rejected[res["rejected"]] = engine_rejected.get(res["rejected"], 0) + 1
+            engine_rejected[res["rejected"]] += 1
             continue
-        evt = res["evt"]
-        if not store.emit_decision(evt):
-            # the store refused the event (quarantine.jsonl says why): an
-            # hour not in the record is not priced
+        if not store.emit_decision(res["evt"]):
+            # the store refused the event (quarantine.jsonl says why, or
+            # another batch priced the hour first): an hour not in the
+            # record is not priced
             rejected[i] = "quarantined: the store refused the decision event"
             quarantined += 1
             continue
-        events.append(evt)
-        priced_rows[i] = evt
+        priced[i] = res["evt"]              # request order: to_price is
 
     rows = []
     for i, r in enumerate(requests):
-        base = {f: r.get(f) for f in ("episode_id", "sku_id", "fc", "date", "hour_of_day")}
-        if i in priced_rows:
-            evt = priced_rows[i]
-            rows.append({**base, "decision_id": evt["decision_id"],
-                         "applied_discount": evt["applied_discount"],
-                         "applied_price": evt["applied_price"],
-                         "is_exploration": evt["is_exploration"], "rejected": None})
-        else:
-            rows.append({**base, "decision_id": None, "applied_discount": None,
-                         "applied_price": None, "is_exploration": None,
-                         "rejected": rejected[i]})
+        base = {f: canon.get(i, r).get(f)
+                for f in ("episode_id", "sku_id", "fc", "date", "hour_of_day")}
+        evt = priced.get(i)
+        rows.append({**base, "decision_id": evt["decision_id"],
+                     "applied_discount": evt["applied_discount"],
+                     "applied_price": evt["applied_price"],
+                     "is_exploration": evt["is_exploration"], "rejected": None}
+                    if evt else
+                    {**base, "decision_id": None, "applied_discount": None,
+                     "applied_price": None, "is_exploration": None,
+                     "rejected": rejected[i]})
+    events = list(priced.values())
     report = {
         "requests": len(requests),
         "decisions": len(events),
         "rejected": len(requests) - len(events),
-        "rejected_before_the_engine": sum(
-            1 for i in rejected if i not in {j for j, _, _ in to_price}),
-        "rejected_by_the_engine": engine_rejected,
+        "rejected_before_the_engine": len(requests) - len(to_price),
+        "rejected_by_the_engine": dict(engine_rejected),
         "quarantined": quarantined,
         "explored": sum(1 for e in events if e["is_exploration"]),
+        # a fresh forecast with no history behind it prices as "unknown";
+        # a batch where every request reads so is a history that does not
+        # meet its requests (an id spelling, a table cut too short)
+        **notes,
         "tau_in_force": None if ctx["suspended"] else ctx["tau"],
         "exploration_suspended": ctx["suspended"],
         "model_version": ctx["model_version"],
@@ -239,10 +203,10 @@ def run(cfg, requests, history, workers=None, seed=0, store=None, model=None,
 
 
 def write_rows(rows, path):
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w") as f:
-        for row in rows:
-            f.write(json.dumps({k: row.get(k) for k in RESPONSE_FIELDS}) + "\n")
+    """The response JSONL, RESPONSE_FIELDS per line (common.io.write_jsonl:
+    a timestamp or a NaN in a rejected row's echo writes, never raises
+    after the batch committed)."""
+    write_jsonl(path, rows, fields=RESPONSE_FIELDS)
 
 
 def main(argv=None):
@@ -274,6 +238,8 @@ def main(argv=None):
     print(f"requests {report['requests']:,}: {report['decisions']:,} priced "
           f"({report['explored']:,} explored), {report['rejected']:,} rejected"
           + (f" [{report['quarantined']} quarantined]" if report["quarantined"] else "")
+          + (f" [{report['requests_with_unknown_features']} priced on no history]"
+             if report["requests_with_unknown_features"] else "")
           + (" -- exploration SUSPENDED" if report["exploration_suspended"] else ""))
     for why, n in sorted(report["rejected_by_the_engine"].items()):
         print(f"  {n:,}  {why}")
