@@ -4,7 +4,8 @@ For the engineering team and the product owner. The order of operations is
 code — `python3 -m ops.advance` — so this document is about the parts
 the process cannot do: what engineering builds, what the owner decides, and
 what a stop or a red line means. The authoritative spec is
-`docs/design.md`; the integration contract is `docs/event_contract.html`;
+`docs/design.md`; the integration contract is `docs/event_contract.html`
+(engineering's one-page handover: `docs/engineering_handover.md`);
 `REVIEW_GUIDE.md` maps the code by risk tier; `AGENTS.md` is what an agent
 reads before touching the repo.
 
@@ -44,7 +45,7 @@ All commands run from the repo root. `data/`, `reports/`, `artifacts/`,
 ```bash
 python3 -m ops.advance --plan       # where the chain is, what runs next; touches nothing
 python3 -m ops.advance              # run to the next human decision, then stop
-python3 -m ops.advance --feed <yesterday's hourly parquet>   # the daily lane
+python3 -m ops.advance --feed <yesterday's hourly parquet> [--failures <failed pushes>]   # the daily lane
 python3 -m ops.advance --report     # regenerate reports/launch_readiness.md
 ```
 
@@ -203,7 +204,8 @@ contract:
   a handle that never reloads keeps drawing on a suspended pilot;
 - a defined fallback for `StateRejected` (hold the current price; alert on
   rate);
-- the daily cron: `advance --feed <yesterday's hourly parquet>`, which
+- the daily cron: `advance --feed <yesterday's hourly parquet> --failures
+  <that day's failed pushes>` (omit `--failures` on a day with none), which
   ingests outcomes, walks tau, writes monitor/assurance/status/exports and
   stops at `--apply`.
 

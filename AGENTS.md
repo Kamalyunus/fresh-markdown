@@ -205,7 +205,7 @@ value, and stops at each owner decision with the evidence. ENGINEERING
 builds Lane B against `docs/event_contract.html` (the caller —
 `ops.price_batch` is the reference, `tools.e2e_cycle` the rehearsal —
 applying the price, reporting failed pushes) and runs the daily lane
-(`advance --feed`) on a cron; `RUNBOOK.md` is their document.
+(`advance --feed`) on a cron; `docs/engineering_handover.md` is their page.
 
 It owns the order and recomputes state from disk every run. Phase by
 phase — what runs, which config keys move, and who moves them:
@@ -380,8 +380,8 @@ fixture re-derives fixture values — read them, never commit them
 
 The doc surface is small on purpose: `docs/design.md` (the spec),
 `docs/learnings.md` (superseded designs), `docs/event_contract.html` (the
-integration contract), this file, `README.md`, `RUNBOOK.md`,
-`REVIEW_GUIDE.md`. Two are test-guarded: `design.md` (every waterfall stage,
+integration contract), `docs/engineering_handover.md` (engineering's one
+page), this file, `README.md`, `RUNBOOK.md`, `REVIEW_GUIDE.md`. Two are test-guarded: `design.md` (every waterfall stage,
 gate, flag and population must appear, no retired rule may read as live —
 `test_docs_match_the_code.py`) and `event_contract.html` (checked against
 `events/store.py` both ways; its quoted thresholds are NOT guarded — re-read

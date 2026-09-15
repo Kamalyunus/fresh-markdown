@@ -137,6 +137,18 @@ def test_the_daily_lane_ends_at_the_operator_gate_never_past_it():
     assert steps[-1]["kind"] == "stop" and "--apply" in steps[-1]["detail"][0]
 
 
+def test_the_failed_push_table_rides_into_ingest_with_the_feed():
+    """Engineering's one outcome fact (RUNBOOK Lane B) enters through the
+    same cron call as the feed; without the pass-through the only route
+    was a hand-run ingest beside advance's own."""
+    steps = advance.plan(_state(feed="feed.parquet", failures="pushes.csv"))
+    ingest = next(s for s in steps if s["args"][0] == "daily.ingest_outcomes")
+    assert ingest["args"][1:] == ["--feed", "feed.parquet", "--failures", "pushes.csv"]
+    steps = advance.plan(_state(feed="feed.parquet"))
+    ingest = next(s for s in steps if s["args"][0] == "daily.ingest_outcomes")
+    assert "--failures" not in ingest["args"]
+
+
 def test_a_red_status_runs_the_daily_lane_then_stops_with_the_resume_path():
     """The status rows that go red after launch (a fired stop, assurance)
     are refreshed only by the daily lane. Stopping on them BEFORE ingest

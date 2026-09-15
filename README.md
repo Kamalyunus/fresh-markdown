@@ -7,6 +7,8 @@ Legacy history cannot point-identify price elasticity (price is collinear
 with hour-of-day under the legacy ramp), so history supplies baseline
 demand, dispersion, correlation structure and a bounded prior — elasticity
 itself is learned in production from IL-budgeted randomized exploration.
+Engineering's handover page is [`docs/engineering_handover.md`](docs/engineering_handover.md);
+the integration contract it points at is `docs/event_contract.html`.
 
 ## Layout
 
@@ -64,7 +66,7 @@ on the hold-out and it stops being one.
 Daily production loop after the shadow gate passes:
 
 ```bash
-python3 -m ops.advance --feed <yesterday's parquet>   # the whole lane, in order:
+python3 -m ops.advance --feed <yesterday's parquet> [--failures <pushes>]   # the whole lane, in order:
 #   ingest_outcomes -> update --calibrate-tau (tau walks daily, no operator)
 #   -> monitor -> assurance -> export_events -> status, stopping at
 python3 -m daily.update --apply     # bounded posterior updates (the human gate)

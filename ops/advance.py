@@ -93,7 +93,7 @@ def _posterior_stale(cfg):
                                             prior["episodes_per_week"])
 
 
-def probe(cfg, root="reports", feed=None, retrain=False):
+def probe(cfg, root="reports", feed=None, retrain=False, failures=None):
     """Everything plan() decides on, read once from disk."""
     reports = status.read_reports(root)
     seal = provenance.verify(cfg, provenance.load_seal(cfg))
@@ -142,6 +142,9 @@ def probe(cfg, root="reports", feed=None, retrain=False):
         "this_week": this_week,
         "events": os.path.isdir(events_dir) and bool(os.listdir(events_dir)),
         "feed": feed,
+        # engineering's failed-push table for the same day (RUNBOOK Lane B):
+        # a reported failure is counted apart, never as a price mismatch
+        "failures": failures,
         "cadence": cfg["learning"]["update_cadence_days"],
         # the extract the config's windows need: train_start through the
         # hold-out's end (download_flc clips at yesterday)
@@ -334,7 +337,8 @@ def plan(st):
     #    monitor never re-read; a fired stop deadlocked the lane
     if st["feed"]:
         steps.append(_run("ingest outcomes",
-                          ["daily.ingest_outcomes", "--feed", st["feed"]],
+                          ["daily.ingest_outcomes", "--feed", st["feed"]]
+                          + (["--failures", st["failures"]] if st.get("failures") else []),
                           phase="daily"))
     if st["events"] or st["feed"]:
         steps += [_run("update: tau walk (no operator)",
@@ -530,6 +534,10 @@ def main():
     ap.add_argument("--reports", default="reports")
     ap.add_argument("--feed", default=None,
                     help="yesterday's hourly feed parquet: runs the daily lane")
+    ap.add_argument("--failures", default=None,
+                    help="engineering's failed price pushes for the same day "
+                         "(parquet/CSV/JSONL: sku_id, fc, date, hour_of_day, "
+                         "reason); handed to daily.ingest_outcomes --failures")
     ap.add_argument("--retrain", action="store_true",
                     help="run the bootstrap again even though a bundle exists "
                          "(rule 1: this is a NEW bundle; reports re-run after)")
@@ -548,7 +556,7 @@ def main():
     while True:
         cfg = load_config(args.config)
         st = probe(cfg, args.reports, feed=args.feed,
-                   retrain=args.retrain and rounds == 0)
+                   retrain=args.retrain and rounds == 0, failures=args.failures)
         steps = plan(st)
         print(render_plan(steps))
         if args.plan:

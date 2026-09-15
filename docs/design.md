@@ -2145,7 +2145,7 @@ step                                          writes
 # human, stops at the next decision (owner keys, launch_date, update --apply).
 python3 -m ops.advance --plan       # touches nothing
 python3 -m ops.advance              # to the next human decision
-python3 -m ops.advance --feed <yesterday's parquet>   # the daily lane
+python3 -m ops.advance --feed <yesterday's parquet> [--failures <pushes>]   # the daily lane
 
 # what it runs, for stepping through one at a time:
 # the bootstrap: 1, 3, then 3b-5b iterated to CONVERGED, then 6, 6b, 11, status.
