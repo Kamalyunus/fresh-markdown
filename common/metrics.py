@@ -87,7 +87,7 @@ def daily_rates(ep):
     return day
 
 
-def summary(ep, hours=None, rounding=None):
+def summary(ep, hours=None, rounding=None, discount_col="total_discount"):
     """The IL, scrap, sell-through and margin block over a SETTLED episode
     frame (`settled(episode_economics(d))`), every figure a ratio of sums
     with its denominator and the absolute IL alongside (design 2.3):
@@ -116,14 +116,15 @@ def summary(ep, hours=None, rounding=None):
         "margin": float(ep.margin.sum()),
     }
     if hours is not None:
+        # the hourly frame's discount column is the caller's to name: the
+        # simulator's truth carries `shelf_discount`, the live frames
+        # `total_discount`
         mine = hours[hours.episode_id.isin(ep.index)]
         out["hours"] = int(len(mine))
-        out["mean_discount"] = float(mine.shelf_discount.mean()) if len(mine) else None
+        out["mean_discount"] = (float(mine[discount_col].mean())
+                                if len(mine) else None)
     for key, digits in (rounding or {}).items():
         if out.get(key) is not None:
             out[key] = round(out[key], digits)
     return out
 
-
-# moved to evaluate.backtest (its one reader); the name stays for callers
-from evaluate.backtest import fidelity_decomposition                     # noqa: E402,F401

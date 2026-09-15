@@ -205,7 +205,7 @@ class PilotSim:
         self.rejected = {}
         self.quarantined = 0
         self.launch_cells = copy.deepcopy(self.posterior.state["cells"])
-        self.launch_tau = self.posterior.tau(cfg)
+        self.launch_tau = self.posterior.tau()
         self.violations = {"price_rose_within_episode": 0, "below_cost": 0}
         self.lane_c_runs = []
         if hasattr(self.pricer, "bind"):
@@ -600,7 +600,7 @@ class PilotSim:
         # the routing, so a reader of the cells takes the widest std over
         # the cells a category reaches (an unrouted GLOBAL never narrows)
         lane["cell_of"] = dict(self.posterior.state["cell_of"])
-        lane["tau_in_force"] = self.posterior.tau(cfg)
+        lane["tau_in_force"] = self.posterior.tau()
         return lane
 
     def lane_c(self, k):
@@ -733,7 +733,7 @@ class PilotSim:
                 "quarantined": int(self.quarantined),
                 "violations": self.violations,
                 "pilot_hours": int((truth.arm == "pilot").sum()),
-                "tau_at_launch": self.launch_tau, "tau_now": self.posterior.tau(self.cfg),
+                "tau_at_launch": self.launch_tau, "tau_now": self.posterior.tau(),
             },
             "learning": self.learning(),
             "economics": self.economics(truth),

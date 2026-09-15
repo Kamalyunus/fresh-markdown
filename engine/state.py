@@ -331,14 +331,18 @@ def batch_context(cfg, posterior, model, categories, seed, **fixed):
     the model version and the config `digest` (computed ONCE here: the
     fingerprint costs about as much as a solve). `fixed` replaces a key a
     caller settles for itself -- shadow prices at its own tau, is never
-    suspended, and adds the grain its worker re-reads the drift by -- so
-    the shape stays one shape. Lane B's batch, the simulator's tick and
+    suspended, and adds the grain its worker re-reads the drift by; the
+    simulator hands over the digest it hashed once for the whole run -- and
+    a key the caller settled is NOT computed here (the fingerprint is the
+    expensive one). One shape: Lane B's batch, the simulator's tick and
     shadow's run each spelt this dict for themselves."""
-    ctx = {"cfg": cfg, "cells": {str(c): posterior.get(c) for c in categories},
-           "suspended": posterior.exploration_suspended(),
-           "tau": posterior.tau(cfg), "seed": int(seed),
-           "model_version": model.version,
-           "digest": config_fingerprint(cfg)["digest"]}
+    lazy = {"cells": lambda: {str(c): posterior.get(c) for c in categories},
+            "suspended": posterior.exploration_suspended,
+            "tau": posterior.tau,
+            "model_version": lambda: model.version,
+            "digest": lambda: config_fingerprint(cfg)["digest"]}
+    ctx = {"cfg": cfg, "seed": int(seed)}
+    ctx.update({k: make() for k, make in lazy.items() if k not in fixed})
     ctx.update(fixed)
     return ctx
 

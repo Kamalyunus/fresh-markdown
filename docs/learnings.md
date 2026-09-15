@@ -883,7 +883,19 @@ now. Dates are owner sign-off.
   the price callback); the deck keeps only its solve cache.
 - **`fidelity_decomposition` in `common`.** One reader, the backtest,
   and the module said "several need them". It lives in
-  `evaluate.backtest`; the old name still resolves.
+  `evaluate.backtest`; the old name is gone (nothing called it).
+- **A re-export that carries its new home's imports.** Two of the moves
+  above left the old name resolving by importing the new module at the
+  bottom of the old one: `common.metrics` then loaded `evaluate.backtest`
+  (and LightGBM) into every monitor start, and `engine.explore` loaded
+  `ops.config_keys` for a gate nothing reached through the engine -- each
+  one import away from a cycle. A re-export is for callers that exist; a
+  name with none is deleted, and `tests/test_layering.py` pins the
+  package map as an import graph: the lane's definitions load no harness,
+  the engine loads no driver. Two smaller ones from the same pass: a key
+  the caller settles (`batch_context(digest=...)`) is not computed and
+  discarded, and a report whose digest is the live one is not diffed
+  against the config.
 
 ## The lesson under all of it
 

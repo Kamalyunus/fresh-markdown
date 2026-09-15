@@ -289,3 +289,22 @@ def test_the_batch_prices_a_later_hour_from_the_store_it_committed_to(tmp_path):
     assert events[0]["mu_ref_path"] == entry["mu_ref_path"][1:]
     assert events[0]["is_entry"] is False
     assert len(model.calls) == calls_after_entry             # no history pass
+
+
+def test_a_key_the_caller_settled_is_not_computed(tmp_path, monkeypatch):
+    """The config fingerprint costs about a solve; the simulator hashes it
+    once per run and hands it over. batch_context once computed every key
+    and then overwrote it, so the hash ran on every simulated hour."""
+    from engine import state as st
+    cfg, store, posterior = _world(tmp_path)
+
+    def never(*a, **k):
+        raise AssertionError("the fingerprint ran although the caller passed a digest")
+
+    monkeypatch.setattr(st, "config_fingerprint", never)
+    ctx = st.batch_context(cfg, posterior, _Model(), ["VEG"], seed=0, digest="d-from-the-caller")
+    assert ctx["digest"] == "d-from-the-caller" and ctx["tau"] == posterior.tau()
+    with pytest.raises(AssertionError):
+        st.batch_context(cfg, posterior, _Model(), ["VEG"], seed=0)
+    with pytest.raises(TypeError):
+        posterior.tau(cfg)          # the store reads its own config; no second one

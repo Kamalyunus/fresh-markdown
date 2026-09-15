@@ -66,7 +66,7 @@ def _arm_economics(hours, ep, excluded):
     """One arm's figures from its hourly frame and its SETTLED episode
     frame (common.metrics.summary, the block the monitor reads too); the
     mean discount is over the settled episodes' hours only."""
-    s = metrics.summary(ep, hours, rounding=_ARM_ROUNDING)
+    s = metrics.summary(ep, hours, rounding=_ARM_ROUNDING, discount_col="shelf_discount")
     return {
         "episodes": s["episodes"], "hours": s["hours"],
         "il_absolute": s["il_absolute"],

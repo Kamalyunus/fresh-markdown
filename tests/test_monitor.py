@@ -405,3 +405,23 @@ def test_the_overspend_stop_takes_no_reading_while_the_il_base_is_short(cfg):
     learning["latest_priced_day"] = "2026-09-05"
     early = overspend_series(learning, {"il_by_close_day": il}, cfg)
     assert early["by_day"] == {} and not evaluate_guardrail(early, 2.0, 2)["fired"]
+
+
+def test_the_economics_summary_names_its_discount_column(cfg):
+    """One IL/scrap block for the monitor, shadow and the simulator: the
+    hourly frame's discount column is the caller's to name (the live
+    frames carry total_discount, the simulator's truth shelf_discount), so
+    a live caller passing hours never reaches for a simulator column."""
+    from common import metrics
+    hours = pd.DataFrame({"episode_id": ["e1", "e1", "e2"], "total_discount": [0.1, 0.3, 0.2],
+                          "starting_inventory": [4, 3, 5], "units_sold": [1, 3, 5],
+                          "ending_inventory": [3, 0, 0], "original_price": [100.0] * 3,
+                          "cost": [40.0] * 3, "offered_price": [90.0, 70.0, 80.0],
+                          "date": ["2026-08-19"] * 3, "hour_of_day": [10, 11, 10]})
+    ep = metrics.episode_economics(hours)
+    live = metrics.summary(ep, hours)
+    assert live["hours"] == 3 and live["mean_discount"] == pytest.approx(0.2)
+    truth = hours.rename(columns={"total_discount": "shelf_discount"})
+    assert metrics.summary(ep, truth, discount_col="shelf_discount")["mean_discount"] == live["mean_discount"]
+    with pytest.raises(KeyError):
+        metrics.summary(ep, truth)

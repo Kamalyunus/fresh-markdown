@@ -250,13 +250,13 @@ class PosteriorStore:
     # tau is production learning state: it lives here, not in hand-
     # maintained config.yaml (design 5.8).
 
-    def tau(self, cfg=None):
+    def tau(self):
         """The exploration budget in force, in currency.
 
         Falls back to `exploration.tau_initial` until the first calibration:
-        a launch that has spent nothing has nothing to calibrate from. The
-        store holds its config; `cfg` is accepted and ignored for callers
-        that still pass it.
+        a launch that has spent nothing has nothing to calibrate from. Read
+        from the store's own config: the file and the config it was
+        initialised under are one state.
         """
         stored = self.state.get("tau")
         return float(stored) if stored is not None \

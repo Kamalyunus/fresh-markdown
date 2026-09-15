@@ -160,10 +160,11 @@ def select(dp_result, tau, rng, explorable=True, delta_min=0.0, costs=None):
     return choice
 
 
-# moved to engine.spread_ledger, engine.budget and ops.config_keys; the
-# names stay here for callers (`from engine import explore; explore.walk_tau`)
+# moved to engine.spread_ledger and engine.budget; the names stay here for
+# callers (`from engine import explore; explore.walk_tau`). The tau paste
+# gate is ops.config_keys.tau_provenance_error: a driver's check, not the
+# engine's
 from engine.spread_ledger import SpreadLedger                                  # noqa: E402,F401
 from engine.budget import (SUSPENDED, budget_base_ready, budget_held,          # noqa: E402,F401
                            budget_scale, budget_today, tau_next,
                            trailing_daily_il, walk_tau, _base_span)
-from ops.config_keys import tau_provenance_error                               # noqa: E402,F401

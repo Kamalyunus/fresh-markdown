@@ -288,6 +288,7 @@ def report_staleness(cfg, bundle, reports):
         return posterior_now["digest"]
 
     out = {}
+    live = provenance.config_fingerprint(cfg, phase=None)["digest"]
     for name, rep in reports.items():
         if not rep:
             continue
@@ -302,7 +303,9 @@ def report_staleness(cfg, bundle, reports):
              "routed": name in ROUTED_REPORTS,
              "phase": fp.get("phase"), "digest": fp.get("digest"),
              "moved": [], "keys": [], "rerun": None}
-        if v["fingerprint"]:
+        # the diff walks the whole snapshot: taken only when the report's
+        # digest is not the live one (a current report has nothing to diff)
+        if v["fingerprint"] and fp.get("digest") != live:
             diff = provenance.config_diff(fp.get("snapshot") or {}, cfg)
             keys = stale_keys(name, [d.split(":")[0] for d in diff])
             mine = set(keys)

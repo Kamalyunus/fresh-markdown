@@ -530,7 +530,7 @@ def shadow_reports(workspace):
 
     # Paste tau the way an operator has to: from the backtest's own
     # derivation. A hand-typed number is refused -- see
-    # engine.explore.tau_provenance_error.
+    # ops.config_keys.tau_provenance_error.
     with open("config.yaml") as f:
         cfg_raw = yaml.safe_load(f)
     with open("reports/backtest.json") as f:

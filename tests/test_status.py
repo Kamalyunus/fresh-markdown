@@ -569,3 +569,28 @@ def test_a_suspended_exploration_reads_warn_with_the_resume_command(cfg, tmp_pat
            if r["check"] == "stop conditions"][0]
     assert row["verdict"] == status.WARN
     assert "SUSPENDED" in row["detail"] and "--resume-exploration" in row["where"]
+
+
+def test_a_current_report_is_not_diffed_against_the_config(cfg, tmp_path, monkeypatch):
+    """report_staleness walks a report's config snapshot only when its
+    digest is not the live one: a current report has nothing to diff, and
+    the two drivers once paid that walk on every report, every round."""
+    from common import provenance
+    from ops import config_keys
+    fp = config_fingerprint(cfg, phase="bootstrap")
+    reports = {"backtest": {"artifact_versions": {"baseline_model_version": "m1"},
+                            "config": fp},
+               "shadow": {"artifact_versions": {"baseline_model_version": "m1"},
+                          "config": {**fp, "digest": "stale"}}}
+    calls = []
+    real = provenance.config_diff
+
+    def spy(snapshot, live_cfg, path=""):
+        if not path:                      # the top-level call, not its recursion
+            calls.append(snapshot is not None)
+        return real(snapshot, live_cfg, path)
+
+    monkeypatch.setattr(provenance, "config_diff", spy)
+    out = config_keys.report_staleness(cfg, "m1", reports)
+    assert calls == [True], "only the stale report is diffed"
+    assert out["backtest"]["moved"] == [] and out["shadow"]["fingerprint"]
