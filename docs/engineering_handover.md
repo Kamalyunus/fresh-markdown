@@ -68,14 +68,56 @@ or, for a request the engine will not price:
  "is_exploration": null, "rejected": "<reason>"}
 ```
 
-A rejection is always row-scoped: the rest of the batch prices. Reasons
-you will see while integrating: a missing or null field, `date` that
-names no day, `hours_remaining` outside `1..max_window_hours`, a price or
-cost that is not a number, `duplicate_request` (two rows for one hour in
-one batch), `already_priced` (the store already holds that hour's
-decision — a resend is refused, never re-priced), and the engine's own
-economic refusals (a cost above the price, an anchor the action set
-cannot honour).
+A rejection is always row-scoped: the rest of the batch prices. Every
+reason the system can return is below; several can appear on one row,
+joined by `; `. Validate the first two groups on your side before
+sending, and you will never see them.
+
+**Refused before the engine — the request itself (`validate_request`).**
+
+| `rejected` reads | Cause | Send instead |
+| --- | --- | --- |
+| `missing <field>` | One of the twelve fields is absent (a null value is present, a missing key is not) | Every field, every row |
+| `date '<value>' names no day` | `date` is not a calendar day | `YYYY-MM-DD`, or a date/timestamp column |
+| `q must be a non-negative integer` | `q` is null, negative, fractional or a boolean | Units on hand at the top of the hour, an integer ≥ 0 |
+| `hours_remaining must be an integer >= 1` | Null, zero, negative or fractional | Hours left including this one, ≥ 1 |
+| `hours_remaining must not exceed data.max_window_hours (<cap>); got <n>` | The counter is not hours (minutes, a sentinel, a stale value) | A value ≤ the config cap; fix the feed, do not clip |
+| `hour_of_day must be an integer in 0..23` | Outside the day, fractional or null | The clock hour the batch is for |
+| `episode_id is null` / `sku_id is null` / `fc is null` | A null id | The id |
+| `<id field> is not an identifier: <value>` | An id that is not text or a number (a struct, a list, NaN) | One scalar id per field |
+| `category is null` / `subcategory is null` | A null label | The labels the history table uses |
+| `original_price is null` / `cost is null` | A null number | The hour's price and unit cost, per FC |
+| `original_price is not a number: <value>` / `cost is not a number: <value>` | Text or a boolean where a number belongs | A number |
+
+**Refused by the batch — the hour was already claimed.**
+
+| `rejected` reads | Cause | Send instead |
+| --- | --- | --- |
+| `duplicate_request: two requests for one hour` | Two rows in one batch name the same `(sku_id, fc, date, hour_of_day)`; both are refused | One row per item per hour |
+| `already_priced: the store holds a decision for this hour` | A resend of a priced hour; the stored price stands, nothing is re-priced | Nothing; read the earlier response |
+
+**Refused by the engine — the state it built (`StateRejected`).** These
+are still row-scoped. The ones marked *yours* come from the request's
+values; the rest are the bundle's or the configuration's and belong to
+the owner.
+
+| `rejected` reads | Whose | Cause |
+| --- | --- | --- |
+| `original_price must be a finite positive number` | yours | Zero, negative, infinite or NaN price |
+| `cost must be a finite non-negative number` | yours | Negative, infinite or NaN cost |
+| `cost must not exceed original_price` | yours | No legal discount exists below cost |
+| `current_discount must be a finite number` | yours | A non-null anchor that is NaN or infinite; the anchor is `null` on an entry hour and a fraction on every later one |
+| `no feasible tier at or below the current anchor price` | yours | The anchor discount sits deeper than any tier the cost floor allows, or is not on the discount grid (`pricing.tier_step`); prices never move back up, so the row cannot be priced |
+| `empty feasible set or degenerate state` | yours | `q` is 0 — an empty shelf between your snapshot and the call; there is nothing to price |
+| `hours_remaining must ...` and the count checks above | yours | The same checks re-run on the built state |
+| `r must be a finite positive number` | owner | The dispersion lookup in the bundle has no usable value for this category |
+| `demand predictions must be finite and positive` | owner | The frozen model returned a non-positive forecast for this episode |
+| `mu_ref_path has <n> hours but hours_remaining is <m>: ...` | owner | The stored forecast path and the counter disagree; the batch report's `non_entry_requests_without_stored_path` says whether an entry hour was skipped (yours) |
+| `exploration.delta_min_log_bias has no entry for '<category>' and no `_default`: ...` | owner | The exploration floor map in `config.yaml` lacks this category |
+| `quarantined: the store refused the decision event` | owner | The decision failed the store's own validation; `quarantine.jsonl` in the store says why |
+
+A category the posterior has no cell for is not a rejection: it prices on
+the pooled `GLOBAL` cell.
 
 The batch report (`--report`) is your integration dashboard. Read these
 after every early batch:
