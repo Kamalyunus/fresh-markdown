@@ -5,26 +5,32 @@ outcomes only; censored NB likelihood; deff-deflated Fisher information;
 bounded step; exactly-once commit. Posterior moves on INFORMATION, tau on
 SPEND; both persist to artifacts/posterior.json. Refuses to apply while any
 hard event-quality gate fails.
+
+The learning maths is engine.learn (`grid_update`, `row_information`);
+this module collects the batch, gates it, walks tau (engine.budget) and
+commits.
 """
 
-import argparse
 import math
 import os
 
-import numpy as np
 import pandas as pd
-from scipy.special import gammaln, logsumexp
-from scipy.stats import nbinom
 
-from common.config import load_config, deff_from_episodes
+from common.cli import make_parser
+from common.config import load_config
 from common import episodes
 from common.io import read_json
 from events.store import EventStore
 from events.pairs import (match_pairs, decision_day, is_learnable, has_stock,
-                          is_restocked, quality_counts, quality_rates)
-from engine import explore
+                          is_restocked, quality_counts, quality_rates,
+                          finalized_days, suspended_days)
+from events.frame import settled_episodes, il_by_close_day
+from engine import budget
+from engine.learn import grid_update
 from engine.posterior import PosteriorStore, bounded_step
 from fit.train_baseline import schedule_reaches, weeks_held_at_anchor
+# moved to engine.learn; the name stays here for callers
+from engine.learn import row_information                                 # noqa: F401
 
 
 def collect_batch(store, posterior, cfg):
@@ -77,153 +83,6 @@ def collect_batch(store, posterior, cfg):
             **excluded}
 
 
-def grid_update(pairs, cell_record, cfg):
-    """Evaluate the censored likelihood on the grid, add the log prior,
-    normalise with log-sum-exp, and take moments (design 5.11)."""
-    pc = cfg["posterior"]
-    grid = np.linspace(pc["epsilon_min"], pc["epsilon_max"], pc["grid_size"])
-
-    k = np.array([o["units_sold"] for _, o, _ in pairs])
-    inv = np.array([o["starting_inventory"] for _, o, _ in pairs])
-    mu0 = np.array([d["reference_mu"] for d, _, _ in pairs])
-    r = np.array([d["dispersion_r"] for d, _, _ in pairs])
-    log_ratio = np.log([ratio for _, _, ratio in pairs])
-    # censoring is the shared rule (the shelf EMPTIED), never `sold >= q`,
-    # which reads a restocked hour as censored
-    end = np.array([o["ending_inventory"] for _, o, _ in pairs])
-    censored = episodes.is_censored_hour(inv, k, end)
-    lgamma_const = gammaln(k + r) - gammaln(r) - gammaln(k + 1)
-
-    # the censored term only where the shelf emptied: logsf is the costly
-    # call, and on an uncensored row it was computed and thrown away
-    inv_c, r_c = np.maximum(inv[censored], 1) - 1, r[censored]
-    loglik = np.empty(len(grid))
-    for i, eps in enumerate(grid):
-        mu = np.clip(mu0 * np.exp(eps * log_ratio),
-                     cfg["pricing"]["demand_floor"], None)
-        p = r / (r + mu)
-        ll = lgamma_const + r * np.log(p) + k * np.log1p(-p)
-        if len(inv_c):
-            ll[censored] = nbinom.logsf(inv_c, r_c, p[censored])
-        loglik[i] = ll.sum()
-
-    log_prior = -0.5 * ((grid - cell_record["mean"]) / cell_record["std"]) ** 2
-    log_post = loglik + log_prior
-    log_post -= log_post.max()
-    w = np.exp(log_post)
-    w /= w.sum()
-    raw_mean = float(np.sum(w * grid))
-    raw_std = float(np.sqrt(np.sum(w * (grid - raw_mean) ** 2)))
-
-    # sequential predictive check (design 5.11): the batch's log marginal
-    # predictive under the PRE-update posterior, bracketed by oracle and
-    # uniform -- read differences, never absolutes
-    n = len(pairs)
-    log_w_prior = log_prior - logsumexp(log_prior)
-    pred_posterior = float((logsumexp(loglik + log_w_prior)) / n)
-    pred_uniform = float((logsumexp(loglik) - np.log(len(grid))) / n)
-    pred_oracle = float(loglik.max() / n)
-    predictive_check = {
-        "posterior_log_pred_per_row": round(pred_posterior, 5),
-        "uniform_log_pred_per_row": round(pred_uniform, 5),
-        "oracle_log_pred_per_row": round(pred_oracle, 5),
-        "information_available_per_row": round(pred_oracle - pred_uniform, 5),
-        "posterior_minus_uniform": round(pred_posterior - pred_uniform, 5),
-        "worse_than_a_flat_prior": bool(pred_posterior < pred_uniform),
-        "note": ("batch scored against the PRE-update posterior -- an "
-                 "out-of-sample grade of the current belief. Read "
-                 "information_available_per_row first; a gap that is a large "
-                 "share of a tiny number is still tiny. worse_than_a_flat_"
-                 "prior persisting across batches means the posterior "
-                 "tightened faster than the evidence justified."),
-    }
-
-    # NB Fisher information at the pre-update mean: mu * L^2 * r/(r+mu),
-    # never the Poisson mu * L^2 (design 5.11) -- and on a CENSORED row
-    # the information of the event actually observed (D >= q), which is
-    # strictly less; crediting the uncensored figure overstated evidence
-    # exactly where sell-outs dominate the batch
-    mu_at_mean = np.clip(mu0 * np.exp(cell_record["mean"] * log_ratio),
-                         cfg["pricing"]["demand_floor"], None)
-    information = float(np.sum(row_information(
-        mu_at_mean, r, log_ratio, inv, censored)))
-    # deff at THIS batch's clustering: how many forced outcomes each
-    # episode actually contributed, not a frozen paste
-    batch_deff = deff_from_episodes(
-        cfg["dispersion"]["rho"], [d["episode_id"] for d, _, _ in pairs])
-    effective_information = information / batch_deff
-    return raw_mean, raw_std, effective_information, {
-        "zero_sales_share": round(float((k == 0).mean()), 4),
-        "stockout_share": round(float(censored.mean()), 4),
-        "exploration_cost": round(float(sum(
-            d["exploration_cost"] for d, _, _ in pairs)), 2),
-        "deff_applied": round(batch_deff, 3),
-        "predictive_check": predictive_check,
-    }
-
-
-def row_information(mu, r, log_ratio, inv, censored):
-    """Fisher information about epsilon per row, at `mu` (design 5.11).
-
-    An uncensored count carries mu * L^2 * r/(r+mu). A censored row was
-    observed only as the event D >= q (the shelf emptied), a Bernoulli
-    with S = P(D >= q): its information is (dS/deps)^2 / (S (1 - S)), with
-    dS/dmu = r/(r+mu) * (P(D' >= q-1) - P(D >= q)) for D' ~ NB(r+1, mu)
-    (k P(D=k) = mu P(D'=k-1)) and dmu/deps = mu L. A certain event (S at
-    0 or 1) teaches nothing and reads 0."""
-    mu = np.asarray(mu, dtype=float)
-    r = np.asarray(r, dtype=float)
-    L = np.asarray(log_ratio, dtype=float)
-    censored = np.asarray(censored, dtype=bool)
-    exact = mu * L ** 2 * r / (r + mu)
-    if not censored.any():
-        return exact
-    q = np.maximum(np.asarray(inv, dtype=float), 1.0)
-    p = r / (r + mu)
-    s = nbinom.sf(q - 1, r, p)                         # P(D >= q)
-    ds_dmu = r / (r + mu) * (nbinom.sf(q - 2, r + 1, p) - s)
-    var = s * (1.0 - s)
-    event = np.divide((ds_dmu * mu * L) ** 2, var,
-                      out=np.zeros_like(exact), where=var > 0)
-    return np.where(censored, event, exact)
-
-
-def finalized_days(decisions, outcomes, pairs=None):
-    """ONE pass over the matched pairs, keyed on the TRADING day the decision
-    priced (events.pairs.decision_day, never the UTC clock of
-    `finalized_at`). Every stored outcome is final -- `finalized_at` is in
-    events.store.OUTCOME_REQUIRED -- so a matched pair is a priced day.
-    Returns (priced_days ascending, {day: realised exploration spend} over
-    the forced decisions whose push EXECUTED -- a failed push
-    (events.pairs.is_learnable) left the old price on the shelf, so its
-    expected sacrifice was never spent) -- the day key and the spend the
-    tau controller and the monitor's stop condition both read, so the
-    correction and its backstop cannot drift apart. `pairs` is
-    match_pairs(decisions, outcomes) if the caller already built it."""
-    days, spend = set(), {}
-    for d, o in (match_pairs(decisions, outcomes) if pairs is None else pairs):
-        day = decision_day(d)
-        days.add(day)
-        if d.get("is_exploration") and is_learnable(o):
-            spend[day] = spend.get(day, 0.0) + float(d["exploration_cost"])
-    return sorted(days), spend
-
-
-def suspended_days(decisions):
-    """The trading days on which NO decision had a budget in force: every
-    decision priced that day carries `tau_current` None (engine.decide
-    records None while the store holds a suspension). The controller holds
-    tau on such a day (explore.budget_held) -- nothing was drawn, so its
-    zero spend is no reading. A day with any budgeted decision is graded."""
-    budgeted, seen = set(), set()
-    for d in decisions:
-        day = decision_day(d)
-        seen.add(day)
-        if d.get("tau_current") is not None:
-            budgeted.add(day)
-    return sorted(seen - budgeted)
-
-
 def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None,
                     pairs=None):
     """Move tau toward the budget from realised spend (design 5.8) -- on
@@ -236,9 +95,7 @@ def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None,
     BEFORE any cell is committed, so a dry run and `--apply` price the same
     days from the same posterior. `pairs` is match_pairs(decisions,
     outcomes) if the caller already built it (collect_batch did)."""
-    from daily.monitor import business_metrics, settled_episodes  # sibling; no cycle
-
-    tau_now = posterior.tau(cfg)
+    tau_now = posterior.tau()
     block = {"tau_before": tau_now, "tau_after": tau_now, "commit": False}
 
     if tau_now is None:
@@ -280,9 +137,10 @@ def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None,
             block["skipped"] = f"already calibrated through {through}"
         block["through_date"] = through
         return block
-    business = business_metrics(decisions, outcomes,
-                                settled_episodes(decisions, outcomes, pairs))
-    il_by_day = business.get("il_by_close_day") or {}
+    # the IL base by close day, off the one settled frame the monitor's
+    # business metrics read (events.frame): the controller and the
+    # overspend stop price a day from the same numbers
+    il_by_day = il_by_close_day(settled_episodes(decisions, outcomes, pairs))
     cells = posterior.state["cells"]
     if not il_by_day or not cells:
         block["skipped"] = ("no closed-episode IL to project a budget from"
@@ -293,7 +151,7 @@ def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None,
     # for the cell that still has the most to learn
     if widest_std is None:
         widest_std = posterior.widest_std()
-    tau_end, rows = explore.walk_tau(
+    tau_end, rows = budget.walk_tau(
         tau_now, days, lambda day, _tau: spend_by_day.get(day, 0.0),
         il_by_day, widest_std, cfg, suspended_days=suspended_days(decisions))
     last = rows[-1]
@@ -308,7 +166,7 @@ def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None,
         "by_day": rows,
         # the last day walked, for the printed line
         "realised_exploration_cost": last["spend"],
-        "markdown_il": round(float(explore.trailing_daily_il(
+        "markdown_il": round(float(budget.trailing_daily_il(
             il_by_day, through, cfg)), 1),
         "markdown_il_basis": (
             f"mean realised IL/day over the trailing "
@@ -321,7 +179,7 @@ def tau_calibration(decisions, outcomes, posterior, cfg, widest_std=None,
         # from the rounded taus
         "clipped": any(r["clipped"] for r in rows),
         # days the controller did not act on (no base, or one shorter than
-        # its window -- explore.budget_held); the printed line names them
+        # its window -- budget.budget_held); the printed line names them
         "held_days": [r["day"] for r in rows if r.get("held")],
     })
     return block
@@ -478,8 +336,69 @@ def run(cfg, apply=False, events_root=None, posterior_path=None, today=None,
     return report
 
 
+def render(report):
+    """The batch summary as printed lines: the gates, the exclusions, each
+    cell's proposed step, the tau walk, what was committed, and the
+    suspension in force."""
+    lines = []
+    for name, g in report["event_quality_gates"].items():
+        lines.append(f"gate {name}: {g['value']} vs {g['threshold']} "
+                     f"-> {'PASS' if g['pass'] else 'FAIL'}"
+                     + (f"  (trailing {g['window_days']} trading days)"
+                        if "window_days" in g else ""))
+    b = report["batch"]
+    if b["excluded_no_stock"] or b["excluded_restock"]:
+        lines.append(f"batch excluded: {b['excluded_no_stock']} hour(s) that opened "
+                     f"empty, {b['excluded_restock']} restocked hour(s)")
+    for cell, c in report["cells"].items():
+        lines.append(f"[{cell}] forced={c['forced_outcomes']} "
+                     f"info+={c['effective_information']} "
+                     f"(required {c['information_required']}, "
+                     f"trigger={c['update_triggered']}) "
+                     f"mean {c['mean_before']:+.3f}->{c['proposed_mean']:+.3f} "
+                     f"std {c['std_before']:.3f}->{c['proposed_std']:.3f}"
+                     + ("  [CLIPPED -> operator review]" if c["bound_clipped"] else ""))
+
+    tc = report["tau_calibration"]
+    if tc.get("skipped"):
+        lines.append(f"tau: {tc['tau_before']} unchanged -- {tc['skipped']}")
+    else:
+        last = tc["by_day"][-1]
+        lines.append(f"tau: {tc['tau_before']} -> {tc['tau_after']}  "
+                     f"({tc['days_walked']} day(s) walked through {tc['through_date']}; "
+                     + (f"last day HELD -- {last['held']}" if last.get("held") else
+                        f"last day spent {tc['realised_exploration_cost']} of "
+                        f"{tc['budget']}") + ")"
+                     + ("  [CLIP BOUND]" if tc.get("clipped") else "")
+                     + (f"  [{len(tc['held_days'])} day(s) held]" if tc["held_days"] else "")
+                     + (f"  [{tc['days_walked_before_outcomes']} day(s) whose outcomes "
+                        "arrived late]" if tc.get("days_walked_before_outcomes") else ""))
+
+    if "refused" in report:
+        lines.append(f"REFUSED: {report['refused']}")
+    if report["applied"]:
+        lines.append("applied bounded posterior updates")
+    elif report.get("tau_committed"):
+        lines.append("tau committed; posterior cells untouched -- --apply is the "
+                     "operator gate")
+    elif "refused" not in report:
+        lines.append("monitor only -- rerun with --apply to commit")
+
+    if "exploration_resumed" in report:
+        cleared = report["exploration_resumed"]
+        lines.append("exploration resumed -- cleared: "
+                     + (f"suspended since {cleared['since']} for "
+                        f"{', '.join(cleared['reasons'])}" if cleared
+                        else "nothing (exploration was not suspended)"))
+    elif report["exploration_suspended"]:
+        lines.append(PosteriorStore.suspension_line(
+            report["exploration_suspended"],
+            "Clear with --resume-exploration once the cause is fixed."))
+    return "\n".join(lines)
+
+
 def main():
-    ap = argparse.ArgumentParser(prog="daily.update")
+    ap = make_parser(prog="daily.update")
     ap.add_argument("--apply", action="store_true",
                     help="apply bounded posterior updates (operator gate, "
                          "every learning.update_cadence_days)")
@@ -490,67 +409,12 @@ def main():
                     help="clear the exploration suspension a stop condition "
                          "set (operator gate: nothing resumes it "
                          "automatically)")
-    ap.add_argument("--config", default="config.yaml")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     report = run(cfg, apply=args.apply, calibrate_tau=args.calibrate_tau,
                  resume_exploration=args.resume_exploration)
-
-    for name, g in report["event_quality_gates"].items():
-        print(f"gate {name}: {g['value']} vs {g['threshold']} "
-              f"-> {'PASS' if g['pass'] else 'FAIL'}"
-              + (f"  (trailing {g['window_days']} trading days)"
-                 if "window_days" in g else ""))
-    b = report["batch"]
-    if b["excluded_no_stock"] or b["excluded_restock"]:
-        print(f"batch excluded: {b['excluded_no_stock']} hour(s) that opened "
-              f"empty, {b['excluded_restock']} restocked hour(s)")
-    for cell, c in report["cells"].items():
-        print(f"[{cell}] forced={c['forced_outcomes']} "
-              f"info+={c['effective_information']} "
-              f"(required {c['information_required']}, "
-              f"trigger={c['update_triggered']}) "
-              f"mean {c['mean_before']:+.3f}->{c['proposed_mean']:+.3f} "
-              f"std {c['std_before']:.3f}->{c['proposed_std']:.3f}"
-              + ("  [CLIPPED -> operator review]" if c["bound_clipped"] else ""))
-
-    tc = report["tau_calibration"]
-    if tc.get("skipped"):
-        print(f"tau: {tc['tau_before']} unchanged -- {tc['skipped']}")
-    else:
-        last = tc["by_day"][-1]
-        print(f"tau: {tc['tau_before']} -> {tc['tau_after']}  "
-              f"({tc['days_walked']} day(s) walked through {tc['through_date']}; "
-              + (f"last day HELD -- {last['held']}" if last.get("held") else
-                 f"last day spent {tc['realised_exploration_cost']} of "
-                 f"{tc['budget']}") + ")"
-              + ("  [CLIP BOUND]" if tc.get("clipped") else "")
-              + (f"  [{len(tc['held_days'])} day(s) held]" if tc["held_days"] else "")
-              + (f"  [{tc['days_walked_before_outcomes']} day(s) whose outcomes "
-                 "arrived late]" if tc.get("days_walked_before_outcomes") else ""))
-
-    if "refused" in report:
-        print("REFUSED:", report["refused"])
-    if report["applied"]:
-        print("applied bounded posterior updates")
-    elif report.get("tau_committed"):
-        print("tau committed; posterior cells untouched -- --apply is the "
-              "operator gate")
-    elif "refused" not in report:
-        print("monitor only -- rerun with --apply to commit")
-
-    if "exploration_resumed" in report:
-        cleared = report["exploration_resumed"]
-        print("exploration resumed -- cleared: "
-              + (f"suspended since {cleared['since']} for "
-                 f"{', '.join(cleared['reasons'])}" if cleared
-                 else "nothing (exploration was not suspended)"))
-    elif report["exploration_suspended"]:
-        s = report["exploration_suspended"]
-        print(f"EXPLORATION SUSPENDED since {s['since']} "
-              f"({', '.join(s['reasons'])}); exploitation continues. Clear "
-              "with --resume-exploration once the cause is fixed.")
+    print(render(report))
 
 
 if __name__ == "__main__":

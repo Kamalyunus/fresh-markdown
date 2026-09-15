@@ -9,7 +9,7 @@ import copy as _copy
 import json as _json
 from ops import tune
 from common.provenance import config_fingerprint, file_digest
-from engine.explore import tau_provenance_error
+from ops.config_keys import tau_provenance_error
 
 
 def _verdicts(report):

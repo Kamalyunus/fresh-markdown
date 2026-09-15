@@ -145,9 +145,9 @@ def test_the_lower_margin_is_a_config_key_and_the_upper_bound_never_moves(cfg):
     g3 = np.linspace(lo, 3.0, len(grid))
     assert pdn.search_grid(g3, higher)[0][-1] == pytest.approx(3.0)
 
-    # the design_effect floor lives in common.config, not re-applied here:
-    # a negative ICC still yields a deff of exactly 1.0 through one floor
-    from common.config import design_effect
+    # the design_effect floor lives in common.clustering, not re-applied
+    # here: a negative ICC still yields a deff of exactly 1.0 through one floor
+    from common.clustering import design_effect
     assert design_effect(-0.5, 6.0) == 1.0
     rows = pd.DataFrame({"units_sold": [3, 0, 3, 0, 3, 0], "sku_id": ["a"] * 6,
                          "fc": ["F"] * 6})
@@ -350,8 +350,7 @@ def test_fold_spread_cuts_the_train_window_by_episode_not_by_row(
         def predict_mu_ref(g):
             return np.full(len(g), 2.0)
 
-    monkeypatch.setattr(pdn, "split_frames", lambda d, c: {"train": d})
-    monkeypatch.setattr(pdn, "population", lambda f, c: f)
+    monkeypatch.setattr(pdn, "scope", lambda d, c, w: d)
     monkeypatch.setattr(pdn, "curve", fake_curve)
     grid = np.linspace(-5.0, -0.05, 20)
     out = pdn.fold_spread(train, cfg, _M(), grid, folds=3)
@@ -535,8 +534,7 @@ def test_the_fold_row_floor_is_a_config_key(cfg, monkeypatch):
         def predict_mu_ref(g):
             return np.full(len(g), 2.0)
 
-    monkeypatch.setattr(pdn, "split_frames", lambda d, c: {"train": d})
-    monkeypatch.setattr(pdn, "population", lambda f, c: f)
+    monkeypatch.setattr(pdn, "scope", lambda d, c, w: d)
     monkeypatch.setattr(pdn, "curve", lambda g, m, grid, c, cfg:
                         -((np.asarray(grid) + 1.0) ** 2))
     grid = np.linspace(-5.0, -0.05, 20)

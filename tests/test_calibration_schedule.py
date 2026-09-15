@@ -8,15 +8,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from common import episodes
-from conftest import _harness_cfg, load_config
+from common import windows
+from conftest import _Applier, _calib_frame, _harness_cfg, _prepared, load_config
+from fit import calibrate as cal
 from fit import train_baseline as tb
-from test_calibration import _CountingModel, _prepared, scratch_config
 
-
-@pytest.fixture
-def scratch_cfg(cfg, tmp_path):
-    return scratch_config(cfg, tmp_path)
 
 
 def _schedule_artifact(cfg, monkeypatch, cells_by_day, weeks_back=1, k_shrink=0.0):
@@ -31,8 +27,8 @@ def _schedule_artifact(cfg, monkeypatch, cells_by_day, weeks_back=1, k_shrink=0.
             pd.date_range(gate - pd.Timedelta(days=21), gate + pd.Timedelta(days=6))]
     d = pd.concat([_prepared(cells_by_day(day), [day]) for day in days],
                   ignore_index=True)
-    monkeypatch.setattr(tb, "BaselineModel", lambda c: _CountingModel(cfg, 1.0))
-    tb.fit_level_calibration(d, cfg)
+    monkeypatch.setattr(cal, "BaselineModel", lambda c: _Applier(cfg, 1.0))
+    cal.fit_level_calibration(d, cfg)
     return json.load(open(cfg["baseline_model"]["calibration_factor_path"])), d
 
 
@@ -52,14 +48,14 @@ def test_calibration_factors_never_see_their_own_week_or_later(scratch_cfg, monk
     art, d = _schedule_artifact(cfg, monkeypatch, cells)
     sched = art["schedule"]
     assert sched["trailing_weeks"] == 1 and len(sched["by_week"]) >= 3
-    opened = episodes.opening_dates(d)
+    opened = windows.opening_dates(d)
     for week, table in sched["by_week"].items():
-        window, _ = episodes.trailing_weeks_window(d, week, 1, opened=opened)
+        window, _ = windows.trailing_weeks_window(d, week, 1, opened=opened)
         assert (opened.loc[window.index] < week).all(), "a row of its own week"
         want = float(window.units_sold.sum()) / float(len(window))   # mu_ref 1.0
         assert table["A"] == pytest.approx(want, abs=1e-3), week
     weeks = sorted(sched["by_week"])
-    jump_week = episodes.week_key(pd.Series([jump])).iloc[0]
+    jump_week = windows.week_key(pd.Series([jump])).iloc[0]
     before = [w for w in weeks if w <= jump_week]
     after = [w for w in weeks if w > jump_week]
     assert before and after
@@ -76,14 +72,17 @@ def test_both_harnesses_get_point_in_time_factors_without_their_own_code():
     them through the one applier. A second copy would drift."""
     import inspect
     from evaluate import backtest as replay
+    from evaluate import level
     from evaluate import shadow
 
-    # one prediction path: replay.predict_frame calls the applier, shadow
-    # predicts through predict_frame (shadow's own copy of extend/lookup/
-    # predict is gone)
-    assert "predict_mu_ref(" in inspect.getsource(replay.predict_frame)
+    # one prediction path: `evaluate.level.predict_frame` calls the applier,
+    # both harnesses predict through it (each once carried a copy of
+    # extend/lookup/predict)
+    assert "predict_mu_ref(" in inspect.getsource(level.predict_frame)
     assert "predict_frame(" in inspect.getsource(shadow._prepare_items)
-    for mod, name in ((replay, "evaluate.backtest"), (shadow, "evaluate.shadow")):
+    assert "predict_frame(" in inspect.getsource(replay)
+    for mod, name in ((replay, "evaluate.backtest"), (shadow, "evaluate.shadow"),
+                      (level, "evaluate.level")):
         src = inspect.getsource(mod)
         # `by_week` is deliberately NOT banned: fidelity has its own weekly
         # series. What must not appear is the selection itself or the
@@ -95,7 +94,10 @@ def test_both_harnesses_get_point_in_time_factors_without_their_own_code():
             assert banned not in src, (
                 f"{name} reaches into the calibration schedule itself -- "
                 "factor selection belongs to BaselineModel alone")
-        assert "level_factors(" in src, f"{name} does not read the applier"
+        # the applier is read directly, or through evaluate.level -- the one
+        # home of the frozen-vs-refit reading both harnesses share
+        assert "level_factors(" in src or "refit_scale(" in src, \
+            f"{name} does not read the applier"
 
 
 def test_a_level_shift_does_not_leak_into_its_own_weeks_factor(tmp_path, cfg):
@@ -284,8 +286,6 @@ def test_convergence_check_flags_drift_and_never_commits_the_resolve(
     being tested for."""
     import copy
 
-    from fit import train_baseline as tb
-
     cfg = copy.deepcopy(load_config())
     path = str(tmp_path / "cal.json")
     cfg["baseline_model"]["calibration_factor_path"] = path
@@ -301,10 +301,10 @@ def test_convergence_check_flags_drift_and_never_commits_the_resolve(
 
     # a factor moved 1.2 -> 1.3 under the current r/prior -> NOT CONVERGED,
     # named, and the disk artifact still holds iteration k
-    monkeypatch.setattr(tb, "fit_level_calibration", fake(
+    monkeypatch.setattr(cal, "fit_level_calibration", fake(
         {"factors": {"A": 1.0, "B": 1.3},
          "schedule": {"by_week": {"2026-07-06": {"A": 1.05}}}}))
-    block = tb.check_calibration_convergence(None, cfg)
+    block = cal.check_calibration_convergence(None, cfg)
     assert not block["converged"]
     assert block["worst_cell"] == "anchor:B"
     assert abs(block["max_abs_dlog"] - abs(np.log(1.3 / 1.2))) < 1e-5
@@ -314,18 +314,18 @@ def test_convergence_check_flags_drift_and_never_commits_the_resolve(
 
     # identical re-solve -> converged; a schedule week's cell moving is
     # caught the same way as the anchor's
-    monkeypatch.setattr(tb, "fit_level_calibration", fake(old))
-    assert tb.check_calibration_convergence(None, cfg)["converged"]
-    monkeypatch.setattr(tb, "fit_level_calibration", fake(
+    monkeypatch.setattr(cal, "fit_level_calibration", fake(old))
+    assert cal.check_calibration_convergence(None, cfg)["converged"]
+    monkeypatch.setattr(cal, "fit_level_calibration", fake(
         {"factors": {"A": 1.0, "B": 1.2},
          "schedule": {"by_week": {"2026-07-06": {"A": 1.30}}}}))
-    block = tb.check_calibration_convergence(None, cfg)
+    block = cal.check_calibration_convergence(None, cfg)
     assert not block["converged"] and block["worst_cell"] == "2026-07-06:A"
 
     # a cell appearing or vanishing is never averaged away
-    monkeypatch.setattr(tb, "fit_level_calibration", fake(
+    monkeypatch.setattr(cal, "fit_level_calibration", fake(
         {"factors": {"A": 1.0}, "schedule": {"by_week": {}}}))
-    block = tb.check_calibration_convergence(None, cfg)
+    block = cal.check_calibration_convergence(None, cfg)
     assert not block["converged"]
     assert "anchor:B" in block["cells_appeared_or_gone"]
 
@@ -340,8 +340,6 @@ def test_rho_is_fit_on_the_calib_window_not_the_full_frame(cfg, monkeypatch):
     import copy
 
     from fit import fit_dispersion as fd
-    from test_dispersion import _FlatModel, _calib_frame
-
     cfg = copy.deepcopy(cfg)
     cfg["dispersion"]["min_rows_per_group"] = 8
     monkeypatch.setattr(fd, "fit_r", lambda k, mu, cen, b: (2.0, True))
@@ -358,7 +356,7 @@ def test_rho_is_fit_on_the_calib_window_not_the_full_frame(cfg, monkeypatch):
         return real(resid, groups, clip_max)
     monkeypatch.setattr(fd, "intraclass_correlation", spy)
     _, rho_out = fd.fit_dispersion(pd.concat([train, calib], ignore_index=True),
-                                   cfg, model=_FlatModel())
+                                   cfg, model=_Applier(cfg))
     assert rho_out["fit_window"] == "calib"
     assert seen == [len(calib)], "rho read rows outside the calib window"
     assert rho_out["fit_rows"] == len(calib)
@@ -368,8 +366,6 @@ def test_convergence_carries_its_trajectory_and_the_worst_cell_s_evidence(tmp_pa
     """A single reading cannot tell a contracting loop from a stuck one, and
     an unweighted max cannot tell an unsettled chain from one thin cell."""
     import copy
-
-    from fit import train_baseline as tb
 
     cfg = copy.deepcopy(cfg)
     path = str(tmp_path / "cal.json")
@@ -384,8 +380,8 @@ def test_convergence_carries_its_trajectory_and_the_worst_cell_s_evidence(tmp_pa
         json.dump({"factors": {"A": 1.0, "B": next(moves)},
                    "schedule": {"by_week": {}}}, open(path, "w"))
     import unittest.mock as um
-    with um.patch.object(tb, "fit_level_calibration", refit):
-        blocks = [tb.check_calibration_convergence(None, cfg) for _ in range(3)]
+    with um.patch.object(cal, "fit_level_calibration", refit):
+        blocks = [cal.check_calibration_convergence(None, cfg) for _ in range(3)]
     for block in blocks:
         assert isinstance(block.get("history"), list) and block["history"]
         assert len(block["history"]) <= 6, "the history is bounded"
@@ -412,32 +408,6 @@ def test_the_prior_fast_path_drops_only_what_cannot_move_the_fixed_point():
     assert "fast" in inspect.signature(prior_density.estimate).parameters
     assert "design_comparison" not in inspect.getsource(prior_density), \
         "the alternative-design block was deleted, not made conditional"
-
-
-def test_the_trailing_fit_window_keeps_episodes_whole_at_the_week_seam():
-    """Both schedule loops cut the trailing window by ROW week, so an
-    episode opening Sunday and closing Monday lost its Monday rows -- and
-    the artifact schedule and shadow's re-fit solved on different rows."""
-    d = pd.DataFrame({
-        "episode_id": ["a", "a", "b", "b"],
-        "date": ["2026-08-09", "2026-08-10",       # Sun -> Mon (week seam)
-                 "2026-08-10", "2026-08-11"],      # opens in the fit week
-        "hour_of_day": [23, 0, 9, 10],
-    })
-    window, weeks = episodes.trailing_weeks_window(d, "2026-08-10", 1)
-    assert sorted(window.episode_id.unique()) == ["a"]
-    assert len(window) == 2 and weeks == 1
-    empty, none = episodes.trailing_weeks_window(d, "2026-08-03", 1)
-    assert len(empty) == 0 and none == 0
-
-
-def test_anchor_rows_are_one_mask():
-    """Five sites spelled `(total_discount - d_ref).abs() <= tier_step / 2`
-    by hand; the fit, the fidelity ratio and the gate share must agree on
-    what an anchor row is."""
-    d = pd.DataFrame({"total_discount": [0.30, 0.32, 0.33, 0.28],
-                      "d_ref": [0.30] * 4})
-    assert episodes.is_anchor_row(d, 0.05).tolist() == [True, True, False, True]
 
 
 def test_apply_is_refused_when_the_calibration_schedule_is_stale(cfg, tmp_path):

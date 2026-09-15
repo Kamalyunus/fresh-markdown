@@ -25,26 +25,12 @@ retraining, which is what a config paste needs (see `ops.tune`); nothing
 in normal operation should ever retrain to settle calibration.
 """
 
-import argparse
-import subprocess
-import sys
-
+from common.cli import make_parser
 from common.config import load_config
 from common.io import read_json
-
-PREPARED = "data/prepared.parquet"
-
-
-def step(label, args, fatal=True):
-    """One pipeline step. Output streams through: the console lines are the
-    evidence, and swallowing them to keep the log tidy is how a warning gets
-    missed."""
-    print(f"\n== {label} " + "=" * max(0, 62 - len(label)))
-    r = subprocess.run([sys.executable, "-m", *args])
-    if r.returncode and fatal:
-        raise SystemExit(f"\n{label} FAILED (exit {r.returncode}) -- stopping "
-                         "here rather than building on a broken artifact")
-    return r.returncode
+from common.paths import BACKTEST_REPORT, SHADOW_REPORT
+# moved to ops.run (the runner) and common.paths; the names stay for callers
+from ops.run import PREPARED, step                                       # noqa: F401
 
 
 def convergence(cfg):
@@ -131,9 +117,8 @@ def settle(cfg, max_turns):
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = make_parser()
     ap.add_argument("--input", help="raw FLC parquet (omit with --check-only)")
-    ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--max-turns", type=int, default=20,
                     help="cap on calibration<->dispersion turns (default 20). "
                          "The owner measures 8-9 on production; the fixture "
@@ -165,7 +150,7 @@ def main():
     ok, turns, block = settle(cfg, args.max_turns)
 
     step("step 6: backtest", ["evaluate.backtest", "--input", PREPARED, "--workers", "0",
-                              "--out", "reports/backtest.json"])
+                              "--out", BACKTEST_REPORT])
     step("step 6b: derive_thresholds",
          ["evaluate.derive_thresholds", "--input", PREPARED])
     step("step 11: seal", ["ops.seal", "--reason", args.seal_reason
@@ -194,7 +179,7 @@ def main():
 Bootstrap complete -- loop settled in {turns} turn(s). Next:
   1. Hold-out shadow (it derives its own launch tau):
        python3 -m ops.init_posterior
-       python3 -m evaluate.shadow --input {PREPARED} --out reports/shadow.json
+       python3 -m evaluate.shadow --input {PREPARED} --out {SHADOW_REPORT}
   2. Let the reports decide the config, and record why:
        python3 -m ops.tune            # what to change, on what evidence
        python3 -m ops.tune --apply    # pastes the MEASURED values

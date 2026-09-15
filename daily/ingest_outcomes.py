@@ -18,12 +18,12 @@ day's rows.
 Run: python3 -m daily.ingest_outcomes --feed <hourly parquet> [--failures f.jsonl]
 """
 
-import argparse
 from collections import Counter
 
 import numpy as np
 import pandas as pd
 
+from common.cli import make_parser
 from common.config import load_config
 from common.episodes import adjustment_reason, is_censored_hour
 from common.io import read_rows
@@ -233,10 +233,9 @@ def emit_all(store, outcomes, report):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="daily.ingest_outcomes")
+    ap = make_parser(prog="daily.ingest_outcomes")
     ap.add_argument("--feed", required=True,
                     help="hourly FLC parquet (raw source schema)")
-    ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--failures", default=None,
                     help="failed price pushes -- parquet/CSV table or JSONL: "
                          "sku_id, fc, date, hour_of_day, reason")

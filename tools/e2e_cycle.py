@@ -9,13 +9,13 @@ the source schema, `daily.ingest_outcomes` builds the outcomes and names
 them from the feed row (`feed-<sku>|<fc>|<date>T<hh>`), and
 `daily.export_events` writes the paired tables engineering reads back.
 Every write goes under `--dir` (a copy of the production state, sealed:
-evaluate.pilot_sim.build_workspace); production is never touched.
+evaluate.pilot_shop.build_workspace); production is never touched.
 
-The shop is the pilot simulator's (`evaluate.pilot_sim.PilotSim`, driven
-hour by hour with a pricer that goes through `ops.price_batch` instead of
-the engine directly): demand from evaluate.pilot_world at the frozen
-model's level with an ASSUMED elasticity, NB noise at the agent's own r,
-the feed row the source would write, a rejected state held at the
+The shop is the pilot simulator's (`evaluate.pilot_shop.PilotSim`, driven
+hour by hour with `LaneBPricer`, which goes through `ops.price_batch`
+instead of the engine directly): demand from evaluate.pilot_world at the
+frozen model's level with an ASSUMED elasticity, NB noise at the agent's
+own r, the feed row the source would write, a rejected state held at the
 defined fallback. Episodes are DP-eligible hold-out templates re-dated
 onto the day after the extract ends, all opening at `--opening-hour` so
 one batch is one clock hour. Every number it prints is the simulated
@@ -29,29 +29,19 @@ import os
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 
 from common.config import load_config
-from common.io import read_json, write_json, write_jsonl
-from daily import export_events
-from daily.ingest_outcomes import build_outcomes
-from engine.state import REQUEST_FIELDS, hour_grid
-from events.pairs import hour_key, match_pairs, outcome_id_of, price_matches
-from evaluate.pilot_sim import PilotSim, build_workspace, load_sim_config
-from evaluate.pilot_world import FEED_SCHEMA, World
-from ops import price_batch
+from common.io import write_json
+from engine.state import hour_grid
+from evaluate.pilot_shop import LaneBPricer, PilotSim, build_workspace, ingest_and_pair
+from evaluate.pilot_sim import load_sim_config
+from evaluate.pilot_world import World
 
 # the simulator's own settings file, beside config.yaml at the repo root:
 # the shop's driving knobs (the feature history margin, the lane hour)
 # live there and nowhere in code
 SIM_CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                "pilot_sim.yaml")
-
-PAIR_COLS = ("decision_id", "outcome_id", "sku_id", "fc", "date", "hour_of_day",
-             "applied_discount", "applied_price", "offered_price", "price_matches",
-             "units_sold", "starting_inventory", "ending_inventory",
-             "adjustment_reason", "is_exploration")
 
 
 def run(cfg, prepared, out_dir, episodes=20, hours=3, opening_hour=10, seed=0,
@@ -64,35 +54,10 @@ def run(cfg, prepared, out_dir, episodes=20, hours=3, opening_hour=10, seed=0,
     # the world's level is the frozen model's own prediction (drift 1.0),
     # built on the production config as the simulator builds it
     world = World(cfg, prepared, epsilon_true, seed=seed)
-    r_lookup = read_json(c["dispersion"]["r_lookup_path"])
-    batches = []
-
-    def price_through_lane_b(pilot, k, date, hour):
-        """The cycle's pricer: the hour's states as the contract's 12-field
-        requests through ops.price_batch -- which builds its own states
-        (engine.state.build_states) and commits every decision itself --
-        with the request and decision files engineering would see."""
-        requests = [{f: s[f] for f in REQUEST_FIELDS} for s in map(sim._pilot_state, pilot)]
-        tag = f"{date}T{hour:02d}"
-        req_path = os.path.join(out_dir, "requests", f"{tag}.jsonl")
-        write_jsonl(req_path, requests, fields=REQUEST_FIELDS)
-        rows, events, rep = price_batch.run(
-            c, requests, sim._feature_history(date), workers=workers, seed=seed,
-            store=sim.store, model=sim.model, posterior=sim.posterior, r_lookup=r_lookup)
-        dec_path = os.path.join(out_dir, "decisions", f"{tag}.jsonl")
-        price_batch.write_rows(rows, dec_path)
-        batches.append({"hour": tag, "requests_path": req_path,
-                        "decisions_path": dec_path, **rep})
-        by_id = {e["decision_id"]: e for e in events}
-        # a rejected request holds the shelf (the shop's defined fallback),
-        # a priced one is already in the store: the shop must not emit it twice
-        return [{"evt": None, "rejected": r["rejected"]} if r["rejected"] else
-                {"evt": by_id[r["decision_id"]], "rejected": None, "committed": True}
-                for r in rows]
-
+    pricer = LaneBPricer(out_dir, workers=workers, seed=seed)
     sim = PilotSim(c, world, out_dir, config_path, days=1, episodes_per_day=2 * episodes,
                    sim_settings=load_sim_config(sim_config), seed=seed,
-                   prepared=prepared, workers=workers, pricer=price_through_lane_b)
+                   prepared=prepared, workers=workers, pricer=pricer)
 
     # one episode per SKU x FC, so no hour holds two states for one shelf;
     # every one opens at the same hour, pilot arm only, no twin
@@ -107,58 +72,24 @@ def run(cfg, prepared, out_dir, episodes=20, hours=3, opening_hour=10, seed=0,
         if len(chosen) == episodes:
             break
     sim.open_templates(0, launch, [("pilot", t, None) for t in chosen])
-    for date, hour in hour_grid(launch, opening_hour, hours):
-        sim._open_due(0, date, hour)
-        if not sim.open:
-            break
-        sim._tick(0, date, hour)
-    sim._close_day(launch)
+    sim.run_hours(0, launch, hour_grid(launch, opening_hour, hours))
 
-    feed = World.feed_frame([r for d in sorted(sim.feed_by_day) for r in sim.feed_by_day[d]])
     feed_path = os.path.join(out_dir, "feed", f"{launch}.parquet")
-    pq.write_table(pa.Table.from_pandas(feed, schema=FEED_SCHEMA, preserve_index=False),
-                   feed_path)
-
+    feed = sim.write_feed(sorted(sim.feed_by_day), feed_path)
     # the daily lane's outcome side, on the feed the shop wrote
-    store = sim.store
-    decisions = store.load_decisions()
-    outcomes, ingest = build_outcomes(decisions, pd.read_parquet(feed_path))
-    ingest["emitted"] = int(sum(store.emit_outcome(o) for o in outcomes))
-    written, _ = export_events.export(store, os.path.join(out_dir, "exports"))
-
-    pairs = match_pairs(decisions, store.load_outcomes())
-    table = []
-    for d, o in pairs:
-        table.append({
-            "decision_id": d["decision_id"], "outcome_id": o["outcome_id"],
-            "sku_id": d["sku_id"], "fc": d["fc"], "date": d["date"],
-            "hour_of_day": d["hour_of_day"],
-            "applied_discount": d["applied_discount"], "applied_price": d["applied_price"],
-            "offered_price": o["applied_price"], "price_matches": price_matches(d, o),
-            "units_sold": o["units_sold"], "starting_inventory": o["starting_inventory"],
-            "ending_inventory": o["ending_inventory"],
-            "adjustment_reason": o.get("adjustment_reason"),
-            "is_exploration": d["is_exploration"]})
-    formula_holds = all(
-        o["outcome_id"] == outcome_id_of(hour_key(d["sku_id"], d["fc"], d["date"],
-                                                  d["hour_of_day"]))
-        for d, o in pairs)
+    paired = ingest_and_pair(sim.store, feed_path, out_dir)
     report = {
         "workspace": out_dir, "config_path": config_path, "launch_date": launch,
         "episodes_opened": len(chosen), "hours": hours, "opening_hour": opening_hour,
         "epsilon_true": epsilon_true, "seed": seed,
-        "batches": batches,
-        "decisions": len(decisions),
+        "batches": pricer.batches,
+        "decisions": paired["decisions"],
         # a rejected state is held at the shop's fallback and priced again
         # next hour, as the simulator does: counted by reason, never dropped
         "rejected": sim.rejected,
         "feed_path": feed_path, "feed_rows": int(len(feed)),
-        "ingest": ingest,
-        "exports": {k: {"path": p, "rows": n} for k, (p, n) in written.items()},
-        "pairs": len(pairs),
-        "price_mismatches": sum(1 for r in table if not r["price_matches"]),
-        "outcome_ids_follow_the_formula": formula_holds,
-        "paired_sample": table[:10],
+        **{k: paired[k] for k in ("ingest", "exports", "pairs", "price_mismatches",
+                                  "outcome_ids_follow_the_formula", "paired_sample")},
     }
     write_json(os.path.join(out_dir, "e2e_report.json"), report)
     return report

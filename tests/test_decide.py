@@ -160,8 +160,9 @@ def test_the_finiteness_test_has_one_home():
     rejects a non-finite state by the SAME predicate -- a second copy is
     how the two drift (inf passed one and not the other, once)."""
     from engine import decide
-    from events import store
+    from events import contract, store
 
+    assert contract.finite_number is decide.finite_number
     assert store.finite_number is decide.finite_number
     assert decide.finite_number(np.float64(1.0)) and decide.finite_number(3)
     for v in (True, np.bool_(True), "1", None, float("inf"), float("nan")):

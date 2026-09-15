@@ -158,6 +158,43 @@ def learnable_with_stock(decisions, outcomes, pairs=None):
     return [(d, o) for d, o in pairs if is_learnable(o) and has_stock(o)]
 
 
+def finalized_days(decisions, outcomes, pairs=None):
+    """ONE pass over the matched pairs, keyed on the TRADING day the decision
+    priced (decision_day, never the UTC clock of `finalized_at`). Every
+    stored outcome is final -- `finalized_at` is in
+    events.contract.OUTCOME_REQUIRED -- so a matched pair is a priced day.
+    Returns (priced_days ascending, {day: realised exploration spend} over
+    the forced decisions whose push EXECUTED -- a failed push
+    (is_learnable) left the old price on the shelf, so its expected
+    sacrifice was never spent) -- the day key and the spend the tau
+    controller (daily.update) and the monitor's stop condition both read,
+    so the correction and its backstop cannot drift apart. `pairs` is
+    match_pairs(decisions, outcomes) if the caller already built it."""
+    days, spend = set(), {}
+    for d, o in (match_pairs(decisions, outcomes) if pairs is None else pairs):
+        day = decision_day(d)
+        days.add(day)
+        if d.get("is_exploration") and is_learnable(o):
+            spend[day] = spend.get(day, 0.0) + float(d["exploration_cost"])
+    return sorted(days), spend
+
+
+def suspended_days(decisions):
+    """The trading days on which NO decision had a budget in force: every
+    decision priced that day carries `tau_current` None (engine.decide
+    records None while the store holds a suspension). The controller holds
+    tau on such a day (engine.budget.budget_held) -- nothing was drawn, so
+    its zero spend is no reading. A day with any budgeted decision is
+    graded."""
+    budgeted, seen = set(), set()
+    for d in decisions:
+        day = decision_day(d)
+        seen.add(day)
+        if d.get("tau_current") is not None:
+            budgeted.add(day)
+    return sorted(seen - budgeted)
+
+
 def quality_counts(decisions, outcomes, cfg, duplicate_counts=None, pairs=None,
                    completeness_counts=None):
     """The event-quality counts the update gate and the monitor's stop
@@ -165,7 +202,10 @@ def quality_counts(decisions, outcomes, cfg, duplicate_counts=None, pairs=None,
     `monitoring.stop_conditions.event_quality_window_days` TRADING days
     (decision_day) ending on the latest priced day. All-time rates re-fired
     a resumed stop until history diluted one incident; a window lets a
-    fixed integration clear the gate.
+    fixed integration clear the gate. TRADING days, on purpose: the tau
+    controller's IL base (engine.budget.trailing_daily_il) and the
+    guardrail series (common.guardrail.deterioration_series) window over
+    CALENDAR days -- the three are distinct and never merged.
 
     Windowed: the compared pairs and their price mismatches, the unmatched
     outcomes (dated by their own `finalized_at`, the only day they carry;

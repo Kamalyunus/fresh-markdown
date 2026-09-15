@@ -3,7 +3,7 @@
 import os
 import re
 
-from events.store import DECISION_REQUIRED, OUTCOME_REQUIRED
+from events.contract import DECISION_REQUIRED, OUTCOME_REQUIRED
 
 DOC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                    "docs", "event_contract.html")

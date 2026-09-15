@@ -96,6 +96,13 @@ now. Dates are owner sign-off.
 - **The drift baseline ran the biased ICC.** `drift_by_window` kept the
   `var(means)/var(all)` form after the frozen fit moved to the ANOVA ICC,
   so baseline and frozen value disagreed by (1−ρ)/m with no drift at all.
+- **One group fit, spelled twice.** The frozen fit and the drift
+  measurement each fitted a group's `r`, read its Pearson dispersion and
+  tested the bound in their own three lines, and the rho-on-thick-episodes
+  block was a literal copy. `_fit_group` and `_episode_rho` are the one
+  reading of each; the cluster statistics themselves (the ANOVA ICC, the
+  design effect, `m` per batch) left the config loader for
+  `common.clustering`, which reads no config.
 
 ## Population and data quality
 
@@ -166,9 +173,28 @@ now. Dates are owner sign-off.
   the DP a NaN `d_max`; `population()` refuses an unknown name rather than
   falling back; the waterfall's `raw` row once mixed a pre-dedup row count
   with post-dedup episodes and COGS.
+- **The window rule in two packages.** The ids and the defective-window
+  drops lived in `fit.prepare_data`, the episode-scoped cuts in
+  `common.episodes`, and a reader asking "where does an episode start and
+  which rows may a fit read" walked both. `common.windows` is the one home
+  of both halves (the rule, the cuts, the week keys, the planning horizon);
+  `episodes` keeps the inventory accounting and gained `episode_cogs`, the
+  exposure read off the flow it already computes. The flag stage split the
+  same way: `dp_flags` sets the columns, `flag_detail` writes the stage's
+  dict in the manifest's order. And the ten spellings of "the eligible
+  population of one split window" are `prepare_data.scope`.
 
 ## Calibration
 
+- **The fixture generator's own window rule.** `tools.make_dummy_flc`
+  counted its windows, seams and restock extensions on the raw schema with
+  a rule of its own that omitted the counter clause, spelled the counter
+  by hand and kept a copy of the reference discounts, so the tool's
+  printed counts and the chain's ids were two readings of one fixture.
+  It now renames to the chain's names and reads `common.windows`
+  (`assign_episode_ids`, `window_signals`, `window_counter`) and
+  `reference_discount(cfg, ...)`; the emitted bytes are unchanged and only
+  the counts that were read off the second rule moved.
 - **Blocking gate → always applied, level as a diagnostic** (owner,
   08-25). The feared mask cannot happen: factors are fit on anchor rows
   only, where the price term is 1, so slope error never enters; the band is
@@ -214,6 +240,17 @@ now. Dates are owner sign-off.
   itself failed, the artifact carried no `convergence` block, the stall test
   had nothing to compare and prior/dispersion re-ran twenty times; a failing
   5b now stops the loop with its own message.
+- **The level-factor fit inside the model module.** `train_baseline` was
+  a quarter model and three quarters calibration, and the fit reached its
+  own `r` through a function-local import to dodge the cycle it created.
+  `fit.calibrate` now holds the one estimator (`solve_level_factors`), the
+  fit basis, the weekly schedule, the convergence check and the console
+  summary; `train_baseline` keeps the model, the applier and the two CLI
+  flags, which call in. The stamp still names the command. The fit basis
+  is one function, `attach_fit_basis(frame, model, r_lookup, raw=)`: a
+  level solve reads the raw mu, the harnesses the calibrated one, and both
+  read `r` through the vectorised lookup -- the replay once looped a Python
+  lookup per row beside it.
 
 ## Exploration budget and tau
 
@@ -744,6 +781,109 @@ now. Dates are owner sign-off.
   deflates by forced outcomes per episode (`deff_from_episodes`): a
   one-forced-hour world read as six and the alert tripped on a rho error
   the update never applied. One home for `m`, one population.
+- **The tau paste gate lived in the engine.** `tau_provenance_error`
+  reads two reports and a paste tolerance and neither prices nor learns;
+  a reader hunting the paste checks looked in `ops` and found it beside
+  the uniform draw. It is `ops.config_keys` now, with the key registry it
+  belongs to; `engine.explore` keeps the name for its callers.
+- **The persistence streak lived in the monitor.** `evaluate_guardrail`
+  is the rule the floor, the trigger and shadow's trace all read, and
+  shadow importing it from `daily.monitor` made the harness depend on
+  the production lane. It sits with the deterioration series it grades,
+  `common.guardrail`; the monitor re-exports it.
+- **The learning maths in the daily lane.** `grid_update` and
+  `row_information` are pure likelihood and information -- no store, no
+  gate, no CLI -- and lived in `daily.update` beside the operator gate.
+  `engine.learn` holds them; `engine` prices and learns, `daily` collects
+  and commits.
+- **update and monitor imported each other.** The monitor read
+  `finalized_days` from update; update lazily imported the monitor's
+  episode frame to price a budget. Both are functions over the event
+  records: `events.pairs` (the priced and the suspended days) and
+  `events.frame` (records to the settled episode frame, and the IL base
+  by close day). Neither lane module needs the other now.
+- **One `explore.py` for four concerns.** The draw, the Q-spread ledger,
+  the budget controller and the paste gate shared a file named for the
+  first; a reader hunting `walk_tau` looked for "budget". The draw stays
+  in `engine.explore`; the budget and the walk are `engine.budget`, the
+  ledger `engine.spread_ledger`; `explore` keeps every name.
+- **The store carried the contract.** The required fields and value
+  checks are the integration contract, read by the doc test and by
+  engineering's page; they were the first third of `events.store`. They
+  are `events.contract`; the store enforces them and keeps the names.
+- **`tune.py` was two modules.** A registry of what each key is to the
+  chain (read by `advance` and `status`, never by tune's own checks) and
+  the findings, four functions carrying three or four unrelated readings
+  each. The registry is `ops.config_keys`, with the one report-staleness
+  judgement both drivers had re-implemented; the findings are one
+  function each, grouped by the class they emit, in the report's order.
+- **The frozen bundle, spelt seven times.** Model, posterior, `r`
+  lookup and prior were loaded in seven places with two wordings for a
+  missing file. `fit.artifacts.load_bundle` loads each on first use;
+  `ops.status.read_artifacts` reads the JSON ones once per run and hands
+  them down instead of each row re-reading them.
+- **`advance.plan` was one ladder.** The run order was a single
+  if/return chain; `AGENTS`' phase table was the only place it read as a
+  list. It is now one function per phase in an ordered table, each
+  answering "what runs next" or nothing; the step dicts did not move.
+  The readiness report it writes is `ops.readiness`, the step runner and
+  the phase names `ops.run`.
+- **Path literals and parser boilerplate in every driver.** The
+  drivers re-spelt the modules' own report defaults in their argv and
+  every CLI declared `--config` by hand. `common.paths` names each file
+  once (the argv strings are unchanged) and `common.cli` builds the
+  shared flags; a driver that restates a default is a drift waiting to
+  happen.
+- **The audit trail inside provenance.** `common.provenance` answered "what
+  was this fitted against" and, in its second half, copied bundles into
+  history folders and indexed them. `common.history` holds the trail; it
+  reads provenance's artifact walk and provenance never reads it back.
+- **The integration cycle reached into the shop's privates.** Its pricer
+  was a closure inside `tools.e2e_cycle.run`, capturing the simulator
+  before it was bound and calling six private methods, and its hour loop,
+  feed write and ingest were second copies of the simulator's. The shop
+  now offers them (`evaluate.pilot_shop.PilotSim.run_hours`, `write_feed`,
+  `LaneBPricer`, `ingest_and_pair` over the lane's own `ingest_feed`) and
+  the cycle is a driver again.
+- **The worker's context and the engine's state, spelt three times.**
+  Lane B, the simulator and shadow each built the dict `price_one` reads
+  and the twelve-field state, shadow with its own shape because its
+  worker called `decide` directly. `engine.state.batch_context` and
+  `assemble_state` are the one spelling of each; shadow's worker goes
+  through `price_one` (handing in its per-episode stream and its spread
+  sink), so a field added to the state or the context reaches every
+  caller at once.
+- **The economics block, three times.** The monitor's business metrics,
+  the simulator's arm economics and shadow's markdown IL each summed the
+  same settled frame with their own rounding. `common.metrics.summary` is
+  the block, unrounded; each reader names the precision it reports at.
+- **A harness importing its sibling.** Shadow imported the priced frame
+  and the coverage guard from the backtest and carried its own copy of
+  the frozen-vs-refit rescale. `evaluate.level` holds what both read
+  about the level (`predict_frame`, `refit_scale`,
+  `weekly_refit_schedule`); neither harness imports the other.
+- **The tau derivation's bookkeeping, twice.** The ledger fold, the
+  `rng.choice` sample and the reported block were spelt in the backtest
+  and in shadow. `evaluate.tau` holds them (`fill_ledger`, `sample_ids`,
+  `tau_derivation_block`); the sample is the same call in the same order,
+  so every sampled report reads as before.
+- **The simulator was one file.** The workspace, the shop, the lanes, the
+  readings, the grading and the CLI shared `evaluate.pilot_sim`. The shop
+  is `evaluate.pilot_shop`, the readings and expectations
+  `evaluate.pilot_grade`, and `pilot_sim` is the run and its settings;
+  the old names still resolve.
+- **A second process pool.** The simulator kept its own executor and
+  chunking beside `common.parallel.map_episodes` because it maps one
+  batch per hour. `EpisodePool` is the held pool; `map_episodes` is the
+  one-shot case of it.
+- **The deck re-implemented the replay's shelf.** `scenario_deck.simulate`
+  walked its own hour loop with the clip and restock bookkeeping the
+  replay already had. Its paths now walk `evaluate.backtest._simulate_arm`
+  priced by `_dp_price` (the restock is an adjustment, a fixed schedule
+  the price callback); the deck keeps only its solve cache.
+- **`fidelity_decomposition` in `common`.** One reader, the backtest,
+  and the module said "several need them". It lives in
+  `evaluate.backtest`; the old name still resolves.
 
 ## The lesson under all of it
 

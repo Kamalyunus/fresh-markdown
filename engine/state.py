@@ -27,6 +27,7 @@ import pandas as pd
 
 from common.config import reference_discount
 from common.parallel import keyed_rng
+from common.provenance import config_fingerprint
 from engine.decide import StateRejected, count_failures, decide
 from events.pairs import ident, ident_series, iso_day
 from fit.fit_dispersion import lookup_r
@@ -188,6 +189,16 @@ def _template(r):
             "fc": r["fc"], "original_price": float(r["original_price"])}
 
 
+def assemble_state(request, r, mu_ref_path):
+    """THE state `engine.decide` prices, in one spelling: the request's 12
+    fields (REQUEST_FIELDS, in the contract's order), the dispersion `r`
+    and the frozen model's `mu_ref_path` from this hour on. Lane B's
+    batch (`build_states`), the simulator's pilot hour and shadow's
+    re-anchored hour each spelt this dict for themselves."""
+    return {**{f: request[f] for f in REQUEST_FIELDS},
+            "r": float(r), "mu_ref_path": list(mu_ref_path)}
+
+
 def build_states(requests, history, cfg, model, r_lookup, episode_paths=None):
     """The engine's state for each VALIDATED request, aligned with it: the
     request's fields (canonical_request), `r` down the lookup's fallback
@@ -277,12 +288,8 @@ def build_states(requests, history, cfg, model, r_lookup, episode_paths=None):
     for i in fresh:
         sliced[i] = predicted[i]
 
-    states = []
-    for i, r in enumerate(requests):
-        states.append({
-            **r, "r": float(lookup_r(r_lookup, r["subcategory"], r["category"])),
-            "mu_ref_path": sliced[i],
-        })
+    states = [assemble_state(r, lookup_r(r_lookup, r["subcategory"], r["category"]),
+                             sliced[i]) for i, r in enumerate(requests)]
     return states, {"requests_with_unknown_features": int(unknown),
                     "non_entry_requests_without_stored_path": int(without_stored)}
 
@@ -317,21 +324,43 @@ class BufferStore:
         return True
 
 
-def price_one(item, ctx):
+def batch_context(cfg, posterior, model, categories, seed, **fixed):
+    """The read-only context every `price_one` of one batch reads: the
+    posterior snapshot for `categories` (`cells`, the cell map applied once
+    by the real store; `suspended`), the `tau` in force, `cfg`, `seed`,
+    the model version and the config `digest` (computed ONCE here: the
+    fingerprint costs about as much as a solve). `fixed` replaces a key a
+    caller settles for itself -- shadow prices at its own tau, is never
+    suspended, and adds the grain its worker re-reads the drift by -- so
+    the shape stays one shape. Lane B's batch, the simulator's tick and
+    shadow's run each spelt this dict for themselves."""
+    ctx = {"cfg": cfg, "cells": {str(c): posterior.get(c) for c in categories},
+           "suspended": posterior.exploration_suspended(),
+           "tau": posterior.tau(cfg), "seed": int(seed),
+           "model_version": model.version,
+           "digest": config_fingerprint(cfg)["digest"]}
+    ctx.update(fixed)
+    return ctx
+
+
+def price_one(item, ctx, rng=None, spread_sink=None):
     """ONE decision in a worker, pure: `item` is (state, key) -- the key
     is what seeds the draw (the hour key for a batch, the episode and its
     hour for the simulator; common.parallel.keyed_rng), so the answer does
-    not depend on which worker prices it or in what order. `ctx` carries
-    the batch's posterior snapshot (`cells`, `suspended`), `tau`, `cfg`,
-    `seed`, `model_version` and the config `digest`. Returns
-    {"evt", "rejected"}; the parent commits. The one worker body the
-    batch caller and the simulator share."""
+    not depend on which worker prices it or in what order. `ctx` is
+    `batch_context`'s: the batch's posterior snapshot (`cells`,
+    `suspended`), `tau`, `cfg`, `seed`, `model_version` and the config
+    `digest`. Returns {"evt", "rejected"}; the parent commits. The one
+    worker body the batch caller, the simulator and shadow share: shadow
+    hands in `rng` (one stream per episode, drawn across its hours) and a
+    `spread_sink` for the Q-spreads its ledger folds."""
     state, key = item
     store = BufferStore()
     try:
         evt = decide(state, FrozenCells(ctx["cells"], ctx["suspended"]), store,
-                     ctx["cfg"], keyed_rng(ctx["seed"], *key), ctx["tau"],
-                     ctx["model_version"], config_digest=ctx["digest"])
+                     ctx["cfg"], keyed_rng(ctx["seed"], *key) if rng is None else rng,
+                     ctx["tau"], ctx["model_version"], spread_sink=spread_sink,
+                     config_digest=ctx["digest"])
     except StateRejected as e:
         return {"evt": None, "rejected": str(e)}
     return {"evt": evt, "rejected": None}

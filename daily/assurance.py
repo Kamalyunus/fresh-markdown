@@ -7,7 +7,6 @@ suspends pricing on its own; verdicts are read at the operator gate.
 Run: python3 -m daily.assurance --out reports/assurance.json
 """
 
-import argparse
 import hashlib
 
 import numpy as np
@@ -15,11 +14,13 @@ from scipy.stats import chi2 as chi2_dist
 from scipy.stats import nbinom
 
 from common import episodes
-from common.config import (deff_from_episodes, intraclass_correlation,
-                           load_config)
+from common.cli import make_parser
+from common.clustering import deff_from_episodes, intraclass_correlation
+from common.config import load_config
 from events.store import EventStore
 from events.pairs import learnable_with_stock, is_restocked
 from common.io import write_json
+from common.paths import ASSURANCE_REPORT
 from common.provenance import config_fingerprint, environment
 from engine import dp as dp_mod
 from engine.explore import affordable_set
@@ -70,7 +71,11 @@ def _replayable(decisions):
 def reproduction(decisions, cfg, cache=None):
     """Re-solve recent decisions and assert they come out the same. The most
     RECENT decisions, not a random sample: a deploy or config break shows
-    there, and a uniform sample would dilute it. `cache` as in _resolve."""
+    there, and a uniform sample would dilute it. A COUNT cap on the newest
+    decisions, not a window: the trading-day window of
+    events.pairs.quality_counts and the calendar windows of the budget and
+    the guardrail are the gates' -- these caps only bound the re-solve.
+    `cache` as in _resolve."""
     ac = cfg["assurance"]
     step = cfg["pricing"]["tier_step"]
     pool = _replayable(decisions)
@@ -226,7 +231,7 @@ def correlation_drift(decisions, outcomes, cfg, pairs=None):
     moved posterior -- a basis mismatch would read as drift and fire the
     alert. The verdict is on deff, at the clustering the LEARNER deflates
     by: `m` is the mean number of FORCED outcomes per episode over the
-    pairs it learns from (common.config.deff_from_episodes, the one home;
+    pairs it learns from (common.clustering.deff_from_episodes, the one home;
     exploit hours and restocked hours are not in it), so the reading
     moves with the forced share exactly as every update's divisor does --
     an m of its own (every learnable hour) once read a one-forced-hour
@@ -387,9 +392,8 @@ def run(decisions, outcomes, cfg):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="daily.assurance", description=__doc__)
-    ap.add_argument("--out", default="reports/assurance.json")
-    ap.add_argument("--config", default="config.yaml")
+    ap = make_parser(prog="daily.assurance", description=__doc__,
+                     out=ASSURANCE_REPORT)
     args = ap.parse_args()
 
     cfg = load_config(args.config)

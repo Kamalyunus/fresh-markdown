@@ -11,53 +11,29 @@ own step (`daily.assurance`); status reads its report directly.
 Run: python3 -m daily.monitor --out reports/monitor.json
 """
 
-import argparse
 import json
 
 import numpy as np
 import pandas as pd
 
-from common.config import load_config, deff_from_episodes
+from common.cli import make_parser
+from common.clustering import deff_from_episodes
+from common.config import load_config
 from common.io import write_json
+from common.paths import MONITOR_REPORT
 from events.store import EventStore
-from events.pairs import match_pairs, decision_day, quality_counts, quality_rates
+from events.pairs import (match_pairs, decision_day, finalized_days,
+                          quality_counts, quality_rates)
+from events.frame import settled_episodes, il_by_close_day
 from engine.posterior import PosteriorStore
-from daily import update as update_mod
-from engine import explore
+from engine import budget, explore
 from common import metrics
 from common.provenance import config_fingerprint
 # aliased: stop_conditions() takes a parameter named `guardrail`
 from common import guardrail as guard
-
-
-def event_frame(decisions, outcomes, pairs=None):
-    """Matched (decision, outcome) pairs as HOURLY rows in the prepared-frame
-    vocabulary, so metrics.episode_economics is the one episode-grain
-    definition on live events too -- floor and trigger measure one thing.
-    `pairs` is events.pairs.match_pairs(decisions, outcomes) if the caller
-    already built it."""
-    if pairs is None:
-        pairs = match_pairs(decisions, outcomes)
-    return pd.DataFrame([{
-        "episode_id": d["episode_id"], "date": decision_day(d),
-        "hour_of_day": d["hour_of_day"],
-        "category": d.get("category"), "fc": d["fc"], "sku_id": d["sku_id"],
-        "original_price": d["original_price"], "offered_price": o["applied_price"],
-        "cost": d["cost"], "starting_inventory": o["starting_inventory"],
-        "units_sold": o["units_sold"], "ending_inventory": o["ending_inventory"],
-    } for d, o in pairs])
-
-
-def settled_episodes(decisions, outcomes, pairs=None):
-    """The ONE episode frame the business metrics, the guardrail series and
-    the tau controller's IL base all read: metrics.settled over
-    metrics.episode_economics on the live pairs. (settled frame, exclusion
-    counts), or None when no outcome matches a decision -- built once per
-    run (build_report) and passed down, never per metric family."""
-    df = event_frame(decisions, outcomes, pairs)
-    if df.empty:
-        return None
-    return metrics.settled(metrics.episode_economics(df))
+# moved to events.frame and common.guardrail; the names stay for callers
+from events.frame import event_frame                                    # noqa: F401
+from common.guardrail import evaluate_guardrail                          # noqa: F401
 
 
 def business_metrics(decisions, outcomes, episodes=None):
@@ -70,26 +46,24 @@ def business_metrics(decisions, outcomes, episodes=None):
         return {"note": "no outcome matches a decision -- nothing to measure"}
     ep, excluded = episodes
 
+    # the one block (common.metrics.summary), at this report's precision
     def cut(g):
-        den = float(g.denom.sum())
-        return {"il_pct": round(float(g.il.sum() / den), 6) if den > 0 else None,
-                "il_pct_denominator": den,
-                "il_absolute": round(float(g.il.sum()), 1)}
+        s = metrics.summary(g, rounding={"il_pct": 6, "il_absolute": 1})
+        return {"il_pct": s["il_pct"],
+                "il_pct_denominator": s["il_pct_denominator"],
+                "il_absolute": s["il_absolute"]}
 
-    units = float(ep.units_sold.sum() + ep.scrap.sum())
+    whole = metrics.summary(ep, rounding={"sell_through": 4})
     return {
         "il_pct_aggregate": cut(ep),
         "il_pct_by_category": {k: cut(g) for k, g in ep.groupby("category")},
         "il_pct_by_fc": {k: cut(g) for k, g in ep.groupby("fc")},
-        "sell_through": round(float(ep.units_sold.sum() / units), 4)
-            if units > 0 else None,
-        "waste_units": int(ep.scrap.sum()),
+        "sell_through": whole["sell_through"],
+        "waste_units": whole["scrap_units"],
         # realised IL by CLOSE DAY: the trailing base the tau controller
-        # prices a day's budget from (explore.trailing_daily_il). Settled
-        # episodes only -- an open one contributes nothing until it closes,
-        # which is what makes the base knowable at the start of each day.
-        "il_by_close_day": {str(k): round(float(v), 2) for k, v
-                            in ep.groupby("close_day").il.sum().items()},
+        # prices a day's budget from (events.frame.il_by_close_day, the one
+        # reading update's tau walk takes too)
+        "il_by_close_day": il_by_close_day(episodes),
         # visible: a rising count means early reporting, not falling waste
         "scrap_basis": excluded,
     }
@@ -148,10 +122,10 @@ def guardrail_series(decisions, outcomes, cfg, episodes=None):
 
 def overspend_series(learning, business, cfg):
     """spend / budget_today per priced day, through the day the controller
-    prices (update.finalized_days -- the last day with a closed episode is
-    a different day whenever the latest day's episodes are still open). A
-    zero-budget day, or one whose IL base is shorter than its window, has
-    no reading and breaks a streak."""
+    prices (events.pairs.finalized_days -- the last day with a closed
+    episode is a different day whenever the latest day's episodes are
+    still open). A zero-budget day, or one whose IL base is shorter than
+    its window, has no reading and breaks a streak."""
     il_by_day = business.get("il_by_close_day") or {}
     cells = learning.get("posterior_by_cell") or {}
     last = learning.get("latest_priced_day")
@@ -169,61 +143,19 @@ def overspend_series(learning, business, cfg):
     # suspension in force, or nothing affordable) reads 0, so it ends the
     # streak instead of leaving the last over-budget days as "latest"
     for day in learning.get("priced_days") or sorted(spend_by_day):
-        budget = explore.budget_today(
-            explore.trailing_daily_il(il_by_day, day, cfg),
+        budget_day = budget.budget_today(
+            budget.trailing_daily_il(il_by_day, day, cfg),
             std_by_day.get(day, widest_std), cfg)
-        # the controller's own rule (explore.budget_held): a zero budget or
+        # the controller's own rule (budget.budget_held): a zero budget or
         # a base shorter than its window is no signal -- no reading, no streak
-        if explore.budget_held(il_by_day, day, budget, cfg) is None:
-            by_day[day] = round(float(spend_by_day.get(day, 0.0)) / budget, 4)
+        if budget.budget_held(il_by_day, day, budget_day, cfg) is None:
+            by_day[day] = round(float(spend_by_day.get(day, 0.0)) / budget_day, 4)
     return {"basis": "spend / budget_today", "by_day": by_day,
             "latest": by_day.get(last)}
 
 
-def evaluate_guardrail(block, threshold, persistence_days):
-    """Fires only after `persistence_days` CONSECUTIVE CALENDAR days over
-    threshold, ending on the latest day in the series. Persistence is
-    load-bearing, not decoration: it buys sensitivity for thresholds sitting
-    just above the measured noise floor (design 5.12). A calendar day with
-    no reading breaks the streak -- an unobserved day is not a day over."""
-    base = {"fired": False, "threshold": threshold,
-            "persistence_days": persistence_days,
-            "basis": block.get("basis"), "latest": block.get("latest")}
-    if threshold is None:
-        return {**base, "status": "BLOCKED -- threshold is null (SET BY OWNER)"}
-    by_day = block.get("by_day") or {}
-    if not by_day:
-        # the series is empty until window + 2 x smoothing - 1 consecutive
-        # close days (common.guardrail.first_reading_close_days, carried
-        # by the block): a short series legitimately has nothing to
-        # compare yet, and the note says when it will
-        first = block.get("first_reading_after_close_days")
-        return {**base, "consecutive_days_over": 0,
-                "status": "no comparable days yet" + (
-                    f" (first reading after {first} consecutive close days)"
-                    if first is not None else "")}
-    streak, prev = 0, None
-    for day in sorted(by_day, reverse=True):
-        stamp = pd.Timestamp(day)
-        if prev is not None and (prev - stamp).days != 1:
-            break                                  # a missing calendar day
-        if not by_day[day] > threshold:
-            break
-        streak += 1
-        prev = stamp
-    fired = streak >= persistence_days
-    return {
-        **base,
-        "fired": fired,
-        "consecutive_days_over": streak,
-        "status": (f"FIRED -- over {threshold} for {streak} consecutive days"
-                   if fired else
-                   f"{streak}/{persistence_days} consecutive days over threshold"),
-    }
-
-
 def learning_metrics(decisions, posterior, cfg, outcomes=(), pairs=None):
-    """`pairs` as in event_frame."""
+    """`pairs` as in events.frame.event_frame."""
     cells = posterior.state["cells"]
     cell_of = posterior.state["cell_of"]
     forced = [d for d in decisions if d["is_exploration"]]
@@ -233,7 +165,7 @@ def learning_metrics(decisions, posterior, cfg, outcomes=(), pairs=None):
     budgeted = [d for d in decisions if d.get("tau_current") is not None]
     empty_rate = (np.mean([d["affordable_set_size"] == 0 for d in budgeted])
                   if budgeted else None)
-    priced_days, spend_by_day = update_mod.finalized_days(decisions, outcomes, pairs)
+    priced_days, spend_by_day = finalized_days(decisions, outcomes, pairs)
     # the widest posterior std a day's decisions were priced with: the std
     # in force that day, as the events recorded it (a routed cell that
     # priced nothing that day is not seen -- the one approximation)
@@ -260,8 +192,8 @@ def learning_metrics(decisions, posterior, cfg, outcomes=(), pairs=None):
             [explore.log_move(d["reference_discount"], d["applied_discount"])
              for d in forced])), 4) if forced else None,
         "realised_exploration_cost": round(realised_cost, 1),
-        # per-day, from update.finalized_days -- the ONE definition the tau
-        # controller and the stop condition both price a day with
+        # per-day, from events.pairs.finalized_days -- the ONE definition
+        # the tau controller and the stop condition both price a day with
         "exploration_cost_by_day": {k: round(v, 1) for k, v in spend_by_day.items()},
         "priced_days": priced_days,
         "latest_priced_day": priced_days[-1] if priced_days else None,
@@ -286,12 +218,12 @@ def learning_metrics(decisions, posterior, cfg, outcomes=(), pairs=None):
 
 
 def safety_metrics(store, decisions, outcomes, pairs=None, cfg=None):
-    """`pairs` as in event_frame; `cfg` defaults to the store's. The
-    event-quality counts (unmatched, compared, mismatched, the window) are
-    events.pairs.quality_counts -- the SAME windowed counts update's gates
-    read -- spread into this block, so the stop condition compares on
-    counts (never the 4dp rates written for reading) and cannot disagree
-    with update at the boundary."""
+    """`pairs` as in events.frame.event_frame; `cfg` defaults to the
+    store's. The event-quality counts (unmatched, compared, mismatched, the
+    window) are events.pairs.quality_counts -- the SAME windowed counts
+    update's gates read -- spread into this block, so the stop condition
+    compares on counts (never the 4dp rates written for reading) and
+    cannot disagree with update at the boundary."""
     cfg = store.cfg if cfg is None else cfg
     matched = {o["decision_id"] for o in outcomes}
     if pairs is None:
@@ -350,7 +282,7 @@ def stop_conditions(safety, learning, business, guardrail, cfg):
     # trailing realised IL and the widest cell std. One day over is a thin
     # IL day or two expensive draws (and the controller halves tau on it the
     # next morning); the stop needs the same persistence as the guardrails
-    guardrails = {"exploration_cost_vs_budget": evaluate_guardrail(
+    guardrails = {"exploration_cost_vs_budget": guard.evaluate_guardrail(
         overspend_series(learning, business, cfg),
         sc["exploration_cost_vs_budget"], sc["persistence_days"])}
     fired["exploration_cost_vs_budget"] = guardrails["exploration_cost_vs_budget"]["fired"]
@@ -360,7 +292,7 @@ def stop_conditions(safety, learning, business, guardrail, cfg):
     for key, block_key in (("scrap_deterioration_pct", "scrap_deterioration"),
                            ("margin_deterioration_pct", "margin_deterioration")):
         block = (guardrail or {}).get(block_key) or {}
-        result = evaluate_guardrail(block, sc[key], sc["persistence_days"])
+        result = guard.evaluate_guardrail(block, sc[key], sc["persistence_days"])
         guardrails[key] = result
         fired[key] = result["fired"] if sc[key] is not None else result["status"]
 
@@ -414,9 +346,7 @@ def build_report(store, posterior, cfg):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="daily.monitor")
-    ap.add_argument("--out", default="reports/monitor.json")
-    ap.add_argument("--config", default="config.yaml")
+    ap = make_parser(prog="daily.monitor", out=MONITOR_REPORT)
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -425,10 +355,9 @@ def main():
     write_json(args.out, report)
     print(json.dumps(report["stop_conditions"], indent=2))
     if report["exploration_suspended"]:
-        s = report["exploration_suspended"]
-        print(f"EXPLORATION SUSPENDED since {s['since']} "
-              f"({', '.join(s['reasons'])}); exploitation continues. "
-              "`daily.update --resume-exploration` clears it.")
+        print(PosteriorStore.suspension_line(
+            report["exploration_suspended"],
+            "`daily.update --resume-exploration` clears it."))
     print(f"wrote {args.out}")
 
 

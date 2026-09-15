@@ -992,7 +992,8 @@ def test_the_manifest_reports_the_identity(workspace):
 def test_re_segmentation_is_a_no_op_and_says_so_if_it_stops_being_one(workspace):
     """`contiguous_episodes_built` guards an invisible invariant."""
     _chdir(workspace)
-    from fit.prepare_data import load_and_filter, assign_episode_ids
+    from fit.prepare_data import load_and_filter
+    from common.windows import assign_episode_ids
     from common.config import load_config as _lc
 
     _, wf = load_and_filter("data/flc.parquet", _lc())
@@ -1131,8 +1132,9 @@ def test_a_set_launch_date_schedules_factors_past_the_gate(workspace, tmp_path):
     After launch the same command IS the weekly cron: it must reach the
     week being priced, or calibration_current refuses every --apply. Moving
     split.test_end instead rescopes every sealed fit."""
-    from fit.train_baseline import fit_level_calibration, schedule_reaches
-    from common import episodes
+    from fit.calibrate import fit_level_calibration
+    from fit.train_baseline import schedule_reaches
+    from common import windows
     from common.config import load_config
 
     ws = workspace
@@ -1141,8 +1143,8 @@ def test_a_set_launch_date_schedules_factors_past_the_gate(workspace, tmp_path):
     cfg["baseline_model"] = dict(cfg["baseline_model"],
                                  calibration_factor_path=str(tmp_path / "cal.json"))
     d = pd.read_parquet(ws / "data" / "prepared.parquet")
-    test_end_week = episodes.week_key(pd.Series([cfg["data"]["split"]["test_end"]]))[0]
-    last_data_week = episodes.week_key(d.date).max()
+    test_end_week = windows.week_key(pd.Series([cfg["data"]["split"]["test_end"]]))[0]
+    last_data_week = windows.week_key(d.date).max()
     assert last_data_week > test_end_week, "fixture has no post-gate weeks"
 
     fit_level_calibration(d, cfg)
@@ -1153,7 +1155,7 @@ def test_a_set_launch_date_schedules_factors_past_the_gate(workspace, tmp_path):
     cfg["data"]["launch_date"] = str(d.date.max())
     fit_level_calibration(d, cfg)
     live = json.loads((tmp_path / "cal.json").read_text())["schedule"]
-    priced_week = (episodes.week_start(last_data_week)
+    priced_week = (windows.week_start(last_data_week)
                    + pd.Timedelta(days=7)).strftime("%Y-%m-%d")
     # the schedule REACHES the priced week -- fitted, or deliberately held
     # at the anchor because its trailing week was thin (the one reading the

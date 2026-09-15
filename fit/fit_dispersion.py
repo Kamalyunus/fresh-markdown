@@ -17,12 +17,13 @@ import pandas as pd
 from scipy.optimize import minimize_scalar
 from scipy.stats import nbinom
 
-from common.config import (intraclass_correlation,
-                           load_config)
+from common.clustering import intraclass_correlation
+from common.config import load_config
+from common import windows
 from common import episodes
 from common.io import write_json
 from common.provenance import stamp
-from fit.prepare_data import population, pre_launch, split_frames
+from fit.prepare_data import scope
 from fit.train_baseline import BaselineModel
 
 
@@ -96,6 +97,33 @@ def r_at_bound(r, cfg):
     return bool(r >= hi * (1 - tol) or r <= lo * (1 + tol))
 
 
+def _fit_group(g, cfg):
+    """One group's r, read the same way by the frozen fit and the drift
+    measurement: `{r, ok, pearson, at_bound}` -- the censored MLE (`ok` is
+    the optimiser's convergence), the Pearson dispersion (below 1 no NB
+    can express) and whether a converged r sits at a search bound (a
+    failed fit, rule 3). Two literal copies once read a group differently."""
+    r, ok = fit_r(g.units_sold.to_numpy(), g.mu_hat.to_numpy(),
+                  g.censored.to_numpy(), cfg["dispersion"]["r_search_bounds"])
+    pear = pearson_dispersion(g.units_sold.to_numpy(), g.mu_hat.to_numpy())
+    return {"r": r, "ok": ok, "pearson": pear,
+            "at_bound": bool(ok and r_at_bound(r, cfg))}
+
+
+def _episode_rho(g, cfg):
+    """rho on a residual frame, the ONE estimator (ANOVA ICC) the frozen fit
+    and every drift window read: over the episodes with at least
+    `rho_min_hours_per_episode` rows, clipped at `rho_clip_max`. None when
+    fewer than two such episodes exist (nothing to correlate)."""
+    sizes = g.groupby("episode_id")["resid"].size()
+    min_hours = cfg["assurance"]["rho_min_hours_per_episode"]
+    sub = g[g.episode_id.isin(sizes[sizes >= min_hours].index)]
+    if sub.episode_id.nunique() <= 1:
+        return None
+    return intraclass_correlation(sub["resid"], sub["episode_id"],
+                                  cfg["dispersion"]["rho_clip_max"])
+
+
 def fit_dispersion(d, cfg, model=None):
     """r_lookup and rho on the calib window. `model` is the BaselineModel
     when the caller already holds one (main shares it with drift_by_window
@@ -104,7 +132,7 @@ def fit_dispersion(d, cfg, model=None):
     model = model or BaselineModel(cfg)
     # working elasticity per category from the prior in force
     eps_by_cat, eps0 = _working_elasticity(cfg)
-    calib = _residual_frame(population(split_frames(d, cfg)["calib"], cfg),
+    calib = _residual_frame(scope(d, cfg, "calib"),
                             cfg, model, eps_by_cat, eps0)
     if not len(calib):
         raise RuntimeError("calibration window contains no rows")
@@ -112,36 +140,30 @@ def fit_dispersion(d, cfg, model=None):
     bounds = dc["r_search_bounds"]
     min_rows = dc["min_rows_per_group"]
 
-    def fit_group(g):
-        return fit_r(g.units_sold.to_numpy(), g.mu_hat.to_numpy(),
-                     g.censored.to_numpy(), bounds)
-
     by_sub, by_cat, under, pinned = {}, {}, {}, {}
     for level, store in (("subcategory", by_sub), ("category", by_cat)):
         for key, g in calib.groupby(level):
             if len(g) < min_rows:
                 continue
-            r, ok = fit_group(g)
-            if not ok:
+            fit = _fit_group(g, cfg)
+            if not fit["ok"]:
                 continue
-            store[str(key)] = r
+            store[str(key)] = fit["r"]
             # a fit pinned at a search bound is stored (the fallback chain
             # needs a value) but FLAGGED, and kept out of the clamp percentile
-            if r_at_bound(r, cfg):
-                pinned[f"{level}:{key}"] = round(r, 4)
-            p = pearson_dispersion(g.units_sold.to_numpy(), g.mu_hat.to_numpy())
-            if p < 1.0:
-                under[f"{level}:{key}"] = round(p, 4)
-    r_global, ok = fit_group(calib)
-    if not ok:
+            if fit["at_bound"]:
+                pinned[f"{level}:{key}"] = round(fit["r"], 4)
+            if fit["pearson"] < 1.0:
+                under[f"{level}:{key}"] = round(fit["pearson"], 4)
+    fit = _fit_group(calib, cfg)
+    if not fit["ok"]:
         # a group that fails to converge is skipped; the global r ends the
         # fallback chain and cannot be, so the failure is a refusal (rule 13)
         raise RuntimeError(
             "the global r fit did not converge on the calib window -- every "
             "fallback ends here, so there is no r_lookup to write")
-    global_at_bound = r_at_bound(r_global, cfg)
-    pearson_global = pearson_dispersion(calib.units_sold.to_numpy(),
-                                        calib.mu_hat.to_numpy())
+    r_global, global_at_bound = fit["r"], fit["at_bound"]
+    pearson_global = fit["pearson"]
 
     # Clamp high CONVERGED r (a thin group's MLE at the ceiling), preserve low
     # -- but EXEMPT groups with Pearson < 1: genuinely under-dispersed data no
@@ -204,12 +226,11 @@ def fit_dispersion(d, cfg, model=None):
     # model fits its own residuals), an understated rho understates deff, and
     # deff deflates every posterior update. `m` is NOT frozen alongside it:
     # production measures forced hours per episode per batch, because that
-    # number moves with the exploration rate by construction.
-    sizes = calib.groupby("episode_id")["resid"].size()
-    min_hours = cfg["assurance"]["rho_min_hours_per_episode"]
-    sub_d = calib[calib.episode_id.isin(sizes[sizes >= min_hours].index)]
-    rho = intraclass_correlation(sub_d["resid"], sub_d["episode_id"],
-                                 dc["rho_clip_max"])
+    # number moves with the exploration rate by construction. A window
+    # with nothing to correlate is the estimator's own zero, not a refusal
+    rho = _episode_rho(calib, cfg)
+    if rho is None:
+        rho = 0.0
 
     dates = pd.to_datetime(calib.date)
     rho_out = {"rho": round(rho, 4),
@@ -239,14 +260,13 @@ def drift_by_window(d, cfg, freq="W", model=None):
     dc = cfg["dispersion"]
     model = model or BaselineModel(cfg)
     eps_by_cat, eps0 = _working_elasticity(cfg)
-    bounds = dc["r_search_bounds"]
     min_windows = int(dc["drift_min_windows"])
     max_unusable = float(dc["drift_max_unusable_share"])
     train_end = pd.Timestamp(cfg["data"]["split"]["train_end"])
 
     # rule 16: drift_by_window sets the retrain cadence and baselines the
     # rho drift alert, both pre-launch readings -- the hold-out is shadow's
-    full = _residual_frame(population(pre_launch(d, cfg), cfg),
+    full = _residual_frame(scope(d, cfg, "pre_launch"),
                            cfg, model, eps_by_cat, eps0)
     if not len(full):
         return {"verdict": "NOT RUN -- no rows"}
@@ -254,7 +274,7 @@ def drift_by_window(d, cfg, freq="W", model=None):
     # and week_key apply): a row-level bucket split every window crossing a
     # week seam into two clusters and read its Monday rows as a new episode
     full["_win"] = pd.to_datetime(
-        episodes.opening_dates(full)).dt.to_period(freq)
+        windows.opening_dates(full)).dt.to_period(freq)
 
     by_window, thin = {}, []
     for win, g in full.groupby("_win"):
@@ -262,33 +282,25 @@ def drift_by_window(d, cfg, freq="W", model=None):
         if len(g) < dc["min_rows_per_group"]:
             thin.append(label)
             continue
-        r, ok = fit_r(g.units_sold.to_numpy(), g.mu_hat.to_numpy(),
-                      g.censored.to_numpy(), bounds)
-        pear = pearson_dispersion(g.units_sold.to_numpy(), g.mu_hat.to_numpy())
+        fit = _fit_group(g, cfg)
         # An r near the search bound is the estimator FAILING, not a large r:
         # under-dispersed data (Pearson < 1) cannot be expressed by any NB
         # (Var = mu + mu^2/r >= mu), so the MLE runs to the ceiling. Folding
         # those into a spread reads a failed fit as drift.
-        at_bound = bool(ok and r_at_bound(r, cfg))
-        usable = bool(ok and pear >= 1.0 and not at_bound)
+        usable = bool(fit["ok"] and fit["pearson"] >= 1.0 and not fit["at_bound"])
         # the ONE rho estimator (ANOVA ICC), as the frozen fit
-        sizes = g.groupby("episode_id")["resid"].size()
-        sub = g[g.episode_id.isin(
-            sizes[sizes >= cfg["assurance"]["rho_min_hours_per_episode"]].index)]
-        rho_w = (intraclass_correlation(sub["resid"], sub["episode_id"],
-                                        dc["rho_clip_max"])
-                 if sub.episode_id.nunique() > 1 else None)
+        rho_w = _episode_rho(g, cfg)
         by_window[label] = {
             "rows": int(len(g)),
             # a window is post-train only when it opens AFTER train_end
             # whole; one straddling the seam holds in-train residuals
             "basis": ("post_train" if win.start_time > train_end
                       else "in_train"),
-            "r": round(r, 4) if ok else None,
+            "r": round(fit["r"], 4) if fit["ok"] else None,
             "rho": round(rho_w, 4) if rho_w is not None else None,
-            "pearson": round(pear, 3),
-            "nb_expressible": bool(pear >= 1.0),
-            "r_at_search_bound": at_bound,
+            "pearson": round(fit["pearson"], 3),
+            "nb_expressible": bool(fit["pearson"] >= 1.0),
+            "r_at_search_bound": fit["at_bound"],
             "r_usable": usable,
         }
 
@@ -417,7 +429,7 @@ def main():
     print(f"r by subcategory : {len(r_lookup['subcategory'])} groups, "
           f"global r = {r_lookup['global']:.3f}, clamp at {r_lookup['clamp_at']:.3f}")
     print(f"rho              : {rho_out['rho']}  (m is measured per batch "
-          "in production -- common.config.deff_from_episodes)")
+          "in production -- common.clustering.deff_from_episodes)")
     dr = rho_out["drift_by_window"]
     if dr.get("windows_fitted"):
         print(f"drift ({dr['freq']})       : r {dr['r_median']} +-{dr['r_spread']} | "

@@ -12,6 +12,7 @@ import yaml
 from common import episodes
 from conftest import _Applier, _frame, _harness_cfg, _hours, load_config
 from engine import explore as explore_mod
+from engine import state as state_mod
 from engine.explore import SpreadLedger
 from engine.posterior import PosteriorStore
 
@@ -142,7 +143,7 @@ def test_a_zero_stock_hour_is_kept_so_the_episode_settles(cfg, monkeypatch):
     from evaluate import shadow
 
     def fake_decide(state, posterior, store, cfg, rng, tau, model_version,
-                    spread_sink=None):
+                    spread_sink=None, config_digest=None):
         evt = {"decision_id": f"d-{state['hour_of_day']}", "applied_discount": 0.30,
                "applied_price": state["original_price"] * 0.7, "cost": state["cost"],
                "is_exploration": False, "affordable_set_size": 1,
@@ -151,7 +152,7 @@ def test_a_zero_stock_hour_is_kept_so_the_episode_settles(cfg, monkeypatch):
         store.emit_decision(evt)
         return evt
 
-    monkeypatch.setattr(shadow, "decide", fake_decide)
+    monkeypatch.setattr(state_mod, "decide", fake_decide)
     # sells out, 3 arrive on a zero-start row, one sells, two written off
     g = _hours("e", "2026-08-10", 4, q0=5)
     g["starting_inventory"] = [5, 0, 3, 2]
@@ -160,7 +161,8 @@ def test_a_zero_stock_hour_is_kept_so_the_episode_settles(cfg, monkeypatch):
     g["r"], g["mu_ref_hat"], g["is_observed"] = 1.0, 2.0, True
     ep = dict({c: g[c].to_numpy() for c in shadow.EP_COLS}, episode_id="e")
     ctx = {"cfg": cfg, "tau": None, "model_version": "x", "seed": 0,
-           "cal_grain": "category", "cells": {"FRUIT": None}}
+           "cal_grain": "category", "cells": {"FRUIT": None},
+           "suspended": None, "digest": "d"}
     out = shadow._shadow_one(ep, ctx)
     assert len(out["events"]) == 3                      # no decision on the empty hour
     assert [h["hour_of_day"] for h in out["hours"]] == [9, 10, 11, 12]
@@ -179,7 +181,7 @@ def test_every_hour_plans_over_the_rows_own_counter(cfg, monkeypatch):
     seen = []
 
     def fake_decide(state, posterior, store, cfg, rng, tau, model_version,
-                    spread_sink=None):
+                    spread_sink=None, config_digest=None):
         seen.append((state["hours_remaining"], len(state["mu_ref_path"])))
         evt = {"decision_id": f"d-{state['hour_of_day']}", "applied_discount": 0.30,
                "applied_price": state["original_price"] * 0.7, "cost": state["cost"],
@@ -189,12 +191,13 @@ def test_every_hour_plans_over_the_rows_own_counter(cfg, monkeypatch):
         store.emit_decision(evt)
         return evt
 
-    monkeypatch.setattr(shadow, "decide", fake_decide)
+    monkeypatch.setattr(state_mod, "decide", fake_decide)
     g = _hours("e", "2026-08-10", 3, tail=4)             # counters 6, 5, 4
     g["r"], g["mu_ref_hat"], g["is_observed"] = 1.0, 2.0, True
     ep = dict({c: g[c].to_numpy() for c in shadow.EP_COLS}, episode_id="e")
     ctx = {"cfg": cfg, "tau": None, "model_version": "x", "seed": 0,
-           "cal_grain": "category", "cells": {"FRUIT": None}}
+           "cal_grain": "category", "cells": {"FRUIT": None},
+           "suspended": None, "digest": "d"}
     shadow._shadow_one(ep, ctx)
     want = [episodes.planning_horizon(c) for c in g.hours_remaining]
     assert want == [7, 6, 5]
@@ -204,17 +207,34 @@ def test_every_hour_plans_over_the_rows_own_counter(cfg, monkeypatch):
     assert episodes.window_counter(episodes.planning_horizon(6)) == 6
 
 
-def test_the_worker_prices_against_the_one_frozen_cell_snapshot():
-    """The read-only cell snapshot a shadow worker prices against is
-    engine.state.FrozenCells -- the one Lane B and the simulator use --
-    with no suspension record, since a rehearsal never suspends."""
-    from engine.state import FrozenCells
+def test_the_worker_prices_against_the_one_frozen_cell_snapshot(cfg):
+    """A shadow worker prices through the one worker body -- engine.state
+    .price_one, Lane B's and the simulator's -- so the cell snapshot it
+    reads is engine.state.FrozenCells, and its context is the batch
+    context's shape with no suspension record, since a rehearsal never
+    suspends."""
+    from engine.state import FrozenCells, price_one
     from evaluate import shadow
-    assert shadow.FrozenCells is FrozenCells
+    assert shadow.price_one is price_one
     cells = FrozenCells({"MEAT": {"mean": -1.0, "std": 0.4}})
     assert cells.exploration_suspended() is None
     with pytest.raises(KeyError):
         cells.get("NOT_A_CATEGORY")
+
+    class _Posterior:
+        def get(self, c):
+            return {"mean": -1.0, "std": 0.4, "version": 0}
+
+        def exploration_suspended(self):
+            return {"since": "x", "reasons": ["y"]}          # ignored by a rehearsal
+
+        def tau(self, cfg=None):
+            return 999.0                                       # ditto: shadow's is its own
+
+    ctx = shadow._ctx(cfg, 12.5, _Applier(cfg), _Posterior(), 0, ["MEAT"])
+    assert ctx["tau"] == 12.5 and ctx["suspended"] is None
+    assert ctx["cal_grain"] == "category" and ctx["cells"] == {"MEAT": _Posterior().get("MEAT")}
+    assert {"cfg", "seed", "model_version", "digest"} <= set(ctx)
 
 
 def test_deeper_and_shallower_hours_are_counted_with_their_sign(
@@ -227,7 +247,7 @@ def test_deeper_and_shallower_hours_are_counted_with_their_sign(
     recommended = iter([0.40, 0.20, 0.30])        # deeper, shallower, same
 
     def fake_decide(state, posterior, store, cfg, rng, tau, model_version,
-                    spread_sink=None):
+                    spread_sink=None, config_digest=None):
         d = next(recommended)
         evt = {"decision_id": f"d-{state['hour_of_day']}",
                "applied_discount": d,
@@ -238,12 +258,13 @@ def test_deeper_and_shallower_hours_are_counted_with_their_sign(
         store.emit_decision(evt)
         return evt
 
-    monkeypatch.setattr(shadow, "decide", fake_decide)
+    monkeypatch.setattr(state_mod, "decide", fake_decide)
     g = _hours("e", "2026-08-10", 3, disc=0.30)
     g["r"], g["mu_ref_hat"], g["is_observed"] = 1.0, 2.0, True
     ep = dict({c: g[c].to_numpy() for c in shadow.EP_COLS}, episode_id="e")
     ctx = {"cfg": cfg, "tau": None, "model_version": "x", "seed": 0,
-           "cal_grain": "category", "cells": {"FRUIT": None}}
+           "cal_grain": "category", "cells": {"FRUIT": None},
+           "suspended": None, "digest": "d"}
     out = shadow._shadow_one(ep, ctx)
     assert (out["deeper"], out["shallower"]) == (1, 1)
 
@@ -371,7 +392,7 @@ def test_the_learning_yield_terms_are_accumulated_on_the_forced_hours(
     ref, forced_d, r_ep = 0.30, 0.40, 2.0
 
     def fake_decide(state, posterior, store, cfg, rng, tau, model_version,
-                    spread_sink=None):
+                    spread_sink=None, config_digest=None):
         forced = state["hour_of_day"] == 10               # one forced hour of three
         d = forced_d if forced else ref
         evt = {"decision_id": f"d-{state['hour_of_day']}",
@@ -385,12 +406,13 @@ def test_the_learning_yield_terms_are_accumulated_on_the_forced_hours(
         store.emit_decision(evt)
         return evt
 
-    monkeypatch.setattr(shadow, "decide", fake_decide)
+    monkeypatch.setattr(state_mod, "decide", fake_decide)
     g = _hours("e", "2026-08-10", 3, disc=ref)
     g["r"], g["mu_ref_hat"], g["is_observed"] = 1.0, 2.0, True
     ep = dict({c: g[c].to_numpy() for c in shadow.EP_COLS}, episode_id="e")
     ctx = {"cfg": cfg, "tau": None, "model_version": "x", "seed": 0,
-           "cal_grain": "category", "cells": {"FRUIT": None}}
+           "cal_grain": "category", "cells": {"FRUIT": None},
+           "suspended": None, "digest": "d"}
     out = shadow._shadow_one(ep, ctx)
 
     lr = np.log((1 - forced_d) / (1 - ref))
@@ -428,9 +450,11 @@ def _shadow_frame():
 
 
 def _run_shadow(cfg, frame, model, monkeypatch, refit=None, **kw):
-    """evaluate.shadow.main's wiring, on `frame`, with the applier."""
+    """evaluate.shadow.main's wiring, on `frame`, with the applier (the
+    bundle's model -- fit.artifacts.load_bundle -- is the applier)."""
+    from fit import train_baseline as tb
     from evaluate import shadow
-    monkeypatch.setattr(shadow, "BaselineModel", lambda c: model)
+    monkeypatch.setattr(tb, "BaselineModel", lambda c: model)
     monkeypatch.setattr(shadow, "weekly_refit_schedule",
                         refit or (lambda *a, **k: ({}, [])))
     history = shadow.pre_window_il_history(frame, cfg, WINDOW_START)
@@ -698,9 +722,9 @@ def test_the_parent_commits_every_event_through_the_real_store(
 def test_weekly_refit_fits_each_week_on_data_strictly_before_it(
         cfg, tmp_path, monkeypatch):
     """The re-fit at week k may read only weeks < k -- no look-ahead inside
-    the replay -- through the one factor solve."""
-    from fit import train_baseline as tb
-    from evaluate import shadow
+    the replay -- through the one factor solve (evaluate.level, shadow's
+    home for the re-fit)."""
+    from evaluate import level, shadow
     cfg = _harness_cfg(cfg, tmp_path)
     cfg["baseline_model"] = dict(cfg["baseline_model"],
                                  calibration_fit_trailing_weeks=1)
@@ -710,7 +734,7 @@ def test_weekly_refit_fits_each_week_on_data_strictly_before_it(
         seen.append(window.copy())
         return {"FRUIT": 1.1}, {}, 1.1
 
-    monkeypatch.setattr(tb, "_solve_level_factors", solve)
+    monkeypatch.setattr(level, "_solve_level_factors", solve)
     frame = pd.concat([_hours("a", "2026-08-05", 3), _hours("b", "2026-08-12", 3),
                        _hours("c", "2026-08-19", 3)])
     table, cov = shadow.weekly_refit_schedule(

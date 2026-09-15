@@ -10,13 +10,14 @@ the same content for the same store.
 Run: python3 -m daily.export_events [--out-dir exports] [--since YYYY-MM-DD]
 """
 
-import argparse
 import json
 import os
 
 import pandas as pd
 
+from common.cli import make_parser
 from common.config import load_config
+from common.paths import EXPORTS
 from events.pairs import decision_day
 from events.store import EventStore
 
@@ -70,10 +71,9 @@ def export(store, out_dir, since=None):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="daily.export_events")
-    ap.add_argument("--config", default="config.yaml")
+    ap = make_parser(prog="daily.export_events")
     ap.add_argument("--events-dir", default=None)
-    ap.add_argument("--out-dir", default="exports")
+    ap.add_argument("--out-dir", default=EXPORTS)
     ap.add_argument("--since", default=None,
                     help="keep events whose TRADING day is on/after this date "
                          "(decisions by their pricing date, outcomes by their "

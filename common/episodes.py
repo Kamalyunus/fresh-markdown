@@ -1,122 +1,29 @@
-"""Episode identification, closure/scrap/censoring conventions, window extension.
+"""What happened to the stock: closure/scrap/censoring conventions, the
+per-episode supply accounting, the COGS at risk, and the window extension.
 
 Identity: opening + restocked == sold + scrap (scrap = leftover + shrink).
 `ending_inventory` is the counted end-of-hour quantity, restocks included, and
 `starting[t+1] == ending[t]` has no exception. The source zeroes
 `ending_inventory` on an episode's LAST ROW at close: leftover is COMPUTED,
 never read; closure is that zero, never `hours_remaining`; censoring is
-`starting == sold`, last row only. design.md sections 5.2/12a for the rationale."""
+`starting == sold`, last row only. design.md sections 5.2/12a for the rationale.
+Where an episode starts and ends, and which rows a fit may read, is
+`common.windows`."""
 
 import numpy as np
 import pandas as pd
+
+# moved to common.windows; the names stay for callers
+from common.windows import (is_anchor_row, calendar_days,          # noqa: F401
+                            planning_horizon, window_counter,
+                            week_start, week_key, week_after,
+                            opening_dates, trailing_weeks_window,
+                            window_slice, last_rows)
 
 # DID IT CLOSE -- decided by `ending_inventory == 0` on the last row, alone.
 COMPLETED = "completed"
 SOLD_OUT_EARLY = "sold_out_early"
 NOT_CLOSED = "not_closed"
-
-
-def is_anchor_row(d, tier_step):
-    """Rows priced AT the reference discount (within half a tier): the level
-    fit, the fidelity anchor ratio and the gate's anchor share all mean
-    this one mask. (`ref_rate_anchor_band` in prepare_data is a wider,
-    separately configured band for the demand-rate features.)"""
-    return (d.total_discount - d.d_ref).abs() <= tier_step / 2
-
-
-def calendar_days(dates):
-    """Days spanned by `dates`, inclusive, never below 1 -- the one n_days
-    rule for "spend per day" (shadow and the backtest used two)."""
-    ts = pd.to_datetime(pd.Series(dates))
-    return max((ts.max() - ts.min()).days + 1, 1)
-
-
-def planning_horizon(counter):
-    """Hours the solver plans over at a row whose window counter reads
-    `counter`: the counter is the hours STILL TO COME after this one, so
-    the horizon is this hour plus the counter. The ONE home of that `+ 1`
-    (shadow, the replay, the simulator's templates and the request's
-    `hours_remaining` all read it; four spellings once disagreed by an
-    hour on a restock-extended window). `window_counter` is its inverse."""
-    return int(counter) + 1
-
-
-def window_counter(horizon):
-    """The source's counter for a row `horizon` hours from the window's end,
-    this hour included: `planning_horizon` read backwards, so a feed row
-    the simulator writes carries exactly the counter production plans on."""
-    return int(horizon) - 1
-
-
-def week_start(ts):
-    """The ISO week (Mon-Sun) holding `ts`, as its Monday."""
-    return pd.Timestamp(ts).to_period("W").start_time
-
-
-def week_key(dates):
-    """`week_start` per row, as the "YYYY-MM-DD" key the factor schedules use."""
-    return (pd.to_datetime(dates).dt.to_period("W").dt.start_time
-            .dt.strftime("%Y-%m-%d"))
-
-
-def week_after(week):
-    """The Monday after the ISO week keyed `week` ("YYYY-MM-DD") -- the one
-    reading of "one week past the latest data's week" that the schedule's
-    appended week, advance's re-fit trigger and the simulator's Lane C all
-    take (three copies once disagreed by construction)."""
-    return (week_start(week) + pd.Timedelta(days=7)).strftime("%Y-%m-%d")
-
-
-def opening_dates(d):
-    """The date each row's episode OPENED on, as "YYYY-MM-DD" per row -- the
-    key every episode-scoped cut assigns by. A caller slicing one frame many
-    times (a weekly schedule, the prior's folds) computes it once and passes
-    it to `window_slice` / `trailing_weeks_window` as `opened`."""
-    return d.groupby("episode_id")["date"].transform("min").astype(str)
-
-
-def trailing_weeks_window(d, week_start, weeks_back, opened=None):
-    """The rows a factor fit for the week starting `week_start` may read:
-    WHOLE episodes that opened in the `weeks_back` weeks strictly before it,
-    plus how many distinct opening weeks that window actually holds.
-
-    The one cut shared by the artifact schedule (train_baseline) and the
-    shadow re-fit; a row-level week cut in either truncated windows at the
-    midnight seam and the two solved on different rows."""
-    w0 = pd.Timestamp(week_start)
-    lo = w0 - pd.Timedelta(weeks=int(weeks_back))
-    if opened is None:
-        opened = opening_dates(d)
-    window = window_slice(d, lo.strftime("%Y-%m-%d"),
-                          (w0 - pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
-                          opened=opened)
-    if not len(window):
-        return window, 0
-    return window, int(week_key(opened.loc[window.index]).nunique())
-
-
-def window_slice(d, start=None, end=None, opened=None):
-    """Episodes whose WINDOW STARTED in [start, end] -- whole, never sliced.
-
-    Assignment is by the window's FIRST date, so every episode lands in exactly
-    one slice; a row-level date cut truncates windows that cross midnight.
-    `opened` is `opening_dates(d)`, precomputed by a caller slicing repeatedly.
-    """
-    if start is None and end is None:
-        return d
-    if opened is None:
-        opened = opening_dates(d)
-    keep = pd.Series(True, index=d.index)
-    if start is not None:
-        keep &= opened.ge(str(start))
-    if end is not None:
-        keep &= opened.le(str(end))
-    return d[keep]
-
-
-def last_rows(d, order=("date", "hour_of_day")):
-    """Final row of each episode, in window order."""
-    return d.sort_values(list(order)).groupby("episode_id").tail(1)
 
 
 # Hour statuses vs the source convention (`ending` is the counted end-of-hour
@@ -420,6 +327,39 @@ def scrap_units(d):
     """
     flow = episode_flow(d)
     return flow.scrap.astype(float).where(flow.eligible, np.nan)
+
+
+def episode_cogs(d):
+    """Exposure PER EPISODE (indexed by episode_id): unit cost x SUPPLY
+    (opening stock + GROSS arrivals; shrink not subtracted), read at the
+    opening row. NaN where the opening row's cost is null. Requires window
+    order, which `load_and_filter` guarantees. Pre-`episode_universe` stages
+    deliberately carry impossible values / an unverified arrival term (5.2).
+    Per episode so the waterfall and the flag details reuse ONE table."""
+    opening = (~d.episode_id.duplicated()).to_numpy()
+    # gross arrivals per episode (ending[t] IS starting[t+1]); reset_index +
+    # sort_index realigns hour_adjustment's (date, hour)-sorted values to
+    # frame order before grouping, whatever labels the caller's frame carries
+    dd = d.reset_index(drop=True)
+    arrivals = (hour_adjustment(dd).sort_index().clip(lower=0)
+                .groupby(dd.episode_id).sum())
+    opening_ids = pd.Series(d.episode_id.to_numpy()[opening])
+    supply = (d.starting_inventory.to_numpy()[opening]
+              + opening_ids.map(arrivals).fillna(0.0).to_numpy())
+    return pd.Series(d.cost.to_numpy()[opening] * supply,
+                     index=opening_ids.to_numpy(), dtype=float)
+
+
+def cogs_at_risk(d, per_episode=None):
+    """`episode_cogs` summed over the episodes in `d` -- NaN, never skipped,
+    when any is NaN. `per_episode` is a precomputed `episode_cogs` table
+    covering every episode in `d` (the chain drops whole episodes, so one
+    table serves every stage after the ids are fixed)."""
+    if not len(d):
+        return 0.0
+    if per_episode is None:
+        per_episode = episode_cogs(d)
+    return float(per_episode.reindex(pd.unique(d.episode_id)).to_numpy().sum())
 
 
 def extend_to_window(d, feature_cols=(), max_tail_hours=None):

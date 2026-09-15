@@ -35,6 +35,7 @@ class _Model:
     """A frozen model that answers a constant and remembers every frame it
     was asked to predict (so a test can say "no history pass happened")."""
     schema = {"model_version": "stub"}
+    version = schema["model_version"]          # as BaselineModel spells it
 
     def __init__(self, mu=0.8):
         self.mu, self.calls = mu, []

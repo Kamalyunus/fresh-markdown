@@ -20,8 +20,7 @@ artifacts/history/<bundle>/<sealed_at>/.
 Run: python3 -m ops.seal [--reason bootstrap|retrain|check-only|weekly-refit|config|libraries]
 """
 
-import argparse
-
+from common.cli import make_parser
 from common.config import load_config
 from common.io import write_json
 from common import provenance
@@ -84,8 +83,7 @@ def seal(cfg, reason=None):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="ops.seal", description=__doc__)
-    ap.add_argument("--config", default="config.yaml")
+    ap = make_parser(prog="ops.seal", description=__doc__)
     ap.add_argument("--reason", default=None,
                     help="why this seal happened (bootstrap, retrain, "
                          "check-only, weekly-refit, config, "

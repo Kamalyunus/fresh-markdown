@@ -1,6 +1,7 @@
-"""fit.prepare_data: episode ids and windows, the two populations and the
-flow identity that decides them (and which consumer is entitled to which),
-the rate features, the waterfall's own basis, and the pre-launch slice."""
+"""fit.prepare_data: the filter chain over the window rule, the flags and
+the two populations the flow identity decides (and which consumer is
+entitled to which), the rate features, the waterfall's own basis, and the
+pre-launch slice. The window rule itself is tested in test_windows."""
 
 import inspect
 
@@ -12,10 +13,11 @@ import pytest
 
 from fit.prepare_data import (DP_INELIGIBLE, load_and_filter, population,
                                     tag_dp_eligibility)
-from conftest import episode_frame
+from conftest import (_Applier, _shelf, _window, episode_frame, source_window,
+                      write_extract)
 
 
-def _frame(**over):
+def _episode(**over):
     """One clean two-hour episode; keyword overrides break it one way."""
     base = dict(episode_id="e", cost=4000.0, original_price=10_000.0,
                 total_discount=0.25, date="2026-01-01", hour_of_day=[10, 11],
@@ -39,7 +41,7 @@ def _frame(**over):
                             "units_sold": [3, 12], "ending_inventory": [9, 0]}),
 ])
 def test_each_condition_flags_and_names_itself(name, over, cfg):
-    d, detail = tag_dp_eligibility(_frame(**over), cfg)
+    d, detail = tag_dp_eligibility(_episode(**over), cfg)
     assert not d.dp_eligible.any(), f"{name} was not caught"
     assert (d.dp_ineligible_reason == name).all()
     assert detail[name]["episodes"] == 1
@@ -47,7 +49,7 @@ def test_each_condition_flags_and_names_itself(name, over, cfg):
 
 
 def test_a_clean_episode_is_eligible(cfg):
-    d, detail = tag_dp_eligibility(_frame(), cfg)
+    d, detail = tag_dp_eligibility(_episode(), cfg)
     assert d.dp_eligible.all()
     assert d.dp_ineligible_reason.isna().all()
     assert detail["episodes_dp_eligible"] == 1
@@ -56,7 +58,7 @@ def test_a_clean_episode_is_eligible(cfg):
 def test_the_flag_is_episode_scoped_not_row_scoped(cfg):
     """One bad hour flags the whole window: the monotonicity anchor carries
     that hour's price into every later one."""
-    d = _frame()
+    d = _episode()
     d.loc[1, "cost"] = 0.0
     tagged, _ = tag_dp_eligibility(d, cfg)
     assert not tagged.dp_eligible.any(), "only the offending row was flagged"
@@ -66,7 +68,7 @@ def test_below_cost_is_reported_but_does_not_gate(cfg):
     """A below-cost price is one the LEGACY policy set, and the agent is
     already constrained never to set one -- so it is a property of the
     history, not a defect in it."""
-    d = _frame()
+    d = _episode()
     d.loc[1, "total_discount"] = 0.95
     d["offered_price"] = d.original_price * (1 - d.total_discount)
     tagged, detail = tag_dp_eligibility(d, cfg)
@@ -82,8 +84,8 @@ def test_below_cost_is_reported_but_does_not_gate(cfg):
 def test_an_unfinished_episode_is_kept_but_gated_out_of_everything(cfg):
     """This reverses an earlier decision in this file, deliberately."""
     from fit.prepare_data import population
-    unclosed = _frame(episode_id="u", ending_inventory=[9, 7])
-    d = pd.concat([_frame(), unclosed], ignore_index=True)
+    unclosed = _episode(episode_id="u", ending_inventory=[9, 7])
+    d = pd.concat([_episode(), unclosed], ignore_index=True)
     tagged, detail = tag_dp_eligibility(d, cfg)
 
     assert (tagged.edge_truncated == (tagged.episode_id == "u")).all()
@@ -109,9 +111,9 @@ def test_an_unfinished_episode_is_kept_but_gated_out_of_everything(cfg):
 def test_edge_truncation_survives_a_counter_of_millions_of_hours(cfg):
     """The source emits counters in the MILLIONS, and this ran before the flag
     that gates them."""
-    absurd = _frame(episode_id="huge", ending_inventory=[9, 7],
+    absurd = _episode(episode_id="huge", ending_inventory=[9, 7],
                     hours_remaining=[9_000_000.0, 8_999_999.0])
-    d = pd.concat([_frame(), absurd], ignore_index=True)
+    d = pd.concat([_episode(), absurd], ignore_index=True)
 
     tagged, detail = tag_dp_eligibility(d, cfg)     # must not raise
 
@@ -127,7 +129,7 @@ def test_a_closed_episode_is_never_flagged_edge_truncated(cfg):
     """The flag has to mean 'the extract stopped', or the residue it is meant
     to isolate -- unclosed for a reason a longer extract will NOT fix -- has
     nothing left to be measured against."""
-    tagged, detail = tag_dp_eligibility(_frame(), cfg)
+    tagged, detail = tag_dp_eligibility(_episode(), cfg)
     assert not tagged.edge_truncated.any()
     assert detail["edge_truncated"]["episodes_unclosed"] == 0
     assert detail["edge_truncated"]["share_of_unclosed_explained_by_edge"] == 0.0
@@ -139,7 +141,7 @@ def test_nothing_is_dropped(cfg):
                  {"hours_remaining": [-242.0, -243.0]},
                  {"starting_inventory": [12, 20], "ending_inventory": [9, 0]},
                  {"ending_inventory": [9, 7]}):
-        before = _frame(**over)
+        before = _episode(**over)
         after, _ = tag_dp_eligibility(before, cfg)
         assert len(after) == len(before)
 
@@ -148,7 +150,7 @@ def test_reasons_are_first_match_so_the_column_reads_as_a_cause(cfg):
     """A zero cost is ALSO non-priceable by the `cost >= price` test... no,
     it is not -- but it IS the more fundamental fact whenever both fire. The
     label has to be the cause, not whichever test ran last."""
-    d, _ = tag_dp_eligibility(_frame(cost=0.0), cfg)
+    d, _ = tag_dp_eligibility(_episode(cost=0.0), cfg)
     assert (d.dp_ineligible_reason == "cost_missing").all()
     assert [n for n, _ in DP_INELIGIBLE][0] == "cost_missing"
 
@@ -156,35 +158,6 @@ def test_reasons_are_first_match_so_the_column_reads_as_a_cause(cfg):
 def test_every_condition_carries_a_stated_reason():
     for name, why in DP_INELIGIBLE:
         assert len(why) > 40, f"{name} has no explanation"
-
-
-def test_recovery_cannot_merge_a_negative_episode_into_its_neighbour():
-    """`negative_window_recovered` rewrites the field the ids are derived from."""
-    from fit.prepare_data import assign_episode_ids
-
-    shelf = dict(starting_inventory=5, units_sold=0, ending_inventory=5)
-    rows = ([dict(sku_id=1, fc="X", date="2026-03-01", hour_of_day=h,
-                  hours_remaining=hr, **shelf) for h, hr in
-             [(10, -5.0), (11, -6.0), (12, -7.0)]]                  # enters negative
-            + [dict(sku_id=1, fc="X", date="2026-03-01", hour_of_day=h,
-                    hours_remaining=hr, **shelf) for h, hr in
-               [(13, 20.0), (14, 19.0)]])                           # a REAL next window
-    raw = pd.DataFrame(rows)
-    raw["episode_id"] = assign_episode_ids(raw)
-    assert raw.episode_id.nunique() == 2, "the two windows are distinct at source"
-
-    # recovery as the chain applies it -- the chain's own function
-    from fit.prepare_data import recover_negative_windows
-    d, rec = recover_negative_windows(raw, 24)
-    assert rec.sum() == 3 and list(d.hours_remaining[:3]) == [23.0, 22.0, 21.0]
-
-    # re-deriving ids from the REWRITTEN counter is what used to happen, and
-    # it silently fuses the two windows
-    assert assign_episode_ids(d).nunique() == 1, (
-        "the collision this ordering exists to avoid no longer reproduces -- "
-        "if recovery changed, re-check whether the ordering is still needed")
-    # ...but the ids the pipeline carries are untouched, which is the fix
-    assert d.episode_id.nunique() == 2
 
 
 def test_recovery_runs_after_the_resegmentation_check(cfg, synth_flc):
@@ -208,7 +181,7 @@ def test_every_eligible_episode_is_closed_but_not_the_reverse():
         "an episode is eligible without having closed"
 
     # and the containment is STRICT: closure alone does not confer eligibility
-    dirty = _frame(episode_id="restocked-close").assign(
+    dirty = _episode(episode_id="restocked-close").assign(
         starting_inventory=[9, 3], units_sold=[6, 7], ending_inventory=[3, 0])
     f2 = E.episode_flow(dirty)
     assert f2.loc["restocked-close", "closed"]
@@ -219,7 +192,7 @@ def test_every_eligible_episode_is_closed_but_not_the_reverse():
 # ------------------------------------------------------- who reads what
 
 def test_population_resolves_the_config_default(cfg):
-    d, _ = tag_dp_eligibility(pd.concat([_frame(), _frame(cost=0.0)
+    d, _ = tag_dp_eligibility(pd.concat([_episode(), _episode(cost=0.0)
                                          .assign(episode_id="bad")]), cfg)
     assert len(population(d, cfg, "integrity")) == len(d)
     # three nested populations, widest first
@@ -232,9 +205,10 @@ def test_population_resolves_the_config_default(cfg):
 
 
 def _split_spy(monkeypatch, module, seen):
-    """Route `module`'s split_frames / population through spies that record
-    which window and which population each fit asked for, handing back
-    the frame itself (the rows are not the point here)."""
+    """Route prepare_data's split_frames / population (what every fit's
+    `scope` call reads) through spies that record which window and which
+    population each fit asked for, handing back the frame itself (the rows
+    are not the point here)."""
     def split_frames(d, cfg):
         class _Splits(dict):
             def __getitem__(self, key):
@@ -257,10 +231,11 @@ def test_the_artifact_fits_read_the_eligible_population_of_their_own_split(
     fitted on train and scored on calib. Observed on the calls, never on
     the source text."""
     from fit import fit_dispersion, prior_density, train_baseline
+    from fit import prepare_data as pdm
 
     # the baseline: train split, eligible population, then LightGBM
     seen = []
-    _split_spy(monkeypatch, train_baseline, seen)
+    _split_spy(monkeypatch, pdm, seen)
     fitted = {}
 
     class _Booster:
@@ -280,7 +255,7 @@ def test_the_artifact_fits_read_the_eligible_population_of_their_own_split(
     # the prior: the window it is asked for, eligible; the fit on train and
     # the held-out score on calib, never the same window
     seen = []
-    _split_spy(monkeypatch, prior_density, seen)
+    _split_spy(monkeypatch, pdm, seen)
     monkeypatch.setattr(prior_density, "scored_rows", lambda f: f.head(0))
     prior_density.build_curves(d, cfg, None, np.linspace(-3, -0.05, 5), "calib")
     assert seen == [("split", "calib"), ("population", "eligible")]
@@ -297,16 +272,11 @@ def test_the_artifact_fits_read_the_eligible_population_of_their_own_split(
 
     # dispersion: the calib split, eligible
     seen = []
-    _split_spy(monkeypatch, fit_dispersion, seen)
+    _split_spy(monkeypatch, pdm, seen)
     monkeypatch.setattr(fit_dispersion, "_working_elasticity", lambda c: ({}, -1.0))
     calib = d.assign(d_ref=0.25, episode_eligible=True, dp_eligible=True,
                      ending_inventory=lambda f: f.starting_inventory - f.units_sold)
-
-    class _Flat:
-        @staticmethod
-        def predict_mu_ref(rows, raw=False):
-            return np.full(len(rows), 2.0)
-    fit_dispersion.fit_dispersion(calib, cfg, model=_Flat())
+    fit_dispersion.fit_dispersion(calib, cfg, model=_Applier(cfg))
     assert seen[:2] == [("split", "calib"), ("population", "eligible")]
 
 
@@ -349,9 +319,9 @@ def test_stock_that_genuinely_vanishes_does_not_net_away():
 def test_a_restocked_episode_does_reach_the_backtest(cfg):
     """It used to be excluded, and that was wrong."""
     from fit.prepare_data import population
-    restocked = _frame(episode_id="R", starting_inventory=[12, 20],
+    restocked = _episode(episode_id="R", starting_inventory=[12, 20],
                        ending_inventory=[20, 0])
-    d = pd.concat([_frame(), restocked], ignore_index=True)
+    d = pd.concat([_episode(), restocked], ignore_index=True)
     tagged, detail = tag_dp_eligibility(d, cfg)
 
     assert tagged.dp_eligible.all(), "a restock must not gate the DP"
@@ -436,8 +406,8 @@ def test_shrink_is_counted_as_scrap_and_gates_nothing(cfg):
 
 def test_units_restocked_is_on_the_prepared_frame(cfg):
     """The owner asked for it by name: how much arrived, per episode."""
-    d = pd.concat([_frame(),
-                   _frame(episode_id="R", starting_inventory=[12, 20],
+    d = pd.concat([_episode(),
+                   _episode(episode_id="R", starting_inventory=[12, 20],
                           ending_inventory=[20, 0])], ignore_index=True)
     tagged, _ = tag_dp_eligibility(d, cfg)
     got = tagged.groupby("episode_id").units_restocked.first()
@@ -569,61 +539,6 @@ def test_population_refuses_a_frame_without_its_eligibility_flag(cfg):
 
 # ------------------------------------------------- episode ids and windows
 
-def _window(sku, fc, start, hours, base_hr=None):
-    """One selling window as hourly rows, counting hours_remaining down,
-    on an open shelf that reconciles every hour (no close, no restock: the
-    boundary rule reads the inventory too)."""
-    hr = hours - 1 if base_hr is None else base_hr
-    ts = pd.date_range(start, periods=hours, freq="h")
-    return episode_frame(sku_id=sku, fc=fc, date=ts.normalize(),
-                         hour_of_day=ts.hour,
-                         hours_remaining=[hr - i for i in range(hours)],
-                         starting_inventory=5, units_sold=0, ending_inventory=5)
-
-
-def test_episode_spans_midnight_as_one_window():
-    """FLC windows commonly run past midnight -- 36 hours is common. A
-    date-keyed episode would split one economic window into three, resetting
-    the monotonicity anchor and charging carried inventory to scrap twice."""
-    from fit.prepare_data import assign_episode_ids
-
-    long_window = _window(1, "FC1", "2026-03-01 10:00", 36)
-    d = long_window.sort_values(["sku_id", "fc", "date", "hour_of_day"])
-    ids = assign_episode_ids(d)
-    assert ids.nunique() == 1, "a 36-hour window must be ONE episode"
-    assert d.date.nunique() == 2, "and it must genuinely cross midnight"
-    assert ids.iloc[0] == "1|FC1|2026-03-01T10"
-    assert len(d) == 36 and d.hours_remaining.iloc[-1] == 0
-
-    # a window long enough to cross twice is still one episode
-    three = _window(1, "FC1", "2026-03-01 20:00", 36)
-    three = three.sort_values(["sku_id", "fc", "date", "hour_of_day"])
-    assert assign_episode_ids(three).nunique() == 1
-    assert three.date.nunique() == 3
-
-
-def test_back_to_back_windows_and_gaps_still_split():
-    from fit.prepare_data import assign_episode_ids
-
-    # two windows abutting with no time gap: only the counter reset separates
-    # them, so time-contiguity alone would wrongly merge these
-    a = _window(1, "FC1", "2026-03-01 10:00", 6)
-    b = _window(1, "FC1", "2026-03-01 16:00", 6)
-    d = pd.concat([a, b]).sort_values(["sku_id", "fc", "date", "hour_of_day"])
-    assert assign_episode_ids(d).nunique() == 2
-
-    # a missing hour inside a window splits it, so an episode's row count
-    # always equals its clock -- validate_state rejects any mismatch
-    g = _window(1, "FC1", "2026-03-01 10:00", 6).drop(index=3)
-    assert assign_episode_ids(g).nunique() == 2
-
-    # different sku x fc never merge
-    two = pd.concat([_window(1, "FC1", "2026-03-01 10:00", 4),
-                     _window(2, "FC1", "2026-03-01 10:00", 4)])
-    two = two.sort_values(["sku_id", "fc", "date", "hour_of_day"])
-    assert assign_episode_ids(two).nunique() == 2
-
-
 def test_split_assigns_straddling_episode_by_start_date():
     """A window that starts in train and ends in calib belongs wholly to
     train -- otherwise the boundary runs through the middle of an episode."""
@@ -638,35 +553,6 @@ def test_split_assigns_straddling_episode_by_start_date():
     frames = split_frames(d, cfg)
     assert len(frames["train"]) == len(d)
     assert len(frames["calib"]) == 0 and len(frames["test"]) == 0
-
-
-def test_a_new_window_is_not_mistaken_for_a_gap():
-    """The counter is what tells them apart, and it must."""
-    from fit.prepare_data import gap_split_windows, assign_episode_ids
-
-    def frame(rows):
-        d = episode_frame(rows, columns=["hour_of_day", "hours_remaining"],
-                          date="2026-03-01", sku_id="S", fc="F",
-                          starting_inventory=5, units_sold=0, ending_inventory=5)
-        d["episode_id"] = assign_episode_ids(d)
-        return d
-
-    # one window, hour 13 missing: clock +2, counter -2 -> a GAP
-    ids, detail = gap_split_windows(
-        frame([(10, 5), (11, 4), (12, 3), (14, 1)]))
-    assert detail["windows_split_by_a_feed_gap"] == 1
-    assert len(ids) == 2, "both fragments must be named"
-    assert detail["missing_hours"] == 1
-
-    # two back-to-back windows, one idle hour between: the counter RESETS
-    ids, detail = gap_split_windows(
-        frame([(10, 3), (11, 2), (12, 1), (14, 9), (15, 8)]))
-    assert len(ids) == 0, "a new window was deleted as if it were a gap"
-
-    # and two windows with no idle hour at all
-    ids, detail = gap_split_windows(
-        frame([(10, 3), (11, 2), (12, 1), (13, 9), (14, 8)]))
-    assert len(ids) == 0
 
 
 # ------------------------------------------ the production worked example
@@ -833,72 +719,17 @@ def test_pre_launch_stops_at_the_gate_window(cfg):
         "pre-launch whole; one that opened after does not belong at all"
 
 
-def test_cogs_at_risk_counts_supply_not_opening_stock():
-    """A window that opens with 3 and takes 10 mid-flight has 13 units of
-    cost at risk; counting 3 understates every restocked episode."""
-    from fit.prepare_data import cogs_at_risk
-
-    # one episode: opens with 3, 10 arrive in hour 2, sells 9, loses 1
-    d = pd.DataFrame({
-        "episode_id": ["e"] * 3,
-        # `hour_adjustment` establishes window order from these, so the
-        # arrival term needs them -- every real caller has them, since
-        # `assign_episode_ids` needs them first
-        "date": ["2026-03-01"] * 3, "hour_of_day": [10, 11, 12],
-        "cost": [100.0] * 3,
-        "starting_inventory": [3, 13, 4],
-        "units_sold": [0, 9, 3],
-        "ending_inventory": [13, 4, 0],
-    })
-    # 3 opening + 10 arrived = 13 units x 100
-    assert cogs_at_risk(d) == pytest.approx(1300.0)
-
-    # no arrivals -> unchanged from the old opening-stock reading
-    flat = pd.DataFrame({
-        "episode_id": ["f"] * 2, "cost": [50.0] * 2,
-        "date": ["2026-03-01"] * 2, "hour_of_day": [10, 11],
-        "starting_inventory": [8, 5], "units_sold": [3, 5],
-        "ending_inventory": [5, 0],
-    })
-    assert cogs_at_risk(flat) == pytest.approx(400.0)
-
-
-def test_the_per_episode_cogs_table_reproduces_every_stage_and_flag_reading():
-    """cogs_at_risk re-ran the arrival pass on every waterfall row and every
-    flag mask (~24 passes per run). Every stage after the ids are fixed drops
-    WHOLE episodes, so one per-episode table summed over the episodes left
-    gives the same number -- NaN included, never skipped."""
-    from fit.prepare_data import cogs_at_risk, episode_cogs
-
-    d = pd.DataFrame({
-        "episode_id": ["e"] * 3 + ["f"] * 2 + ["n"] * 2,
-        "date": ["2026-03-01"] * 7, "hour_of_day": [10, 11, 12, 10, 11, 10, 11],
-        "cost": [100.0] * 3 + [50.0] * 2 + [np.nan] * 2,
-        "starting_inventory": [3, 13, 4, 8, 5, 2, 1],
-        "units_sold": [0, 9, 3, 3, 5, 1, 1],
-        "ending_inventory": [13, 4, 0, 5, 0, 1, 0],
-    })
-    table = episode_cogs(d)
-    assert table["e"] == pytest.approx(1300.0) and table["f"] == pytest.approx(400.0)
-    assert np.isnan(table["n"])
-    for keep in (["e"], ["f"], ["e", "f"], ["e", "n"], ["e", "f", "n"], []):
-        sub = d[d.episode_id.isin(keep)]
-        direct, tabled = cogs_at_risk(sub), cogs_at_risk(sub, table)
-        assert (np.isnan(direct) and np.isnan(tabled)) or direct == tabled, keep
-
-
 def test_a_precomputed_flow_and_cogs_table_change_nothing_in_the_flags(cfg):
     """load_and_filter hands tag_dp_eligibility the flow it already built at
     episode_universe (and the COGS table); the result must be the one a bare
     call computes for itself."""
-    from common.episodes import episode_flow
-    from fit.prepare_data import episode_cogs
+    from common.episodes import episode_cogs, episode_flow
 
-    d = pd.concat([_frame(),
-                   _frame(episode_id="R", starting_inventory=[12, 20],
+    d = pd.concat([_episode(),
+                   _episode(episode_id="R", starting_inventory=[12, 20],
                           ending_inventory=[20, 0]),
-                   _frame(episode_id="u", ending_inventory=[9, 7]),
-                   _frame(episode_id="bad", cost=0.0)], ignore_index=True)
+                   _episode(episode_id="u", ending_inventory=[9, 7]),
+                   _episode(episode_id="bad", cost=0.0)], ignore_index=True)
     bare, bare_detail = tag_dp_eligibility(d, cfg)
     fed, fed_detail = tag_dp_eligibility(d, cfg, flow=episode_flow(d),
                                          per_episode_cogs=episode_cogs(d))
@@ -906,7 +737,7 @@ def test_a_precomputed_flow_and_cogs_table_change_nothing_in_the_flags(cfg):
     assert bare_detail == fed_detail
     # and the sentinel diagnostic the design names is on the manifest
     assert fed_detail["edge_truncated"]["write_off_convention_in_force"] is True
-    none = _frame(episode_id="open", ending_inventory=[9, 7])
+    none = _episode(episode_id="open", ending_inventory=[9, 7])
     _, no_sentinel = tag_dp_eligibility(none, cfg)
     assert no_sentinel["edge_truncated"]["write_off_convention_in_force"] is False
 
@@ -951,7 +782,7 @@ def test_a_row_with_no_episode_key_is_dropped_and_counted(cfg, tmp_path):
     """A null sku_id or fc fell out of every groupby in assign_episode_ids,
     so such rows collapsed into one NaN "episode" that later stages read as
     a window. INTEGRITY (rule 14): a DROP with its own waterfall row."""
-    from fit.prepare_data import EPISODE_KEY, null_key_rows
+    from common.windows import EPISODE_KEY, null_key_rows
     from tools import make_dummy_flc as gen
 
     # a SPOTLESS base, so the only dirt this stage sees is what the test
@@ -1011,7 +842,8 @@ def test_a_row_with_no_episode_key_is_dropped_and_counted(cfg, tmp_path):
 def _window_run_of(raw, idx):
     """The rows of `raw` in the same source WINDOW as `idx`, as the id rule
     reads the clean frame (source names -> prepared, the chain's own cast)."""
-    from fit.prepare_data import SOURCE_TO_CANONICAL, assign_episode_ids
+    from common.windows import assign_episode_ids
+    from fit.prepare_data import SOURCE_TO_CANONICAL
     d = raw.rename(columns=SOURCE_TO_CANONICAL).copy()
     for c in ("starting_inventory", "ending_inventory"):
         d[c] = d[c].round().astype("int64")
@@ -1020,161 +852,9 @@ def _window_run_of(raw, idx):
     return raw.loc[ids.index[ids == ids.loc[idx]]]
 
 
-def test_a_null_counter_drops_its_whole_window_not_a_fragment():
-    """Rule 15 at the null-counter stage: the run the null sits in goes
-    whole, and a back-to-back neighbour with its own clock break stays."""
-    from fit.prepare_data import null_counter_windows
-
-    df = pd.DataFrame({
-        "starting_inventory": [5] * 6, "units_sold": [0] * 6, "ending_inventory": [5] * 6,
-        "sku_id": [7] * 6, "fc": ["F"] * 6,
-        "date": ["2026-08-01"] * 6,
-        "hour_of_day": [9, 10, 11, 14, 15, 16],       # a break between 11 and 14
-        "hours_remaining": [2.0, np.nan, 0.0, 2.0, 1.0, 0.0]})
-    mask, detail = null_counter_windows(df)
-    assert list(mask) == [True, True, True, False, False, False]
-    assert detail == {"windows": 1, "gap_fragments_kept": 0}
-    clean, detail = null_counter_windows(df.assign(hours_remaining=[2.0, 1, 0, 2, 1, 0]))
-    assert not clean.any() and detail["windows"] == 0
-
-    # back-to-back windows with NO clock gap: the counter resets upward
-    # between two non-null rows, so the neighbour is its own window and
-    # survives (the contract: two windows back to back are two episodes)
-    b2b = pd.DataFrame({
-        "starting_inventory": [5] * 6, "units_sold": [0] * 6, "ending_inventory": [5] * 6,
-        "sku_id": [7] * 6, "fc": ["F"] * 6, "date": ["2026-08-01"] * 6,
-        "hour_of_day": [9, 10, 11, 12, 13, 14],
-        "hours_remaining": [2.0, np.nan, 0.0, 2.0, 1.0, 0.0]})
-    mask, detail = null_counter_windows(b2b)
-    assert list(mask) == [True, True, True, False, False, False]
-    assert detail["windows"] == 1
-    # two nulls in two chained windows count as two windows
-    mask, detail = null_counter_windows(
-        b2b.assign(hours_remaining=[2.0, np.nan, 0.0, 2.0, np.nan, 0.0]))
-    assert mask.all() and detail["windows"] == 2
-
-    # a feed gap the counter ran down across is ONE window: the far
-    # fragment goes with it (gap_split_windows could no longer see the gap
-    # once the near side was dropped)
-    gap = pd.DataFrame({
-        "starting_inventory": [5] * 6, "units_sold": [0] * 6, "ending_inventory": [5] * 6,
-        "sku_id": [7] * 6, "fc": ["F"] * 6, "date": ["2026-08-01"] * 6,
-        "hour_of_day": [9, 10, 11, 14, 15, 16],
-        "hours_remaining": [7.0, np.nan, 5.0, 2.0, 1.0, 0.0]})
-    mask, detail = null_counter_windows(gap)
-    assert mask.all() and detail == {"windows": 1, "gap_fragments_kept": 0}
-    # a gap with the null right beside it cannot be read: the far side
-    # survives as a fragment, and the detail says so
-    beside = gap.assign(hours_remaining=[7.0, 6.0, np.nan, 2.0, 1.0, 0.0])
-    mask, detail = null_counter_windows(beside)
-    assert list(mask) == [True, True, True, False, False, False]
-    assert detail["gap_fragments_kept"] == 1
-
-
 # ------------------------------------------- restock-extended windows (rule)
 
-def _shelf(hours, counters, start, sold, end, day="2026-03-01", sku="S", fc="F"):
-    """Hourly rows of one SKU x FC with the inventory the boundary rule reads."""
-    return episode_frame(hour_of_day=hours, hours_remaining=counters,
-                         starting_inventory=start, units_sold=sold,
-                         ending_inventory=end, date=day, sku_id=sku, fc=fc)
-
-
-def test_a_restock_extended_window_is_one_episode():
-    """Engineering: stock arriving mid-window extends it, and the counter
-    steps UP from the NEXT hour. Hour 12 opens with 3, sells 1 and ends
-    with 6 (4 arrived); hour 13 opens with 6 and the counter jumps 1 -> 4.
-    Same listing, one id -- and every restock re-tests on its own."""
-    from fit.prepare_data import assign_episode_ids, counter_step_detail
-
-    d = _shelf(hours=[10, 11, 12, 13, 14], counters=[4, 3, 2, 4, 3],
-               start=[5, 4, 3, 6, 5], sold=[1, 1, 1, 1, 1], end=[4, 3, 6, 5, 4])
-    assert assign_episode_ids(d).nunique() == 1
-    assert counter_step_detail(d) == {"up_steps_at_one_hour": 1, "restock_continued": 1,
-                                      "closed_new_window": 0, "reset_new_window": 0,
-                                      "closed_then_resumed": 0}
-    # the same up-step with NO stock arriving the hour before is a reset:
-    # two back-to-back windows, two ids
-    reset = d.copy()
-    reset.loc[reset.hour_of_day == 12, "ending_inventory"] = 2   # 3 - 1, reconciles
-    reset.loc[reset.hour_of_day >= 13, ["starting_inventory", "ending_inventory"]] -= 4
-    assert assign_episode_ids(reset).nunique() == 2
-    assert counter_step_detail(reset)["reset_new_window"] == 1
-    # a flat step after a restock continues too; three restocks, one id
-    three = _shelf(hours=list(range(10, 17)), counters=[6, 5, 4, 5, 4, 4, 3],
-                   start=[5, 4, 3, 6, 5, 8, 7], sold=[1] * 7,
-                   end=[4, 3, 6, 5, 8, 7, 6])
-    assert assign_episode_ids(three).nunique() == 1
-
-
-def test_a_write_off_zero_closes_the_window_whatever_the_counter_does():
-    """Engineering: `ending_inventory == 0` is the close, even on an hour
-    that also restocked; the next row opens a new id -- whether the
-    counter resets or, mid-window, keeps counting down (that zero is a
-    write-off leftover, not shrink)."""
-    from fit.prepare_data import assign_episode_ids, counter_step_detail
-
-    # closed at 12 (sold 5 of 5), relisted at 13 with a fresh counter
-    relist = _shelf(hours=[10, 11, 12, 13, 14], counters=[2, 1, 0, 6, 5],
-                    start=[7, 6, 5, 9, 8], sold=[1, 1, 5, 1, 1], end=[6, 5, 0, 8, 7])
-    assert assign_episode_ids(relist).nunique() == 2
-    assert counter_step_detail(relist)["closed_new_window"] == 1
-    # the zero hour sold MORE than it opened with (a restock by C9) and
-    # still ended at zero: closed, not continued
-    oversold = relist.copy()
-    oversold.loc[oversold.hour_of_day == 12, "units_sold"] = 8
-    assert assign_episode_ids(oversold).nunique() == 2
-    # a mid-window zero with the counter still ticking -1: two ids
-    mid = _shelf(hours=[10, 11, 12, 13, 14], counters=[4, 3, 2, 1, 0],
-                 start=[5, 4, 3, 2, 1], sold=[1, 1, 3, 1, 1], end=[4, 3, 0, 1, 0])
-    assert assign_episode_ids(mid).nunique() == 2
-
-
-def test_the_null_counter_run_reads_the_same_boundaries():
-    """The null-counter drop reads the window the id rule would: a null
-    after a restock-extended step is inside ONE window (the whole run
-    drops), and a null after a close belongs to the relist alone."""
-    from fit.prepare_data import null_counter_windows
-
-    ext = _shelf(hours=[10, 11, 12, 13, 14], counters=[4.0, 3.0, 2.0, np.nan, 3.0],
-                 start=[5, 4, 3, 6, 5], sold=[1] * 5, end=[4, 3, 6, 5, 4])
-    mask, detail = null_counter_windows(ext)
-    assert mask.all() and detail["windows"] == 1
-    closed = _shelf(hours=[10, 11, 12, 13, 14], counters=[2.0, 1.0, 0.0, np.nan, 5.0],
-                    start=[7, 6, 5, 9, 8], sold=[1, 1, 5, 1, 1], end=[6, 5, 0, 8, 7])
-    mask, detail = null_counter_windows(closed)
-    assert list(mask) == [False, False, False, True, True] and detail["windows"] == 1
-
-
 # ------------------------------------------ the row-defect stages, per stage
-
-def _source_window(sku, start_hour, n, day="2026-03-02", fc="F1", inv0=10,
-                   discount=25.0, price=10_000.0, category="MEAT",
-                   subcategory="PORK"):
-    """One clean source window in the extract's own schema: `n` hours from
-    `start_hour`, selling one an hour, the write-off sentinel on its last
-    row; discount in PERCENT, as the source emits it."""
-    import datetime as dt
-    rows, inv = [], inv0
-    for i in range(n):
-        end = inv - 1 if i < n - 1 else 0
-        rows.append(dict(date=dt.date.fromisoformat(day), hour=start_hour + i,
-                         skuseq=sku, fc=fc, inventory=float(inv), discount=discount,
-                         units_sold=1, normal_asp=price, final_price=price * (1 - discount / 100),
-                         cogs_wo_vat=4000.0, ending_inventory=float(end),
-                         flc_window=float(n - 1 - i), category=category,
-                         subcategory=subcategory))
-        inv = end
-    return rows
-
-
-def _extract(tmp_path, rows, name="raw.parquet"):
-    from tools.make_dummy_flc import SCHEMA
-    df = pd.DataFrame(rows)[[f.name for f in SCHEMA]]
-    path = tmp_path / name
-    pq.write_table(pa.Table.from_pandas(df, schema=SCHEMA, preserve_index=False), str(path))
-    return str(path)
-
 
 def _stage(wf, label):
     return next(t for t in wf if t[0] == label)
@@ -1186,13 +866,13 @@ def test_a_defective_first_hour_drops_its_whole_window_not_a_fragment(cfg, tmp_p
     opening one hour late -- eligible, dp-eligible, and scored as an ENTRY
     row by the prior (the leak gap_split_windows exists to prevent; it only
     sees interior holes). The whole window goes, and is counted."""
-    clean = _source_window(1, 10, 6) + _source_window(2, 10, 6) + _source_window(3, 10, 6)
-    dup = _source_window(2, 10, 6)[:1]                      # sku 2's first hour, twice
-    null_q = _source_window(3, 10, 6)
+    clean = source_window(1, 10, 6) + source_window(2, 10, 6) + source_window(3, 10, 6)
+    dup = source_window(2, 10, 6)[:1]                      # sku 2's first hour, twice
+    null_q = source_window(3, 10, 6)
     dirty = clean + dup
     dirty[12]["inventory"] = None                           # sku 3's first hour
     assert dirty[12]["skuseq"] == 3 and dirty[12]["hour"] == 10
-    d, wf = load_and_filter(_extract(tmp_path, dirty), cfg)
+    d, wf = load_and_filter(write_extract(tmp_path, dirty), cfg)
     assert sorted(d.episode_id.unique()) == ["1|F1|2026-03-02T10"]
     assert not d.episode_id.str.endswith("T11").any()
     nulls = _stage(wf, "null_key_rows_dropped")[4]
@@ -1204,35 +884,12 @@ def test_a_defective_first_hour_drops_its_whole_window_not_a_fragment(cfg, tmp_p
     assert _stage(wf, "duplicate_hour_rows_dropped")[1] == 6
     # a null in any quantity column is a counted drop, never a cast error
     for col in ("units_sold", "ending_inventory"):
-        rows = _source_window(1, 10, 6) + _source_window(2, 10, 6)
+        rows = source_window(1, 10, 6) + source_window(2, 10, 6)
         rows[8][col] = None                                  # sku 2, mid-window
-        d, wf = load_and_filter(_extract(tmp_path, rows, f"{col}.parquet"), cfg)
+        d, wf = load_and_filter(write_extract(tmp_path, rows, f"{col}.parquet"), cfg)
         assert sorted(d.episode_id.unique()) == ["1|F1|2026-03-02T10"]
         assert _stage(wf, "null_key_rows_dropped")[4]["null_quantity_windows_dropped"] == 1
     assert len(null_q) == 6
-
-
-def test_the_null_run_drop_reads_the_ids_boundaries_on_flat_and_minus_two_steps():
-    """Counters [3, NaN, 1, 1, 0]: the ids split at the flat step (no
-    restock, EPISODE_RULE), so the null's window is the first three rows
-    and the two after it are their own window -- the run drop once
-    swallowed all five. `window_signals.counter_ok` is the one clause."""
-    from fit.prepare_data import (assign_episode_ids, null_counter_windows,
-                                  window_signals, window_starts)
-
-    d = _shelf(hours=[10, 11, 12, 13, 14], counters=[3.0, np.nan, 1.0, 1.0, 0.0],
-               start=[5] * 5, sold=[0] * 5, end=[5] * 5)
-    assert list(window_signals(d)["counter_ok"]) == [False, False, False, False, True]
-    assert list(window_starts(d)) == [True, True, True, True, False]
-    assert assign_episode_ids(d).nunique() == 4
-    mask, detail = null_counter_windows(d)
-    assert list(mask) == [True, True, True, False, False] and detail["windows"] == 1
-    # a -2 step between two readable counters is a new window too
-    skip = _shelf(hours=[10, 11, 12, 13, 14], counters=[4.0, np.nan, 2.0, 0.0, 6.0],
-                  start=[5] * 5, sold=[0] * 5, end=[5] * 5)
-    mask, _ = null_counter_windows(skip)
-    assert list(mask) == [True, True, True, False, False]
-    assert list(window_starts(skip)) == [True, True, True, True, True]
 
 
 def test_an_episode_opening_on_an_empty_shelf_is_flagged_not_priced(cfg):
@@ -1241,7 +898,7 @@ def test_an_episode_opening_on_an_empty_shelf_is_flagged_not_priced(cfg):
     open and shadow priced. It is `opens_empty` (dp-ineligible, counted)
     and `counter_up_steps.closed_then_resumed` keeps C3's question
     measurable."""
-    from fit.prepare_data import assign_episode_ids, counter_step_detail
+    from common.windows import assign_episode_ids, counter_step_detail
 
     d = _shelf(hours=[10, 11, 12, 13], counters=[3.0, 2.0, 1.0, 0.0],
                start=[5, 0, 3, 2], sold=[5, 0, 1, 2], end=[0, 3, 2, 0])
@@ -1271,8 +928,8 @@ def test_the_chain_asserts_the_episode_identity_on_its_output(cfg, tmp_path, mon
     from common import episodes
     from fit import prepare_data as pdm
 
-    rows = _source_window(1, 10, 6) + _source_window(2, 10, 6)
-    path = _extract(tmp_path, rows)
+    rows = source_window(1, 10, 6) + source_window(2, 10, 6)
+    path = write_extract(tmp_path, rows)
     d, wf = load_and_filter(path, cfg)
     identity = _stage(wf, "dp_eligible")[4]["flow_identity"]
     assert identity["holds"] and identity["violations"] == 0
@@ -1286,7 +943,7 @@ def test_the_chain_asserts_the_episode_identity_on_its_output(cfg, tmp_path, mon
         load_and_filter(path, cfg)
     monkeypatch.setattr(pdm.episodes, "flow_identity_violations", real)
     # a bare frame that is not continuous is recorded, not asserted
-    _, detail = tag_dp_eligibility(_frame(starting_inventory=[12, 20],
+    _, detail = tag_dp_eligibility(_episode(starting_inventory=[12, 20],
                                           ending_inventory=[9, 0]), cfg)
     assert detail["flow_identity"]["holds"] is False
 
@@ -1295,9 +952,9 @@ def test_the_unclosed_residue_is_located_and_the_sentinel_check_named(cfg):
     """Contract C2's self-check (`final_rows_without_closure_sentinel`) and
     design 12a's `not_closed_by_month` / `by_category` were named in the
     docs and written by nothing."""
-    unclosed = _frame(episode_id="u", ending_inventory=[9, 7], date="2026-02-15")
-    later = _frame(episode_id="edge", ending_inventory=[9, 7], date="2026-03-01")
-    d = pd.concat([_frame(), unclosed, later], ignore_index=True)
+    unclosed = _episode(episode_id="u", ending_inventory=[9, 7], date="2026-02-15")
+    later = _episode(episode_id="edge", ending_inventory=[9, 7], date="2026-03-01")
+    d = pd.concat([_episode(), unclosed, later], ignore_index=True)
     d["category"] = ["MEAT", "MEAT", "FRUIT", "FRUIT", "MEAT", "MEAT"]
     _, detail = tag_dp_eligibility(d, cfg)
     edge = detail["edge_truncated"]
@@ -1314,21 +971,21 @@ def test_each_row_scoped_integrity_stage_drops_what_it_names(cfg, tmp_path):
     constructed extract: the stage drops the whole window it names and
     nothing else, and the discount is percent in, fraction out, once
     (rule 11)."""
-    base = _source_window(1, 10, 6)
-    bad_disc = _source_window(2, 10, 6, discount=250.0)   # out of [0, 100]
+    base = source_window(1, 10, 6)
+    bad_disc = source_window(2, 10, 6, discount=250.0)   # out of [0, 100]
     bad_disc[3]["discount"] = 25.0                         # one good hour: still whole
-    neg = _source_window(3, 10, 6)
+    neg = source_window(3, 10, 6)
     neg[2]["units_sold"] = -1
-    no_cat = _source_window(4, 10, 6)
+    no_cat = source_window(4, 10, 6)
     no_cat[4]["category"] = None
-    no_sub = _source_window(5, 10, 6)
+    no_sub = source_window(5, 10, 6)
     no_sub[0]["subcategory"] = None
-    no_price = _source_window(6, 10, 6, price=0.0)         # never priced
-    filled = _source_window(7, 10, 6)
+    no_price = source_window(6, 10, 6, price=0.0)         # never priced
+    filled = source_window(7, 10, 6)
     filled[0]["normal_asp"] = 0.0                          # priced from hour 2 on
     filled[5]["normal_asp"] = 0.0
     rows = base + bad_disc + neg + no_cat + no_sub + no_price + filled
-    d, wf = load_and_filter(_extract(tmp_path, rows), cfg)
+    d, wf = load_and_filter(write_extract(tmp_path, rows), cfg)
     kept = {int(s.split("|")[0]) for s in d.episode_id.unique()}
     assert kept == {1, 7}
     labels = [t[0] for t in wf]

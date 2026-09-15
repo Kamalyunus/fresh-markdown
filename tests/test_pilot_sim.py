@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from conftest import _hours
-from evaluate import pilot_sim, pilot_world
+from evaluate import pilot_shop, pilot_sim, pilot_world
 from engine.state import hour_grid
 from evaluate.pilot_world import World, episode_templates, parse_faults
 
@@ -659,7 +659,8 @@ def _sim(cfg, templates, monkeypatch, per_day=1, shocks=None):
     w.level_multiplier = lambda k: 1.0
     w.feed_row = lambda *a, **kw: {}
     w.draw_fault = lambda name: False
-    monkeypatch.setattr(pilot_sim, "ref_rate_features",
+    # the shop reads the feature home by name in its own module
+    monkeypatch.setattr(pilot_shop, "ref_rate_features",
                         lambda hist, stub, cfg: {e: (np.nan, np.nan) for e in stub.episode_id})
     s = PilotSim.__new__(PilotSim)
     s.cfg, s.world, s.rng, s.per_day, s.model = cfg, w, np.random.default_rng(0), per_day, None

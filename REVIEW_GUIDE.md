@@ -10,9 +10,11 @@ sittings.
 | --- | --- |
 | `engine/dp.py` | The two safety properties are **structural**: `feasible_tiers` cannot express a price below cost or above the anchor (no post-hoc check to forget), and the terminal value books scrap once. The state space is small enough that the solve is exact — check the truncation diagnostic, not the math |
 | `engine/demand.py` | `mu(d) = mu_ref × ((1−d)/(1−d_ref))^ε` with a floor; censored expectation `E[min(D, q)]`. This is the only demand math in the system — everything else calls it |
-| `engine/explore.py` | Exploration is a **uniform** draw from the tau-affordable subset of `admissible` (tiers at least `delta_min` from the REFERENCE discount in log price — information is measured from the reference, cost from p*) — any weighting would un-randomise the evidence the learner consumes, and the ledger, the chooser and the assurance check must read the one `admissible`. Also: `walk_tau` — tau moves by `clip(budget/spend, 0.5, 1.25)` one step per closed day on the trailing 7-day close-day IL base, held (no step, `held` set) until that base spans its window — `budget_base_ready`, the rule the overspend stop reads too — and it is the ONE walk (production and shadow's trace) |
+| `engine/explore.py` | Exploration is a **uniform** draw from the tau-affordable subset of `admissible` (tiers at least `delta_min` from the REFERENCE discount in log price — information is measured from the reference, cost from p*) — any weighting would un-randomise the evidence the learner consumes, and the ledger, the chooser and the assurance check must read the one `admissible` |
+| `engine/budget.py` | `walk_tau` — tau moves by `clip(budget/spend, 0.5, 1.25)` one step per closed day on the trailing 7-day close-day IL base, held (no step, `held` set) until that base spans its window — `budget_base_ready`, the rule the overspend stop reads too — and it is the ONE walk (production and shadow's trace) |
+| `engine/learn.py` | The censored NB likelihood on the grid; information in NB units (`μL²·r/(r+μ)`, and the observed-event information on a stocked-out row) deflated by the batch's own deff; `predictive_check` scores the batch against the pre-update posterior. Pure maths — no store, no gate |
 | `engine/decide.py` | Validation **rejects** rather than returning a best-effort price; the decision event carries enough to re-solve itself (`mu_ref_path`, `anchor_discount`) and names the config digest it was priced with, so it maps to one audit snapshot |
-| `events/store.py` | Append-only, durable writes, dedup on emit AND on load (a duplicated line is counted and loaded once; the id is registered after the append succeeds); malformed events **quarantine with the reason attached** rather than being dropped, and every stream's torn last line is closed on open; exactly three `adjustment_reason` values reconcile inventory; the two invariants live here and nowhere else — one decision per hour (`priced_hours`, a second one refused and counted) and one outcome per decision (a second one refused on emit, skipped on load, counted; an outcome without `is_stockout` never lands) — and `episode_paths` holds the forecast a later hour of an episode is priced on |
+| `events/store.py` (+ `events/contract.py`, the required fields and value checks it enforces) | Append-only, durable writes, dedup on emit AND on load (a duplicated line is counted and loaded once; the id is registered after the append succeeds); malformed events **quarantine with the reason attached** rather than being dropped, and every stream's torn last line is closed on open; exactly three `adjustment_reason` values reconcile inventory; the two invariants live here and nowhere else — one decision per hour (`priced_hours`, a second one refused and counted) and one outcome per decision (a second one refused on emit, skipped on load, counted; an outcome without `is_stockout` never lands) — and `episode_paths` holds the forecast a later hour of an episode is priced on |
 
 The review question for this tier is single: *can any path emit an unsafe or
 unauditable price?* The test files that pin these properties —
@@ -23,8 +25,8 @@ are worth reading as the specification.
 
 | File | What to verify |
 | --- | --- |
-| `daily/update.py` | Only exploration outcomes are eligible; the censored NB likelihood on the grid; information in NB units (`μL²·r/(r+μ)`) deflated by deff; the trigger evaluates the **unconsumed batch**, never a running counter; `predictive_check` scores the batch against the pre-update posterior; tau calibrates on spend, not evidence — `--calibrate-tau` commits it daily with no operator, one step per closed day since the last calibration (a missed day is graded, not skipped), keyed by the decision's TRADING day (`events.pairs.decision_day`, never the outcome's UTC finalize time), and zero spend on a priced day raises it — under-spend, not absence of signal; a base shorter than its window holds it (`budget_base_ready`) |
-| `events/pairs.py` | The one decision↔outcome pairing; `learnable=` is what keeps a failed push out of the evidence; `quality_counts`/`quality_rates` are the one event-quality count the `--apply` gate and the monitor's stop compare (a reported failure is never a mismatch) |
+| `daily/update.py` | Only exploration outcomes are eligible (the grid update it calls is Tier 1, `engine/learn.py`); the trigger evaluates the **unconsumed batch**, never a running counter; tau calibrates on spend, not evidence — `--calibrate-tau` commits it daily with no operator, one step per closed day since the last calibration (a missed day is graded, not skipped), keyed by the decision's TRADING day (`events.pairs.decision_day`, never the outcome's UTC finalize time), and zero spend on a priced day raises it — under-spend, not absence of signal; a base shorter than its window holds it (`budget_base_ready`) |
+| `events/pairs.py` | The one decision↔outcome pairing; `learnable=` is what keeps a failed push out of the evidence; `quality_counts`/`quality_rates` are the one event-quality count the `--apply` gate and the monitor's stop compare (a reported failure is never a mismatch); `finalized_days`/`suspended_days` are the day key and the spend the tau walk and the overspend stop both read. `events/frame.py` is the one episode frame the business metrics, the guardrail series and the walk's IL base are built on |
 | `engine/posterior.py` | The bounded step (mean ≤ `max_mean_step`, std shrink ≤ `max_std_shrink`, floored, clipped to the epsilon range); revision + consumed outcome IDs commit in **one atomic write** — a crash between them cannot double-count; re-applying with nothing new is a verified no-op; `launch_stale` is False on ANY production state (outcome, τ, suspension), so the process can never re-initialise a live file |
 
 The review question: *can evidence be spent twice, or a belief move more
@@ -34,10 +36,13 @@ the exactly-once tests in `test_end_to_end.py` are the pinned answers.
 ## Tier 3 — skim; the gates and suite carry it (~11,500 lines, offline)
 
 `fit/` (data preparation, model/prior/dispersion fits), `evaluate/`
-(backtest, shadow, thresholds; `pilot_sim.py`/`pilot_world.py` rehearse
-the weeks after launch against a simulated shop — they call the reviewed
-engine and lane, never price a shelf) and `ops/` (`advance.py` is the phase order
-as code; its `plan()` is pure and unit-tested per stop; `price_batch.py` is
+(backtest, shadow, thresholds, with what the two harnesses share in
+`level.py` and `tau.py`; `pilot_shop.py`/`pilot_grade.py`/`pilot_sim.py`/
+`pilot_world.py` rehearse the weeks after launch against a simulated shop
+— they call the reviewed engine and lane, never price a shelf) and `ops/` (`advance.py` is the phase order
+as code, one function per phase in `PLAN`; its `plan()` is pure and unit-tested per stop;
+`config_keys.py` is the one table of what each config key is to the chain and the
+one report-staleness judgement `status` and `advance` share; `price_batch.py` is
 Lane B's reference caller — the contract's requests in, a price per request
 out, through the reviewed engine and `engine/state.py`, the one request →
 state) run before launch,
@@ -51,9 +56,11 @@ population every other number is measured on, and its rules are
 cross-checked against the docs by `test_docs_match_the_code.py`.
 
 `common/` is shared definitions (episodes, config loading, guardrail
-comparison, JSON I/O); read `common/episodes.py` if you touch anything that
+comparison and the persistence streak, JSON I/O, the drivers' paths and
+parser); read `common/episodes.py` if you touch anything that
 counts inventory — it is the single source of closure/scrap/censoring truth
-— and `common/metrics.py::episode_economics`, the one episode-grain frame
+— and `common/windows.py` if you touch where an episode starts or ends or
+which rows a fit may read (the id rule and every episode-scoped cut) — and `common/metrics.py::episode_economics`, the one episode-grain frame
 every IL, scrap and margin figure (floors, live guardrail,
 business metrics, shadow's budget base) is built on. `events/pairs.py` is
 the one decision↔outcome pairing.
@@ -62,9 +69,10 @@ the one decision↔outcome pairing.
 
 `tools/` (the fixture generator, the leadership scenario deck, which only
 calls the reviewed solver — its exploration table too is `engine.explore`'s,
-embedded, never re-derived in the page — and `e2e_cycle.py`, a thin driver
-of the reviewed simulator's shop through the reviewed caller in a
-workspace) and `docs/` pages. The test suite is the
+embedded, never re-derived in the page, and its paths walk the reviewed
+replay's one forward simulation — and `e2e_cycle.py`, a thin driver of
+the reviewed simulator's shop (`evaluate.pilot_shop`) through the reviewed
+caller in a workspace) and `docs/` pages. The test suite is the
 reviewers' asset, not their burden: every non-obvious rule named above has a
 test whose docstring states it in prose.
 

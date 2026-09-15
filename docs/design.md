@@ -160,7 +160,7 @@ DECISION PATH (per hourly decision interval)
         ──▶ feasible discount tiers, constructed from the cost floor
         ──▶ exact DP: expected IL for every tier
         ──▶ exploit the argmax | explore the affordable, admissible set (§5.8)
-        ──▶ price ──▶ decision event (events.store.DECISION_REQUIRED)
+        ──▶ price ──▶ decision event (events.contract.DECISION_REQUIRED)
                           │
                  finalized outcome event
                           │
@@ -267,7 +267,11 @@ restocked` (follows from the identity; ASSERTED on the chain's output —
 `load_and_filter` stops with the violating count once every continuity
 break is gone, because the identity is then provable and a violation is a
 bug in `episode_flow`; `tag_dp_eligibility` on a bare frame only records
-`flow_identity.holds`). The
+`flow_identity.holds`). `tag_dp_eligibility` is two steps: `dp_flags`
+sets the columns (the supply accounting, the three `eligible`
+conditions, the first-match `dp_ineligible_reason`, the two reported-only
+flags) and `flag_detail` builds the stage's dict from them, in the order
+the manifest carries. The
 negative-window cap is a claim about the data and the stage checks it: if
 `episodes_entering_negative_but_longer_than_cap` is not near-zero on an
 extract, fix the cap, do not widen the recovery.
@@ -282,7 +286,10 @@ survived the chain — is read by `m1`/gate 1 only. The three populations are
 NESTED (integrity > eligible > dp_eligible) and resolved through
 `prepare_data.population(d, cfg[, which])` — always call it, never
 re-derive the filter. Artifact fits read `eligible`; the DP, calibration
-gate, backtest, shadow and tau pass `"dp_eligible"` explicitly.
+gate, backtest, shadow and tau pass `"dp_eligible"` explicitly. A fit
+that reads one split window (or everything pre-launch) spells it
+`prepare_data.scope(d, cfg, window)` — the population of the window, in
+one place, so no fit can pair a window with the wrong population.
 
 Every stage reports **`cogs_at_risk`** — unit cost × supply (opening +
 gross arrivals), once per episode — because rows are not the unit the
@@ -385,7 +392,7 @@ posterior update). `dispersion.rho` must be re-pasted from
 working elasticity moves the residuals); a stale paste mis-weights every
 posterior step silently, in the direction of slower learning.
 
-rho is fitted with `common.config.intraclass_correlation`, the one-way ANOVA
+rho is fitted with `common.clustering.intraclass_correlation`, the one-way ANOVA
 ICC. `var(group means)/var(all)` — the form used before — estimates
 `rho + (1−rho)/m`, because a group mean of m *independent* draws still varies
 by σ²/m and that term reads as shared signal: on independent hours it returns
@@ -393,7 +400,7 @@ by σ²/m and that term reads as shared signal: on independent hours it returns
 by that much pure estimator artifact.
 
 **`m` is not pasted.** It is measured wherever deff is applied
-(`common.config.deff_from_episodes`) as the forced outcomes per episode in
+(`common.clustering.deff_from_episodes`) as the forced outcomes per episode in
 the batch at hand. The frozen key held the mean *length* of legacy episodes
 whose discount changed — not forced hours at all — and the real quantity
 moves with the exploration rate by construction, so freezing it guaranteed
@@ -637,15 +644,17 @@ halving is the safety direction.
 
 **The daily loop:** at midnight, (1) yesterday's realised IL closes; (2)
 today's budget = `budget_share_of_il` × trailing mean × the posterior-std
-scale; (3) today's τ = `tau_next(yesterday's τ, budget, spend)`. **Both
-sides are ONE DAY** — the spend of the day just closed against the budget
+scale; (3) today's τ = `tau_next(yesterday's τ, budget, spend)` (the
+budget and the controller are `engine.budget`; the draw they fund is
+`engine.explore`). **Both sides are ONE DAY** — the spend of the day just closed against the budget
 priced from the days before it. Comparing all-time spend against all-time IL
 (as the controller once did) dilutes each day's correction by 1/N: the ratio
 tends to 1 as history accumulates, so a day at ten times budget moves τ by
 0.76× instead of the 0.5× clip, and because
 `monitoring.exploration_cost_vs_budget` compares the same two numbers by
-design, the backstop goes blind at exactly the same rate. `il_by_close_day`
-(monitor) and `finalized_days` (update) are the one definition of
+design, the backstop goes blind at exactly the same rate.
+`events.frame.il_by_close_day` (the monitor's business block and the
+walk read it) and `events.pairs.finalized_days` are the one definition of
 each side, both keyed by the decision's TRADING day
 (`events.pairs.decision_day`) — never the outcome's UTC finalize time,
 which for an hour-23 decision is D+1 and put the controller a day ahead of
@@ -656,14 +665,14 @@ not yet reach back a whole `budget_il_window_days` — the first mornings
 after launch, when a handful of early closers is all the IL there is — is
 an absence of signal like a zero budget: the controller holds τ (the row
 says `held`, `update` lists `held_days`) and the overspend stop takes no
-reading (`explore.budget_held`, the one composite both read; the mean
+reading (`engine.budget.budget_held`, the one composite both read; the mean
 divides by the same span readiness judges — back to the earliest close,
 capped at the window — so a no-close day at the window's leading edge
 cannot inflate it). The owner's rehearsal showed why: a budget priced from
 day two's closers was tiny, the stop fired on day three and exploration
 stayed suspended for the run. A day exploration was SUSPENDED on (every
-decision priced that day carries `tau_current: None`, `update.suspended_days`)
-is held the same way (`explore.SUSPENDED`): nothing was drawn, so its
+decision priced that day carries `tau_current: None`, `events.pairs.suspended_days`)
+is held the same way (`budget.SUSPENDED`): nothing was drawn, so its
 zero spend is no reading — graded as under-spend it ratcheted τ up by
 the clip every suspended morning, and the resume then overspent at once
 and re-fired the stop. Spend counts only pushes that EXECUTED
@@ -675,7 +684,7 @@ force, and a seed that does not reach back a whole window derives no tau.
 `evaluate.shadow`'s
 controller trace walks the same arithmetic, so "would the pilot survive its
 first week" grades the controller production actually runs — literally:
-both call `explore.walk_tau`, one clipped step per closed day the store
+both call `engine.budget.walk_tau`, one clipped step per closed day the store
 has not yet graded (`PosteriorStore.tau_day_walked`, the walked-day
 ledger the commit keeps), so a missed day is graded, never skipped — a
 day whose outcomes arrive after a later day was walked included: it is
@@ -692,7 +701,7 @@ bank evidence, not to leave yesterday's overspend uncorrected — while the
 event-quality gates refuse the walk too (with mismatched prices the spend
 itself is not a reading).
 τ persists in the posterior artifact; `exploration.tau_initial` is only the
-launch value, and a production caller reads `PosteriorStore.tau(cfg)` or τ
+launch value, and a production caller reads `PosteriorStore.tau()` or τ
 stays pinned at launch forever. Why budget-only rationing is sound:
 information and IL cost of a perturbation both scale as
 `mu × (log ratio)²`, so information per won is approximately constant —
@@ -771,7 +780,7 @@ a config defect (`ConfigError`) that `decide` turns into that row's
 the hourly FLC feed (matched by SKU, FC, date, hour; `adjustment_reason`,
 `is_stockout` and the offered price derived), so the integration surface is
 the price request, applying the price, and a failed-push report. Every
-decision emits the `events.store.DECISION_REQUIRED` fields (the contract's
+decision emits the `events.contract.DECISION_REQUIRED` fields (the contract's
 §04 lists them and is test-pinned to the list): the full pricing context,
 the exact prediction, posterior moments, exploration flags and cost, and
 the versions of model, posterior, config. Learning replays evidence from
@@ -833,10 +842,14 @@ hour match neither (`decisions_colliding_on_hour`; completeness falls by
 both). `tools.e2e_cycle` runs one whole cycle — requests, decisions, the
 shop's feed, ingest, exports — in a workspace under `sim/e2e`, before any
 of engineering's code exists: it drives the pilot simulator's own shop
-(`PilotSim`, §11.3) hour by hour with a pricer that goes through
-`ops.price_batch` instead of the engine, so the cycle and the rehearsal
-share one shelf, one demand draw and one feed row, and a rejected state is
-held at the shop's fallback and priced again next hour — never dropped.
+(`evaluate.pilot_shop.PilotSim`, §11.3: `run_hours`, `write_feed`) hour by
+hour with a pricer that goes through `ops.price_batch` instead of the
+engine (`pilot_shop.LaneBPricer`, writing the request and decision files
+engineering would see), then runs the outcome side the lane's morning
+runs (`pilot_shop.ingest_and_pair`), so the cycle and the rehearsal share
+one shelf, one demand draw, one feed row and one ingest, and a rejected
+state is held at the shop's fallback and priced again next hour — never
+dropped.
 
 ### 5.11 Learning update — censored, deflated, bounded, gated
 
@@ -859,7 +872,9 @@ takes moments.
   observed only as the event `D ≥ q`, a Bernoulli with `S = P(D ≥ q)`,
   whose information is `(dS/dε)² / (S(1−S))` with
   `dS/dmu = r/(r+mu)·(P(D' ≥ q−1) − S)`, D' ~ NB(r+1) — strictly less,
-  and 0 for a certain event (`update.row_information`). Crediting every
+  and 0 for a certain event (`engine.learn.row_information`; the grid
+  update beside it is `engine.learn.grid_update`, the maths without the
+  store or the gate). Crediting every
   row the uncensored figure overstated evidence exactly where sell-outs
   dominate a batch (deep forced moves on thin shelves), so the increment
   fired before the evidence justified it.
@@ -943,7 +958,7 @@ all-time over the window's denominator — a repeated line has no trading
 day, and a producer re-appending one is broken, not an incident that ages
 out — realised spend > 2× the day's budget (no reading on a zero-budget
 day or while the IL base is shorter than `budget_il_window_days`, the
-first mornings after launch — `explore.budget_base_ready`, §5.8; a day
+first mornings after launch — `engine.budget.budget_base_ready`, §5.8; a day
 without a reading breaks the streak), scrap/margin deterioration — the last three over
 `persistence_days` consecutive priced days, because one day over is a
 thin-IL day or two
@@ -996,7 +1011,7 @@ naming which numbers it flatters (drift ratio, `tau_recommended`, learning
 yield) and which it does not (completeness, cost-floor — plumbing). A missing `data.holdout` is an error, never a silent full run.
 The hold-out is **one-shot**: tune a value on it and it becomes a second
 calibration set. Date cuts are episode-scoped
-(`common.episodes.window_slice`, by the date a window opened).
+(`common.windows.window_slice`, by the date a window opened).
 
 **Sampling.** Shadow draws a uniform episode sample
 (`monitoring.shadow_gate.sample_episodes`, default 3,000; `--max-episodes
@@ -1016,7 +1031,7 @@ path mismatch (affordable sets measured ~1.66× apart). The pre-window week
 is out-of-window for the run, so day one of the controller trace is an
 out-of-sample test of the launch value. Too-thin weeks fall back to the
 `exploration.tau_initial` paste, behind
-`engine.explore.tau_provenance_error` (refuses a paste with no source or
+`ops.config_keys.tau_provenance_error` (refuses a paste with no source or
 that no longer matches its derivation). Shadow also reports
 `tau_recommended` (the bisection pooled over the whole window — a
 cross-check) and `tau_controller_trace` (day-by-day walk: `tau_next` reads
@@ -1031,13 +1046,14 @@ scrap and IL the guardrail floors and the monitor read, never a local copy.
 `daily_budget` is the mean of `budget_today` over the window's **decision
 days** (`ledger.days`, the days the controller trace walks), never over the
 seed days, whose first day has no trailing history and a budget of exactly
-zero; a window on which every decision day is held (`explore.budget_held`
+zero; a window on which every decision day is held (`engine.budget.budget_held`
 — the seed never spans `budget_il_window_days`) has no budget base, and the
 report says `NO BUDGET BASE` and grades no spend against one
 (`decision_days_held`, the sweep skipped) rather than failing after the
 decision loop. The trace's persistence verdict is
-`daily.monitor.evaluate_guardrail` on the readings walked so far — the
-monitor's rule, never a copy of it. The budget base keeps every observed
+`common.guardrail.evaluate_guardrail` on the readings walked so far — the
+monitor's rule (its stop conditions call the same function), never a copy
+of it. The budget base keeps every observed
 hour, a zero-stock restock-gap hour (no decision) included, so every episode
 the ledger priced settles. Every per-day figure divides by one `n_days`: the calendar span of
 the episodes' **opening dates** in the unsampled, unextended window frame
@@ -1173,12 +1189,14 @@ no fingerprint at all (an older producer) is WARN and `advance` re-runs it,
 because nothing says which config it graded — read as current, a shadow from
 an older code version once stood as the launch record; a config key
 **the report reads** that has moved since is WARN and names it
-(`tune.stale_keys` routes moved keys to the reports they invalidate, and
-`advance` re-runs by the same table: W turns the loop; `delta_min` re-runs
+(`ops.config_keys.stale_keys` routes moved keys to the reports they
+invalidate, `report_staleness` beside it is the one judgement `status`'s
+line and `advance`'s re-runs both read, and `advance` re-runs by the same
+table: W turns the loop; `delta_min` re-runs
 shadow; a stop threshold, `max_std_shrink` or `information_increment`
 re-derives thresholds; `max_mean_step` re-derives thresholds AND re-runs
 shadow; keys tune does not paste but one report or fit reads are routed by
-prefix (`tune.READ_BY`: the budget and controller knobs to shadow, the
+prefix (`config_keys.READ_BY`: the budget and controller knobs to shadow, the
 guardrail window/smoothing/persistence and the `tuning.` floor multiples to
 thresholds, the backtest's own tables to a `backtest`-only class that
 re-runs `evaluate.backtest` and nothing else, the launch belief to
@@ -1251,7 +1269,7 @@ Two thresholds here are set on the quantity with the *consequence*, not the
 one that is easiest to measure. **`correlation` judges `deff = 1 + (m−1)ρ`,
 not `rho`**, at the clustering the learner deflates by: `m` is the mean
 number of FORCED outcomes per episode over the pairs the update learns
-from (`common.config.deff_from_episodes` over the forced ids — the one
+from (`common.clustering.deff_from_episodes` over the forced ids — the one
 home; exploit and restocked hours are not in it), so the verdict prices
 the frozen ρ by the consequence it has today and moves with the forced
 share exactly as every update's divisor does (`mean_forced_hours_live`
@@ -1320,7 +1338,7 @@ Rules, in order:
    is the calendar weeks `[t − W, t)` — a gap is a gap, not bridged by the
    last W fitted weeks — exactly the schedule production applies (§9.2),
    and each window is fit by the **same estimator** production pastes W
-   into, `train_baseline._solve_level_factors` (subcategory grain,
+   into, `fit.calibrate.solve_level_factors` (subcategory grain,
    shrinkage toward the parent, the censored basis, the
    `calibration_min_anchor_rows` floor) and applied through the same
    waterfall; a window too thin to fit scores its week uncalibrated, as
@@ -1491,12 +1509,15 @@ never share a verdict.
 
 **Shadow reports both calibration regimes.** The artifact's schedule stops
 at `test_end`, so every hold-out row falls back to the frozen anchor —
-"launch and never re-calibrate". `evaluate.shadow.weekly_refit_schedule`
+"launch and never re-calibrate". `evaluate.level.weekly_refit_schedule`
 re-fits the factors per shadow week (trailing window ending strictly before
 each week, fitted in shadow rather than the artifact so the pre-launch
 bundle stays clean of hold-out rows — rule 16) and `calibration_regimes`
 carries `frozen_anchor`, `weekly_refit`, and their `spread` on the same
-rows. Reading the pair: both near 1.0, the level held; only the frozen one
+rows — rescaled by `evaluate.level.refit_scale`, the one re-fit-over-frozen
+reading the backtest's `fidelity.weekly_refit` takes too (both through
+`BaselineModel.level_factors`; a factor swap is an exact rescale of
+`mu_ref`, so neither harness predicts twice). Reading the pair: both near 1.0, the level held; only the frozen one
 off, the anchor went stale and weekly re-fitting earns its keep; both off,
 the level moved faster than a weekly cadence can track — a retrain, not a
 cadence change.
@@ -1695,7 +1716,10 @@ The second row is the case this design makes most likely.
 
 Every piece of the production loop is tested alone and shadow rehearses
 the decision path on history, but nothing before this ran them **together
-for weeks on a shop that answers back**. `evaluate.pilot_sim` does: it
+for weeks on a shop that answers back**. `evaluate.pilot_sim` does (the
+run and its settings; the shop is `evaluate.pilot_shop.PilotSim` — the
+workspace, the clock, the shelf, the lanes, the two pricers — and the
+readings and grading `evaluate.pilot_grade`): it
 plays engineering and the shop against a demand world of its own
 (`evaluate.pilot_world`), in a workspace under `sim/` that never touches a
 production artifact. Its settings — the world, the run, the faults, the
@@ -1929,7 +1953,7 @@ restocked many times is one episode. And a zeroed `ending_inventory`
 CLOSES the listing whatever the counter does next: the next row opens a
 new id, even when that hour also restocked, and a mid-window zero is a
 write-off leftover, not shrink. The boundary has one home,
-`prepare_data.window_starts` (`window_signals.counter_ok` is the counter
+`common.windows.window_starts` (`window_signals.counter_ok` is the counter
 clause), which the ids and the defective-window drops both read;
 `counter_up_steps` in the `episode_universe` stage detail
 counts every up-step by what the previous hour did (restock continued /
@@ -1940,7 +1964,7 @@ C3's open question); such a window is `opens_empty`, dp-ineligible
 (§5.2). The
 replay and shadow plan each hour over the ROW's own counter, never the
 rows the episode turned out to have, so an extension is never seen
-before it happened — `common.episodes.planning_horizon` (the counter plus
+before it happened — `common.windows.planning_horizon` (the counter plus
 this hour) is the one spelling the replay, shadow, the simulator's
 templates and the feed row (`window_counter`, its inverse) read.
 Duplicate `(sku, fc, date, hour)` rows collide two
@@ -2075,11 +2099,14 @@ right. `step_sensitivity` shifts around the launch belief with the world
 held at the prior mean, and `intra_episode_deepening` reports both medians
 (`median_abs_eps_prior`, `median_abs_eps_in_use`).
 `derive_tau_initial` solves production's own equation: the budget is
-`explore.budget_today` at the widest launch prior std, Q-spreads are
+`engine.budget.budget_today` at the widest launch prior std, Q-spreads are
 collected under `engine.decide`'s explorability gate, and `n_days` is
-the calendar span (`episodes.calendar_days`) — the same three definitions
+the calendar span (`windows.calendar_days`) — the same three definitions
 shadow's derivation uses, so the cross-check can only disagree on the
-path, never on the bookkeeping. The replay's episode sample — what every
+path, never on the bookkeeping. The ledger fold, the episode sample and
+the reported block are shared outright (`evaluate.tau`: `fill_ledger`,
+`sample_ids`, `tau_derivation_block` — `tau_initial` and
+`implied_daily_spend` spelt once for both derivations). The replay's episode sample — what every
 policy figure, `intra_episode_moves`, `step_sensitivity`'s pool and the
 cross-check sit on — is `tuning.backtest_policy_episodes` (as shadow's is
 `monitoring.shadow_gate.sample_episodes`), so it is in the report's config

@@ -16,6 +16,10 @@ Three properties: it never retrains unless the model is absent or --retrain
 is given; a config edit re-runs what it invalidates (report vintages); it
 never invents a value -- SET BY OWNER keys stop it. `daily.update --apply`
 stays the human gate: the daily lane runs everything up to it.
+
+The order is `PLAN` below: one function per phase, asked in turn for the
+next steps, the first that has any wins. The readiness report is
+ops.readiness; the step runner and the phase names are ops.run.
 """
 
 import argparse
@@ -24,19 +28,20 @@ import sys
 
 import pandas as pd
 
-from ops.bootstrap_loop import PREPARED, step
+from ops.run import PHASES, PREPARED, step
 from common import episodes, provenance
+from common.cli import make_parser
 from common.config import load_config
 from common.io import read_json, write_json
+from common.paths import (BACKTEST_REPORT, DECISIONS, JOURNAL, RAW, READINESS,   # noqa: F401
+                          SHADOW_REPORT)
+from fit.artifacts import load_bundle
 from fit.train_baseline import schedule_reaches
 from ops import status, tune
+from ops.config_keys import report_staleness
+# moved to ops.readiness; the names stay here for callers
+from ops.readiness import report, write_readiness as _write_readiness          # noqa: F401
 
-RAW = "data/flc_raw.parquet"
-JOURNAL = "artifacts/advance_journal.json"
-DECISIONS = "artifacts/config_decisions.json"
-READINESS = "launch_readiness.md"
-PHASES = ("data", "bootstrap", "tune", "posterior", "shadow", "owner",
-          "launch", "daily")
 MAX_TUNE_ROUNDS = 4
 
 
@@ -48,56 +53,49 @@ PASTE_PHASE = {"exploration.tau_initial": "shadow"}
 
 def stale_reports(cfg, bundle, reports):
     """Reports produced against a bundle no longer on disk, or under a
-    config whose MOVED KEYS they actually read (tune.stale_keys, the same
-    routing status uses). A MEASURED paste that only writes back what a
-    report measured invalidates nothing. Returns {name: why}."""
+    config whose MOVED KEYS they actually read (config_keys.stale_keys, the
+    same routing status uses). A MEASURED paste that only writes back what
+    a report measured invalidates nothing. Returns {name: why}."""
     out = {}
-    posterior_path = cfg["posterior"]["path"]
-    posterior_now = (provenance.file_digest(posterior_path)
-                     if os.path.exists(posterior_path) else None)
-    for name, rep in reports.items():
-        if not rep:
-            continue
-        av = rep.get("artifact_versions") or {}
-        if bundle and av.get("baseline_model_version") not in (None, bundle):
-            out[name] = f"ran against bundle {av['baseline_model_version']}"
+    for name, v in report_staleness(cfg, bundle, reports).items():
+        if v["bundle_mismatch"]:
+            out[name] = f"ran against bundle {v['bundle']}"
             continue
         # shadow prices from the posterior FILE: a re-init (the launch belief
         # or the prior moved) or a rho paste after a retrain leaves it
         # grading a belief no longer on disk, and no config key says so
-        if name == "shadow" and av.get("posterior_digest") \
-                and av["posterior_digest"] != posterior_now:
+        if v["posterior_moved"]:
             out[name] = "ran against a posterior no longer on disk"
             continue
-        fp = rep.get("config") or {}
-        if not fp.get("snapshot"):
+        if not v["snapshot"]:
             # written before the fingerprint existed (or by another producer):
             # nothing says which config it graded, so it grades nothing now
-            if name in tune.ROUTED_REPORTS:
+            if v["routed"]:
                 out[name] = "no config fingerprint -- re-run under the config in force"
             continue
-        moved = [m.split(":")[0] for m in
-                 provenance.config_diff(fp["snapshot"], cfg)]
-        mine = tune.stale_keys(name, moved)
-        if mine:
-            out[name] = f"{tune.rerun_for(mine)}: " + ", ".join(mine)
+        if v["keys"]:
+            out[name] = f"{v['rerun']}: " + ", ".join(v["keys"])
     return out
 
 
 def _posterior_stale(cfg):
-    from engine.posterior import PosteriorStore
-    prior = read_json(cfg["posterior"]["prior"]["path"])
-    if not prior or not os.path.exists(cfg["posterior"]["path"]):
+    if not os.path.exists(cfg["posterior"]["prior"]["path"]) \
+            or not os.path.exists(cfg["posterior"]["path"]):
         return False
-    return PosteriorStore(cfg).launch_stale(prior["per_category"],
-                                            prior["episodes_per_week"])
+    bundle = load_bundle(cfg)
+    prior = bundle.prior
+    if not prior:
+        return False
+    return bundle.posterior.launch_stale(prior["per_category"],
+                                         prior["episodes_per_week"])
 
 
 def probe(cfg, root="reports", feed=None, retrain=False, failures=None):
     """Everything plan() decides on, read once from disk."""
     reports = status.read_reports(root)
+    artifacts = status.read_artifacts(cfg)
     seal = provenance.verify(cfg, provenance.load_seal(cfg))
-    cal = read_json(cfg["baseline_model"]["calibration_factor_path"]) or {}
+    cal = artifacts["calibration"] or {}
     sched = (cal.get("schedule") or {})
     launched = bool(cfg["data"].get("launch_date"))
     events_dir = cfg["events"]["store_dir"]
@@ -121,7 +119,7 @@ def probe(cfg, root="reports", feed=None, retrain=False, failures=None):
         "retrain": retrain,
         "stale": stale_reports(cfg, seal.get("bundle"), reports),
         "have": {n for n, r in reports.items() if r},
-        "tune": tune.collect(cfg, root, reports=reports),
+        "tune": tune.collect(cfg, root, reports=reports, artifacts=artifacts),
         "posterior": os.path.exists(cfg["posterior"]["path"]),
         # the seal covers the environment too: what moved outside the
         # artifacts since the last seal (config, code, libraries)
@@ -151,7 +149,7 @@ def probe(cfg, root="reports", feed=None, retrain=False, failures=None):
         "extract_range": (cfg["data"]["split"]["train_start"],
                           (cfg["data"].get("holdout") or {}).get("end")
                           or cfg["data"]["split"]["test_end"]),
-        "status": status.collect(cfg, root, reports=reports),
+        "status": status.collect(cfg, root, reports=reports, artifacts=artifacts),
     }
 
 
@@ -169,15 +167,16 @@ def _shadow_step(st):
     why = st["stale"].get("shadow")
     return _run("shadow (hold-out, every episode" + (f"; {why}" if why else "") + ")",
                 ["evaluate.shadow", "--input", PREPARED,
-                 "--out", "reports/shadow.json", "--max-episodes", "0",
+                 "--out", SHADOW_REPORT, "--max-episodes", "0",
                  "--workers", "0"],          # every core but one; byte-identical
                 phase="shadow", reevaluate=True)
 
 
-def plan(st):
-    """The next steps, in order, ending in a stop -- pure over probe()'s
-    state so every branch is testable without a workspace."""
-    steps = []
+# Each phase answers "what runs next?" from probe()'s state: a list of
+# steps ending in a stop, or None when the phase has nothing to do and the
+# next one is asked. plan() walks PLAN in order; the order IS the chain.
+
+def _plan_data(st):
     if not st["raw"] and not st["prepared"]:
         # per config: the split and hold-out dates size the pull. Credentials
         # come from ~/.env (REDSHIFT_*); download_flc fails loudly without them
@@ -185,19 +184,24 @@ def plan(st):
         return [_run("download the extract (config split/holdout dates)",
                      ["fit.download_flc", "--start-date", str(start),
                       "--end-date", str(end)], phase="data", reevaluate=True)]
+    return None
 
-    # 1. bootstrap: the ONLY place a retrain happens
+
+def _plan_bootstrap(st):
+    """1. bootstrap: the ONLY place a retrain happens."""
     if not st["model"] or not st["bundle"] or st["retrain"]:
         if not st["raw"]:
             return [_stop("bootstrap", "no raw extract to (re)train from",
                           [f"expected {RAW}"])]
-        steps.append(_run("bootstrap", ["ops.bootstrap_loop", "--input", RAW]
-                          + (["--seal-reason", "retrain"] if st["retrain"] else []),
-                          phase="bootstrap", reevaluate=True))
-        return steps
+        return [_run("bootstrap", ["ops.bootstrap_loop", "--input", RAW]
+                     + (["--seal-reason", "retrain"] if st["retrain"] else []),
+                     phase="bootstrap", reevaluate=True)]
+    return None
 
-    # 2. reports that grade a bundle or config no longer in force -- only
-    #    for the keys they read (stale_reports says which)
+
+def _plan_regrade(st):
+    """2. reports that grade a bundle or config no longer in force -- only
+    for the keys they read (stale_reports says which)."""
     if "backtest" in st["stale"]:
         why = st["stale"]["backtest"]
         if why.startswith("retrain:"):
@@ -210,30 +214,35 @@ def plan(st):
         if why.split(":")[0] in ("backtest", "backtest+shadow"):
             # only the backtest (and shadow, at step 5) reads it: no
             # artifact moved, no loop to turn
-            steps.append(_run(f"re-run backtest ({why})",
-                              ["evaluate.backtest", "--input", PREPARED,
-                               "--workers", "0", "--out", "reports/backtest.json"],
-                              phase="tune", reevaluate=True))
-        else:
-            steps.append(_run(f"re-grade ({why})",
-                              ["ops.bootstrap_loop", "--check-only"],
-                              phase="tune", reevaluate=True))
-        return steps
+            return [_run(f"re-run backtest ({why})",
+                         ["evaluate.backtest", "--input", PREPARED,
+                          "--workers", "0", "--out", BACKTEST_REPORT],
+                         phase="tune", reevaluate=True)]
+        return [_run(f"re-grade ({why})",
+                     ["ops.bootstrap_loop", "--check-only"],
+                     phase="tune", reevaluate=True)]
     if "thresholds" in st["stale"]:
-        steps.append(_run(f"re-derive thresholds ({st['stale']['thresholds']})",
-                          ["evaluate.derive_thresholds", "--input", PREPARED],
-                          phase="tune", reevaluate=True))
-        return steps
-    # A shadow graded on a bundle (or a posterior) no longer on disk waits
-    # for step 5, AFTER the pastes and the posterior re-init it must price
-    # with -- re-run here it stood on the pre-retrain rho and belief. Until
-    # then tune's one-model invariant and its tau derivation (both read the
-    # stale shadow) are set aside, never a BLOCK and never a paste.
-    shadow_ghost = str(st["stale"].get("shadow", "")).startswith("ran against")
+        return [_run(f"re-derive thresholds ({st['stale']['thresholds']})",
+                     ["evaluate.derive_thresholds", "--input", PREPARED],
+                     phase="tune", reevaluate=True)]
+    return None
+
+
+def _shadow_ghost(st):
+    """A shadow graded on a bundle (or a posterior) no longer on disk waits
+    for step 5, AFTER the pastes and the posterior re-init it must price
+    with -- re-run here it stood on the pre-retrain rho and belief. Until
+    then tune's one-model invariant and its tau derivation (both read the
+    stale shadow) are set aside, never a BLOCK and never a paste."""
+    return str(st["stale"].get("shadow", "")).startswith("ran against")
+
+
+def _plan_tune(st):
+    """3. tune: paste what the reports measured, settle, repeat; 3b. re-seal
+    a moved environment once nothing is left to paste."""
+    shadow_ghost = _shadow_ghost(st)
     ignore = {"reports agree on one model", "reports match the artifacts",
               "reports present"} if shadow_ghost else {"reports present"}
-
-    # 3. tune: paste what the reports measured, settle, repeat
     rep = st["tune"]
     blocks = [f for f in rep["findings"]
               if f["class"] == tune.BLOCK and f["key"] not in ignore]
@@ -246,10 +255,9 @@ def plan(st):
     if pasteable:
         keys = [f["key"] for f in pasteable]
         phases = {PASTE_PHASE.get(k, "tune") for k in keys}
-        steps.append({"kind": "paste", "label": "tune --apply",
-                      "phase": phases.pop() if len(phases) == 1 else "tune",
-                      "reevaluate": True, "keys": keys})
-        return steps
+        return [{"kind": "paste", "label": "tune --apply",
+                 "phase": phases.pop() if len(phases) == 1 else "tune",
+                 "reevaluate": True, "keys": keys}]
     # a PASTE the report could not measure (NOT RUN) carries no value:
     # --apply would skip it and the plan would repeat to the round budget
     unmeasured = [f for f in rep["to_paste"] if f.get("recommended", 0) is None]
@@ -263,33 +271,41 @@ def plan(st):
     if st.get("environment_drift"):
         what = st["environment_drift"][0].split(" moved")[0]
         reason = "libraries" if what == "libraries" else "config"
-        steps.append(_run(f"re-seal ({'; '.join(st['environment_drift'])})",
-                          ["ops.seal", "--reason", reason],
-                          phase="tune", reevaluate=True))
-        return steps
+        return [_run(f"re-seal ({'; '.join(st['environment_drift'])})",
+                     ["ops.seal", "--reason", reason],
+                     phase="tune", reevaluate=True)]
+    return None
 
-    # 4. posterior, once -- re-initialised only BEFORE launch, while it holds
-    #    no production state and the launch belief it was written with moved
+
+def _plan_posterior(st):
+    """4. posterior, once -- re-initialised only BEFORE launch, while it
+    holds no production state and the launch belief it was written with
+    moved."""
     if not st["posterior"]:
-        steps.append(_run("init posterior", ["ops.init_posterior"],
-                          phase="posterior", reevaluate=True))
-        return steps
+        return [_run("init posterior", ["ops.init_posterior"],
+                     phase="posterior", reevaluate=True)]
     if st.get("posterior_stale") and not st["launched"]:
-        steps.append(_run("re-init posterior (launch belief moved; no outcome "
-                          "consumed yet)", ["ops.init_posterior", "--force"],
-                          phase="posterior", reevaluate=True))
-        return steps
+        return [_run("re-init posterior (launch belief moved; no outcome "
+                     "consumed yet)", ["ops.init_posterior", "--force"],
+                     phase="posterior", reevaluate=True)]
+    return None
 
-    # 5. shadow on the hold-out, the launch record
+
+def _plan_shadow(st):
+    """5. shadow on the hold-out, the launch record."""
     if "shadow" not in st["have"] or "shadow" in st["stale"]:
         return [_shadow_step(st)]
     if st["shadow_gate"] and not str(st["shadow_gate"]).startswith("PASS"):
         return [_stop("shadow", f"shadow gate: {st['shadow_gate']}",
                       ["read reports/shadow.json -> shadow_gate, rejected_reasons"])]
+    return None
 
-    # 6. values still null. A MEASURED one the process could not derive is a
-    #    report problem (the note in that report says why -- a thin week, no
-    #    pre-window); the SET BY OWNER ones are never invented
+
+def _plan_owner(st):
+    """6. values still null. A MEASURED one the process could not derive is
+    a report problem (the note in that report says why -- a thin week, no
+    pre-window); the SET BY OWNER ones are never invented."""
+    rep = st["tune"]
     nulls = [n for n in st["nulls"] if n != "data.launch_date"]
     by_key = {f["key"]: f for f in rep["findings"]}
     measured = {".".join(k) for k in tune.MEASURED_KEYS}
@@ -303,8 +319,12 @@ def plan(st):
                               if k in by_key else "null -- see reports/thresholds.json")
                   for k in nulls]
         return [_stop("owner", "SET BY OWNER values are null", detail)]
+    return None
 
-    # 7. launch day
+
+def _plan_launch(st):
+    """7. launch day: the schedule reaches the week being priced, re-fit
+    and re-sealed by the process, on a fresh enough extract."""
     if not st["launched"]:
         return [_stop("launch", "data.launch_date is null",
                       ["set it on launch day; the weekly re-fit then schedules "
@@ -313,12 +333,11 @@ def plan(st):
               or (st["schedule_end"] or "") < (st["expected_schedule_end"] or "")
               or st.get("manifest_moved", False))
     if behind:
-        steps.append(_run("weekly level re-fit",
-                          ["fit.train_baseline", "--input", PREPARED,
-                           "--fit-calibration"], phase="launch"))
-        steps.append(_run("re-seal", ["ops.seal", "--reason", "weekly-refit"], phase="launch",
-                          reevaluate=True))
-        return steps
+        return [_run("weekly level re-fit",
+                     ["fit.train_baseline", "--input", PREPARED,
+                      "--fit-calibration"], phase="launch"),
+                _run("re-seal", ["ops.seal", "--reason", "weekly-refit"], phase="launch",
+                     reevaluate=True)]
     if not st["schedule_end"]:
         return [_stop("launch", "the calibration artifact carries an empty "
                       "schedule", ["python3 -m fit.train_baseline --input "
@@ -329,12 +348,16 @@ def plan(st):
                       [f"schedule ends {st['schedule_end']}, this week is "
                        f"{st['this_week']} -- refresh data/prepared.parquet "
                        "(download_flc + prepare_data), then run again"])]
+    return None
 
-    # 8. daily lane, up to the human gate -- BEFORE the red check: the
-    #    status rows that go red after launch (a fired stop, assurance)
-    #    are the ones only this lane refreshes. Stopping on them first
-    #    ingested nothing, so the windowed rate never diluted and the
-    #    monitor never re-read; a fired stop deadlocked the lane
+
+def _plan_daily(st):
+    """8. daily lane, up to the human gate -- BEFORE the red check: the
+    status rows that go red after launch (a fired stop, assurance) are the
+    ones only this lane refreshes. Stopping on them first ingested
+    nothing, so the windowed rate never diluted and the monitor never
+    re-read; a fired stop deadlocked the lane."""
+    steps = []
     if st["feed"]:
         steps.append(_run("ingest outcomes",
                           ["daily.ingest_outcomes", "--feed", st["feed"]]
@@ -365,6 +388,25 @@ def plan(st):
                         "read the batch summary above first -- a second --apply "
                         "consuming nothing is correct"]))
     return steps
+
+
+# the run order, as a table: (phase, what it asks). The daily lane always
+# answers, so the walk always ends in a stop.
+PLAN = (("data", _plan_data), ("bootstrap", _plan_bootstrap),
+        ("tune", _plan_regrade), ("tune", _plan_tune),
+        ("posterior", _plan_posterior), ("shadow", _plan_shadow),
+        ("owner", _plan_owner), ("launch", _plan_launch),
+        ("daily", _plan_daily))
+
+
+def plan(st):
+    """The next steps, in order, ending in a stop -- pure over probe()'s
+    state so every branch is testable without a workspace."""
+    for _phase, ask in PLAN:
+        steps = ask(st)
+        if steps is not None:
+            return steps
+    return []
 
 
 # ----------------------------------------------------------------- driver
@@ -437,101 +479,10 @@ def execute(steps, config_path, root="reports", journal=JOURNAL):
     return again, failed
 
 
-# ---------------------------------------------------------------- report
-
-def report(cfg, root="reports", journal=JOURNAL, decisions=DECISIONS):
-    """The launch-readiness report: what ran in each phase, every config
-    value the process changed and why, the owner's decisions, the config in
-    force, status, and what is still waited on. Assembled from the journal
-    advance keeps, tune's decision log, the config and the reports -- never
-    from memory."""
-    runs = (read_json(journal) or {}).get("runs", [])
-    pastes = (read_json(decisions) or {}).get("runs", [])
-    st = status.collect(cfg, root)
-    findings = tune.collect(cfg, root)["findings"]
-    seal = provenance.verify(cfg, provenance.load_seal(cfg))
-    fp = provenance.config_fingerprint(cfg, phase=None)
-    now = pd.Timestamp.now("UTC").strftime("%Y-%m-%d %H:%M UTC")
-    last_stop = next((r["stop"] for r in reversed(runs) if r.get("stop")), None)
-
-    lines = [f"# Launch readiness — {now}", "",
-             f"bundle `{seal.get('bundle')}` · config `{cfg['meta']['config_version']}` "
-             f"(digest `{fp['digest']}`) · status **{st['verdict']}**", ""]
-
-    lines += ["## What ran, by phase", ""]
-    by_phase = {}
-    for r in runs:
-        by_phase.setdefault(r["phase"], []).append(r)
-    for phase in PHASES:
-        rs = by_phase.get(phase)
-        if not rs:
-            continue
-        lines.append(f"### {phase}")
-        for r in rs:
-            for item in r["ran"]:
-                if "command" in item:
-                    lines.append(f"- {r['at'][:16]}  `{item['command']}`")
-                else:
-                    lines.append(f"- {r['at'][:16]}  tune --apply pasted "
-                                 + (", ".join(f"`{k}`" for k in item["pasted"]) or "nothing")
-                                 + (f"; skipped {', '.join(item['skipped'])}"
-                                    if item["skipped"] else ""))
-            if r.get("stop"):
-                lines.append(f"- {r['at'][:16]}  STOP: {r['stop']['why']}")
-        lines.append("")
-
-    lines += ["## Config values the process changed, and why", "",
-              "| when | key | before → after | why | source |", "|---|---|---|---|---|"]
-    for run in pastes:
-        for f in run.get("applied", []):
-            lines.append(f"| {run['at'][:16]} | `{f['key']}` | {f.get('current')} → "
-                         f"{f.get('recommended')} | {str(f.get('evidence', '')).replace('|', '/')} "
-                         f"| {f.get('source', '')} |")
-    if lines[-1].startswith("|---"):
-        lines.append("| — | — | no paste recorded yet | — | — |")
-    lines.append("")
-
-    lines += ["## Config in force (every MEASURED and SET BY OWNER value)", "",
-              "| key | value | class | current? | source |", "|---|---|---|---|---|"]
-    for f in findings:
-        if f["class"] in (tune.PASTE, tune.OWNER):
-            lines.append(f"| `{f['key']}` | {f.get('current')} | "
-                         f"{'MEASURED' if f['class'] == tune.PASTE else 'SET BY OWNER'} | "
-                         f"{f['status']} | {f.get('source', '')} |")
-    nulls = status.runtime_nulls(cfg)
-    lines += ["", "Still null: " + (", ".join(f"`{n}`" for n in nulls) or "none"), ""]
-
-    lines += ["## Status", "", "| check | verdict | detail |", "|---|---|---|"]
-    lines += [f"| {r['check']} | {r['verdict']} | {r['detail'].replace('|', '/')} |"
-              for r in st["checks"]]
-    lines.append("")
-
-    lines += ["## Waiting on", ""]
-    if last_stop:
-        lines.append(f"**[{last_stop['phase']}] {last_stop['why']}**")
-        lines += [f"- {d}" for d in last_stop["detail"]]
-    else:
-        lines.append("nothing recorded -- run `python3 -m ops.advance`")
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _write_readiness(config_path, root):
-    cfg = load_config(config_path)
-    text = report(cfg, root)
-    os.makedirs(root, exist_ok=True)
-    open(os.path.join(root, READINESS), "w").write(text)
-    # the audit trail: the bundle's snapshot carries how it graded
-    seal = provenance.load_seal(cfg) or {}
-    provenance.archive_reports(cfg, root, seal.get("bundle"))
-    return text
-
-
 def main():
-    ap = argparse.ArgumentParser(prog="ops.advance", description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--config", default="config.yaml")
-    ap.add_argument("--reports", default="reports")
+    ap = make_parser(prog="ops.advance", description=__doc__,
+                     formatter_class=argparse.RawDescriptionHelpFormatter,
+                     reports=True)
     ap.add_argument("--feed", default=None,
                     help="yesterday's hourly feed parquet: runs the daily lane")
     ap.add_argument("--failures", default=None,

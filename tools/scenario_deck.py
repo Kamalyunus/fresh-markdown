@@ -18,14 +18,15 @@ import os
 
 import numpy as np
 
+from common import episodes
 from common.config import load_config, reference_discount
 from common.io import read_json
 from common.parallel import map_episodes
 from common.provenance import config_fingerprint
 from engine import dp as dp_mod
 from engine import explore
-from engine.demand import expected_min_demand_inventory, mu_at
 from engine.posterior import launch_belief
+from evaluate.backtest import _dp_price, _simulate_arm
 
 P0 = 10_000.0          # list price; every currency figure scales with it
 # the page's two exploration sliders: the tau the affordable set is read
@@ -63,44 +64,56 @@ def beliefs(cfg):
     return {"cold": round(cold, 3), "learned": round(learned, 3)}
 
 
-def _solve(cache, key, cfg, d_ref, r):
-    if key not in cache:
-        gamma, mu, eps, q, h, anchor = key
-        cache[key] = dp_mod.solve(P0, P0 * gamma, q, [mu] * h, d_ref, eps, r, cfg,
-                                  anchor_discount=anchor, entry=(anchor is None))
-    return cache[key]
+def _episode(d_ref, r, gamma, mu, q0, hours, restock_at=None, restock_units=0):
+    """The deck's shelf as the replay's episode dict (the frame
+    evaluate.backtest._simulate_arm walks): a flat forecast at `mu`, the
+    row's own counter each hour, no shrink, and a restock as the
+    adjustment landing after hour `restock_at - 1`'s sale -- on the shelf
+    at hour `restock_at`, as production learns of a delivery next hour."""
+    adjustment = np.zeros(hours)
+    if restock_at is not None:
+        if restock_at < 1:
+            raise ValueError("a restock lands after an hour's sale: restock_at >= 1")
+        adjustment[restock_at - 1] += restock_units
+    return {"original_price": P0, "cost": P0 * gamma, "q0": q0, "hours": hours,
+            "adjustment": adjustment, "shrink": 0, "mu_ref_path": [mu] * hours,
+            "r": r, "d_ref": d_ref, "category": "_default",
+            "counter": [episodes.window_counter(hours - t) for t in range(hours)]}
 
 
 def simulate(cache, cfg, d_ref, r, gamma, mu, eps_belief, q0, hours,
              world=1.0, restock_at=None, restock_units=0, fixed=None):
-    """Hour-by-hour: re-solve from the actual shelf (as production does),
-    sell E[min(D, q)] under the WORLD's demand, carry the anchor. `fixed`
-    replaces the solver with a schedule (a flat reference or a legacy ramp).
-    Returns the path and the scorecard."""
+    """Hour-by-hour through the ONE forward simulation
+    (evaluate.backtest._simulate_arm): re-solve from the actual shelf (as
+    production does; `_dp_price`, each solve kept in `cache` for the
+    state's other paths), sell E[min(D, q)] under the WORLD's demand,
+    carry the anchor. `fixed` replaces the solver with a schedule (a flat
+    reference or a legacy ramp). Returns the path and the scorecard."""
     cost = P0 * gamma
-    q, anchor = float(q0), None
-    rows, disc_cost = [], 0.0
+    forecast = _episode(d_ref, r, gamma, mu, q0, hours, restock_at, restock_units)
+    if fixed is not None:
+        def price_at(t, q_int, anchor):
+            return float(fixed[t])
+    else:
+        dp = _dp_price(forecast, cfg, eps_belief)
+
+        def price_at(t, q_int, anchor):
+            key = (gamma, mu, eps_belief, q_int, hours - t, anchor)
+            if key not in cache:
+                cache[key] = float(dp(t, q_int, anchor))
+            return cache[key]
+    # the solver plans on the forecast; the shelf sells at the world's level
+    arm = _simulate_arm(dict(forecast, mu_ref_path=[mu * world] * hours), cfg,
+                        price_at, eps_belief)
+    rows = []
     for t in range(hours):
-        q_int = int(round(q))
-        if restock_at is not None and t == restock_at:
-            q += restock_units
-            q_int = int(round(q))
-        if q_int <= 0:
-            rows.append({"h": t, "q": 0.0, "d": None, "sold": 0.0})
-            continue
-        if fixed is not None:
-            d = float(fixed[t])
+        if t < len(arm["path"]) and arm["path"][t] is not None:
+            q, sold = arm["hourly"][t]
+            rows.append({"h": t, "q": round(q, 2), "d": round(arm["path"][t], 3),
+                         "sold": round(sold, 2)})
         else:
-            res = _solve(cache, (gamma, mu, eps_belief, q_int, hours - t, anchor),
-                         cfg, d_ref, r)
-            d = float(res.tiers[res.optimal_index])
-            anchor = d
-        mu_w = mu_at(mu * world, d, d_ref, eps_belief, cfg["pricing"]["demand_floor"])
-        sold = min(expected_min_demand_inventory(mu_w, r, q_int, cfg["pricing"]["negbin_max_k"]), q)
-        disc_cost += P0 * d * sold
-        rows.append({"h": t, "q": round(q, 2), "d": round(d, 3), "sold": round(sold, 2)})
-        q -= sold
-    left = max(q, 0.0)
+            rows.append({"h": t, "q": 0.0, "d": None, "sold": 0.0})
+    left, disc_cost = arm["left"], arm["disc_cost"]
     return {"path": rows,
             "score": {"leftover": round(left, 2), "scrap_cost": round(cost * left, 0),
                       "discount_cost": round(disc_cost, 0),
@@ -154,8 +167,9 @@ def exploration_table(res, cfg, eps, d_ref):
 def one_state(item, cfg):
     """Everything the page needs for one (gamma, mu, belief, q, h) cell."""
     gamma, mu, eps_name, eps, q, h, d_ref, r = item
-    cache = {}
-    res = _solve(cache, (gamma, mu, eps, q, h, None), cfg, d_ref, r)
+    cache = {}                             # this state's solves, shared by its paths
+    res = dp_mod.solve(P0, P0 * gamma, q, [mu] * h, d_ref, eps, r, cfg,
+                       anchor_discount=None, entry=True)
     star = res.optimal_index
     _, d_max = dp_mod.feasible_tiers(P0, P0 * gamma, cfg["pricing"]["tier_step"])
     q_by = {int(j): round(float(v), 1) for j, v in res.q_by_tier.items()}

@@ -58,7 +58,10 @@ def deterioration_series(series, smooth_days, window, worse_when_higher, basis):
     its trailing `window`-calendar-day mean shifted by the same smoothing so
     the two windows never overlap. FULL windows only -- min_periods below
     `window` manufactures deviations that are an estimator artifact. Days
-    with no reading are dropped; the index is the "YYYY-MM-DD" close day."""
+    with no reading are dropped; the index is the "YYYY-MM-DD" close day.
+    A CALENDAR window laid over close days: distinct from the trading-day
+    window of events.pairs.quality_counts and the calendar IL base of
+    engine.budget.trailing_daily_il -- three windows, kept apart."""
     s = smoothed_calendar(series, smooth_days)
     if s.empty:
         return pd.Series(dtype=float)
@@ -66,6 +69,50 @@ def deterioration_series(series, smooth_days, window, worse_when_higher, basis):
     dev = deviation(s, trailing, worse_when_higher, basis).dropna()
     dev.index = dev.index.strftime("%Y-%m-%d")
     return dev
+
+
+def evaluate_guardrail(block, threshold, persistence_days):
+    """Fires only after `persistence_days` CONSECUTIVE CALENDAR days over
+    threshold, ending on the latest day in the series. Persistence is
+    load-bearing, not decoration: it buys sensitivity for thresholds sitting
+    just above the measured noise floor (design 5.12). A calendar day with
+    no reading breaks the streak -- an unobserved day is not a day over.
+    The ONE streak rule: the monitor's stop conditions and shadow's
+    controller trace both read it."""
+    base = {"fired": False, "threshold": threshold,
+            "persistence_days": persistence_days,
+            "basis": block.get("basis"), "latest": block.get("latest")}
+    if threshold is None:
+        return {**base, "status": "BLOCKED -- threshold is null (SET BY OWNER)"}
+    by_day = block.get("by_day") or {}
+    if not by_day:
+        # the series is empty until window + 2 x smoothing - 1 consecutive
+        # close days (first_reading_close_days, carried by the block): a
+        # short series legitimately has nothing to compare yet, and the
+        # note says when it will
+        first = block.get("first_reading_after_close_days")
+        return {**base, "consecutive_days_over": 0,
+                "status": "no comparable days yet" + (
+                    f" (first reading after {first} consecutive close days)"
+                    if first is not None else "")}
+    streak, prev = 0, None
+    for day in sorted(by_day, reverse=True):
+        stamp = pd.Timestamp(day)
+        if prev is not None and (prev - stamp).days != 1:
+            break                                  # a missing calendar day
+        if not by_day[day] > threshold:
+            break
+        streak += 1
+        prev = stamp
+    fired = streak >= persistence_days
+    return {
+        **base,
+        "fired": fired,
+        "consecutive_days_over": streak,
+        "status": (f"FIRED -- over {threshold} for {streak} consecutive days"
+                   if fired else
+                   f"{streak}/{persistence_days} consecutive days over threshold"),
+    }
 
 
 def first_reading_close_days(smooth_days, window):

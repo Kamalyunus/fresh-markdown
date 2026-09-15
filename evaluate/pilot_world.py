@@ -25,12 +25,11 @@ import pandas as pd
 
 from common import episodes
 from common.config import reference_discount
-from common.io import read_json
 # the request -> state helpers are engine.state's: the one home Lane B
 # (ops.price_batch) and the simulator share
 from engine.state import mu_ref_paths
+from fit.artifacts import load_bundle
 from fit.fit_dispersion import lookup_r
-from fit.train_baseline import BaselineModel
 from tools.make_dummy_flc import SCHEMA as FEED_SCHEMA
 
 # every fault the simulator can inject, its argument, and where it lands
@@ -118,10 +117,11 @@ class World:
                  r_scale=1.0, level_drift_per_day=1.0, faults=None,
                  episode_shock_sd=0.0):
         self.cfg = cfg
-        self.model = BaselineModel(cfg)
-        self.r_lookup = read_json(cfg["dispersion"]["r_lookup_path"])
-        if self.r_lookup is None:
-            raise FileNotFoundError(cfg["dispersion"]["r_lookup_path"])
+        # the sealed model and the r lookup, by the one loader (a missing
+        # lookup is a FileNotFoundError naming its path)
+        bundle = load_bundle(cfg)
+        self.model = bundle.model
+        self.r_lookup = bundle.r_lookup
         self.templates = episode_templates(prepared, cfg, opened_from)
         cats = sorted({t["category"] for t in self.templates})
         if isinstance(epsilon_true, dict):

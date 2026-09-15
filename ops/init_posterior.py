@@ -7,17 +7,16 @@ the posterior is production learning state.
 Run: python3 -m ops.init_posterior [--force]
 """
 
-import argparse
 import os
 
+from common.cli import make_parser
 from common.config import load_config
-from common.io import read_json
 from engine.posterior import PosteriorStore
+from fit.artifacts import load_bundle
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="ops.init_posterior")
-    ap.add_argument("--config", default="config.yaml")
+    ap = make_parser(prog="ops.init_posterior")
     ap.add_argument("--force", action="store_true",
                     help="overwrite an existing posterior (discards all "
                          "learning state)")
@@ -30,7 +29,7 @@ def main():
                          "state. Re-run with --force only if you mean to "
                          "discard it.")
 
-    prior = read_json(cfg["posterior"]["prior"]["path"])
+    prior = load_bundle(cfg).prior
 
     store = PosteriorStore.initialise(cfg, prior["per_category"],
                                       prior["episodes_per_week"])

@@ -99,10 +99,19 @@ def test_the_generator_crosses_midnight_and_leaves_the_final_counter_positive():
     assert cross_midnight_windows(flat) == 0
     assert final_counter_positive_share(flat) < share
     # and the cross-midnight windows still pass the id rule as one episode
-    from fit.prepare_data import assign_episode_ids, SOURCE_TO_CANONICAL
+    from common.windows import assign_episode_ids
+    from fit.prepare_data import SOURCE_TO_CANONICAL
     d = df.rename(columns=SOURCE_TO_CANONICAL).sort_values(["sku_id", "fc", "date", "hour_of_day"])
     ids = assign_episode_ids(d)
     assert d.groupby(ids).date.nunique().gt(1).sum() == cross_midnight_windows(df)
+    # the tool reads its windows through the chain's rule and spells no
+    # clock or counter step of its own: its window reading once omitted the
+    # counter clause, and the printed counts and the chain's ids disagreed
+    import inspect
+    from tools import make_dummy_flc as gen
+    src = inspect.getsource(gen)
+    assert "assign_episode_ids(" in src and "window_starts(" in src
+    assert ".dt.total_seconds()" not in src and "prev.flc_window" not in src
 
 
 def test_an_extension_hour_arrives_more_than_it_shrinks():

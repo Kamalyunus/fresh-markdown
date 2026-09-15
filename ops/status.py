@@ -7,16 +7,17 @@ run", never as a pass. Exit code 1 on any FAIL, so it can gate a script.
 Run: python3 -m ops.status [--json]
 """
 
-import argparse
 import json
 import os
 
+from common.cli import make_parser
 from common.config import (OWN_DATA_WEIGHT, RUNTIME_REQUIRED,
                            artifact_mirror_drift, config_get, load_config)
 from common import provenance
 from common.guardrail import verdict_is_blocking, verdict_is_insufficient
 from common.io import read_json
-from engine import explore
+from ops import tune
+from ops.config_keys import report_staleness, tau_provenance_error
 
 PASS, FAIL, WARN, NONE = "PASS", "FAIL", "WARN", "not run"
 
@@ -51,6 +52,15 @@ def runtime_nulls(cfg):
 def read_reports(root):
     return {n: read_json(os.path.join(root, f"{n}.json"))
             for n in ("backtest", "thresholds", "shadow", "monitor", "assurance")}
+
+
+def read_artifacts(cfg):
+    """The fitted artifacts the rows read (None where absent), read once
+    per run and handed down -- to tune.collect too, beside `read_reports`."""
+    return {"calibration": read_json(cfg["baseline_model"]["calibration_factor_path"]),
+            "prior": read_json((cfg["posterior"].get("prior") or {}).get("path")),
+            "r_lookup": read_json(cfg["dispersion"].get("r_lookup_path")),
+            "rho": read_json(cfg["dispersion"].get("rho_path"))}
 
 
 def _launch_blockers(cfg):
@@ -107,15 +117,13 @@ def _mirrors(cfg):
                 "config matches the frozen artifacts")
 
 
-def _config_vs_reports(cfg, root, reports=None):
+def _config_vs_reports(cfg, root, reports=None, artifacts=None):
     """MEASURED values pasted from a REPORT, checked against that report
     (`artifact mirrors` covers the ones pasted from a frozen artifact). A
     value nobody measured this run is unverified, never a match. Values
     still null are launch blockers and are reported there, not twice here."""
-    from ops import tune
-
     try:
-        rep = tune.collect(cfg, root, reports=reports)
+        rep = tune.collect(cfg, root, reports=reports, artifacts=artifacts)
     except Exception as exc:                                   # noqa: BLE001
         return _row("config mirrors reports", NONE,
                     f"could not evaluate: {type(exc).__name__}: {exc}",
@@ -193,11 +201,11 @@ def _calibration(cfg, backtest):
                 "" if ok else "fidelity.by_week, by_window, measurement_10")
 
 
-def _calibration_convergence(cfg):
+def _calibration_convergence(cfg, artifacts=None):
     # the calibration <-> dispersion loop is resolved by iteration; this row
     # says whether anyone ASSERTED the fixed point settled. WARN, not FAIL:
     # like the level band it is a chain-health reading, not a launch gate.
-    cal = read_json(cfg["baseline_model"]["calibration_factor_path"])
+    cal = (artifacts or read_artifacts(cfg))["calibration"]
     if row := _needs(cal, "calibration convergence", "calibration artifact",
                      key="convergence", predates=(
                          "never checked -- the factor <-> r loop is assumed, "
@@ -232,8 +240,8 @@ def _calibration_convergence(cfg):
                               "estimate_prior, fit_dispersion, re-check")
 
 
-def _prior(cfg):
-    prior = read_json((cfg["posterior"].get("prior") or {}).get("path"))
+def _prior(cfg, artifacts=None):
+    prior = (artifacts or read_artifacts(cfg))["prior"]
     if row := _needs(prior, "elasticity prior", "prior artifact"):
         return row
     per = prior.get("per_category", {})
@@ -247,14 +255,15 @@ def _prior(cfg):
                 + (f" · {wrong} wrong-signed (pooled)" if wrong else ""))
 
 
-def _boundaries(cfg):
+def _boundaries(cfg, artifacts=None):
     """Rule 3: a fit pinned at a search bound is not an estimate. The fits
     flag it (the prior's lower-boundary categories, a level factor at the
     bracket end, an r at the search bound); this row is where the flags are
     READ, so a pinned fit is a visible WARN and never silently green."""
-    prior = read_json((cfg["posterior"].get("prior") or {}).get("path")) or {}
-    cal = read_json(cfg["baseline_model"]["calibration_factor_path"]) or {}
-    r_lookup = read_json(cfg["dispersion"]["r_lookup_path"]) or {}
+    artifacts = artifacts or read_artifacts(cfg)
+    prior = artifacts["prior"] or {}
+    cal = artifacts["calibration"] or {}
+    r_lookup = artifacts["r_lookup"] or {}
     if not (prior or cal or r_lookup):
         return _row("boundary solutions", NONE, "no fitted artifacts yet")
     pinned = []
@@ -309,36 +318,29 @@ def _vintages(cfg, state, reports):
     live = provenance.config_fingerprint(cfg, phase=None)["digest"]
     stale, checked = [], []
     moved = {}                  # (digest, what moved) -> [report names]
-    for name, rep in reports.items():
-        if not rep:
-            continue                # its own row already reads "not run"
-        av = rep.get("artifact_versions") or {}
+    # one judgement for both drivers (ops.config_keys.report_staleness);
+    # a report with no row of its own is absent there ("not run" already)
+    for name, v in report_staleness(cfg, bundle, reports).items():
         # None = written before any bundle existed: current, as advance reads it
-        if av.get("baseline_model_version") not in (None, bundle):
-            stale.append(f"{name} ran against bundle "
-                         f"{av['baseline_model_version']}")
+        if v["bundle_mismatch"]:
+            stale.append(f"{name} ran against bundle {v['bundle']}")
             continue
-        fp = rep.get("config")
-        if fp:
-            from ops import tune                        # sibling; no cycle
-            if name not in tune.ROUTED_REPORTS:
+        if v["fingerprint"]:
+            if not v["routed"]:
                 # a production report reads the live config on every run;
                 # no config move re-grades it
-                checked.append(f"{name}={fp.get('phase')}")
-            elif fp.get("digest") != live:
-                diff = provenance.config_diff(fp.get("snapshot") or {}, cfg)
-                # only a key THIS report reads re-grades it (tune.stale_keys,
-                # the routing advance re-runs by): a paste that writes back
+                checked.append(f"{name}={v['phase']}")
+            elif v["digest"] != live:
+                # only a key THIS report reads re-grades it (stale_keys, the
+                # routing advance re-runs by): a paste that writes back
                 # what it measured, or a key another report reads, does not
-                mine = set(tune.stale_keys(name, [d.split(":")[0] for d in diff]))
-                live_moves = [d for d in diff if d.split(":")[0] in mine]
-                if live_moves:
-                    moved.setdefault((fp.get("digest"), "; ".join(live_moves)),
+                if v["moved"]:
+                    moved.setdefault((v["digest"], "; ".join(v["moved"])),
                                      []).append(name)
                 else:
-                    checked.append(f"{name}={fp.get('phase')} (pastes since, none it reads)")
+                    checked.append(f"{name}={v['phase']} (pastes since, none it reads)")
             else:
-                checked.append(f"{name}={fp.get('phase')}")
+                checked.append(f"{name}={v['phase']}")
         else:
             # no fingerprint: nothing says which config it graded, so it is
             # re-run (advance does) -- reading it as current let a shadow from
@@ -379,7 +381,7 @@ def _tau(cfg, backtest, shadow=None):
                     "or a gate-passing backtest")
     # a paste must still match its source; shadow's anchored-path derivation
     # outranks the backtest's exploit-only one
-    stale = explore.tau_provenance_error(cfg, backtest, shadow)
+    stale = tau_provenance_error(cfg, backtest, shadow)
     if stale:
         return _row("exploration tau", FAIL, stale.split(". ")[0],
                     "python3 -m evaluate.shadow, then re-paste tau_initial")
@@ -460,22 +462,24 @@ def _assurance(rep):
     return _row("assurance", WARN if thin else PASS, detail)
 
 
-def collect(cfg, root="reports", reports=None):
+def collect(cfg, root="reports", reports=None, artifacts=None):
     """`root` is injectable so the tests can point at a fixture directory;
-    `reports` lets advance hand over the JSON it already read."""
+    `reports` and `artifacts` let advance hand over the JSON it already
+    read (read_reports, read_artifacts)."""
     reports = reports or read_reports(root)
+    artifacts = artifacts or read_artifacts(cfg)
     backtest, shadow = reports["backtest"], reports["shadow"]
     state = provenance.verify(cfg, provenance.load_seal(cfg))
     rows = [
         _launch_blockers(cfg),
         _bundle(cfg, state),
         _mirrors(cfg),
-        _config_vs_reports(cfg, root, reports),
+        _config_vs_reports(cfg, root, reports, artifacts),
         _vintages(cfg, state, reports),
         _calibration(cfg, backtest),
-        _calibration_convergence(cfg),
-        _prior(cfg),
-        _boundaries(cfg),
+        _calibration_convergence(cfg, artifacts),
+        _prior(cfg, artifacts),
+        _boundaries(cfg, artifacts),
         _tau(cfg, backtest, shadow),
         _shadow(shadow),
         _guardrails(reports["thresholds"]),
@@ -505,10 +509,8 @@ def render(report):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="ops.status", description=__doc__)
-    ap.add_argument("--config", default="config.yaml")
+    ap = make_parser(prog="ops.status", description=__doc__, reports=True)
     ap.add_argument("--json", action="store_true", help="machine-readable")
-    ap.add_argument("--reports", default="reports")
     args = ap.parse_args()
 
     report = collect(load_config(args.config), args.reports)

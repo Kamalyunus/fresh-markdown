@@ -9,16 +9,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from common import windows
+from conftest import _Applier, _prepared
+from fit import calibrate as cal
 from fit import train_baseline as tb
-
-
-class _Model:
-    """A fixed raw mu_ref per row; carries cfg like the real model."""
-    def __init__(self, cfg, mu):
-        self.cfg, self.mu = cfg, mu
-
-    def predict_mu_ref(self, d, raw=False):
-        return np.full(len(d), self.mu)
 
 
 def _anchor_frame(cells):
@@ -46,8 +40,8 @@ def test_a_factor_pinned_at_the_bracket_is_flagged_not_returned_silently(cfg):
     # HOT sells 60 an hour against mu 1.0: no factor inside the bracket
     # reaches it. COLD sells 1 against mu 1.0: interior.
     calib = _anchor_frame({"HOT": ("C", 30, 60), "COLD": ("C", 30, 1)})
-    factors, detail, f_global, global_at_bound, _ = tb._solve_level_factors(
-        calib, _Model(cfg, 1.0), k_shrink=0.0, min_anchor=10,
+    factors, detail, f_global, global_at_bound, _ = cal.solve_level_factors(
+        calib, _Applier(cfg, 1.0), k_shrink=0.0, min_anchor=10,
         tier_step=cfg["pricing"]["tier_step"], max_k=cfg["pricing"]["negbin_max_k"],
         r_lookup=R_LOOKUP)
     assert detail["HOT"]["raw_factor"] == pytest.approx(f_hi)
@@ -61,16 +55,16 @@ def test_a_factor_pinned_at_the_bracket_is_flagged_not_returned_silently(cfg):
 
     # the bracket is config, not a literal: narrow it and the pin moves
     cfg["baseline_model"]["calibration_factor_search_bounds"] = [0.5, 2.0]
-    _, detail2, _, _, _ = tb._solve_level_factors(
-        calib.copy(), _Model(cfg, 1.0), 0.0, 10, cfg["pricing"]["tier_step"],
+    _, detail2, _, _, _ = cal.solve_level_factors(
+        calib.copy(), _Applier(cfg, 1.0), 0.0, 10, cfg["pricing"]["tier_step"],
         cfg["pricing"]["negbin_max_k"], R_LOOKUP)
     assert detail2["HOT"]["raw_factor"] == pytest.approx(2.0)
     assert detail2["HOT"]["at_bound"] == "upper"
     # the halvings are config too: one halving resolves the interior cell
     # to the bracket's midpoint, twenty to well inside a percent
     cfg["baseline_model"]["calibration_factor_bisection_steps"] = 1
-    _, coarse, _, _, _ = tb._solve_level_factors(
-        calib.copy(), _Model(cfg, 1.0), 0.0, 10, cfg["pricing"]["tier_step"],
+    _, coarse, _, _, _ = cal.solve_level_factors(
+        calib.copy(), _Applier(cfg, 1.0), 0.0, 10, cfg["pricing"]["tier_step"],
         cfg["pricing"]["negbin_max_k"], R_LOOKUP)
     assert coarse["COLD"]["raw_factor"] in (pytest.approx(0.875), pytest.approx(1.625))
     assert abs(coarse["COLD"]["raw_factor"] - detail2["COLD"]["raw_factor"]) > 0.05
@@ -80,15 +74,15 @@ def test_a_lower_pin_is_named_too(cfg):
     calib = _anchor_frame({"DEAD": ("C", 30, 0), "LIVE": ("C", 30, 1)})
     # DEAD sells nothing at all: solve_factor short-circuits to 1.0 (no
     # evidence), never a bound...
-    _, detail, _, _, _ = tb._solve_level_factors(
-        calib, _Model(cfg, 1.0), 1.0, 10, cfg["pricing"]["tier_step"],
+    _, detail, _, _, _ = cal.solve_level_factors(
+        calib, _Applier(cfg, 1.0), 1.0, 10, cfg["pricing"]["tier_step"],
         cfg["pricing"]["negbin_max_k"], R_LOOKUP)
     assert detail["DEAD"]["raw_factor"] == 1.0 and "at_bound" not in detail["DEAD"]
     # ...while a cell selling far LESS than the lowest factor predicts pins low
     f_lo = cfg["baseline_model"]["calibration_factor_search_bounds"][0]
     calib = _anchor_frame({"SLOW": ("C", 30, 1), "LIVE": ("C", 30, 50)})
-    _, detail, _, _, _ = tb._solve_level_factors(
-        calib, _Model(cfg, 50.0), 1.0, 10, cfg["pricing"]["tier_step"],
+    _, detail, _, _, _ = cal.solve_level_factors(
+        calib, _Applier(cfg, 50.0), 1.0, 10, cfg["pricing"]["tier_step"],
         cfg["pricing"]["negbin_max_k"], R_LOOKUP)
     assert detail["SLOW"]["at_bound"] == "lower"
     assert detail["SLOW"]["raw_factor"] == pytest.approx(f_lo)
@@ -102,8 +96,8 @@ def test_a_pinned_global_factor_is_flagged_not_discarded(cfg):
     f_lo, f_hi = cfg["baseline_model"]["calibration_factor_search_bounds"]
     # EVERY cell sells far more than mu predicts: the global solve pins high
     calib = _anchor_frame({"HOT": ("C", 30, 60), "HOTTER": ("C", 30, 80)})
-    factors, detail, f_global, global_at_bound, _ = tb._solve_level_factors(
-        calib, _Model(cfg, 1.0), 1.0, 10, cfg["pricing"]["tier_step"],
+    factors, detail, f_global, global_at_bound, _ = cal.solve_level_factors(
+        calib, _Applier(cfg, 1.0), 1.0, 10, cfg["pricing"]["tier_step"],
         cfg["pricing"]["negbin_max_k"], R_LOOKUP)
     assert global_at_bound == "upper" and f_global == pytest.approx(f_hi)
     assert all(v["at_bound"] == "upper" for v in detail.values())
@@ -112,7 +106,7 @@ def test_a_pinned_global_factor_is_flagged_not_discarded(cfg):
            "global_factor": f_global, "global_factor_at_bound": global_at_bound,
            "fit_window": "w", "fit_window_dates": ["a", "b"], "fit_rows": 60,
            "fit_basis": "b", "fit_in_sample_share": 0.0}
-    text = tb._describe_calibration(art, factors)
+    text = cal.describe_calibration(art, factors)
     assert "AT UPPER BOUND" in text.split("\n")[0], "the global pin is on line 1"
     # (the written artifact carries the flag by name: exercised on a fitted
     # artifact in test_the_artifact_lists_every_pin_and_predicts_the_scope_once)
@@ -130,7 +124,7 @@ def test_the_vectorised_r_lookup_is_used_for_the_censored_basis(cfg):
     assert list(got) == [lookup_r(r, s, c)
                          for s, c in zip(calib.subcategory, calib.category)]
     # the fit basis carries exactly that r per row, attached once
-    attached = tb.attach_fit_basis(calib.copy(), _Model(cfg, 1.0), r)
+    attached = cal.attach_fit_basis(calib.copy(), _Applier(cfg, 1.0), r)
     assert list(attached.r_val) == list(got)
 
 
@@ -139,8 +133,8 @@ def test_thin_cells_are_shrunk_toward_the_parent_not_held_at_one(cfg):
     every cell above the window floor follows its parent by k_shrink."""
     # THIN wants twice the factor FAT does, on a fortieth of the evidence
     calib = _anchor_frame({"THIN": ("C", 12, 6), "FAT": ("C", 300, 3)})
-    factors, detail, f_global, _, _ = tb._solve_level_factors(
-        calib, _Model(cfg, 1.0), k_shrink=1000.0, min_anchor=10,
+    factors, detail, f_global, _, _ = cal.solve_level_factors(
+        calib, _Applier(cfg, 1.0), k_shrink=1000.0, min_anchor=10,
         tier_step=cfg["pricing"]["tier_step"], max_k=cfg["pricing"]["negbin_max_k"],
         r_lookup=R_LOOKUP)
     thin = detail["THIN"]
@@ -162,18 +156,18 @@ def test_the_convergence_method_label_says_whether_the_resolve_was_kept(
     old = {"factors": {"A": 1.0}, "schedule": {"by_week": {}}}
     json.dump(old, open(path, "w"))
     new = {"factors": {"A": 1.1}, "schedule": {"by_week": {}}}
-    monkeypatch.setattr(tb, "fit_level_calibration",
+    monkeypatch.setattr(cal, "fit_level_calibration",
                         lambda d, c: json.dump(new, open(path, "w")))
 
-    dry = tb.check_calibration_convergence(None, cfg)
+    dry = cal.check_calibration_convergence(None, cfg)
     assert "dry run" in dry["method"] and "KEPT" not in dry["method"]
     assert json.load(open(path))["factors"] == old["factors"]
 
-    kept = tb.check_calibration_convergence(None, cfg, commit=True)
+    kept = cal.check_calibration_convergence(None, cfg, commit=True)
     assert "KEPT" in kept["method"] and "dry run" not in kept["method"]
     assert json.load(open(path))["factors"] == new["factors"]
     # the digests come from the one provenance walk, not a second one
-    src = inspect.getsource(tb.check_calibration_convergence)
+    src = inspect.getsource(cal.check_calibration_convergence)
     assert "collect(cfg)" in src and "file_digest(" not in src
     assert set(dry["checked_against"]) <= {"prior", "r_lookup", "rho"}
 
@@ -265,8 +259,8 @@ def test_a_pinned_category_marks_every_subcategory_it_is_the_parent_of(cfg):
     # evidence; category Z is interior. Global pools C's heat and pins too.
     calib = _anchor_frame({"HOT": ("C", 300, 60), "THIN": ("C", 12, 1),
                            "CALM": ("Z", 300, 1)})
-    factors, detail, f_global, g_bound, cat_detail = tb._solve_level_factors(
-        calib, _Model(cfg, 1.0), k_shrink=100.0, min_anchor=10,
+    factors, detail, f_global, g_bound, cat_detail = cal.solve_level_factors(
+        calib, _Applier(cfg, 1.0), k_shrink=100.0, min_anchor=10,
         tier_step=cfg["pricing"]["tier_step"],
         max_k=cfg["pricing"]["negbin_max_k"], r_lookup=R_LOOKUP)
     assert cat_detail["C"]["at_bound"] == "upper"
@@ -280,60 +274,8 @@ def test_a_pinned_category_marks_every_subcategory_it_is_the_parent_of(cfg):
     assert g_bound == "upper" and "parent_at_bound" not in detail["CALM"]
     # the category's parent is the global: its flag is the global's
     assert cat_detail["Z"]["parent_at_bound"] == "upper"
-    assert tb.pinned_cells(detail) == {"HOT": "upper"}
-    assert tb.pinned_cells(cat_detail) == {"C": "upper"}
-
-
-class _CountingModel(_Model):
-    """`_Model` that counts raw predictions and carries a version."""
-    version = "counting-model"
-
-    def __init__(self, cfg, mu):
-        super().__init__(cfg, mu)
-        self.calls = 0
-
-    def predict_mu_ref(self, d, raw=False):
-        self.calls += 1
-        return super().predict_mu_ref(d, raw)
-
-
-def _prepared(cells, days):
-    """A prepared-frame lookalike: one 4-hour anchor episode per cell per
-    day over `days`, every row eligible. `cells`: {sub: (cat, sold)}."""
-    rows = []
-    for day in days:
-        for sub, (cat, sold) in cells.items():
-            for h in range(10, 14):
-                rows.append(dict(
-                    episode_id=f"{sub}|{day}|{h}", date=day, hour_of_day=h,
-                    sku_id=sub, fc="F", category=cat, subcategory=sub,
-                    total_discount=0.25, d_ref=0.25, starting_inventory=100,
-                    units_sold=sold, ending_inventory=100 - sold,
-                    episode_eligible=True, dp_eligible=True))
-    return pd.DataFrame(rows)
-
-
-def scratch_config(cfg, tmp_path):
-    """`cfg` with every artifact path under tmp_path (no r_lookup: raw
-    basis), a thin anchor floor, and W=1 so the anchor window is the week
-    before the gate -- the builder behind `scratch_cfg` (test_calibration_
-    schedule builds its artifacts on it too)."""
-    cfg = copy.deepcopy(cfg)
-    for key, name in (("model_path", "m.txt"), ("feature_schema_path", "s.json"),
-                      ("calibration_factor_path", "cal.json")):
-        cfg["baseline_model"][key] = str(tmp_path / name)
-    cfg["data"]["split_manifest_path"] = str(tmp_path / "split.json")
-    cfg["dispersion"]["r_lookup_path"] = str(tmp_path / "r.json")
-    cfg["dispersion"]["rho_path"] = str(tmp_path / "rho.json")
-    cfg["posterior"]["prior"]["path"] = str(tmp_path / "prior.json")
-    cfg["baseline_model"]["calibration_min_anchor_rows"] = 10
-    cfg["baseline_model"]["calibration_fit_trailing_weeks"] = 1
-    return cfg
-
-
-@pytest.fixture
-def scratch_cfg(cfg, tmp_path):
-    return scratch_config(cfg, tmp_path)
+    assert cal.pinned_cells(detail) == {"HOT": "upper"}
+    assert cal.pinned_cells(cat_detail) == {"C": "upper"}
 
 
 def test_the_weekly_production_refit_carries_the_convergence_verdict(
@@ -348,26 +290,26 @@ def test_the_weekly_production_refit_carries_the_convergence_verdict(
     days = [str(x.date()) for x in
             pd.date_range(gate - pd.Timedelta(days=21), gate + pd.Timedelta(days=6))]
     d = _prepared({"A": ("C", 2), "B": ("C", 1)}, days)
-    model = _CountingModel(cfg, 1.0)
-    monkeypatch.setattr(tb, "BaselineModel", lambda c: model)
+    model = _Applier(cfg, 1.0)
+    monkeypatch.setattr(cal, "BaselineModel", lambda c: model)
     path = cfg["baseline_model"]["calibration_factor_path"]
 
     # bootstrap path: fit, check, fit again -> no carry (5b re-checks)
-    tb.fit_level_calibration(d, cfg)
+    cal.fit_level_calibration(d, cfg)
     assert "convergence" not in json.load(open(path))
-    block = tb.check_calibration_convergence(d, cfg)
+    block = cal.check_calibration_convergence(d, cfg)
     assert block["converged"] and "carried_from" not in block
-    tb.fit_level_calibration(d, cfg)
+    cal.fit_level_calibration(d, cfg)
     assert "convergence" not in json.load(open(path))
 
     # production path: the same three steps keep the verdict
     cfg["data"]["launch_date"] = str(gate.date())
-    tb.fit_level_calibration(d, cfg)
+    cal.fit_level_calibration(d, cfg)
     first = json.load(open(path))
     assert "convergence" not in first            # nothing to carry yet
-    tb.check_calibration_convergence(d, cfg)
+    cal.check_calibration_convergence(d, cfg)
     checked = json.load(open(path))["convergence"]
-    tb.fit_level_calibration(d, cfg)             # the weekly cron
+    cal.fit_level_calibration(d, cfg)             # the weekly cron
     art = json.load(open(path))
     conv = art["convergence"]
     assert conv["converged"] and conv["history"] == checked["history"]
@@ -375,7 +317,7 @@ def test_the_weekly_production_refit_carries_the_convergence_verdict(
     assert conv["carried_from"] == first["provenance"]["created_at"]
     assert "carried forward" in conv["carried_note"]
     # ...and the origin survives a second carry
-    tb.fit_level_calibration(d, cfg)
+    cal.fit_level_calibration(d, cfg)
     assert json.load(open(path))["convergence"]["carried_from"] == \
         first["provenance"]["created_at"]
     # the launched schedule reaches the week being priced
@@ -396,9 +338,9 @@ def test_the_artifact_lists_every_pin_and_predicts_the_scope_once(
     # (a bracket exists on the censored basis only, so r_lookup is present)
     d = _prepared({"HOT": ("C", 60), "COLD": ("C", 1), "CALM": ("Z", 1)}, days)
     json.dump(R_LOOKUP, open(cfg["dispersion"]["r_lookup_path"], "w"))
-    model = _CountingModel(cfg, 1.0)
-    monkeypatch.setattr(tb, "BaselineModel", lambda c: model)
-    tb.fit_level_calibration(d, cfg)
+    model = _Applier(cfg, 1.0)
+    monkeypatch.setattr(cal, "BaselineModel", lambda c: model)
+    cal.fit_level_calibration(d, cfg)
     art = json.load(open(cfg["baseline_model"]["calibration_factor_path"]))
 
     assert art["detail"]["HOT"]["at_bound"] == "upper"
@@ -416,7 +358,7 @@ def test_the_artifact_lists_every_pin_and_predicts_the_scope_once(
     assert {p["scope"] for p in pins} == {"anchor", *weeks}
     assert all(p["at_bound"] == "upper" for p in pins)
     # the console summary names the parent pin
-    text = tb._describe_calibration(art, art["factors"])
+    text = cal.describe_calibration(art, art["factors"])
     assert "CATEGORY solve(s) pinned" in text and "schedule week(s)" in text
     # one raw prediction for the anchor fit, one for the whole scope --
     # not one per schedule week
@@ -439,8 +381,8 @@ def test_a_cell_with_no_anchor_rows_takes_its_parent_never_one(cfg):
     off = _anchor_frame({"BEEF": ("MEAT", 20, 1), "FISH": ("SEAFOOD", 20, 1)})
     off["total_discount"] = 0.45
     calib = pd.concat([calib, off], ignore_index=True)
-    factors, detail, f_global, _, cat_detail = tb._solve_level_factors(
-        calib, _Model(cfg, 1.0), k_shrink=0.0, min_anchor=10,
+    factors, detail, f_global, _, cat_detail = cal.solve_level_factors(
+        calib, _Applier(cfg, 1.0), k_shrink=0.0, min_anchor=10,
         tier_step=cfg["pricing"]["tier_step"], max_k=cfg["pricing"]["negbin_max_k"],
         r_lookup=R_LOOKUP)
     assert factors["PORK"] > 1.5 and factors["LEAF"] > factors["PORK"]
@@ -451,8 +393,8 @@ def test_a_cell_with_no_anchor_rows_takes_its_parent_never_one(cfg):
     assert cat_detail["SEAFOOD"]["held_at_parent"]
     assert cat_detail["SEAFOOD"]["factor"] == pytest.approx(round(f_global, 4))
     assert factors["FISH"] == pytest.approx(round(f_global, 4))
-    assert tb.keys_held_at_parent(detail) == ["BEEF", "FISH"]
-    assert tb.category_factors(cat_detail)["MEAT"] == cat_detail["MEAT"]["factor"]
+    assert cal.keys_held_at_parent(detail) == ["BEEF", "FISH"]
+    assert cal.category_factors(cat_detail)["MEAT"] == cat_detail["MEAT"]["factor"]
     assert 1.0 not in factors.values()
 
 
@@ -516,9 +458,9 @@ def test_the_artifact_carries_the_parent_tables_and_the_held_cells(
     off = _prepared({"OFF": ("C", 1), "FAR": ("Z", 1)}, days[-3:])
     off["total_discount"] = 0.45
     d = pd.concat([d, off], ignore_index=True)
-    model, Applier = _CountingModel(cfg, 1.0), tb.BaselineModel
-    monkeypatch.setattr(tb, "BaselineModel", lambda c: model)
-    tb.fit_level_calibration(d, cfg)
+    model, Applier = _Applier(cfg, 1.0), tb.BaselineModel
+    monkeypatch.setattr(cal, "BaselineModel", lambda c: model)
+    cal.fit_level_calibration(d, cfg)
     art = json.load(open(cfg["baseline_model"]["calibration_factor_path"]))
     assert art["keys_held_at_parent"] == ["FAR", "OFF"]
     assert art["factors"]["OFF"] == art["factors_category"]["C"]
@@ -544,5 +486,5 @@ def test_the_artifact_carries_the_parent_tables_and_the_held_cells(
     applier._reset_calibration_counters()
     new = pd.DataFrame({"subcategory": ["NEW"], "category": ["C"],
                         "date": [days[-1]], "episode_id": ["n"]})
-    wk = tb.episodes.week_key(pd.Series([days[-1]])).iloc[0]
+    wk = windows.week_key(pd.Series([days[-1]])).iloc[0]
     assert applier.level_factors(new)[0] == sched["by_week_category"][wk]["C"]

@@ -8,7 +8,7 @@ from conftest import P0, decision_event, outcome_event
 from events.store import EventStore
 from daily import monitor as mon
 from common.episodes import adjustment_reason
-from daily.update import grid_update
+from engine.learn import grid_update
 
 PRICE = 7000.0
 

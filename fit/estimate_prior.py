@@ -14,10 +14,10 @@ import numpy as np
 import pandas as pd
 
 from common.config import OWN_DATA_WEIGHT, load_config
-from common import episodes
+from common import windows
 from common.io import write_json
 from common.provenance import stamp
-from fit.prepare_data import population, split_frames
+from fit.prepare_data import scope
 from fit.train_baseline import BaselineModel
 from fit import prior_density
 
@@ -26,8 +26,8 @@ def _episodes_per_week(d, cfg):
     """Volume per category on the train window, which decides cell structure in
     `engine.posterior.initialise`. A property of the population, not of how
     epsilon was estimated."""
-    train = population(split_frames(d, cfg)["train"], cfg)
-    weeks = max(episodes.week_key(train.date).nunique(), 1)
+    train = scope(d, cfg, "train")
+    weeks = max(windows.week_key(train.date).nunique(), 1)
     per = train.groupby("category")["episode_id"].nunique() / weeks
     return {str(k): round(float(v), 1) for k, v in per.items()}
 

@@ -285,7 +285,7 @@ def test_the_fit_window_holds_on_a_near_tie_instead_of_oscillating(cfg, tmp_path
 
     def w_finding(sweep):
         backtest = {"fidelity": {"calibration_window_sweep": sweep}}
-        finds = tune._readings(cfg, backtest, {})
+        finds = tune._fit_window(cfg, tune.Reports(backtest=backtest))
         return [f for f in finds
                 if f["key"] == "baseline_model.calibration_fit_trailing_weeks"][0]
 
@@ -318,11 +318,13 @@ def test_the_fit_window_holds_on_a_near_tie_instead_of_oscillating(cfg, tmp_path
     # near-tie switch, a wider band gain plus a tighter ratio holds the
     # material win
     loose = {**cfg, "tuning": {**cfg["tuning"], "w_switch_mae_ratio": 1.0}}
-    finds = tune._readings(loose, {"fidelity": {"calibration_window_sweep": near_tie}}, {})
+    finds = tune._fit_window(loose, tune.Reports(
+        backtest={"fidelity": {"calibration_window_sweep": near_tie}}))
     assert [f for f in finds if f["key"].endswith("trailing_weeks")][0]["status"] == "ACT"
     strict = {**cfg, "tuning": {**cfg["tuning"], "w_switch_mae_ratio": 0.4,
                                 "w_switch_band_gain": 0.2}}
-    finds = tune._readings(strict, {"fidelity": {"calibration_window_sweep": material}}, {})
+    finds = tune._fit_window(strict, tune.Reports(
+        backtest={"fidelity": {"calibration_window_sweep": material}}))
     held = [f for f in finds if f["key"].endswith("trailing_weeks")][0]
     assert held["status"] == "OK" and "HELD" in held["evidence"]
 
@@ -341,8 +343,11 @@ def test_no_factors_winning_is_reported_and_is_never_a_paste(cfg):
         "recommended_fit_window": f"trailing_{cur}w",
         "uncalibrated_beats_all_windows": True,
     }
-    finds = tune._readings(cfg, {"fidelity": {"calibration_window_sweep": sweep}}, {})
-    by = {f["key"]: f for f in finds}
+    def readings(sweep):
+        rep = tune.Reports(backtest={"fidelity": {"calibration_window_sweep": sweep}})
+        return tune._fit_window(cfg, rep) + tune._info_uncalibrated_wins(cfg, rep)
+
+    by = {f["key"]: f for f in readings(sweep)}
 
     keep = by["level calibration earns its keep"]
     assert (keep["class"], keep["status"]) == ("INFO", "ACT")
@@ -354,8 +359,7 @@ def test_no_factors_winning_is_reported_and_is_never_a_paste(cfg):
 
     del sweep["uncalibrated_beats_all_windows"]
     assert "level calibration earns its keep" not in {
-        f["key"] for f in
-        tune._readings(cfg, {"fidelity": {"calibration_window_sweep": sweep}}, {})}
+        f["key"] for f in readings(sweep)}
 
 
 def test_tau_uses_the_same_staleness_rule_the_status_gate_enforces(cfg):
@@ -365,7 +369,7 @@ def test_tau_uses_the_same_staleness_rule_the_status_gate_enforces(cfg):
     hand edit of config.yaml."""
     import copy as _copy
 
-    from engine.explore import tau_provenance_error
+    from ops.config_keys import tau_provenance_error
 
     cfg = _copy.deepcopy(cfg)
     cfg["exploration"]["tau_initial"] = 269.99
@@ -373,7 +377,7 @@ def test_tau_uses_the_same_staleness_rule_the_status_gate_enforces(cfg):
                                          "spread_decisions": 1000}}
 
     def tau_finding(c, sh):
-        return [f for f in tune._measured(c, sh, None, {}, None)
+        return [f for f in tune._paste_tau_initial(c, tune.Reports(shadow=sh))
                 if f["key"] == "exploration.tau_initial"][0]
 
     # 0.19% drift: inside the provenance tolerance, so neither complains.
@@ -405,7 +409,7 @@ def test_an_unusable_guardrail_floor_is_never_pasted(cfg):
         "binding_floor": 1.4, "binding_basis": "trailing",
         "verdict": "BLOCKED -- the binding trailing floor is 1.4 on the "
                    "RELATIVE basis"}}}
-    f = [x for x in tune._derived(cfg, {}, blocked)
+    f = [x for x in tune._guardrail_stops(cfg, tune.Reports(thresholds=blocked))
          if x["key"].endswith("scrap_deterioration_pct")][0]
     assert f["class"] == "OWNER" and f["recommended"] is None
     assert "BLOCKED" in f["evidence"] and "NOT pasted" in f["evidence"]
@@ -414,7 +418,7 @@ def test_an_unusable_guardrail_floor_is_never_pasted(cfg):
         "config_key": "monitoring.stop_conditions.scrap_deterioration_pct",
         "binding_floor": 0.18, "binding_basis": "trailing",
         "verdict": "clears the floor"}}}
-    f = [x for x in tune._derived(cfg, {}, usable)
+    f = [x for x in tune._guardrail_stops(cfg, tune.Reports(thresholds=usable))
          if x["key"].endswith("scrap_deterioration_pct")][0]
     assert f["class"] == "PASTE" and f["recommended"] == 0.18
 

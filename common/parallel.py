@@ -40,20 +40,55 @@ def _run_chunk(args):
     return [fn(item, cfg) for item in items]
 
 
+class EpisodePool:
+    """The process pool a run holds across many batches (the simulator maps
+    one batch per hour: one executor per hour would fork 500 times a run).
+    `map` is `[fn(item, cfg) for item in items]`, chunked across the
+    workers (per-task IPC would dwarf a millisecond DP solve; several
+    chunks per worker since episode lengths vary by an order of magnitude),
+    results in submission order; serial in-process until the pool is
+    entered, for a single worker, or for a batch under `serial_below`
+    items (a batch too small to be worth the IPC). `fn` and every item
+    must be picklable -- the constraint that forces purity."""
+
+    def __init__(self, workers=None, chunks_per_worker=4, serial_below=2):
+        self.workers = resolve_workers(workers)
+        self.chunks_per_worker = int(chunks_per_worker)
+        self.serial_below = int(serial_below)
+        self._pool = None
+
+    def __enter__(self):
+        if self.workers > 1:
+            self._pool = ProcessPoolExecutor(max_workers=self.workers)
+        return self
+
+    def __exit__(self, *exc):
+        self.shutdown()
+
+    def shutdown(self):
+        if self._pool is not None:
+            self._pool.shutdown()
+            self._pool = None
+
+    def map(self, fn, items, cfg):
+        n = self.workers
+        if self._pool is None or n <= 1 or len(items) < self.serial_below:
+            return [fn(item, cfg) for item in items]
+        size = max(len(items) // (n * self.chunks_per_worker), 1)
+        batches = [items[i:i + size] for i in range(0, len(items), size)]
+        out = []
+        # map, not as_completed: results must come back in submission order
+        for got in self._pool.map(_run_chunk, [(fn, b, cfg) for b in batches]):
+            out.extend(got)
+        return out
+
+
 def map_episodes(fn, items, cfg, workers=None, chunks_per_worker=4):
-    """`[fn(item, cfg) for item in items]`, optionally across processes.
-    Chunked (per-task IPC would dwarf a millisecond DP solve), several chunks
-    per worker since episode lengths vary by an order of magnitude. `fn` and
-    every item must be picklable -- the constraint that forces purity."""
+    """`[fn(item, cfg) for item in items]`, optionally across processes:
+    one EpisodePool for one batch (the offline harnesses map their whole
+    window once)."""
     n = resolve_workers(workers)
     if n <= 1 or len(items) < 2:
         return [fn(item, cfg) for item in items]
-
-    size = max(len(items) // (n * chunks_per_worker), 1)
-    batches = [items[i:i + size] for i in range(0, len(items), size)]
-    out = []
-    with ProcessPoolExecutor(max_workers=n) as pool:
-        # map, not as_completed: results must come back in submission order
-        for got in pool.map(_run_chunk, [(fn, b, cfg) for b in batches]):
-            out.extend(got)
-    return out
+    with EpisodePool(n, chunks_per_worker) as pool:
+        return pool.map(fn, items, cfg)

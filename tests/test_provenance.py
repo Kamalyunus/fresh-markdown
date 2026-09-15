@@ -1,51 +1,19 @@
-"""Tests for common.provenance and ops.seal."""
+"""Tests for common.provenance and ops.seal (the audit trail: test_history)."""
 import json
 import pathlib
 
 import pytest
 
-from common import provenance
+from common import history, provenance
 from common.config import config_get
 from ops import seal as seal_mod
-from conftest import _write
-
-
-BUNDLE = "baseline-20260101000000"
+from conftest import BUNDLE, _write, artifact_at, full_bundle, scratch_paths
 
 
 @pytest.fixture
 def cfg(cfg, tmp_path):
     """A config whose artifact paths all point into a scratch directory."""
-    c = cfg
-    c["artifacts"]["bundle_path"] = str(tmp_path / "bundle.json")
-    c["data"]["split_manifest_path"] = str(tmp_path / "split_manifest.json")
-    c["baseline_model"]["model_path"] = str(tmp_path / "baseline_model.txt")
-    c["baseline_model"]["feature_schema_path"] = str(tmp_path / "feature_schema.json")
-    c["baseline_model"]["calibration_factor_path"] = str(tmp_path / "calibration.json")
-    c["dispersion"]["r_lookup_path"] = str(tmp_path / "r_lookup.json")
-    c["dispersion"]["rho_path"] = str(tmp_path / "rho.json")
-    c["posterior"]["prior"]["path"] = str(tmp_path / "prior.json")
-    return c
-
-
-def _artifact(cfg, key, payload, bundle=BUNDLE, stamped=True):
-    """Write `payload` at the artifact path config names under `key`."""
-    path = pathlib.Path(config_get(cfg, key))
-    if stamped:
-        provenance.stamp(payload, cfg, bundle, "test")
-    _write(path.parent, path.stem, payload)
-
-
-def _full_bundle(cfg, bundle=BUNDLE):
-    """One coherent set: model, its schema, and everything fitted against it."""
-    with open(config_get(cfg, ("baseline_model", "model_path")), "w") as f:
-        f.write("tree { }")                      # a model file, not JSON
-    _artifact(cfg, ("data", "split_manifest_path"), {"split": {}}, bundle=None)
-    _artifact(cfg, ("baseline_model", "feature_schema_path"),
-              {"model_version": bundle}, stamped=False)   # names its model the old way
-    _artifact(cfg, ("dispersion", "r_lookup_path"), {"global": 0.9}, bundle)
-    _artifact(cfg, ("dispersion", "rho_path"), {"rho": 0.31}, bundle)
-    _artifact(cfg, ("posterior", "prior", "path"), {"source": "fallback"}, bundle)
+    return scratch_paths(cfg, tmp_path)
 
 
 def test_stamp_records_what_the_artifact_was_fitted_against(cfg):
@@ -57,7 +25,7 @@ def test_stamp_records_what_the_artifact_was_fitted_against(cfg):
 
 
 def test_a_coherent_set_verifies(cfg):
-    _full_bundle(cfg)
+    full_bundle(cfg)
     state = provenance.verify(cfg)
     assert state["verdict"] == "PASS", state["problems"]
     assert state["bundle"] == BUNDLE
@@ -66,8 +34,8 @@ def test_a_coherent_set_verifies(cfg):
 
 def test_mixed_vintages_are_caught(cfg):
     """The whole point: rho fitted against a different model than the prior."""
-    _full_bundle(cfg)
-    _artifact(cfg, ("dispersion", "rho_path"), {"rho": 0.42},
+    full_bundle(cfg)
+    artifact_at(cfg, ("dispersion", "rho_path"), {"rho": 0.42},
               bundle="baseline-20250101000000")
     state = provenance.verify(cfg)
     assert state["verdict"] == "FAIL"
@@ -76,8 +44,8 @@ def test_mixed_vintages_are_caught(cfg):
 
 
 def test_an_unstamped_artifact_is_caught(cfg):
-    _full_bundle(cfg)
-    _artifact(cfg, ("dispersion", "rho_path"), {"rho": 0.31}, stamped=False)
+    full_bundle(cfg)
+    artifact_at(cfg, ("dispersion", "rho_path"), {"rho": 0.31}, stamped=False)
     state = provenance.verify(cfg)
     assert state["verdict"] == "FAIL"
     assert any("no provenance: rho" in p for p in state["problems"])
@@ -85,13 +53,13 @@ def test_an_unstamped_artifact_is_caught(cfg):
 
 def test_the_model_file_and_split_manifest_need_no_stamp(cfg):
     """One cannot carry JSON, the other precedes the model. Neither is a fault."""
-    _full_bundle(cfg)
+    full_bundle(cfg)
     assert provenance.verify(cfg)["verdict"] == "PASS"
 
 
 def test_sealing_then_editing_an_artifact_is_caught(cfg):
     """Provenance alone cannot see this: an editor leaves the stamp intact."""
-    _full_bundle(cfg)
+    full_bundle(cfg)
     sealed = seal_mod.seal(cfg)
     assert sealed["bundle"] == BUNDLE
     assert provenance.verify(cfg, sealed)["verdict"] == "PASS"
@@ -112,7 +80,7 @@ def test_the_seal_covers_the_environment_not_only_the_artifacts(cfg, tmp_path):
     The seal records both (and the posterior as it stands); verify reads a
     move as a problem, the same row, on purpose."""
     import copy
-    _full_bundle(cfg)
+    full_bundle(cfg)
     cfg["posterior"]["path"] = str(tmp_path / "posterior.json")
     _write(tmp_path, "posterior", {"cells": {"GLOBAL": {"mean": -1.2, "prior_mean": -1.0,
                                                           "std": 0.4, "n_obs": 0, "version": 0}},
@@ -162,15 +130,15 @@ def test_the_seal_covers_the_environment_not_only_the_artifacts(cfg, tmp_path):
     # and the audit MANIFEST carries the record
     cfg["artifacts"]["history_dir"] = str(tmp_path / "history")
     conf = tmp_path / "config.yaml"; conf.write_text("meta: {config_version: t}\n")
-    snap = provenance.archive(cfg, sealed, config_path=str(conf), reason="config")
+    snap = history.archive(cfg, sealed, config_path=str(conf), reason="config")
     manifest = json.load(open(pathlib.Path(snap, "MANIFEST.json")))
     assert manifest["environment"] == env and manifest["launch_posterior"] == lp
 
 
 def test_seal_refuses_an_inconsistent_set(cfg):
     """A sealed mixed bundle is worse than an unsealed one: it looks decided."""
-    _full_bundle(cfg)
-    _artifact(cfg, ("dispersion", "rho_path"), {"rho": 0.42}, bundle="other-model")
+    full_bundle(cfg)
+    artifact_at(cfg, ("dispersion", "rho_path"), {"rho": 0.42}, bundle="other-model")
     with pytest.raises(SystemExit) as exc:
         seal_mod.seal(cfg)
     assert "mixed bundle" in str(exc.value)
@@ -183,9 +151,9 @@ def test_seal_refuses_when_there_is_nothing_stamped(cfg):
 
 def test_a_seal_naming_a_bundle_that_is_gone_is_caught(cfg):
     """Artifacts replaced wholesale by a newer run, seal never refreshed."""
-    _full_bundle(cfg)
+    full_bundle(cfg)
     sealed = seal_mod.seal(cfg)
-    _full_bundle(cfg, bundle="baseline-20270101000000")
+    full_bundle(cfg, bundle="baseline-20270101000000")
     state = provenance.verify(cfg, sealed)
     assert state["verdict"] == "FAIL"
     assert any("is not on disk" in p for p in state["problems"])
@@ -224,7 +192,7 @@ def test_a_sealed_artifact_that_vanished_or_appeared_is_caught(cfg):
     """verify() compared hashes only for files present, so `rm r_lookup.json`
     after sealing still read PASS; a fit made after sealing was invisible too."""
     import os
-    _full_bundle(cfg)
+    full_bundle(cfg)
     sealed = seal_mod.seal(cfg)
     os.remove(config_get(cfg, ("dispersion", "r_lookup_path")))
     v = provenance.verify(cfg, sealed)
@@ -233,99 +201,16 @@ def test_a_sealed_artifact_that_vanished_or_appeared_is_caught(cfg):
     # the other direction: the calibration was ABSENT at sealing and is
     # fitted afterwards -- stamped with the right bundle, hashes all match,
     # and the seal still does not describe what is on disk
-    _full_bundle(cfg)
+    full_bundle(cfg)
     sealed = seal_mod.seal(cfg)
     assert "calibration" in sealed["missing"]
-    _artifact(cfg, ("baseline_model", "calibration_factor_path"),
+    artifact_at(cfg, ("baseline_model", "calibration_factor_path"),
               {"factors": {"A": 1.0}})
     v = provenance.verify(cfg, sealed)
     assert v["verdict"] == "FAIL"
     assert any(p == "fitted after sealing (re-seal): calibration"
                for p in v["problems"])
     assert v["missing"] == []                    # present, just unsealed
-
-
-def test_every_seal_leaves_an_audit_snapshot_and_stops_add_the_reports(cfg, tmp_path):
-    """A retrain overwrites artifacts/ in place; the history folder is the
-    audit trail: bundle files, config and posterior per seal, the reports
-    per stop, never pruned by the process."""
-    import os
-    cfg["artifacts"]["history_dir"] = str(tmp_path / "history")
-    cfg["posterior"]["path"] = str(tmp_path / "posterior.json")
-    (tmp_path / "posterior.json").write_text("{}")
-    conf = tmp_path / "config.yaml"; conf.write_text("meta: {config_version: t}\n")
-    _full_bundle(cfg)
-    sealed = seal_mod.seal(cfg)
-
-    snap = provenance.archive(cfg, sealed, config_path=str(conf), reason="bootstrap")
-    assert snap.startswith(str(tmp_path / "history" / BUNDLE))
-    names = set(os.listdir(snap))
-    assert {"MANIFEST.json", "rho.json", "r_lookup.json", "prior.json",
-            "baseline_model.txt", "config.yaml", "posterior.json"} <= names
-    manifest = json.load(open(os.path.join(snap, "MANIFEST.json")))
-    assert manifest["bundle"] == BUNDLE and manifest["reason"] == "bootstrap"
-    assert manifest["sha256"] == sealed["sha256"]
-    # the copy is byte-identical to what was sealed
-    assert provenance.file_digest(os.path.join(snap, "rho.json")) == sealed["sha256"]["rho"]
-
-    # a second seal is a second folder, never an overwrite -- even inside
-    # the same SECOND (the stamp carries the microseconds)
-    later = dict(sealed, sealed_at="2030-01-01T00:00:00.000001+00:00")
-    snap2 = provenance.archive(cfg, later, config_path=str(conf), reason="weekly-refit")
-    same_second = dict(sealed, sealed_at="2030-01-01T00:00:00.000002+00:00")
-    snap3 = provenance.archive(cfg, same_second, config_path=str(conf), reason="retrain")
-    assert len({snap, snap2, snap3}) == 3
-    assert provenance.latest_snapshot(cfg, BUNDLE) == snap3
-    assert [r for _, _, r in provenance.history_index(cfg)] == \
-        ["bootstrap", "weekly-refit", "retrain"]
-
-    # a stop copies the reports as they stand into the LATEST snapshot
-    reports = tmp_path / "reports"; reports.mkdir()
-    (reports / "shadow.json").write_text("{}"); (reports / "launch_readiness.md").write_text("x")
-    dst = provenance.archive_reports(cfg, str(reports), BUNDLE)
-    assert dst == os.path.join(snap3, "reports")
-    assert {"shadow.json", "launch_readiness.md"} <= set(os.listdir(dst))
-    assert provenance.archive_reports(cfg, str(reports), "no-such-bundle") is None
-
-
-def test_the_history_is_ordered_by_seal_time_not_by_folder_name(cfg, tmp_path):
-    """history_index claimed "oldest first" and sorted by PATH, which sorts
-    by bundle name first: a bundle whose name sorts earlier but was sealed
-    later came out first, and status printed it as the latest snapshot."""
-    cfg["artifacts"]["history_dir"] = str(tmp_path / "history")
-    cfg["posterior"]["path"] = str(tmp_path / "posterior.json")
-    (tmp_path / "posterior.json").write_text("{}")
-    conf = tmp_path / "config.yaml"; conf.write_text("meta: {config_version: t}\n")
-    # "zzz" sorts AFTER "aaa" by name but is sealed FIRST
-    for bundle, when, reason in (("zzz-model", "2026-01-01T00:00:00+00:00", "first"),
-                                 ("aaa-model", "2026-06-01T00:00:00+00:00", "second")):
-        _full_bundle(cfg, bundle=bundle)
-        sealed = dict(seal_mod.seal(cfg), sealed_at=when)
-        provenance.archive(cfg, sealed, config_path=str(conf), reason=reason)
-    assert [r for _, _, r in provenance.history_index(cfg)] == ["first", "second"]
-    assert [b for b, _, _ in provenance.history_index(cfg)] == ["zzz-model", "aaa-model"]
-
-
-def test_archive_refuses_a_copy_that_does_not_match_the_seal(cfg, tmp_path):
-    """The audit trail is only evidence if the copy IS what was sealed: an
-    artifact edited (or re-fitted) between seal and archive must raise, not
-    become the record of that bundle."""
-    cfg["artifacts"]["history_dir"] = str(tmp_path / "history")
-    conf = tmp_path / "config.yaml"; conf.write_text("meta: {config_version: t}\n")
-    _full_bundle(cfg)
-    sealed = seal_mod.seal(cfg)
-    path = config_get(cfg, ("dispersion", "rho_path"))
-    payload = json.load(open(path))
-    payload["rho"] = 0.99
-    json.dump(payload, open(path, "w"))
-    with pytest.raises(RuntimeError, match="rho on disk does not match its seal"):
-        provenance.archive(cfg, sealed, config_path=str(conf), reason="bootstrap")
-    # an artifact that appeared after sealing is refused too: nothing vouches for it
-    _full_bundle(cfg)
-    sealed = seal_mod.seal(cfg)
-    _artifact(cfg, ("baseline_model", "calibration_factor_path"), {"factors": {}})
-    with pytest.raises(RuntimeError, match="calibration on disk does not match its seal"):
-        provenance.archive(cfg, sealed, config_path=str(conf))
 
 
 def test_a_config_reseal_refuses_an_artifact_that_moved_since_the_previous_seal(cfg, tmp_path):
@@ -337,13 +222,13 @@ def test_a_config_reseal_refuses_an_artifact_that_moved_since_the_previous_seal(
     artifacts may have moved: none for config/libraries, the calibration
     for weekly-refit; a fit reason or none seals the set as it stands."""
     from common.io import write_json
-    _full_bundle(cfg)
-    _artifact(cfg, ("baseline_model", "calibration_factor_path"), {"factors": {"A": 1.0}}, BUNDLE)
+    full_bundle(cfg)
+    artifact_at(cfg, ("baseline_model", "calibration_factor_path"), {"factors": {"A": 1.0}}, BUNDLE)
     write_json(cfg["artifacts"]["bundle_path"], seal_mod.seal(cfg, reason="bootstrap"))
 
     # the environment moved AND someone edited the prior (stamp intact)
     cfg["exploration"]["budget_share_of_il"] = 0.02
-    _artifact(cfg, ("posterior", "prior", "path"), {"source": "hand-edited"}, BUNDLE)
+    artifact_at(cfg, ("posterior", "prior", "path"), {"source": "hand-edited"}, BUNDLE)
     assert provenance.verify(cfg)["verdict"] == "PASS"       # stamps alone see nothing
     for reason in ("config", "libraries"):
         with pytest.raises(SystemExit) as exc:
@@ -357,7 +242,7 @@ def test_a_config_reseal_refuses_an_artifact_that_moved_since_the_previous_seal(
 
     # a weekly re-fit moves the calibration alone: sealed under its reason
     write_json(cfg["artifacts"]["bundle_path"], seal_mod.seal(cfg, reason="check-only"))
-    _artifact(cfg, ("baseline_model", "calibration_factor_path"), {"factors": {"A": 1.1}}, BUNDLE)
+    artifact_at(cfg, ("baseline_model", "calibration_factor_path"), {"factors": {"A": 1.1}}, BUNDLE)
     assert seal_mod.seal(cfg, reason="weekly-refit")["bundle"] == BUNDLE
     with pytest.raises(SystemExit) as exc:
         seal_mod.seal(cfg, reason="config")

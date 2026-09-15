@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from conftest import _Applier, _calib_frame
 from fit import fit_dispersion as fd
 
 
@@ -26,33 +27,6 @@ def test_an_r_at_a_search_bound_is_recognised_by_the_configured_tolerance(cfg):
     assert fd.r_at_bound(hi * 0.95, monkeypatch_tol) and not fd.r_at_bound(hi * 0.95, cfg)
 
 
-class _FlatModel:
-    """mu_ref = 2.0 everywhere; enough to form residuals."""
-    @staticmethod
-    def predict_mu_ref(rows, raw=False):
-        return np.full(len(rows), 2.0)
-
-
-def _calib_frame(cfg, groups):
-    """`groups`: {subcategory: (category, rows)}; every row inside the calib
-    window, stocked, eligible, at the anchor."""
-    s = cfg["data"]["split"]
-    rng = np.random.default_rng(0)
-    rows = []
-    for sub, (cat, n) in groups.items():
-        for i in range(n):
-            rows.append(dict(
-                episode_id=f"{sub}-{i // 4}", date=s["calib_start"],
-                hour_of_day=10 + i % 4, sku_id=sub, fc="F", category=cat,
-                subcategory=sub, starting_inventory=10,
-                units_sold=int(rng.negative_binomial(1.0, 1.0 / 3.0)),
-                total_discount=0.25, d_ref=0.25,
-                episode_eligible=True, dp_eligible=True))
-    d = pd.DataFrame(rows)
-    d["ending_inventory"] = (d.starting_inventory - d.units_sold).clip(lower=0)
-    return d
-
-
 def test_a_pinned_r_is_flagged_and_kept_out_of_the_clamp_percentile(
         cfg, monkeypatch):
     """A group whose MLE ran to r_search_bounds used to be stored like any
@@ -66,7 +40,7 @@ def test_a_pinned_r_is_flagged_and_kept_out_of_the_clamp_percentile(
     groups = {"S1": ("C1", 8), "S2": ("C1", 16), "S3": ("C2", 32)}
     by_size = {8: hi, 16: 2.0, 32: 3.0, 24: 4.0, 56: 2.5}   # C1=24, all=56
     monkeypatch.setattr(fd, "fit_r", lambda k, mu, cen, b: (by_size[len(k)], True))
-    monkeypatch.setattr(fd, "BaselineModel", lambda c: _FlatModel())
+    monkeypatch.setattr(fd, "BaselineModel", lambda c: _Applier(c))
     monkeypatch.setattr(fd, "_working_elasticity", lambda c: ({}, -1.0))
     # every group over-dispersed, so nothing is clamp-exempt on Pearson
     monkeypatch.setattr(fd, "pearson_dispersion", lambda k, mu: 5.0)
@@ -114,10 +88,9 @@ def test_drift_windows_hold_whole_episodes_keyed_on_the_opening_week(
     one-hour episode in the next window's rho."""
     cfg = copy.deepcopy(cfg)
     cfg["dispersion"]["min_rows_per_group"] = 4
-    monkeypatch.setattr(fd, "BaselineModel", lambda c: _FlatModel())
+    monkeypatch.setattr(fd, "BaselineModel", lambda c: _Applier(c))
     monkeypatch.setattr(fd, "_working_elasticity", lambda c: ({}, -1.0))
-    monkeypatch.setattr(fd, "pre_launch", lambda d, c: d)
-    monkeypatch.setattr(fd, "population", lambda d, c: d)
+    monkeypatch.setattr(fd, "scope", lambda d, c, w: d)
     monkeypatch.setattr(fd, "fit_r", lambda k, mu, cen, b: (2.0, True))
 
     def hours(eid, day, hrs):
@@ -165,7 +138,7 @@ def test_the_residual_frame_has_one_home(cfg):
         "starting_inventory": [4, 0, 4], "units_sold": [1, 0, 4],
         "ending_inventory": [3, 0, 0], "total_discount": [0.5, 0.5, 0.5],
         "d_ref": [0.25, 0.25, 0.25]})
-    f = fd._residual_frame(d, cfg, _FlatModel(), {"A": -2.0}, -1.0)
+    f = fd._residual_frame(d, cfg, _Applier(cfg), {"A": -2.0}, -1.0)
     # the zero-stock row is gone; A uses its own eps, B the fallback
     assert list(f.index) == [0, 2]
     ratio = 0.5 / 0.75
@@ -221,8 +194,7 @@ def test_drift_is_graded_on_post_train_windows_and_says_so(cfg, monkeypatch):
     cfg["dispersion"]["min_rows_per_group"] = 4
     cfg["dispersion"]["drift_min_windows"] = 2
     monkeypatch.setattr(fd, "_working_elasticity", lambda c: ({}, -1.0))
-    monkeypatch.setattr(fd, "pre_launch", lambda d, c: d)
-    monkeypatch.setattr(fd, "population", lambda d, c: d)
+    monkeypatch.setattr(fd, "scope", lambda d, c, w: d)
     # r keyed on the window's rows so the two sides are told apart: the
     # in-train weeks (12 rows) fit r=1.0, post-train (8 rows) r=3.0 / 5.0
     seen = iter([3.0, 5.0])
@@ -232,7 +204,7 @@ def test_drift_is_graded_on_post_train_windows_and_says_so(cfg, monkeypatch):
     d = pd.concat([_weekly_frame(cfg, 3, 0, rows_per_week=12),
                    _weekly_frame(cfg, 0, 2, rows_per_week=8)])
     # the model is passed in, not rebuilt (main shares one with fit_dispersion)
-    drift = fd.drift_by_window(d, cfg, model=_FlatModel())
+    drift = fd.drift_by_window(d, cfg, model=_Applier(cfg))
 
     basis = {w: v["basis"] for w, v in drift["by_window"].items()}
     train_end = cfg["data"]["split"]["train_end"]
@@ -249,7 +221,7 @@ def test_drift_is_graded_on_post_train_windows_and_says_so(cfg, monkeypatch):
     # note that says the spread is then a floor
     cfg["dispersion"]["drift_min_windows"] = 3
     seen = iter([3.0, 5.0])
-    fallback = fd.drift_by_window(d, cfg, model=_FlatModel())
+    fallback = fd.drift_by_window(d, cfg, model=_Applier(cfg))
     assert fallback["stats_basis"].startswith("all windows")
     assert "drift_min_windows" in fallback["stats_basis"]
     assert fallback["windows_graded"] == 5 and fallback["r_median"] == 1.0
@@ -258,7 +230,7 @@ def test_drift_is_graded_on_post_train_windows_and_says_so(cfg, monkeypatch):
     # with its key rather than a literal
     cfg["dispersion"]["drift_min_windows"] = 2
     seen = iter([3.0, 5.0])
-    assert fd.drift_by_window(d, cfg, model=_FlatModel())["stats_basis"] == "post_train"
+    assert fd.drift_by_window(d, cfg, model=_Applier(cfg))["stats_basis"] == "post_train"
 
 
 def test_dispersion_drift_separates_a_failed_fit_from_a_moved_parameter(
@@ -280,8 +252,7 @@ def test_dispersion_drift_separates_a_failed_fit_from_a_moved_parameter(
     cfg["dispersion"]["min_rows_per_group"] = 4
     cfg["dispersion"]["drift_min_windows"] = 3
     monkeypatch.setattr(fd, "_working_elasticity", lambda c: ({}, -1.0))
-    monkeypatch.setattr(fd, "pre_launch", lambda d, c: d)
-    monkeypatch.setattr(fd, "population", lambda d, c: d)
+    monkeypatch.setattr(fd, "scope", lambda d, c, w: d)
     monkeypatch.setattr(fd, "fit_r", lambda k, mu, cen, b: (2.0, True))
     # two of five post-train windows are under-dispersed
     pears = iter([0.8, 0.9, 1.5, 1.6, 1.7])
@@ -289,7 +260,7 @@ def test_dispersion_drift_separates_a_failed_fit_from_a_moved_parameter(
     d = _weekly_frame(cfg, 0, 5)
     path = tmp_path / "rho.json"
     write_json(str(path), {"rho": 0.1, "drift_by_window":
-                           fd.drift_by_window(d, cfg, model=_FlatModel())})
+                           fd.drift_by_window(d, cfg, model=_Applier(cfg))})
     drift = read_json(str(path))["drift_by_window"]
 
     for w, v in drift["by_window"].items():
@@ -308,7 +279,7 @@ def test_dispersion_drift_separates_a_failed_fit_from_a_moved_parameter(
     # ...and below it, the verdict is about rho
     cfg["dispersion"]["drift_max_unusable_share"] = 0.5
     pears = iter([0.8, 0.9, 1.5, 1.6, 1.7])
-    ok = fd.drift_by_window(d, cfg, model=_FlatModel())
+    ok = fd.drift_by_window(d, cfg, model=_Applier(cfg))
     assert "rho varies" in ok["verdict"]
 
 
@@ -323,4 +294,4 @@ def test_a_global_r_that_does_not_converge_is_a_refusal_not_a_value(
     monkeypatch.setattr(fd, "_working_elasticity", lambda c: ({}, -1.0))
     d = _calib_frame(cfg, {"S1": ("C1", 16), "S2": ("C2", 32)})    # 48 rows
     with pytest.raises(RuntimeError, match="global r fit did not converge"):
-        fd.fit_dispersion(d, cfg, model=_FlatModel())
+        fd.fit_dispersion(d, cfg, model=_Applier(cfg))

@@ -1,61 +1,13 @@
-"""common.episodes: episode-scoped cuts at the midnight seam, the window
-extension, closure and scrap keyed to the source's sentinel, and the
-adjustment reasons."""
+"""common.episodes: the window extension, closure and scrap keyed to the
+source's sentinel, the adjustment reasons, and the COGS at risk per
+episode (the episode-scoped cuts are test_windows)."""
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from common import episodes
-from conftest import _frame, episode_frame
-
-
-def test_window_slice_takes_whole_episodes_or_none():
-    out = episodes.window_slice(_frame(), "2026-08-04", "2026-08-21")
-    assert set(out.episode_id) == {"inside"}
-    assert len(out) == 4          # all four of its rows, none of the other's
-
-
-def test_row_level_slicing_is_what_this_prevents():
-    d = _frame()
-    naive = d[d.date.astype(str).ge("2026-08-04")]
-    # the naive cut keeps 4 orphan hours of an episode that opened the day
-    # before -- a "short episode" that never existed
-    assert (naive.episode_id == "crosses").sum() == 4
-    assert "crosses" not in set(
-        episodes.window_slice(d, "2026-08-04", None).episode_id)
-
-
-def test_window_slice_assigns_every_episode_to_exactly_one_slice():
-    d = _frame()
-    a = episodes.window_slice(d, None, "2026-08-03")
-    b = episodes.window_slice(d, "2026-08-04", None)
-    assert set(a.episode_id) | set(b.episode_id) == {"crosses", "inside"}
-    assert not set(a.episode_id) & set(b.episode_id)
-    assert len(a) + len(b) == len(d)
-
-
-def test_window_slice_is_a_noop_without_bounds():
-    d = _frame()
-    assert episodes.window_slice(d) is d
-
-
-def test_a_precomputed_opening_date_gives_the_same_cut():
-    """A weekly schedule sliced the whole scope once per week, regrouping it
-    every time; the opening date is computed once and passed through
-    `opened`, and the cut -- and the weeks-seen count -- are unchanged."""
-    d = _frame()
-    opened = episodes.opening_dates(d)
-    assert list(opened.unique()) == ["2026-08-03", "2026-08-04"]
-    for start, end in (("2026-08-04", None), (None, "2026-08-03"),
-                       ("2026-08-04", "2026-08-21")):
-        pd.testing.assert_frame_equal(
-            episodes.window_slice(d, start, end),
-            episodes.window_slice(d, start, end, opened=opened))
-    plain = episodes.trailing_weeks_window(d, "2026-08-10", 1)
-    fed = episodes.trailing_weeks_window(d, "2026-08-10", 1, opened=opened)
-    pd.testing.assert_frame_equal(plain[0], fed[0])
-    assert plain[1] == fed[1] == 1
+from conftest import episode_frame
 
 
 def test_the_hour_discrepancy_has_one_home():
@@ -292,3 +244,62 @@ def test_identity_violations_are_the_rows_the_flow_already_marks():
     broken = flow.copy()
     broken.loc["B", "accounting_closes"] = False
     assert list(episodes.flow_identity_violations(d, flow=broken).index) == ["B"]
+
+
+# ------------------------------------------------------- COGS at risk
+
+def test_cogs_at_risk_counts_supply_not_opening_stock():
+    """A window that opens with 3 and takes 10 mid-flight has 13 units of
+    cost at risk; counting 3 understates every restocked episode."""
+    from common.episodes import cogs_at_risk
+
+    # one episode: opens with 3, 10 arrive in hour 2, sells 9, loses 1
+    d = pd.DataFrame({
+        "episode_id": ["e"] * 3,
+        # `hour_adjustment` establishes window order from these, so the
+        # arrival term needs them -- every real caller has them, since
+        # `assign_episode_ids` needs them first
+        "date": ["2026-03-01"] * 3, "hour_of_day": [10, 11, 12],
+        "cost": [100.0] * 3,
+        "starting_inventory": [3, 13, 4],
+        "units_sold": [0, 9, 3],
+        "ending_inventory": [13, 4, 0],
+    })
+    # 3 opening + 10 arrived = 13 units x 100
+    assert cogs_at_risk(d) == pytest.approx(1300.0)
+
+    # no arrivals -> unchanged from the old opening-stock reading
+    flat = pd.DataFrame({
+        "episode_id": ["f"] * 2, "cost": [50.0] * 2,
+        "date": ["2026-03-01"] * 2, "hour_of_day": [10, 11],
+        "starting_inventory": [8, 5], "units_sold": [3, 5],
+        "ending_inventory": [5, 0],
+    })
+    assert cogs_at_risk(flat) == pytest.approx(400.0)
+
+
+def test_the_per_episode_cogs_table_reproduces_every_stage_and_flag_reading():
+    """cogs_at_risk re-ran the arrival pass on every waterfall row and every
+    flag mask (~24 passes per run). Every stage after the ids are fixed drops
+    WHOLE episodes, so one per-episode table summed over the episodes left
+    gives the same number -- NaN included, never skipped."""
+    from common.episodes import cogs_at_risk, episode_cogs
+
+    d = pd.DataFrame({
+        "episode_id": ["e"] * 3 + ["f"] * 2 + ["n"] * 2,
+        "date": ["2026-03-01"] * 7, "hour_of_day": [10, 11, 12, 10, 11, 10, 11],
+        "cost": [100.0] * 3 + [50.0] * 2 + [np.nan] * 2,
+        "starting_inventory": [3, 13, 4, 8, 5, 2, 1],
+        "units_sold": [0, 9, 3, 3, 5, 1, 1],
+        "ending_inventory": [13, 4, 0, 5, 0, 1, 0],
+    })
+    table = episode_cogs(d)
+    assert table["e"] == pytest.approx(1300.0) and table["f"] == pytest.approx(400.0)
+    assert np.isnan(table["n"])
+    for keep in (["e"], ["f"], ["e", "f"], ["e", "n"], ["e", "f", "n"], []):
+        sub = d[d.episode_id.isin(keep)]
+        direct, tabled = cogs_at_risk(sub), cogs_at_risk(sub, table)
+        assert (np.isnan(direct) and np.isnan(tabled)) or direct == tabled, keep
+    # the chain's callers reach it by the name they imported
+    from fit import prepare_data
+    assert prepare_data.episode_cogs is episode_cogs

@@ -6,7 +6,7 @@ import time
 import numpy as np
 import pytest
 
-from common.parallel import map_episodes, resolve_workers
+from common.parallel import EpisodePool, map_episodes, resolve_workers
 
 
 def _square(x, ctx):
@@ -42,6 +42,21 @@ def test_results_come_back_in_submission_order_not_completion_order():
 def test_a_single_item_never_pays_for_a_pool():
     assert map_episodes(_square, [7], {"offset": 0}, workers=8) == [49]
     assert map_episodes(_square, [], {"offset": 0}, workers=8) == []
+
+
+def test_a_held_pool_maps_many_batches_like_the_one_shot_map():
+    """The simulator holds one pool across its hours (one executor per hour
+    would fork hundreds of times a run): every batch through it agrees
+    with map_episodes, in submission order; a batch under `serial_below`
+    items, or a pool not entered, prices in-process with the same answer."""
+    ctx = {"offset": 3}
+    batches = [list(range(n)) for n in (1, 5, 97)]
+    with EpisodePool(3, serial_below=4) as pool:
+        assert pool.workers == 3
+        for items in batches:
+            assert pool.map(_square, items, ctx) == map_episodes(_square, items, ctx)
+    unentered = EpisodePool(3)
+    assert unentered.map(_square, batches[-1], ctx) == map_episodes(_square, batches[-1], ctx)
 
 
 def test_resolve_workers():

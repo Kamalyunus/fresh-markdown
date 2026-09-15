@@ -9,7 +9,7 @@ import pytest
 def test_guardrail_fires_only_after_persistence():
     """The owner thresholds must actually be evaluated -- and must not fire on
     a single day over, which is what the noise floor makes routine."""
-    from daily.monitor import evaluate_guardrail
+    from common.guardrail import evaluate_guardrail
 
     block = {"basis": "trailing_28d_mean", "latest": 0.30,
              "by_day": {"2026-09-01": 0.05, "2026-09-02": 0.30}}
@@ -37,7 +37,7 @@ def test_guardrail_fires_only_after_persistence():
 def test_persistence_counts_calendar_days_not_observed_days():
     """Two days over with a silent day between them are not two CONSECUTIVE
     days: a missing reading is not a reading over the threshold."""
-    from daily.monitor import evaluate_guardrail
+    from common.guardrail import evaluate_guardrail
 
     gap = {"by_day": {"2026-09-01": 0.30, "2026-09-03": 0.30}}
     r = evaluate_guardrail(gap, threshold=0.20, persistence_days=2)
@@ -57,7 +57,8 @@ def test_overspend_reads_zero_on_a_priced_day_with_no_forced_spend(cfg):
     spend. Without a reading for them the streak was still counted from the
     last two over-budget days, and the next --feed re-suspended what a human
     had just resumed. A priced day with nothing spent is a day at 0."""
-    from daily.monitor import overspend_series, evaluate_guardrail
+    from common.guardrail import evaluate_guardrail
+    from daily.monitor import overspend_series
     cfg["exploration"]["budget_il_window_days"] = 1      # a one-day base reads
     il = {f"2026-09-{d:02d}": 1000.0 for d in range(1, 8)}
     learning = {"posterior_by_cell": {"GLOBAL": {"std": 0.5}},
@@ -386,7 +387,8 @@ def test_the_overspend_stop_takes_no_reading_while_the_il_base_is_short(cfg):
     same rule (explore.budget_base_ready): a base shorter than its window
     is no reading, so a launch's first over-budget mornings cannot fire it
     -- the owner's rehearsal lost the whole pilot to that on day three."""
-    from daily.monitor import overspend_series, evaluate_guardrail
+    from common.guardrail import evaluate_guardrail
+    from daily.monitor import overspend_series
 
     cfg["exploration"]["budget_il_window_days"] = 7
     il = {f"2026-09-{d:02d}": 1000.0 for d in range(1, 12)}

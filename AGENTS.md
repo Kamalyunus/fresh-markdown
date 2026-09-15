@@ -70,7 +70,7 @@ statement and the incident that created the rule.
     and keep** — the test is "can the demand model see it?". Conflating the
     two once cost >70% of the extract's COGS. (§5.2)
 15. **Cut this data by episode, never by row** — always
-    `common.episodes.window_slice`; a row-level date cut manufactures
+    `common.windows.window_slice`; a row-level date cut manufactures
     orphan episodes at the midnight seam. (§12a)
 16. **Nothing pre-launch may see past `split.test_end`** — the hold-out is
     read once, by `evaluate.shadow`, and never tuned on. (§5.13, §9)
@@ -103,43 +103,46 @@ And the standing prohibitions:
 - Never hand-edit `artifacts/posterior.json` (production learning state).
 - Never re-derive logic that has one home. The homes, and what each
   replaced (a second copy of any of these is a review failure):
-  - population filter — `fit.prepare_data.population`; window boundaries
-    — `window_starts` (`window_signals.counter_ok`; the ids and every
-    defective-window drop, `defective_windows`, rule 15)
-  - episode-scoped cuts — `common.episodes.window_slice`,
+  - population filter — `fit.prepare_data.population` (`scope` for one
+    split window); window boundaries — `common.windows.window_starts`
+    (`window_signals.counter_ok`; the ids and every defective-window
+    drop, `defective_windows`, rule 15)
+  - episode-scoped cuts — `common.windows.window_slice`,
     `trailing_weeks_window` (both factor-fit schedules), `week_key`,
     `opening_dates` (the episode's date key: folds, drift windows, the
-    schedule), `calendar_days` (the one `n_days`); the hour arithmetic —
-    `hour_discrepancy`; the planning horizon at a row — `planning_horizon`
-    (replay, shadow, templates, the feed row); COGS at risk —
-    `prepare_data.episode_cogs`
+    schedule), `calendar_days` (the one `n_days`), `week_after`; the hour
+    arithmetic — `common.episodes.hour_discrepancy`; the planning horizon
+    at a row — `windows.planning_horizon`; COGS at risk —
+    `episodes.episode_cogs`; anchor rows — `windows.is_anchor_row`
   - outcome reconciliation — `common.episodes.adjustment_reason`
-  - request → state — `engine.state.canonical_request` (one spelling) and
-    `build_states` (Lane B; a later hour of an episode is the entry
-    decision's stored path sliced, `EventStore.episode_paths`); the worker
-    body — `engine.state.price_one`; per-decision seeding —
-    `common.parallel.keyed_rng`; the hour key and the outcome id —
-    `events.pairs.hour_key`, `outcome_id_of`; id spelling — `ident`; two
-    claims on one key — `colliding_keys`; one decision per hour and one
-    outcome per decision — the STORE (`priced_hours`, `completeness_counts`)
+  - request → state — `engine.state.canonical_request` (one spelling),
+    `assemble_state` (the one state dict) and `build_states` (Lane B; a
+    later hour of an episode is the entry decision's stored path sliced,
+    `EventStore.episode_paths`); the worker body — `engine.state.price_one`,
+    its context — `batch_context`; per-decision seeding —
+    `common.parallel.keyed_rng` (the pool — `EpisodePool`); the hour key
+    and the outcome id — `events.pairs.hour_key`, `outcome_id_of`; id
+    spelling — `ident`; two claims on one key — `colliding_keys`; one
+    decision per hour and one outcome per decision — the STORE
+    (`priced_hours`, `completeness_counts`); the event field lists —
+    `events.contract`; the loaded bundle — `fit.artifacts.load_bundle`
   - scrap, IL, margin at episode grain — `common.metrics.episode_economics`
-    (+ `settled`, `daily_rates`; `scrap_rate` is scrap over SUPPLY,
-    opening + restocked) over `common.episodes.scrap_units`; live events
-    enter it through `daily.monitor.event_frame`. The floors, the live
-    guardrail, the business metrics and shadow's budget base all read
-    this one frame; the floor and the trigger read one deterioration
-    series — `common.guardrail.deterioration_series`; when it can first
-    read — `first_reading_close_days` / `stop_ready_close_days` (the
-    monitor's note, the simulator's readiness); the persistence streak —
-    `daily.monitor.evaluate_guardrail` (shadow's trace reads it)
+    (+ `settled`, `daily_rates`, `summary` — the IL/scrap/sell-through
+    block every reader rounds for itself; `scrap_rate` is scrap over
+    SUPPLY) over `common.episodes.scrap_units`; live events enter it
+    through `events.frame.event_frame` / `settled_episodes` (once per
+    monitor run). The floors, the live guardrail, the business metrics
+    and shadow's budget base all read this one frame; the floor and the
+    trigger read one deterioration series —
+    `common.guardrail.deterioration_series`; when it can first read —
+    `first_reading_close_days` / `stop_ready_close_days`; the persistence
+    streak — `guardrail.evaluate_guardrail` (shadow's trace reads it)
   - decision↔outcome pairing and the trading day —
     `events.pairs.match_pairs` (`learnable=` excludes failed pushes,
     `learnable_with_stock` also the hours with nothing to sell),
-    `decision_day`, `price_matches`; the event-quality gates, windowed
-    over `event_quality_window_days` — `quality_counts` (incl. the decision
-    side: `decisions_colliding_on_hour`, `decisions_without_outcome`),
-    `quality_rates`
-  - anchor rows — `common.episodes.is_anchor_row`
+    `decision_day`, `price_matches`, `finalized_days`, `suspended_days`;
+    the event-quality gates, windowed over `event_quality_window_days` —
+    `quality_counts` (incl. the decision side), `quality_rates`
   - guardrail deviation and verdicts — `common.guardrail.deviation`,
     `verdict_is_blocking`, `verdict_is_insufficient`
   - the tiers a forced move may land on — `engine.explore.admissible`
@@ -150,39 +153,43 @@ And the standing prohibitions:
     `engine.decide.finite_number`, `count_failures` (request and state);
     the NB pmf table — `engine.demand.nb_pmf_table`; the censored
     expectation, exact at every q — `expected_min_demand_inventory_vec`;
-    the table width — `dp.table_width`; the live episode frame —
-    `daily.monitor.settled_episodes` (built once per monitor run); the
-    week the factor schedule reaches (a held week counts) —
-    `fit.train_baseline.schedule_reaches` (the `--apply` gate and
-    `advance`'s re-fit trigger); the level estimator — `_solve_level_factors`
-    (anchor fit, schedule, shadow's re-fit, the backtest's W sweep)
-  - spread accounting — `engine.explore.SpreadLedger`; the tau controller
-    walk — `engine.explore.walk_tau` (production and shadow's trace) and
-    whether a day's budget is signal — `budget_held` (the controller's
-    hold, the overspend stop's no-reading, shadow's mean budget, §5.8; a
-    suspended day and a failed push are no reading — `update.suspended_days`,
-    `is_learnable`); the walked-day ledger — `PosteriorStore.tau_day_walked`;
-    the week after a data week — `common.episodes.week_after`; the
-    backtest's forward simulation — `evaluate.backtest._simulate_arm`
-    (+ `_dp_price`); the simulated shop — `evaluate.pilot_sim.PilotSim`
-    (a pricer strategy; `tools.e2e_cycle` drives it)
-  - rho — `common.config.intraclass_correlation`; `m` per batch —
+    the table width — `dp.table_width`; the week the factor schedule
+    reaches (a held week counts) — `fit.train_baseline.schedule_reaches`
+    (the `--apply` gate and `advance`'s re-fit trigger); the level
+    estimator — `fit.calibrate.solve_level_factors` (anchor fit, schedule,
+    shadow's re-fit, the backtest's W sweep) on `attach_fit_basis`; the
+    frozen-vs-refit rescale and the harnesses' priced frame —
+    `evaluate.level.refit_scale`, `predict_frame`; the learning maths —
+    `engine.learn.grid_update`, `row_information`
+  - spread accounting — `engine.spread_ledger.SpreadLedger`; the tau
+    controller walk — `engine.budget.walk_tau` (production and shadow's
+    trace) and whether a day's budget is signal — `budget_held` (§5.8; a
+    suspended day and a failed push are no reading); the walked-day
+    ledger — `PosteriorStore.tau_day_walked`; the backtest's forward
+    simulation — `evaluate.backtest._simulate_arm` (+ `_dp_price`; the
+    deck's paths too); the simulated shop — `evaluate.pilot_shop.PilotSim`
+    (a pricer strategy; `tools.e2e_cycle` drives it through
+    `LaneBPricer`); the harnesses' episode sample and tau block —
+    `evaluate.tau.sample_ids`, `tau_derivation_block`
+  - rho — `common.clustering.intraclass_correlation`; `m` per batch —
     `deff_from_episodes`
   - JSON/rows in/out — `common.io.read_json`/`write_json`,
-    `read_rows`/`write_jsonl` (NaN-safe)
+    `read_rows`/`write_jsonl` (NaN-safe); report and artifact paths —
+    `common.paths`; the CLI parser — `common.cli.make_parser`
   - what an hour was priced with beyond the artifacts —
-    `common.provenance.environment` / `environment_drift`; the config digest — `config_fingerprint`
+    `common.provenance.environment` / `environment_drift`; the config
+    digest — `config_fingerprint`; the audit trail — `common.history`
   - the discount-grid epsilon — `engine.dp.TIER_EPS`; own-data prior
     weight — `common.config.OWN_DATA_WEIGHT`
-  - pastable config keys — `ops.tune.KEYS` (anchor, measured, rerun);
-    the status "not run" prologue — `ops.status._needs`
+  - pastable config keys and what a move re-runs — `ops.config_keys.KEYS`,
+    `stale_keys`, `report_staleness` (both drivers), the paste gate
+    `tau_provenance_error`; the status "not run" prologue — `ops.status._needs`
 - Never invent a SET BY OWNER value; never drive a quarantine count to zero
   with a catch-all reason.
 - **A code change ships with its doc change in the same commit** (which
-  docs: the last section of this file). Docs that lag the code are how
-  the next agent re-derives what already has a home.
-- `python3 -m pytest tests/` must pass before any push (a couple of minutes; the
-  end-to-end module runs the bootstrap chain in subprocesses).
+  docs: the last section of this file). `python3 -m pytest tests/` must
+  pass before any push; `pyflakes` is clean except the `# noqa: F401`
+  re-export lines (a moved name keeps its old dotted name for callers).
 
 ## Setup
 
@@ -214,7 +221,7 @@ phase — what runs, which config keys move, and who moves them:
 | --- | --- | --- | --- |
 | data | `fit.download_flc` over `split.train_start` → the hold-out's end, only when no extract is on disk | none | — |
 | bootstrap | `ops.bootstrap_loop` (train ONCE, loop to the fixed point, backtest, thresholds, seal). A moved TRAINING input (`data.split`, `exclusion_window`, the LightGBM keys) is a STOP: a retrain is a new bundle and only `--retrain` runs one | none | — |
-| tune | `tune --apply`, then `ops.bootstrap_loop --check-only` / `evaluate.backtest` / `derive_thresholds` / shadow as the moved keys demand (`tune.stale_keys`; `READ_BY` routes unpasted keys to the one report or fit that reads them), until nothing is left to paste. A MEASURED value a report ran and still could not derive is a STOP naming that report, never an owner decision; then `ops.seal --reason config` (or `libraries`) whenever the environment moved since the last seal | `rho`, `calibration_fit_trailing_weeks`, `calibration_gate_band`, `information_increment`, `delta_min_log_bias`, `scrap/margin_deterioration_pct` (the 3σ trailing floor), `max_mean_step` (inside its price-consequence gate) | the process, from the report that derives each |
+| tune | `tune --apply`, then `ops.bootstrap_loop --check-only` / `evaluate.backtest` / `derive_thresholds` / shadow as the moved keys demand (`config_keys.stale_keys`; `READ_BY` routes unpasted keys to the one report or fit that reads them), until nothing is left to paste. A MEASURED value a report ran and still could not derive is a STOP naming that report, never an owner decision; then `ops.seal --reason config` (or `libraries`) whenever the environment moved since the last seal | `rho`, `calibration_fit_trailing_weeks`, `calibration_gate_band`, `information_increment`, `delta_min_log_bias`, `scrap/margin_deterioration_pct` (the 3σ trailing floor), `max_mean_step` (inside its price-consequence gate) | the process, from the report that derives each |
 | posterior | `init_posterior`, once — re-run with `--force` by the process only BEFORE launch, while the file holds no production state (no consumed outcome, no walked τ, no suspension) and its cells differ from what init would write now (the launch belief or the prior moved) | none | — |
 | shadow | `evaluate.shadow` on the hold-out, every episode; then `tune --apply` | `tau_initial` | the process, from `shadow.tau_initial_derivation`. The forced rate is the budget's: to change it the owner reads `shadow.exploration_budget_sweep` (forced rate, spend, move, `information_rel` per `budget_share_of_il` × `delta_min_bias_multiple`), sets the pair, and shadow re-runs once |
 | owner | STOP | `max_std_shrink`; `max_mean_step` when its re-price EXCEEDS the gate; a stop threshold only when its floor is `BLOCKED`, `TOO TIGHT`, `LIKELY INERT` or `insufficient history`; `posterior.cold_start_shift_std` never stops (it ships 0.5) but is yours — `tune` reports it with the backtest evidence | you, from `thresholds.json` (advance prints floor, verdict, source) |
@@ -228,7 +235,7 @@ with before, after, why and source, the config in force, status, and what
 is still waited on — the handover document, from the journal and tune's
 decision log, never from memory. It never retrains unless the model is
 absent or `--retrain` is given; it re-grades a report only when its bundle
-moved or a config key that report READS moved (`tune.stale_keys`, the one
+moved or a config key that report READS moved (`config_keys.stale_keys`, the one
 routing `status`'s `report vintages` line also uses; a MEASURED paste that
 writes back what a report measured invalidates nothing; a bundle-stale
 shadow is re-run before tune can BLOCK on it); it refuses a third run of
@@ -251,23 +258,14 @@ python3 -m evaluate.shadow --input data/prepared.parquet --out reports/shadow.js
 3b–5b until the fixed point CONVERGES**, then 6, 6b, 11 and `status`, and
 exits non-zero if the loop never settles. Its closing `status` is ADVISORY
 (`tau_initial` null, shadow not run): red rows are next steps, not a broken
-bundle; `status` gates the pilot (RUNBOOK), never the bootstrap.
-
-**Why this is not optional.** Steps 3b–5 are one TURN of a fixed-point
-iteration (the factor solve consumes `r`; `r`, `rho` and the prior are fitted
-against *calibrated* `mu_ref`); one pass leaves artifacts that disagree.
-Re-running the list restarts at 3 and RETRAINS THE BASELINE (rule 1).
-
-After a **config paste**, settle without retraining:
-
-```bash
-python3 -m ops.bootstrap_loop --check-only   # settle on the artifacts on disk, NO retrain
-```
-
-`--max-turns` (default 20) is a runaway guard, not a budget — the STALL test
-stops a loop three turns without a new best; turn one has no `r_lookup`
-(raw-mu basis) and `--fast` drops `fold_spread` (a std FLOOR, never the
-fixed point); the settled artifact gets a FULL prior. (§9.2)
+bundle. **Why this is not optional:** steps 3b–5 are one TURN of a
+fixed-point iteration (the factor solve consumes `r`; `r`, `rho` and the
+prior are fitted against *calibrated* `mu_ref`); re-running the list
+restarts at 3 and RETRAINS THE BASELINE (rule 1). After a **config
+paste**, settle without retraining: `python3 -m ops.bootstrap_loop
+--check-only`. `--max-turns` (default 20) is a runaway guard, not a
+budget — the STALL test stops a loop three turns without a new best;
+`--fast` drops `fold_spread` (a std FLOOR, never the fixed point). (§9.2)
 
 ### The steps it runs — for debugging ONE step, not for driving the pipeline
 
@@ -316,7 +314,7 @@ fixture re-derives fixture values — read them, never commit them
 | --- | --- | --- |
 | `dispersion.rho` | `artifacts/rho.json`, after EVERY retrain (`m` is measured per batch, never pasted) | `artifact mirrors` (strict start-up refuses drift beyond `rho_paste_tolerance_rel`, 1% of the frozen rho — above the ~1e-3 step a `--check-only` turn takes, so a settle is not a new paste; tighter than tau's 5% because rho is frozen for the pilot while tau self-corrects daily) |
 | `calibration_fit_trailing_weeks`, `information_increment`, `calibration_gate_band` | the REPORT that derives each (`tune` names it) | `config mirrors reports` — these cannot be null, so the check is the only thing between a pulled repo and a number from another extract |
-| `exploration.tau_initial` | `reports/shadow.json` → `tau_initial_derivation` (backtest = cross-check only) | `tau_provenance_error` — shadow refuses a stale paste |
+| `exploration.tau_initial` | `reports/shadow.json` → `tau_initial_derivation` (backtest = cross-check only) | `ops.config_keys.tau_provenance_error` — shadow refuses a stale paste |
 | `exploration.delta_min_log_bias` | `tune` from `backtest.fidelity`, PER CATEGORY as a one-line mapping (own log ratio floored by MAE@W and the gate half-width; `_default` for unseen categories) — null = no floor | `config mirrors reports` |
 | `scrap/margin_deterioration_pct` | `tune` pastes the 3σ trailing-mean floor from `reports/thresholds.json` (owner, 2026-09-06); OWNER only when the verdict is `TOO TIGHT`, `BLOCKED`, `LIKELY INERT` or `insufficient history` — all blocking, none pasted | `guardrail floors` |
 | `posterior.cold_start_shift_std` | OWNER — launch belief = prior mean − k·std per cell (0.5); read by `init_posterior` and the backtest's DP arm; inert once the posterior has consumed an outcome | `tune` (OWNER reading with `intra_episode_deepening` medians and the like-for-like IL gap) |
@@ -326,18 +324,18 @@ fixture re-derives fixture values — read them, never commit them
 
 | Working on | Read first |
 | --- | --- |
-| filter chain, waterfall, eligibility, restocks, scrap | §5.2, §12a; `fit/prepare_data.py`, `common/episodes.py`; rules 13–15 |
+| filter chain, waterfall, eligibility, restocks, scrap | §5.2, §12a; `fit/prepare_data.py`, `common/windows.py` (boundaries), `common/episodes.py` (stock); rules 13–15 |
 | baseline, calibration, fidelity | §5.4, §9.2 (incl. the gate decision tree); rules 1, 4–6 |
 | elasticity prior, dispersion | §5.5, §5.6; rules 1a, 2, 3, 7 |
 | DP, pricing, exploration, tau, budget | §5.7, §5.8, §5.10 |
 | backtest, replay, tau derivation | §5.14, §9; rule 17 |
 | "does the agent move after entry?" | §5.7 `intra_episode_moves` (steps on the DP arm's own path, by cost band) — NOT `pct_dp_deepened`, which compares episode means with legacy; shadow re-anchors on legacy's price and cannot measure it |
 | shadow phase | §5.13 (holdout default, sampling caveats, tau₀ derivation) |
-| the weeks after launch, before launch (`evaluate.pilot_sim`: real engine + daily lane vs a simulated shop; its world, run, faults and grading in `pilot_sim.yaml`, key table in §11.3) | §11.3 |
+| the weeks after launch, before launch (`evaluate.pilot_sim` drives `pilot_shop` + `pilot_grade`: real engine + daily lane vs a simulated shop; settings in `pilot_sim.yaml`, key table in §11.3) | §11.3 |
 | posterior, update, operator gate | §5.9, §5.11 |
 | monitoring, guardrails, stop conditions, the pilot read | §5.12, §11, §12 |
 | events, integration, quarantine | `docs/event_contract.html`; `events/store.py` |
-| provenance, seal, freshness, the audit trail (`artifacts/history/<bundle>/<sealed_at>/`) | §5.14a; rule 18 |
+| provenance, seal, freshness, the audit trail (`common/history.py`; `artifacts/history/<bundle>/<sealed_at>/`) | §5.14a; rule 18 |
 | operating the chain end to end, phase order | `ops/advance.py` (`--plan`); rule 1b |
 | operator runbook, review tiers | `RUNBOOK.md`, `REVIEW_GUIDE.md` |
 | why is it not done the other way? | `docs/learnings.md` |

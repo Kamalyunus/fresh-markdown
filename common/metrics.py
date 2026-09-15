@@ -3,14 +3,16 @@
   episode_economics / settled / daily_rates -> every IL, scrap and margin
       figure (guardrail floors, live guardrail, business metrics, shadow's
       budget base)
-  fidelity_decomposition  -> evaluate.backtest (the level gate value)
+  summary -> the IL / scrap / sell-through / margin block over a settled
+      frame (the monitor's business metrics, the simulator's arm
+      economics, shadow's markdown IL)
 
 They live here rather than in any caller because several need them and a
-second copy would drift.
+second copy would drift. `fidelity_decomposition` (the level gate value)
+is the backtest's own and lives there.
 """
 
 import numpy as np
-import pandas as pd
 
 from common import episodes
 
@@ -85,41 +87,43 @@ def daily_rates(ep):
     return day
 
 
-
-def fidelity_decomposition(d, cfg, pred_col="predicted_units"):
-    """Measurement 10 -- separates LEVEL bias (sold ratio at the reference
-    anchor, where elasticity scaling ~1) from SLOPE bias (how the ratio moves
-    with distance from d_ref). Requires predicted units at the ACTUAL
-    historical price; skipped when the column is absent."""
-    if pred_col not in d.columns:
-        return "NOT RUN -- requires fitted baseline predictions"
-
-    tier_step = cfg["pricing"]["tier_step"]
-    d = d.copy()
-    d["gap"] = d.total_discount - d.d_ref
-
-    def ratio(g):
-        pred = g[pred_col].sum()
-        return round(float(g.units_sold.sum() / pred), 4) if pred > 0 else None
-
-    at_anchor = d[episodes.is_anchor_row(d, tier_step)]
-
-    # ratio by distance from the anchor: bins two tiers wide, spanning eight
-    # tiers either side of it (the shipped tier_step gives -0.20..0.20 by 0.05)
-    width, half_span = 2 * tier_step, 8 * tier_step
-    bins = np.arange(-half_span, half_span + width / 2, width)
-    d["gap_bin"] = pd.cut(d.gap, bins)
-    by_gap = {str(k): ratio(g) for k, g in d.groupby("gap_bin", observed=True)}
-
-    return {
-        "overall_sold_ratio": ratio(d),
-        "level_bias_at_anchor": ratio(at_anchor),
-        "rows_at_anchor": int(len(at_anchor)),
-        "slope_ratio_by_discount_gap": by_gap,
-        # per-category ratios live in fidelity.by_category (what tune reads)
-        "interpretation": (
-            "level_bias_at_anchor well below 1 with a flat slope -> mu_ref level "
-            "error, multiplicative recalibration permitted. Ratio near 1 at the "
-            "anchor degrading with gap -> epsilon understated; do NOT recalibrate "
-            "the level, widen the search bound and re-estimate."),
+def summary(ep, hours=None, rounding=None):
+    """The IL, scrap, sell-through and margin block over a SETTLED episode
+    frame (`settled(episode_economics(d))`), every figure a ratio of sums
+    with its denominator and the absolute IL alongside (design 2.3):
+    `episodes`, `il_absolute`, `il_pct`, `il_pct_denominator`,
+    `il_discount`, `il_scrap` (the two terms of `il`), `scrap_units`,
+    `scrap_rate` (scrap over SUPPLY), `sell_through` (sold over sold +
+    scrap), `margin`; with `hours` (the hourly frame the episodes came
+    from) also `hours` and `mean_discount` over the settled episodes' rows.
+    Unrounded unless `rounding` maps a key to its decimals -- each reader
+    keeps the precision it reports at, so the monitor, the simulator and
+    shadow read one block without one moving another's figures."""
+    den = float(ep.denom.sum())
+    il = float(ep.il.sum())
+    units = float(ep.units_sold.sum() + ep.scrap.sum())
+    out = {
+        "episodes": int(len(ep)),
+        "il_absolute": il,
+        "il_pct": float(ep.il.sum() / den) if den > 0 else None,
+        "il_pct_denominator": den,
+        "il_discount": float(ep.discount_cost.sum()),
+        "il_scrap": float((ep.cost * ep.scrap).sum()),
+        "scrap_units": int(ep.scrap.sum()),
+        "scrap_rate": float(ep.scrap.sum() / ep.supply.sum())
+        if ep.supply.sum() > 0 else None,
+        "sell_through": float(ep.units_sold.sum() / units) if units > 0 else None,
+        "margin": float(ep.margin.sum()),
     }
+    if hours is not None:
+        mine = hours[hours.episode_id.isin(ep.index)]
+        out["hours"] = int(len(mine))
+        out["mean_discount"] = float(mine.shelf_discount.mean()) if len(mine) else None
+    for key, digits in (rounding or {}).items():
+        if out.get(key) is not None:
+            out[key] = round(out[key], digits)
+    return out
+
+
+# moved to evaluate.backtest (its one reader); the name stays for callers
+from evaluate.backtest import fidelity_decomposition                     # noqa: E402,F401

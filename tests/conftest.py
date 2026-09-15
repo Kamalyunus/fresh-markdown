@@ -1,4 +1,5 @@
 """Shared fixtures and builders for the test suite."""
+import copy
 import datetime as dt
 import json
 import os
@@ -6,9 +7,12 @@ import pathlib
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
-from common.config import load_config as _load_config
+from common.config import config_get, load_config as _load_config
+from common.provenance import stamp
 from engine.posterior import PosteriorStore
 from fit.train_baseline import BaselineModel
 
@@ -43,8 +47,6 @@ def synth_flc(tmp_path_factory):
     path = os.path.join(ROOT, "data", "flc_synth.parquet")
     if os.path.exists(path):
         return path
-    import pyarrow as pa
-    import pyarrow.parquet as pq
     from tools import make_dummy_flc as gen
     start, days = gen.span_covering_splits(CFG)
     df, _ = gen.generate(120, days, "randomized", 3, 0.004, 0.02, start=start)
@@ -150,22 +152,6 @@ def _reports(root, **over):
     return str(root)
 
 
-def _cfg_with(cfg, tmp_path, cal=None, rho=None):
-    """`cfg` pointed at a calibration and a rho artifact under tmp_path."""
-    cal_path = tmp_path / "calibration.json"
-    cal_path.write_text(json.dumps(cal if cal is not None else {
-        "provenance": {"bundle": "m1"},
-        "convergence": {"converged": True, "max_abs_dlog": 0.001,
-                        "tol_log": 0.02}}))
-    rho_path = tmp_path / "rho.json"
-    rho_path.write_text(json.dumps(rho or {"rho": 0.2436}))
-    return dict(
-        cfg,
-        baseline_model=dict(cfg["baseline_model"],
-                            calibration_factor_path=str(cal_path)),
-        dispersion=dict(cfg["dispersion"], rho_path=str(rho_path)))
-
-
 @pytest.fixture
 def reports_dir(tmp_path):
     """tmp_path/"r" holding the default report set from `_reports`."""
@@ -173,6 +159,109 @@ def reports_dir(tmp_path):
     root.mkdir()
     _reports(root)
     return root
+
+
+# ------------------------------------------- a config pointed at tmp artifacts
+#
+# ONE builder redirects every artifact the process writes; the others put a
+# file or a knob on top of it. The file NAMES are the shipped ones, which the
+# seal and the audit trail read back.
+
+ARTIFACT_PATHS = (
+    (("data", "split_manifest_path"), "split_manifest.json"),
+    (("baseline_model", "model_path"), "baseline_model.txt"),
+    (("baseline_model", "feature_schema_path"), "feature_schema.json"),
+    (("baseline_model", "calibration_factor_path"), "calibration.json"),
+    (("dispersion", "r_lookup_path"), "r_lookup.json"),
+    (("dispersion", "rho_path"), "rho.json"),
+    (("posterior", "prior", "path"), "prior.json"),
+    (("posterior", "path"), "posterior.json"),
+    (("artifacts", "bundle_path"), "bundle.json"),
+)
+
+
+def scratch_paths(cfg, tmp_path):
+    """A deep copy of `cfg` with every artifact path under `tmp_path` and
+    nothing written there yet."""
+    cfg = copy.deepcopy(cfg)
+    for key, name in ARTIFACT_PATHS:
+        node = cfg
+        for k in key[:-1]:
+            node = node[k]
+        node[key[-1]] = str(tmp_path / name)
+    return cfg
+
+
+def scratch_config(cfg, tmp_path):
+    """`scratch_paths` (no r_lookup: raw basis) with a thin anchor floor and
+    W=1, so the anchor window is the week before the gate -- the builder
+    behind `scratch_cfg`, which the calibration tests fit artifacts on."""
+    cfg = scratch_paths(cfg, tmp_path)
+    cfg["baseline_model"]["calibration_min_anchor_rows"] = 10
+    cfg["baseline_model"]["calibration_fit_trailing_weeks"] = 1
+    return cfg
+
+
+@pytest.fixture
+def scratch_cfg(cfg, tmp_path):
+    return scratch_config(cfg, tmp_path)
+
+
+def _cfg_with(cfg, tmp_path, cal=None, rho=None):
+    """`scratch_paths` with a calibration and a rho artifact written."""
+    cfg = scratch_paths(cfg, tmp_path)
+    pathlib.Path(cfg["baseline_model"]["calibration_factor_path"]).write_text(
+        json.dumps(cal if cal is not None else {
+            "provenance": {"bundle": "m1"},
+            "convergence": {"converged": True, "max_abs_dlog": 0.001,
+                            "tol_log": 0.02}}))
+    pathlib.Path(cfg["dispersion"]["rho_path"]).write_text(
+        json.dumps(rho or {"rho": 0.2436}))
+    return cfg
+
+
+def _harness_cfg(cfg, tmp_path):
+    """`scratch_paths` with an empty r_lookup, an initialised posterior, a
+    throwaway shadow store and the exploration keys the harness frame needs."""
+    cfg = scratch_paths(cfg, tmp_path)
+    pathlib.Path(cfg["dispersion"]["r_lookup_path"]).write_text(
+        json.dumps({"fallback_order": ["subcategory", "category", "global"],
+                    "subcategory": {}, "category": {}, "global": 1.0}))
+    cfg["events"] = dict(cfg["events"], shadow_store_dir=str(tmp_path / "shadow_events"))
+    cfg["exploration"] = dict(cfg["exploration"], tau0_derivation_min_decisions=1,
+                              delta_min_log_bias=None,   # no floor: the shipped map is the owner's
+                              # the harness frame's seed closes on six days
+                              # before the window; the base must span the
+                              # window or day one is held (budget_held)
+                              budget_il_window_days=6)
+    PosteriorStore.initialise(cfg, {"FRUIT": {"mean": -1.2, "std": 0.5}},
+                              {"FRUIT": 1000}, path=cfg["posterior"]["path"])
+    return cfg
+
+
+# ------------------------------------------------------- the artifact bundle
+
+BUNDLE = "baseline-20260101000000"
+
+
+def artifact_at(cfg, key, payload, bundle=BUNDLE, stamped=True):
+    """Write `payload` at the artifact path config names under `key`."""
+    path = pathlib.Path(config_get(cfg, key))
+    if stamped:
+        stamp(payload, cfg, bundle, "test")
+    _write(path.parent, path.stem, payload)
+
+
+def full_bundle(cfg, bundle=BUNDLE):
+    """One coherent set: model, its schema, and everything fitted against it."""
+    with open(config_get(cfg, ("baseline_model", "model_path")), "w") as f:
+        f.write("tree { }")                      # a model file, not JSON
+    artifact_at(cfg, ("data", "split_manifest_path"), {"split": {}}, bundle=None)
+    artifact_at(cfg, ("baseline_model", "feature_schema_path"),
+                {"model_version": bundle}, stamped=False)   # names its model the old way
+    artifact_at(cfg, ("dispersion", "r_lookup_path"), {"global": 0.9}, bundle)
+    artifact_at(cfg, ("dispersion", "rho_path"), {"rho": 0.31}, bundle)
+    artifact_at(cfg, ("posterior", "prior", "path"), {"source": "fallback"}, bundle)
 
 
 # ---------------------------------------------------------------- episodes
@@ -204,16 +293,81 @@ def _frame():
     return episode_frame(rows, columns=["episode_id", "date", "hour_of_day"])
 
 
+def _window(sku, fc, start, hours, base_hr=None):
+    """One selling window as hourly rows, counting hours_remaining down,
+    on an open shelf that reconciles every hour (no close, no restock: the
+    boundary rule reads the inventory too)."""
+    hr = hours - 1 if base_hr is None else base_hr
+    ts = pd.date_range(start, periods=hours, freq="h")
+    return episode_frame(sku_id=sku, fc=fc, date=ts.normalize(),
+                         hour_of_day=ts.hour,
+                         hours_remaining=[hr - i for i in range(hours)],
+                         starting_inventory=5, units_sold=0, ending_inventory=5)
+
+
+def _shelf(hours, counters, start, sold, end, day="2026-03-01", sku="S", fc="F"):
+    """Hourly rows of one SKU x FC with the inventory the boundary rule reads."""
+    return episode_frame(hour_of_day=hours, hours_remaining=counters,
+                         starting_inventory=start, units_sold=sold,
+                         ending_inventory=end, date=day, sku_id=sku, fc=fc)
+
+
+# ------------------------------------------------ rows in the SOURCE schema
+
+def source_row(**over):
+    """One row in the extract's own schema (`make_dummy_flc.SCHEMA` names:
+    discount in PERCENT, `final_price` a realised price); keywords override."""
+    row = {"date": dt.date(2026, 3, 2), "hour": 10, "skuseq": 1, "fc": "F1",
+           "inventory": 10.0, "discount": 25.0, "units_sold": 1,
+           "normal_asp": 10_000.0, "final_price": 7_500.0,
+           "cogs_wo_vat": 4000.0, "ending_inventory": 9.0, "flc_window": 5.0,
+           "category": "MEAT", "subcategory": "PORK"}
+    row.update(over)
+    return row
+
+
+def source_window(sku, start_hour, n, day="2026-03-02", fc="F1", inv0=10,
+                  discount=25.0, price=10_000.0, category="MEAT",
+                  subcategory="PORK"):
+    """One clean source window as `source_row`s: `n` hours from
+    `start_hour`, selling one an hour, the write-off sentinel on its last
+    row; discount in PERCENT, as the source emits it."""
+    rows, inv = [], inv0
+    for i in range(n):
+        end = inv - 1 if i < n - 1 else 0
+        rows.append(source_row(
+            date=dt.date.fromisoformat(day), hour=start_hour + i, skuseq=sku,
+            fc=fc, inventory=float(inv), discount=discount, units_sold=1,
+            normal_asp=price, final_price=price * (1 - discount / 100),
+            cogs_wo_vat=4000.0, ending_inventory=float(end),
+            flc_window=float(n - 1 - i), category=category,
+            subcategory=subcategory))
+        inv = end
+    return rows
+
+
+def write_extract(tmp_path, rows, name="raw.parquet"):
+    """`rows` (source_row dicts) as a parquet extract under the source
+    schema; returns its path."""
+    from tools.make_dummy_flc import SCHEMA
+    df = pd.DataFrame(rows)[[f.name for f in SCHEMA]]
+    path = tmp_path / name
+    pq.write_table(pa.Table.from_pandas(df, schema=SCHEMA, preserve_index=False), str(path))
+    return str(path)
+
+
 # ---------------------------------------------- the harness applier and frames
 #
 # A BaselineModel applier over a constant base rate (no booster), so shadow
 # and the backtest run their real code -- decide(), the DP, the ledger, the
 # event store, the level-factor applier -- on a frame small enough to reason
-# about.
+# about. The same stub stands in for the model in every fit test: a level
+# solve reads its RAW mu, a residual frame its calibrated one.
 
 class _Applier(BaselineModel):
     """BaselineModel's factor applier over a constant mu_ref -- the real
-    schedule/freeze/coverage code, no LightGBM."""
+    schedule/freeze/coverage code, no LightGBM. `calls` counts predictions,
+    for a test that pins how often a fit predicts."""
 
     def __init__(self, cfg, base_mu=2.0, anchor=None, schedule=None):
         self.cfg = cfg
@@ -223,9 +377,11 @@ class _Applier(BaselineModel):
         self.calibration_stops_at = None
         self.version = "applier-only"
         self.base_mu = base_mu
+        self.calls = 0
         self._reset_calibration_counters()
 
     def predict_mu_ref(self, d, raw=False):
+        self.calls += 1
         mu = np.full(len(d), float(self.base_mu))
         return mu if raw else mu * self.level_factors(d)
 
@@ -253,23 +409,37 @@ def _hours(eid, day, n, q0=6, sold=1, disc=0.30, tail=0, hour0=9, dp=True,
     })
 
 
-def _harness_cfg(cfg, tmp_path):
-    """The shipped config pointed at throwaway artifacts."""
-    r_path = tmp_path / "r_lookup.json"
-    r_path.write_text(json.dumps({"fallback_order": ["subcategory", "category",
-                                                     "global"],
-                                  "subcategory": {}, "category": {},
-                                  "global": 1.0}))
-    cfg = dict(cfg)
-    cfg["dispersion"] = dict(cfg["dispersion"], r_lookup_path=str(r_path))
-    cfg["posterior"] = dict(cfg["posterior"], path=str(tmp_path / "posterior.json"))
-    cfg["events"] = dict(cfg["events"], shadow_store_dir=str(tmp_path / "shadow_events"))
-    cfg["exploration"] = dict(cfg["exploration"], tau0_derivation_min_decisions=1,
-                              delta_min_log_bias=None,   # no floor: the shipped map is the owner's
-                              # the harness frame's seed closes on six days
-                              # before the window; the base must span the
-                              # window or day one is held (budget_held)
-                              budget_il_window_days=6)
-    PosteriorStore.initialise(cfg, {"FRUIT": {"mean": -1.2, "std": 0.5}},
-                              {"FRUIT": 1000}, path=cfg["posterior"]["path"])
-    return cfg
+def _prepared(cells, days):
+    """A prepared-frame lookalike: one 4-hour anchor episode per cell per
+    day over `days`, every row eligible. `cells`: {sub: (cat, sold)}."""
+    rows = []
+    for day in days:
+        for sub, (cat, sold) in cells.items():
+            for h in range(10, 14):
+                rows.append(dict(
+                    episode_id=f"{sub}|{day}|{h}", date=day, hour_of_day=h,
+                    sku_id=sub, fc="F", category=cat, subcategory=sub,
+                    total_discount=0.25, d_ref=0.25, starting_inventory=100,
+                    units_sold=sold, ending_inventory=100 - sold,
+                    episode_eligible=True, dp_eligible=True))
+    return pd.DataFrame(rows)
+
+
+def _calib_frame(cfg, groups):
+    """`groups`: {subcategory: (category, rows)}; every row inside the calib
+    window, stocked, eligible, at the anchor."""
+    s = cfg["data"]["split"]
+    rng = np.random.default_rng(0)
+    rows = []
+    for sub, (cat, n) in groups.items():
+        for i in range(n):
+            rows.append(dict(
+                episode_id=f"{sub}-{i // 4}", date=s["calib_start"],
+                hour_of_day=10 + i % 4, sku_id=sub, fc="F", category=cat,
+                subcategory=sub, starting_inventory=10,
+                units_sold=int(rng.negative_binomial(1.0, 1.0 / 3.0)),
+                total_discount=0.25, d_ref=0.25,
+                episode_eligible=True, dp_eligible=True))
+    d = pd.DataFrame(rows)
+    d["ending_inventory"] = (d.starting_inventory - d.units_sold).clip(lower=0)
+    return d

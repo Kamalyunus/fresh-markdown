@@ -49,6 +49,15 @@ def test_twelve_scenarios_each_land_on_a_precomputed_state(deck):
 def test_every_state_has_paths_scores_and_monotone_discounts(deck):
     for st in deck["states"]:
         assert st["star"] in st["q_by_tier"]
+        # the paths walk the replay's one forward simulation
+        # (evaluate.backtest._simulate_arm, priced by _dp_price): its entry
+        # solve is the state's own, so the system path opens at the chosen
+        # tier and the restock path shares it until the delivery lands
+        opening = st["paths"]["dp"]["path"][0]
+        assert opening["d"] == st["tiers"][st["star"]] and opening["q"] == st["key"][3]
+        h = st["key"][4]
+        assert (st["paths"]["dp_restock"]["path"][:max(h // 2, 1)]
+                == st["paths"]["dp"]["path"][:max(h // 2, 1)])
         for name in ("dp", "dp_world_half", "dp_world_double", "dp_restock", "flat_reference", "legacy_ramp"):
             p = st["paths"][name]
             assert set(p["score"]) == {"leftover", "scrap_cost", "discount_cost", "il", "sold"}

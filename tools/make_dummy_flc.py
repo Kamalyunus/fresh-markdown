@@ -30,16 +30,22 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from common.config import load_config, reference_discount
+from common.windows import (assign_episode_ids, window_counter, window_signals,
+                            window_starts)
 from engine.dp import TIER_EPS
+from fit.prepare_data import SOURCE_TO_CANONICAL
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # --------------------------------------------------------------------------
-# Catalog definition. Reference discounts mirror config.yaml's reference_discount.
+# Catalog definition. The reference discount is config.yaml's
+# (`reference_discount(cfg, category)`), never a copy kept here.
 # --------------------------------------------------------------------------
 
 CATALOG = {
     "MEAT": {
         "subcats": ["CHICKEN", "PORK", "BEEF"],
-        "ref_discount": 0.25,
         "asp": (12000, 26000),
         "cost_ratio": (0.62, 0.72),
         "base_rate": 0.55,
@@ -47,7 +53,6 @@ CATALOG = {
     },
     "SIDE DISH": {
         "subcats": ["KIMCHI", "BANCHAN"],
-        "ref_discount": 0.25,
         "asp": (4000, 11000),
         "cost_ratio": (0.55, 0.68),
         "base_rate": 0.70,
@@ -55,7 +60,6 @@ CATALOG = {
     },
     "SEAFOOD": {
         "subcats": ["FISH", "SHELLFISH"],
-        "ref_discount": 0.30,
         "asp": (9000, 32000),
         "cost_ratio": (0.66, 0.78),
         "base_rate": 0.40,
@@ -63,7 +67,6 @@ CATALOG = {
     },
     "FRUIT": {
         "subcats": ["BERRY", "CITRUS", "MELON"],
-        "ref_discount": 0.30,
         "asp": (5000, 20000),
         "cost_ratio": (0.60, 0.74),
         "base_rate": 0.80,
@@ -71,7 +74,6 @@ CATALOG = {
     },
     "VEGETABLE": {
         "subcats": ["LEAF", "ROOT"],
-        "ref_discount": 0.30,
         "asp": (2500, 9000),
         "cost_ratio": (0.58, 0.70),
         "base_rate": 0.95,
@@ -188,8 +190,9 @@ def randomized_discount_path(entry_d, n_hours, d_max, rng, tier=0.025):
 
 def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
              start=None, restock_extend_rate=0.03, cross_midnight_rate=0.15,
-             early_close_rate=0.6):
-    """`cross_midnight_rate`: the share of windows opening in the evening
+             early_close_rate=0.6, cfg=None):
+    """`cfg` supplies the category anchors (`reference_discount`); None
+    reads the config this repo ships, by path. `cross_midnight_rate`: the share of windows opening in the evening
     and running past midnight (design 12a's seam -- every opening-date
     cut, the entry-row sort and the week schedule's seam run on it, and a
     fixture without it exercises none of them). `early_close_rate`: the
@@ -200,13 +203,14 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
     rng = np.random.default_rng(seed)
     master = build_sku_master(n_skus, rng)
     start = start or DEFAULT_START
+    cfg = cfg or load_config(os.path.join(REPO_ROOT, "config.yaml"))
 
     records = []
     windows = []          # (start, end) row range of each emitted window
     for _, sku in master.iterrows():
         spec = CATALOG[sku.category]
         eps_true = spec["epsilon"] * float(np.exp(rng.normal(0, 0.12)))
-        d_ref = spec["ref_discount"]
+        d_ref = reference_discount(cfg, sku.category)
         d_max = 1.0 - sku.cogs_wo_vat / sku.normal_asp
         if d_max < 0.05:
             continue
@@ -304,7 +308,10 @@ def generate(n_skus, n_days, policy, seed, dirty_frac, shrink_rate=0.02,
                     row_day, hour, int(sku.skuseq), fc,
                     float(inv), float(np.round(d * 100, 0)), int(sold),
                     float(sku.normal_asp), final_price, float(sku.cogs_wo_vat),
-                    float(ending), float(n_hours - h_idx - 1),
+                    # the counter production plans on: the hours to come
+                    # after this one (the chain reads it back with
+                    # planning_horizon)
+                    float(ending), float(window_counter(n_hours - h_idx)),
                     sku.category, sku.subcategory,
                 ))
                 inv = ending
@@ -383,7 +390,6 @@ def main():
     args = ap.parse_args()
 
     try:
-        from common.config import load_config
         cfg = load_config(args.config)
     except Exception as exc:                            # noqa: BLE001
         # loud: the 90-day fallback does NOT cover data.split, and the
@@ -397,7 +403,8 @@ def main():
     days = args.days if args.days is not None else auto_days
 
     df, master = generate(args.skus, days, args.policy, args.seed,
-                          args.dirty_frac, args.shrink_rate, start=start)
+                          args.dirty_frac, args.shrink_rate, start=start,
+                          cfg=cfg or None)
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     table = pa.Table.from_pandas(df, schema=SCHEMA, preserve_index=False)
@@ -448,67 +455,63 @@ def main():
     print(f"wrote             : {args.out}")
 
 
-def _clocked(df):
-    """The frame in (sku, fc, clock) order with the hours since the previous
-    row of the same sku x fc -- the raw frame's own reading of a window,
-    which crosses midnight like the source's (a date key would cut it)."""
-    g = df.sort_values(["skuseq", "fc", "date", "hour"]).copy()
-    ts = pd.to_datetime(g.date) + pd.to_timedelta(g.hour, unit="h")
-    g["_dt_h"] = ts.groupby([g.skuseq, g.fc]).diff().dt.total_seconds() / 3600.0
-    return g
+def _canonical(df):
+    """The raw frame under the chain's names, in window order, with the
+    chain's own episode ids -- the generator reads its windows through
+    EPISODE_RULE (`assign_episode_ids`), never a second rule: the tool's
+    own reading once omitted the counter clause, so its window count and
+    the chain's ids disagreed. Dirt (a null or negative counter) reads as
+    the chain reads it."""
+    d = (df.rename(columns=SOURCE_TO_CANONICAL)
+         .sort_values(["sku_id", "fc", "date", "hour_of_day"]))
+    return d, assign_episode_ids(d)
 
 
 def window_opens(df):
-    """Rows that open a window on the raw frame: the clock did not advance
-    exactly one hour, or the previous row closed (ending 0). Aligned to
-    `df`'s index."""
-    g = _clocked(df)
-    prev_end = g.ending_inventory.groupby([g.skuseq, g.fc]).shift()
-    return (g._dt_h.ne(1.0) | prev_end.eq(0)).reindex(df.index)
+    """Rows that open a window on the raw frame (`window_starts`, the one
+    boundary reading). Aligned to `df`'s index."""
+    d, _ = _canonical(df)
+    return window_starts(d).reindex(df.index)
 
 
 def _window_ids(df):
-    g = _clocked(df)
-    return window_opens(g).cumsum().reindex(df.index)
+    return _canonical(df)[1].reindex(df.index)
 
 
 def cross_midnight_windows(df):
     """Windows whose rows sit on two dates with a one-hour step between."""
-    w = _window_ids(df)
-    return int(df.groupby(w).date.nunique().gt(1).sum())
+    return int(df.groupby(_window_ids(df)).date.nunique().gt(1).sum())
 
 
 def final_counter_positive_share(df):
     """Share of windows whose last row still carries a positive counter."""
-    g = _clocked(df)
-    last = g.groupby(_window_ids(g).reindex(g.index)).tail(1)
-    ok = last.flc_window.notna() & (last.flc_window >= 0)
-    return float((last.flc_window[ok] > 0).mean()) if ok.any() else float("nan")
+    d, ids = _canonical(df)
+    last = d.groupby(ids, sort=False).tail(1)
+    ok = last.hours_remaining.notna() & (last.hours_remaining >= 0)
+    return float((last.hours_remaining[ok] > 0).mean()) if ok.any() else float("nan")
 
 
 def restock_extended_windows(df):
-    """Windows whose counter stepped up (or held) on the hour after a
-    restocked row -- EPISODE_RULE's restock clause, as the source would
-    show it. Counted on the raw frame; dirt (a null or negative counter)
-    reads as no step."""
-    g = _clocked(df)
-    prev = g.groupby(["skuseq", "fc"]).shift()
-    up = (g.flc_window - prev.flc_window) > -1
-    restocked = prev.ending_inventory > prev.inventory - prev.units_sold
-    hit = up & restocked & g._dt_h.eq(1.0)
-    return int(_window_ids(g).reindex(g.index)[hit].nunique())
+    """Windows holding an up (or flat) counter step at a one-hour clock
+    step after a restocked hour -- EPISODE_RULE's restock clause, read off
+    `window_signals` as the chain reads it."""
+    d, ids = _canonical(df)
+    s = window_signals(d)
+    hit = (s["dt_h"].eq(1.0) & s["hr_diff"].gt(-1.0)
+           & s["prev_restock"] & ~s["prev_closed"])
+    return int(ids[hit].nunique())
 
 
 def corr_within(df):
     """Mean within-episode correlation of discount and hour -- the confound
     (hours counted from the window's opening, so a window past midnight
     reads as one clock)."""
-    g = _clocked(df[df.normal_asp > 0])
-    g["_pos"] = g.groupby(_window_ids(g).reindex(g.index)).cumcount()
+    d, ids = _canonical(df[df.normal_asp > 0])
+    d = d.assign(_pos=d.groupby(ids, sort=False).cumcount())
     cs = []
-    for _, sub in g.groupby(_window_ids(g).reindex(g.index)):
-        if len(sub) > 3 and sub.discount.std() > 0:
-            cs.append(np.corrcoef(sub.discount, sub._pos)[0, 1])
+    for _, sub in d.groupby(ids, sort=False):
+        if len(sub) > 3 and sub.total_discount.std() > 0:
+            cs.append(np.corrcoef(sub.total_discount, sub._pos)[0, 1])
     return float(np.nanmean(cs)) if cs else float("nan")
 
 

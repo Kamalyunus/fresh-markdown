@@ -250,15 +250,17 @@ class PosteriorStore:
     # tau is production learning state: it lives here, not in hand-
     # maintained config.yaml (design 5.8).
 
-    def tau(self, cfg):
+    def tau(self, cfg=None):
         """The exploration budget in force, in currency.
 
         Falls back to `exploration.tau_initial` until the first calibration:
-        a launch that has spent nothing has nothing to calibrate from.
+        a launch that has spent nothing has nothing to calibrate from. The
+        store holds its config; `cfg` is accepted and ignored for callers
+        that still pass it.
         """
         stored = self.state.get("tau")
         return float(stored) if stored is not None \
-            else cfg["exploration"]["tau_initial"]
+            else self.cfg["exploration"]["tau_initial"]
 
     def tau_calibrated_through(self):
         """The last date tau was calibrated for, or None."""
@@ -308,6 +310,15 @@ class PosteriorStore:
     def exploration_suspended(self):
         """The suspension record {reasons, since, updated_at}, or None."""
         return self.state.get("exploration_suspended")
+
+    @staticmethod
+    def suspension_line(record, remedy):
+        """The one printed sentence for a suspension in force -- since
+        when, why, that exploitation continues -- with the caller's remedy
+        (update names its own flag, the monitor names update's)."""
+        return (f"EXPLORATION SUSPENDED since {record['since']} "
+                f"({', '.join(record['reasons'])}); exploitation continues. "
+                + remedy)
 
     def suspend_exploration(self, reasons, since):
         """Suspend forced exploration for `reasons` (stop-condition names)

@@ -13,9 +13,10 @@ import pandas as pd
 from scipy.special import gammaln, logsumexp
 from scipy.stats import poisson
 
-from common.config import design_effect, intraclass_correlation
+from common.clustering import design_effect, intraclass_correlation
+from common import windows
 from common import episodes
-from fit.prepare_data import population, split_frames
+from fit.prepare_data import scope
 
 
 def scored_rows(frame):
@@ -165,7 +166,7 @@ def build_curves(d, cfg, model, grid, window):
     """Per-category (naive, controlled) curves and the deff used, on one split
     window. Shared by the fit and by the held-out scoring so the two cannot
     diverge in how they build rows."""
-    frame = population(split_frames(d, cfg)[window], cfg)
+    frame = scope(d, cfg, window)
     rows = scored_rows(frame)
     out = {}
     for cat, g in rows.groupby("category"):
@@ -266,19 +267,18 @@ def fold_spread(d, cfg, model, grid, folds=3):
     the std floor in `estimate`. Folds are cut by EPISODE (opening date,
     rule 15): a row-level cut put a midnight-straddling episode in two folds
     and scored its 00:00 row as an entry row. Rationale: design 5.6."""
-    frames = split_frames(d, cfg)
-    train = population(frames["train"], cfg)
+    train = scope(d, cfg, "train")
     if train.empty:
         return {}
     min_rows = int(cfg["posterior"]["prior"]["fold_min_entry_rows"])
-    opened = episodes.opening_dates(train)
+    opened = windows.opening_dates(train)
     dates = np.array_split(np.sort(opened.unique()), folds)
     out = {}
     per_cat = {}
     for chunk in dates:
         if not len(chunk):
             continue
-        sl = episodes.window_slice(train, chunk[0], chunk[-1], opened=opened)
+        sl = windows.window_slice(train, chunk[0], chunk[-1], opened=opened)
         rows = scored_rows(sl)
         for cat, g in rows.groupby("category"):
             if len(g) < min_rows:

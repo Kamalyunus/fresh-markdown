@@ -34,16 +34,14 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from common.config import load_config
-from common.io import read_json, read_rows, write_json, write_jsonl
+from common.io import read_rows, write_json, write_jsonl
 from common.parallel import map_episodes
-from common.provenance import config_fingerprint
-from engine.posterior import PosteriorStore
-from engine.state import (HISTORY_COLS, REQUEST_FIELDS, build_states,
+from engine.state import (HISTORY_COLS, REQUEST_FIELDS, batch_context, build_states,
                           canonical_request, price_one, validate_request)
 from events.pairs import colliding_keys, hour_key, ident_series
 from events.store import EventStore
 from fit import prepare_data
-from fit.train_baseline import BaselineModel
+from fit.artifacts import load_bundle
 
 # what a caller gets back per request: the hour, the id the outcome will
 # name, the price to put on the shelf -- or why there is none
@@ -121,14 +119,15 @@ def run(cfg, requests, history, workers=None, seed=0, store=None, model=None,
     (HISTORY_COLS). Returns (rows, events, report): one response row per
     request in request order (RESPONSE_FIELDS), the committed decision
     events, and the batch's counts. `store`, `model`, `posterior`,
-    `r_lookup` are built from `cfg` unless a long-lived caller holds them;
-    the posterior is RELOADED here regardless -- one read per batch."""
+    `r_lookup` are built from `cfg` unless a long-lived caller holds them
+    (fit.artifacts.load_bundle: a missing lookup is a FileNotFoundError
+    naming its path); the posterior is RELOADED here regardless -- one
+    read per batch."""
+    bundle = load_bundle(cfg)
     store = store or EventStore(cfg)
-    model = model or BaselineModel(cfg)
-    posterior = (posterior or PosteriorStore(cfg)).reload()
-    r_lookup = r_lookup or read_json(cfg["dispersion"]["r_lookup_path"])
-    if r_lookup is None:
-        raise FileNotFoundError(cfg["dispersion"]["r_lookup_path"])
+    model = model or bundle.model
+    posterior = (posterior or bundle.posterior).reload()
+    r_lookup = r_lookup or bundle.r_lookup
 
     to_price, rejected = plan(requests, store.priced_hours, cfg)
     canon = {i: r for i, r, _ in to_price}
@@ -140,12 +139,10 @@ def run(cfg, requests, history, workers=None, seed=0, store=None, model=None,
     mine = history[ident_series(history.sku_id).isin(skus)] if len(history) else history
     states, notes = build_states(list(canon.values()), mine, cfg, model, r_lookup,
                                  episode_paths=store.episode_paths)
+    # the one context every worker reads (engine.state.batch_context): the
+    # cells in category order, so the report's posterior_versions read so
     cats = sorted({r["category"] for r in canon.values()})
-    ctx = {"cfg": cfg, "cells": {c: posterior.get(c) for c in cats},
-           "suspended": posterior.exploration_suspended(),
-           "tau": posterior.tau(cfg), "seed": int(seed),
-           "model_version": model.schema["model_version"],
-           "digest": config_fingerprint(cfg)["digest"]}
+    ctx = batch_context(cfg, posterior, model, cats, seed)
     results = map_episodes(price_one, [(s, k) for s, (_, _, k) in zip(states, to_price)],
                            ctx, workers=workers)
 

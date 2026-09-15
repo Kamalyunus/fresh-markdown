@@ -345,8 +345,11 @@ def test_the_tau_cross_check_uses_one_day_count_on_both_sides(cfg):
 
 
 def test_predict_frame_is_the_one_extend_lookup_predict_path(cfg, tmp_path):
-    """Shadow and the replay each carried a copy of extend -> r -> mu_ref."""
-    from evaluate.backtest import predict_frame
+    """Shadow and the replay each carried a copy of extend -> r -> mu_ref;
+    evaluate.level is its one home (the replay's name is a re-export)."""
+    from evaluate import backtest as bt
+    from evaluate.level import predict_frame
+    assert bt.predict_frame is predict_frame
     cfg = _harness_cfg(cfg, tmp_path)
     r_lookup = json.load(open(cfg["dispersion"]["r_lookup_path"]))
     d = predict_frame(_hours("e", "2026-08-10", 2, hour0=22, tail=3), cfg,
@@ -376,8 +379,7 @@ def test_fidelity_grades_the_frozen_artifact_and_reports_the_refit_beside_it(
     refit reading is a RESCALE of the gate rows (a factor swap is an exact
     rescale of mu_ref), equal to predicting them again under the schedule
     -- which it once did, a second full predict for a side reading."""
-    from common.metrics import fidelity_decomposition
-    from evaluate.backtest import _attach_predictions, fidelity
+    from evaluate.backtest import _attach_predictions, fidelity, fidelity_decomposition
     from fit.prepare_data import split_frames
     cfg = _harness_cfg(cfg, tmp_path)
     r_lookup = json.load(open(cfg["dispersion"]["r_lookup_path"]))
@@ -450,7 +452,9 @@ def test_the_backtest_slices_to_pre_launch_before_anything_reads_the_frame(
                 "calibration_gate_value": 1.0, "calibration_gate_band": [0.9, 1.1],
                 "calibration_gate": "PASS"}, d
 
-    monkeypatch.setattr(bt, "BaselineModel", lambda c: _Applier(c))
+    # the bundle's model (fit.artifacts.load_bundle) is the applier
+    from fit import train_baseline as tb
+    monkeypatch.setattr(tb, "BaselineModel", lambda c: _Applier(c))
     monkeypatch.setattr(bt, "fidelity", fake_fidelity)
 
     def fake_replay(*a, **k):
