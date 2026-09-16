@@ -907,6 +907,16 @@ now. Dates are owner sign-off.
   still cannot reach the week, which is a data problem. The cron host
   holds the Redshift credentials; that is the whole cost.
 
+- **The history table in every hourly batch.** A batch read the whole
+  trailing feed, sliced it to its SKUs and re-rolled the two demand-rate
+  features, twenty-four times a day; handed the source schema, it ran the
+  preparation chain each hour. Both features read strictly before the
+  opening date, so one table per morning is exactly the batch's number.
+  `daily.features` writes it after ingest from a rolling feed history the
+  lane keeps itself; the batch joins on SKU × FC; the decision records
+  the features it stood on so a later hour never recomputes them as of
+  another day. The hourly path is now join, predict once, solve, commit.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,

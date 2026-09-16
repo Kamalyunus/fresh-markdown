@@ -31,6 +31,7 @@ from common.provenance import config_fingerprint
 from engine.decide import StateRejected, count_failures, decide
 from events.pairs import ident, ident_series, iso_day
 from fit.fit_dispersion import lookup_r
+from fit import prepare_data
 from fit.prepare_data import add_ref_rate_features
 
 # the request, in the contract's names and order (section 03)
@@ -189,17 +190,22 @@ def _template(r):
             "fc": r["fc"], "original_price": float(r["original_price"])}
 
 
-def assemble_state(request, r, mu_ref_path):
+def assemble_state(request, r, mu_ref_path, features=None):
     """THE state `engine.decide` prices, in one spelling: the request's 12
-    fields (REQUEST_FIELDS, in the contract's order), the dispersion `r`
-    and the frozen model's `mu_ref_path` from this hour on. Lane B's
-    batch (`build_states`), the simulator's pilot hour and shadow's
-    re-anchored hour each spelt this dict for themselves."""
+    fields (REQUEST_FIELDS, in the contract's order), the dispersion `r`,
+    the frozen model's `mu_ref_path` from this hour on and, when the
+    caller has them, the two demand-rate `features` the forecast stood on
+    (the decision event records them, so a later hour of the episode and
+    the assurance re-solve read what the entry read). Lane B's batch
+    (`build_states`), the simulator's pilot hour and shadow's re-anchored
+    hour each spelt this dict for themselves."""
     return {**{f: request[f] for f in REQUEST_FIELDS},
-            "r": float(r), "mu_ref_path": list(mu_ref_path)}
+            "r": float(r), "mu_ref_path": list(mu_ref_path),
+            "features": None if features is None else tuple(features)}
 
 
-def build_states(requests, history, cfg, model, r_lookup, episode_paths=None):
+def build_states(requests, history, cfg, model, r_lookup, episode_paths=None,
+                 features=None):
     """The engine's state for each VALIDATED request, aligned with it: the
     request's fields (canonical_request), `r` down the lookup's fallback
     chain, and `mu_ref_path` over `hours_remaining` consecutive hours from
@@ -218,13 +224,24 @@ def build_states(requests, history, cfg, model, r_lookup, episode_paths=None):
     request earlier than the stored decision) falls back to a fresh
     forecast and is counted.
 
+    `features` is the day's feature table (ref_rate_table, written by
+    daily.features each morning): with it an entry request reads its two
+    features off the table and `history` is not read at all; without it
+    they are computed point-in-time over `history`. A restock extension
+    reads the features the entry decision RECORDED (episode_paths carries
+    them) -- the same numbers either way -- and only a stored decision
+    from before they were recorded falls back to today's table (counted)
+    or to the history as of the opening.
+
     Returns (states, notes): `notes` carries
     `requests_with_unknown_features` (a fresh forecast with no history
-    behind it -- the model prices it as "unknown") and
-    `non_entry_requests_without_stored_path`."""
+    behind it -- the model prices it as "unknown"),
+    `non_entry_requests_without_stored_path` and
+    `restock_extensions_without_stored_features`."""
     if not requests:
         return [], {"requests_with_unknown_features": 0,
-                    "non_entry_requests_without_stored_path": 0}
+                    "non_entry_requests_without_stored_path": 0,
+                    "restock_extensions_without_stored_features": 0}
     requests = [canonical_request(r) for r in requests]
     paths = episode_paths or {}
     fresh, tails, sliced = {}, {}, {}      # index -> what to predict / the path
@@ -248,10 +265,10 @@ def build_states(requests, history, cfg, model, r_lookup, episode_paths=None):
         else:
             sliced[i] = path
 
-    # ONE history pass for every opening that needs a prediction: an entry
-    # request as of its own hour, a restock extension as of the episode's
-    # opening (the features the entry forecast stood on)
-    stub_rows = {}
+    # ONE feature read for every opening that needs a prediction: an entry
+    # request as of its own hour; a restock extension on the features its
+    # entry decision recorded, else as of the episode's opening
+    stub_rows, feats, without_features = {}, {}, 0
     for i, (day, hour) in fresh.items():
         r = requests[i]
         stub_rows.setdefault(r["episode_id"], {
@@ -260,12 +277,19 @@ def build_states(requests, history, cfg, model, r_lookup, episode_paths=None):
             "starting_inventory": r["q"]})
     for i, (_, opened) in tails.items():
         r = requests[i]
+        stored = paths[r["episode_id"]].get("features")
+        if stored is not None:
+            feats[r["episode_id"]] = _feature_pair(stored)
+            continue
+        without_features += 1
         stub_rows.setdefault(r["episode_id"], {
             "episode_id": r["episode_id"], "sku_id": r["sku_id"], "fc": r["fc"],
             "category": r["category"], "date": opened[0], "hour_of_day": opened[1],
             "starting_inventory": r["q"]})
-    feats = (ref_rate_features(history, pd.DataFrame(list(stub_rows.values())), cfg)
-             if stub_rows else {})
+    if stub_rows:
+        stub = pd.DataFrame(list(stub_rows.values()))
+        feats.update(features_from_table(features, stub) if features is not None
+                     else ref_rate_features(history, stub, cfg))
     unknown = 0
     openings, owners = [], []
     for i in fresh:
@@ -288,10 +312,115 @@ def build_states(requests, history, cfg, model, r_lookup, episode_paths=None):
     for i in fresh:
         sliced[i] = predicted[i]
 
+    def features_of(i, r):
+        """What this hour's forecast stood on: the opening's features for a
+        fresh forecast or an extension, the entry's recorded ones for a
+        sliced path (None when that decision predates the record)."""
+        if i in fresh or i in tails:
+            return feats[r["episode_id"]]
+        stored = paths[r["episode_id"]].get("features")
+        return None if stored is None else _feature_pair(stored)
+
     states = [assemble_state(r, lookup_r(r_lookup, r["subcategory"], r["category"]),
-                             sliced[i]) for i, r in enumerate(requests)]
+                             sliced[i], features_of(i, r)) for i, r in enumerate(requests)]
     return states, {"requests_with_unknown_features": int(unknown),
-                    "non_entry_requests_without_stored_path": int(without_stored)}
+                    "non_entry_requests_without_stored_path": int(without_stored),
+                    "restock_extensions_without_stored_features": int(without_features)}
+
+
+def _feature_pair(stored):
+    """A recorded feature pair back to the engine's spelling: a null read
+    from the event is the model's own "unknown" (NaN)."""
+    return tuple(float("nan") if v is None else float(v) for v in stored)
+
+
+# ------------------------------------------------------- the feature table
+
+POOLED_FC = "*"      # the SKU-pooled row: the fallback for an fc the SKU has no history at
+FEATURE_COLS = ("sku_id", "fc", "sku_ref_sales_rate_30d",
+                "prior_episode_ref_sales_rate", "as_of")
+
+
+def load_history(path, cfg):
+    """The feature service's history in HISTORY_COLS: a prepared parquet
+    is read as is; the hourly FLC table in the source schema goes through
+    the one chain (prepare_data.load_and_filter), so a feature is computed
+    on the rows the bootstrap would have computed it on. Ids come back in
+    the hour key's spelling (events.pairs.ident_series), the day as
+    `YYYY-MM-DD`. Read by daily.features every morning and by a batch
+    handed `--history` instead of the day's table."""
+    import pyarrow.parquet as pq
+    cols = set(pq.read_schema(path).names) if path.endswith(".parquet") else set()
+    if {"episode_id", "total_discount", "starting_inventory"} <= cols:
+        hist = pd.read_parquet(path, columns=list(HISTORY_COLS))
+    else:
+        hist, _ = prepare_data.load_and_filter(path, cfg)
+        hist = hist[list(HISTORY_COLS)]
+    hist = hist.copy()
+    hist["date"] = pd.to_datetime(hist["date"]).dt.strftime("%Y-%m-%d")
+    for col in ("sku_id", "fc"):
+        hist[col] = ident_series(hist[col])
+    return hist.reset_index(drop=True)
+
+
+def ref_rate_table(history, as_of, cfg):
+    """The day's feature table (FEATURE_COLS): the two demand-rate features
+    an episode OPENING on `as_of` reads, for every (sku, fc) the history
+    holds, plus one POOLED row per SKU (`fc` = POOLED_FC) carrying the
+    SKU-pooled rate a (sku, fc) with no history at that fc falls back to.
+    Both features read strictly before the opening date (the trailing
+    window is closed on the left, the prior episode started earlier), so
+    one table per morning IS every batch's number that day: it is built
+    by the one home, ref_rate_features, over one synthetic opening per
+    row. A (sku, fc) that resolves to nothing at all is left out -- absent
+    from the table reads as "unknown", exactly as absent from the history
+    does. daily.features writes it; ops.price_batch --features reads it."""
+    hist = history.copy()
+    for col in ("sku_id", "fc"):
+        hist[col] = ident_series(hist[col])
+    hist = hist[hist.sku_id.notna() & hist.fc.notna()]
+    as_of = iso_day(as_of)
+    if not len(hist):
+        return pd.DataFrame(columns=list(FEATURE_COLS))
+    last = hist.sort_values("date").drop_duplicates(["sku_id", "fc"], keep="last")
+    last_sku = hist.sort_values("date").drop_duplicates(["sku_id"], keep="last")
+    openings = [{"episode_id": f"feat|{r.sku_id}|{r.fc}", "sku_id": r.sku_id, "fc": r.fc,
+                 "category": r.category, "date": as_of, "hour_of_day": 0,
+                 "starting_inventory": 1} for r in last.itertuples()]
+    openings += [{"episode_id": f"feat|{r.sku_id}|{POOLED_FC}", "sku_id": r.sku_id,
+                  "fc": POOLED_FC, "category": r.category, "date": as_of,
+                  "hour_of_day": 0, "starting_inventory": 1} for r in last_sku.itertuples()]
+    feats = ref_rate_features(hist, pd.DataFrame(openings), cfg)
+    rows = [{"sku_id": o["sku_id"], "fc": o["fc"],
+             "sku_ref_sales_rate_30d": feats[o["episode_id"]][0],
+             "prior_episode_ref_sales_rate": feats[o["episode_id"]][1], "as_of": as_of}
+            for o in openings if not features_unknown(feats[o["episode_id"]])]
+    return pd.DataFrame(rows, columns=list(FEATURE_COLS))
+
+
+def features_from_table(table, openings):
+    """{episode_id: (sku_ref_sales_rate_30d, prior_episode_ref_sales_rate)}
+    for `openings` (the stub frame build_states makes) read off a feature
+    table: the (sku, fc) row, else the SKU's pooled row, else NaN, NaN --
+    the three readings ref_rate_features gives the same opening."""
+    idx = {(str(r.sku_id), str(r.fc)): (float(r.sku_ref_sales_rate_30d),
+                                        float(r.prior_episode_ref_sales_rate))
+           for r in table.itertuples()}
+    out = {}
+    for o in openings.itertuples():
+        sku, fc = ident(o.sku_id), ident(o.fc)
+        f = idx.get((sku, fc))
+        if f is None:
+            f = idx.get((sku, POOLED_FC), (float("nan"), float("nan")))
+        out[o.episode_id] = f
+    return out
+
+
+def table_as_of(table):
+    """The day a feature table was built for (its one `as_of`), or None."""
+    if table is None or not len(table) or "as_of" not in table:
+        return None
+    return str(table["as_of"].iloc[0])
 
 
 class FrozenCells:

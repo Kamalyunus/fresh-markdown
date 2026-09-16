@@ -134,6 +134,11 @@ learning:
   max_mean_step: 0.796                 # SET BY OWNER, gated  cap on one update's mean move (pasted inside its gate, owner, 2026-09-06)
   max_std_shrink: 0.10                 # SET BY OWNER  the PRIMARY rate limit on learning; 0.25 -> 0.10 (owner, 2026-09-06, conservative launch). information_increment derives from it: tune re-pastes it on the next advance
 
+features:                              # SET  the day's feature table Lane B's batches read (daily.features writes it each morning, engine.state.ref_rate_table)
+  table_dir: "features"                # SET  features/<date>.parquet, one per morning, the two demand-rate features per SKU x FC as of that day
+  history_path: "data/feed_history.parquet"  # SET  the rolling hourly feed the table is built from (source schema; seeded from data/flc_raw.parquet on the first morning)
+  history_days: 45                     # SET  days the rolling feed keeps: ref_rate_window_days plus a margin so a window crossing the cut keeps its episode id
+
 events:
   store_dir: "events_store"            # SET  decision/outcome event log location
   shadow_store_dir: "events_store_shadow"  # SET  shadow-phase events kept separate

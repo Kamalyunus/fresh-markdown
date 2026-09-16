@@ -465,7 +465,7 @@
 
   <div class="ataglance">
     <div><b>12</b><span>fields you send to request a price</span></div>
-    <div><b>39</b><span>fields the agent logs per decision</span></div>
+    <div><b>39 + 2</b><span>fields the agent logs per decision (two of them the features it stood on, optional)</span></div>
     <div><b>0</b><span>outcome fields you produce — built from the hourly feed</span></div>
     <div><b>1:1</b><span>outcomes per decision, hourly, exactly once</span></div>
   </div>
@@ -729,7 +729,7 @@
       returning its price, and refuses row by row, never the batch:
     </p>
 <pre class="json">python3 -m ops.price_batch --requests 2026-08-19T17.jsonl \
-    --history flc_to_date.parquet --out decisions.jsonl [--report report.json] [--workers N]
+    --features features/2026-08-19.parquet --out decisions.jsonl [--report report.json] [--workers N]
 
 <span class="c">// one request line: the 17:00 entry decision of §06</span>
 {"episode_id": "EP-88213-4471", "sku_id": "SKU-88213", "fc": "FC-04", "category": "vegetables",
@@ -746,10 +746,17 @@
  "hour_of_day": 17, "decision_id": null, "applied_discount": null, "applied_price": null,
  "is_exploration": null, "rejected": "cost must not exceed original_price"}</pre>
     <ul>
-      <li><code>--history</code> is the hourly FLC table the outcomes are ingested from — the same
-          table, source schema — covering at least the trailing <code>ref_rate_window_days</code>
-          (30) before the batch's day: the two demand-rate features are computed point-in-time from
-          it, the one way the bootstrap computed them.</li>
+      <li><code>--features</code> is the day's feature table, <code>features/&lt;today&gt;.parquet</code>,
+          which the morning lane writes (<code>daily.features</code>, inside <code>advance --feed</code>)
+          from the rolling hourly feed: the two demand-rate features an episode opening today reads,
+          per SKU × FC plus a pooled row per SKU. Both features read strictly before the opening
+          date, so one table per morning is exactly what a batch would have computed for itself;
+          the batch joins on SKU and FC and reads no history. <code>--history</code> (the trailing
+          hourly FLC table, source schema, at least <code>ref_rate_window_days</code> deep) is the
+          alternative when no table exists yet: the same features, computed inside the batch. The
+          batch report's <code>features_as_of</code> says which day's table it priced on, and
+          <code>entry_requests_on_stale_features</code> counts entry requests priced on an older one
+          (a stopped morning lane), never refused.</li>
       <li>One batch per hour. A request for an hour the store already holds a decision for is refused
           (<code>already_priced</code>) — a retried batch never puts two prices on one feed row; two
           requests for one hour in the same batch are both refused (<code>duplicate_request</code>).
@@ -863,6 +870,8 @@
         <tr><td class="f">reference_discount · reference_mu</td><td class="ex">0.3 · 0.8</td><td>The anchor the forecast is quoted at, and the forecast there.</td></tr>
         <tr><td class="f">mu_ref_path</td><td class="ex">[0.8, 0.8, 0.62, 0.41]</td><td><strong>The full remaining-hours forecast</strong>, not just this hour — one entry per remaining hour, and its length must equal <code>hours_remaining</code>. Every tier's value depends on the whole path.</td></tr>
         <tr><td class="f">anchor_discount</td><td class="ex null">null</td><td>The price in force, which fixed the action set. <code>null</code> at entry; a fraction thereafter.</td></tr>
+        <tr><td class="f">sku_ref_sales_rate_30d</td><td class="ex">0.83</td><td><span class="tag cond">optional</span> The trailing reference sales rate the forecast stood on — the SKU's units per anchor-priced hour over the thirty days before the episode opened, read off the day's feature table (§03). <code>null</code> when the SKU had no history ("unknown"). A later hour of the episode reads it back from here, never as of another day. Recorded since the feature table; absent from the worked episode in §06, captured before it.</td></tr>
+        <tr><td class="f">prior_episode_ref_sales_rate</td><td class="ex">0.75</td><td><span class="tag cond">optional</span> The previous episode's reference sales rate for the same SKU × FC, the second feature the forecast stood on; <code>null</code> when there was none.</td></tr>
         <tr><td class="f">dispersion_r</td><td class="ex">0.919</td><td>Demand variance parameter used.</td></tr>
 
         <tr class="grouphead"><td colspan="3">Versions — 4</td></tr>

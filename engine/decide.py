@@ -18,6 +18,14 @@ from engine import explore
 from engine.demand import mu_at, expected_min_demand_inventory
 
 
+def _feature_or_none(features, k):
+    """A recorded feature as JSON carries it: NaN and an absent pair are null."""
+    if features is None:
+        return None
+    v = features[k]
+    return None if v is None or not finite_number(v) else float(v)
+
+
 class StateRejected(ValueError):
     """Raised instead of returning an unsafe price (design 5.10)."""
 
@@ -235,6 +243,12 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
         # the FULL path and anchor: without them the event cannot be
         # re-solved, and daily.assurance exists to re-solve it
         "mu_ref_path": [float(m) for m in s["mu_ref_path"]],
+        # the two demand-rate features the forecast stood on (null when
+        # the caller had none, or the model read "unknown"): a later hour
+        # of the episode and its restock extension read these back
+        # rather than recomputing them as of another day
+        "sku_ref_sales_rate_30d": _feature_or_none(s.get("features"), 0),
+        "prior_episode_ref_sales_rate": _feature_or_none(s.get("features"), 1),
         "anchor_discount": anchor,
         "dispersion_r": float(s["r"]),
         "baseline_model_version": baseline_version,

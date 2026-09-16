@@ -38,6 +38,7 @@ from daily import update
 from engine import dp as dp_mod
 from engine.posterior import PosteriorStore
 from engine.state import (HISTORY_COLS as HIST_COLS, REQUEST_FIELDS, assemble_state,
+                          ref_rate_table,
                           batch_context, hour_grid, price_one, ref_rate_features)
 from events.pairs import hour_key, match_pairs, outcome_id_of, price_matches
 from events.store import EventStore
@@ -759,10 +760,24 @@ class LaneBPricer:
         self.out_dir, self.workers, self.seed = out_dir, workers, seed
         self.batches = []
         self.sim = None
+        self.table_date, self.table = None, None    # the day's feature table
+        self.tables = {}                            # date -> path written
 
     def bind(self, sim):
         self.sim = sim
         self.r_lookup = load_bundle(sim.cfg).r_lookup
+
+    def features_for(self, date):
+        """The day's feature table, built once per day the way the morning
+        lane builds it (engine.state.ref_rate_table over the trailing
+        history) and written where engineering would find it."""
+        if self.table_date != date:
+            self.table = ref_rate_table(self.sim._feature_history(date), date, self.sim.cfg)
+            path = os.path.join(self.out_dir, "features", f"{date}.parquet")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            self.table.to_parquet(path, index=False)
+            self.table_date, self.tables[date] = date, path
+        return self.table
 
     def __call__(self, pilot, k, date, hour):
         sim = self.sim
@@ -771,9 +786,9 @@ class LaneBPricer:
         req_path = os.path.join(self.out_dir, "requests", f"{tag}.jsonl")
         write_jsonl(req_path, requests, fields=REQUEST_FIELDS)
         rows, events, rep = price_batch.run(
-            sim.cfg, requests, sim._feature_history(date), workers=self.workers,
-            seed=self.seed, store=sim.store, model=sim.model, posterior=sim.posterior,
-            r_lookup=self.r_lookup)
+            sim.cfg, requests, workers=self.workers, seed=self.seed, store=sim.store,
+            model=sim.model, posterior=sim.posterior, r_lookup=self.r_lookup,
+            features=self.features_for(date))
         dec_path = os.path.join(self.out_dir, "decisions", f"{tag}.jsonl")
         price_batch.write_rows(rows, dec_path)
         self.batches.append({"hour": tag, "requests_path": req_path,

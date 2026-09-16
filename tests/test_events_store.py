@@ -330,3 +330,23 @@ def test_a_torn_line_split_inside_a_multibyte_character_is_quarantined(cfg, tmp_
     assert "unparseable" in store.load_quarantine()[0]["problems"][0]
     assert store.emit_decision(decision_event(decision_id="D-next", hour_of_day=18))
     assert [d["decision_id"] for d in store.load_decisions()] == ["D-good", "D-next"]
+
+
+def test_an_episodes_path_carries_the_features_its_entry_stood_on(cfg, tmp_path):
+    """The store's episode path hands a later hour the entry decision's
+    recorded features (contract.DECISION_OPTIONAL), None for a decision
+    from before they were recorded -- a restock extension then never
+    recomputes them as of another day."""
+    from conftest import decision_event
+    store = EventStore(cfg, root=str(tmp_path / "e"))
+    old = decision_event(decision_id="D-old", episode_id="EP-old",
+                         mu_ref_path=[1.0, 1.0], hours_remaining=2)
+    old.pop("sku_ref_sales_rate_30d", None); old.pop("prior_episode_ref_sales_rate", None)
+    assert store.emit_decision(old)
+    new = decision_event(decision_id="D-new", episode_id="EP-new", hour_of_day=18,
+                         mu_ref_path=[1.0, 1.0], hours_remaining=2,
+                         sku_ref_sales_rate_30d=0.75, prior_episode_ref_sales_rate=None)
+    assert store.emit_decision(new)
+    assert store.episode_paths["EP-old"]["features"] is None
+    assert store.episode_paths["EP-new"]["features"] == (0.75, None)
+    assert EventStore(cfg, root=store.root).episode_paths["EP-new"]["features"] == (0.75, None)

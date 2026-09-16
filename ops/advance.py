@@ -385,6 +385,10 @@ def _plan_daily(st):
                           ["daily.ingest_outcomes", "--feed", st["feed"]]
                           + (["--failures", st["failures"]] if st.get("failures") else []),
                           phase="daily"))
+        # today's feature table for Lane B's batches: yesterday's feed
+        # joins the rolling history, the two features are written once
+        steps.append(_run("feature table for today's batches",
+                          ["daily.features", "--feed", st["feed"]], phase="daily"))
     if st["events"] or st["feed"]:
         steps += [_run("update: tau walk (no operator)",
                        ["daily.update", "--calibrate-tau"], phase="daily"),

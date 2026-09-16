@@ -141,11 +141,12 @@ def test_launch_day_refits_the_schedule_once_and_refreshes_a_stale_extract():
 def test_the_daily_lane_ends_at_the_operator_gate_never_past_it():
     steps = advance.plan(_state(feed="feed.parquet"))
     mods = [s["args"][0] for s in steps if s["kind"] == "run"]
-    assert mods == ["daily.ingest_outcomes", "daily.update",
+    assert mods == ["daily.ingest_outcomes", "daily.features", "daily.update",
                     "daily.monitor", "daily.assurance",
                     "daily.export_events", "ops.status"]
     assert all("--apply" not in s["args"] for s in steps if s["kind"] == "run")
-    assert "--calibrate-tau" in steps[1]["args"]          # tau is daily, no operator
+    assert steps[1]["args"] == ["daily.features", "--feed", "feed.parquet"]
+    assert "--calibrate-tau" in steps[2]["args"]          # tau is daily, no operator
     assert "every 7 days" in steps[-1]["detail"][0]
     assert steps[-1]["kind"] == "stop" and "--apply" in steps[-1]["detail"][0]
 
@@ -171,8 +172,8 @@ def test_a_red_status_runs_the_daily_lane_then_stops_with_the_resume_path():
     steps = advance.plan(_state(feed="feed.parquet",
                                 status={"failing": ["stop conditions"], "checks": []}))
     mods = [s["args"][0] for s in steps if s["kind"] == "run"]
-    assert mods == ["daily.ingest_outcomes", "daily.update", "daily.monitor",
-                    "daily.assurance", "daily.export_events", "ops.status"]
+    assert mods == ["daily.ingest_outcomes", "daily.features", "daily.update",
+                    "daily.monitor", "daily.assurance", "daily.export_events", "ops.status"]
     stop = steps[-1]
     assert stop["kind"] == "stop" and "red" in stop["why"]
     assert "stop conditions" in stop["detail"]

@@ -36,7 +36,8 @@ import pyarrow.parquet as pq
 from common.config import load_config
 from common.io import read_rows, write_json, write_jsonl
 from common.parallel import map_episodes
-from engine.state import (HISTORY_COLS, REQUEST_FIELDS, batch_context, build_states,
+from engine.state import (HISTORY_COLS, REQUEST_FIELDS, batch_context, build_states,   # noqa: F401
+                          load_history, table_as_of,
                           canonical_request, price_one, validate_request)
 from events.pairs import colliding_keys, hour_key, ident_series
 from events.store import EventStore
@@ -60,24 +61,8 @@ def read_requests(path):
     return read_rows(path)
 
 
-def load_history(path, cfg):
-    """The feature service's history in HISTORY_COLS: a prepared parquet
-    is read as is; the hourly FLC table in the source schema goes through
-    the one chain (prepare_data.load_and_filter), so a feature is computed
-    on the rows the bootstrap would have computed it on. Ids come back in
-    the hour key's spelling (events.pairs.ident_series), the day as
-    `YYYY-MM-DD`."""
-    cols = set(pq.read_schema(path).names) if path.endswith(".parquet") else set()
-    if {"episode_id", "total_discount", "starting_inventory"} <= cols:
-        hist = pd.read_parquet(path, columns=list(HISTORY_COLS))
-    else:
-        hist, _ = prepare_data.load_and_filter(path, cfg)
-        hist = hist[list(HISTORY_COLS)]
-    hist = hist.copy()
-    hist["date"] = pd.to_datetime(hist["date"]).dt.strftime("%Y-%m-%d")
-    for col in ("sku_id", "fc"):
-        hist[col] = ident_series(hist[col])
-    return hist.reset_index(drop=True)
+# `load_history` is engine.state's (daily.features reads it every morning);
+# the name stays here for callers
 
 
 def plan(requests, priced_keys, cfg):
@@ -113,10 +98,12 @@ def plan(requests, priced_keys, cfg):
 
 # ------------------------------------------------------------------ batch
 
-def run(cfg, requests, history, workers=None, seed=0, store=None, model=None,
-        posterior=None, r_lookup=None):
-    """Price `requests` (dicts in REQUEST_FIELDS) against `history`
-    (HISTORY_COLS). Returns (rows, events, report): one response row per
+def run(cfg, requests, history=None, workers=None, seed=0, store=None, model=None,
+        posterior=None, r_lookup=None, features=None):
+    """Price `requests` (dicts in REQUEST_FIELDS) against the day's feature
+    table `features` (engine.state.ref_rate_table, the production path:
+    one join, no history read) or, without one, against `history`
+    (HISTORY_COLS, the features computed here). Returns (rows, events, report): one response row per
     request in request order (RESPONSE_FIELDS), the committed decision
     events, and the batch's counts. `store`, `model`, `posterior`,
     `r_lookup` are built from `cfg` unless a long-lived caller holds them
@@ -136,9 +123,18 @@ def run(cfg, requests, history, workers=None, seed=0, store=None, model=None,
     # trailing table is every SKU ever fed; the features are per SKU),
     # matched in the one id spelling whatever dtype the caller's table has
     skus = {r["sku_id"] for r in canon.values()}
-    mine = history[ident_series(history.sku_id).isin(skus)] if len(history) else history
+    if features is None and history is None:
+        raise ValueError("a batch prices against the day's feature table or a history")
+    mine = (history[ident_series(history.sku_id).isin(skus)]
+            if history is not None and len(history) else history)
     states, notes = build_states(list(canon.values()), mine, cfg, model, r_lookup,
-                                 episode_paths=store.episode_paths)
+                                 episode_paths=store.episode_paths, features=features)
+    # an entry request priced on a table built for an EARLIER day read the
+    # features as of that day, not its own: counted, never refused (a day
+    # late is nearly the same window; a week late is a cron that stopped)
+    as_of = table_as_of(features)
+    stale = sum(1 for r in canon.values()
+                if r["current_discount"] is None and as_of is not None and as_of < r["date"])
     # the one context every worker reads (engine.state.batch_context): the
     # cells in category order, so the report's posterior_versions read so
     cats = sorted({r["category"] for r in canon.values()})
@@ -187,14 +183,16 @@ def run(cfg, requests, history, workers=None, seed=0, store=None, model=None,
         # a batch where every request reads so is a history that does not
         # meet its requests (an id spelling, a table cut too short)
         **notes,
+        "features_as_of": as_of,
+        "entry_requests_on_stale_features": int(stale),
         "tau_in_force": None if ctx["suspended"] else ctx["tau"],
         "exploration_suspended": ctx["suspended"],
         "model_version": ctx["model_version"],
         "config_digest": ctx["digest"],
         "posterior_versions": {c: int(v["version"]) for c, v in ctx["cells"].items()},
-        "history_rows": int(len(history)),
+        "history_rows": int(len(history)) if history is not None else 0,
         "history_dates": ([str(history.date.min()), str(history.date.max())]
-                          if len(history) else None),
+                          if history is not None and len(history) else None),
     }
     return rows, events, report
 
@@ -211,10 +209,15 @@ def main(argv=None):
     ap.add_argument("--requests", required=True,
                     help="one hour's price requests: JSONL, parquet or CSV in "
                          f"the contract's names {list(REQUEST_FIELDS)}")
-    ap.add_argument("--history", required=True,
-                    help="the hourly FLC table the outcomes are ingested from "
-                         "(source schema), or a prepared parquet; the trailing "
-                         "ref_rate_window_days the features read")
+    ap.add_argument("--features", default=None,
+                    help="today's feature table (features/<date>.parquet, written "
+                         "by daily.features each morning): the production path, "
+                         "one join and no history read")
+    ap.add_argument("--history", default=None,
+                    help="instead of --features: the hourly FLC table the outcomes "
+                         "are ingested from (source schema), or a prepared parquet, "
+                         "covering the trailing ref_rate_window_days; the features "
+                         "are computed here, every batch")
     ap.add_argument("--out", required=True, help="response JSONL, one row per request")
     ap.add_argument("--report", default=None, help="the batch's counts, JSON")
     ap.add_argument("--config", default="config.yaml")
@@ -224,11 +227,14 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
 
+    if bool(args.features) == bool(args.history):
+        ap.error("pass exactly one of --features (the day's table) or --history")
     cfg = load_config(args.config, strict=True)
     requests = read_requests(args.requests)
-    history = load_history(args.history, cfg)
+    features = pd.read_parquet(args.features) if args.features else None
+    history = load_history(args.history, cfg) if args.history else None
     rows, events, report = run(cfg, requests, history, workers=args.workers,
-                               seed=args.seed)
+                               seed=args.seed, features=features)
     write_rows(rows, args.out)
     if args.report:
         write_json(args.report, report)
@@ -237,6 +243,8 @@ def main(argv=None):
           + (f" [{report['quarantined']} quarantined]" if report["quarantined"] else "")
           + (f" [{report['requests_with_unknown_features']} priced on no history]"
              if report["requests_with_unknown_features"] else "")
+          + (f" [{report['entry_requests_on_stale_features']} on a table from "
+             f"{report['features_as_of']}]" if report["entry_requests_on_stale_features"] else "")
           + (" -- exploration SUSPENDED" if report["exploration_suspended"] else ""))
     for why, n in sorted(report["rejected_by_the_engine"].items()):
         print(f"  {n:,}  {why}")

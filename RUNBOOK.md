@@ -177,10 +177,16 @@ contract:
   or an id read back as `7.0` prices and writes. Call it as it is (a file
   drop per hour) or lift the service out of it: `engine.state.build_states`
   is the one request → state (an entry request: the frozen model's
-  `mu_ref_path` on its two demand-rate features computed point-in-time
-  from the trailing feed; a later hour of a known episode: the entry's
-  stored path SLICED to the hour, extended only when a restock grew the
-  window; `r` from the lookup) — never re-derived. Read the batch report's
+  `mu_ref_path` on its two demand-rate features, read off the day's
+  feature table `features/<today>.parquet` — `daily.features` writes it
+  every morning from the rolling feed, `engine.state.ref_rate_table`;
+  both features read strictly before the opening date, so the table's
+  row is the batch's number and the batch reads no history; a later hour
+  of a known episode: the entry's stored path SLICED to the hour and the
+  features it recorded, extended only when a restock grew the window;
+  `r` from the lookup) — never re-derived. `--history` (the trailing feed
+  itself) computes the same features inside the batch, for the day
+  before the first morning. Read the batch report's
   `requests_with_unknown_features` (fresh forecasts with no history
   behind them) and `non_entry_requests_without_stored_path` (later hours
   of episodes the store never priced) after the first batches: a whole
@@ -207,7 +213,9 @@ contract:
 - the daily cron: `advance --feed <yesterday's hourly parquet> --failures
   <that day's failed pushes>` (omit `--failures` on a day with none), which
   ingests outcomes, walks tau, writes monitor/assurance/status/exports and
-  stops at `--apply`. Once a week the same call refreshes the extract
+  stops at `--apply`; after ingest it writes today's feature table
+  (`daily.features`), which every batch that day joins on SKU × FC. Once
+  a week the same call refreshes the extract
   (`download_flc` through yesterday, `prepare_data`, the level re-fit, the
   re-seal) before the lane runs, so the cron host holds `REDSHIFT_*` in
   `~/.env` and the pull's runtime lands in that morning.

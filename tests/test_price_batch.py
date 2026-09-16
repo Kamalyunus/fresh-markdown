@@ -4,6 +4,7 @@ engineering can name from the feed, and a later hour priced on the entry
 forecast."""
 
 import json
+import math
 
 import numpy as np
 import pandas as pd
@@ -308,3 +309,68 @@ def test_a_key_the_caller_settled_is_not_computed(tmp_path, monkeypatch):
         st.batch_context(cfg, posterior, _Model(), ["VEG"], seed=0)
     with pytest.raises(TypeError):
         posterior.tau(cfg)          # the store reads its own config; no second one
+
+
+# ------------------------------------------------------ the day's feature table
+
+def test_the_feature_table_prices_exactly_as_the_history_does():
+    """The two demand-rate features read strictly before the opening date
+    (the trailing window is closed on the left; the prior episode started
+    earlier), so a table built once for the day IS every batch's number:
+    a seen (sku, fc), a SKU new to an fc (the pooled fallback row), and a
+    SKU with no history at all (absent from the table, "unknown") each
+    resolve to the same features, the same forecast and the same count
+    whether the batch reads the history or the table."""
+    from engine.state import ref_rate_table, table_as_of
+    hist = _history(skus=(7, 8))
+    table = ref_rate_table(hist, "2026-08-19", CFG)
+    assert table_as_of(table) == "2026-08-19"
+    assert set(table.fc) == {"F1", "*"} and set(table.sku_id) == {"7", "8"}
+    reqs = [_req(episode_id="E1", sku_id=7),                     # seen at F1
+            _req(episode_id="E2", sku_id=8, fc="F2"),            # the SKU's pooled row
+            _req(episode_id="E3", sku_id=9)]                     # no history: unknown
+    model = _Model()
+    by_history, n_h = build_states(reqs, hist, CFG, model, R_LOOKUP)
+    by_table, n_t = build_states(reqs, None, CFG, model, R_LOOKUP, features=table)
+    for a, b in zip(by_history, by_table):
+        assert a["mu_ref_path"] == b["mu_ref_path"]
+        assert all(x == y or (math.isnan(x) and math.isnan(y))
+                   for x, y in zip(a["features"], b["features"]))
+    assert n_h == n_t and n_t["requests_with_unknown_features"] == 1
+    assert not math.isnan(by_table[0]["features"][0])          # seen
+    assert not math.isnan(by_table[1]["features"][0])          # pooled
+    assert math.isnan(by_table[1]["features"][1])              # no prior episode at F2
+    assert all(math.isnan(v) for v in by_table[2]["features"])
+
+
+def test_a_batch_on_the_days_table_reads_no_history_and_counts_a_stale_one(tmp_path):
+    """The production path: `--features` alone, no history read; the
+    decision records the features the forecast stood on; a table built
+    for an earlier day is counted, not refused."""
+    from engine.state import ref_rate_table
+    cfg, store, posterior = _world(tmp_path)
+    table = ref_rate_table(_history(), "2026-08-19", cfg)
+    rows, events, rep = run(cfg, [_req()], store=store, model=_Model(),
+                            posterior=posterior, r_lookup=R_LOOKUP, features=table)
+    assert rep["decisions"] == 1 and rep["history_rows"] == 0
+    assert rep["features_as_of"] == "2026-08-19"
+    assert rep["entry_requests_on_stale_features"] == 0
+    assert events[0]["sku_ref_sales_rate_30d"] == pytest.approx(1.0)
+    assert events[0]["prior_episode_ref_sales_rate"] == pytest.approx(1.0)
+    # the store now knows the episode with its features: the next hour is
+    # the stored path sliced and carries the entry's features, no table needed
+    later = _req(episode_id="E1", hour_of_day=18, hours_remaining=3, q=2,
+                 current_discount=events[0]["applied_discount"])
+    rows2, events2, rep2 = run(cfg, [later], store=store, model=_Model(),
+                               posterior=posterior, r_lookup=R_LOOKUP,
+                               features=table.iloc[0:0])
+    assert rep2["decisions"] == 1 and rep2["non_entry_requests_without_stored_path"] == 0
+    assert events2[0]["sku_ref_sales_rate_30d"] == events[0]["sku_ref_sales_rate_30d"]
+    # a table built for an earlier day prices, and says so
+    old = table.assign(as_of="2026-08-17")
+    _, _, rep3 = run(cfg, [_req(episode_id="E9", sku_id=9)], store=store, model=_Model(),
+                     posterior=posterior, r_lookup=R_LOOKUP, features=old)
+    assert rep3["entry_requests_on_stale_features"] == 1 and rep3["features_as_of"] == "2026-08-17"
+    with pytest.raises(ValueError):
+        run(cfg, [_req(episode_id="E8", sku_id=8)], store=store, model=_Model(),
+            posterior=posterior, r_lookup=R_LOOKUP)

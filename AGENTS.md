@@ -118,7 +118,8 @@ And the standing prohibitions:
   - request → state — `engine.state.canonical_request` (one spelling),
     `assemble_state` (the one state dict) and `build_states` (Lane B; a
     later hour of an episode is the entry decision's stored path sliced,
-    `EventStore.episode_paths`); the worker body — `engine.state.price_one`,
+    `EventStore.episode_paths`); the day's feature table — `ref_rate_table`
+    (`daily.features` writes, the batch joins); the worker body — `engine.state.price_one`,
     its context — `batch_context`; per-decision seeding —
     `common.parallel.keyed_rng` (the pool — `EpisodePool`); the hour key
     and the outcome id — `events.pairs.hour_key`, `outcome_id_of`; id
@@ -226,7 +227,7 @@ phase — what runs, which config keys move, and who moves them:
 | shadow | `evaluate.shadow` on the hold-out, every episode; then `tune --apply` | `tau_initial` | the process, from `shadow.tau_initial_derivation`. The forced rate is the budget's: to change it the owner reads `shadow.exploration_budget_sweep` (forced rate, spend, move, `information_rel` per `budget_share_of_il` × `delta_min_bias_multiple`), sets the pair, and shadow re-runs once |
 | owner | STOP | `max_std_shrink`; `max_mean_step` when its re-price EXCEEDS the gate; a stop threshold only when its floor is `BLOCKED`, `TOO TIGHT`, `LIKELY INERT` or `insufficient history`; `posterior.cold_start_shift_std` never stops (it ships 0.5) but is yours — `tune` reports it with the backtest evidence | you, from `thresholds.json` (advance prints floor, verdict, source) |
 | launch | STOP, then `--fit-calibration` + `seal` | `data.launch_date` | you, on launch day |
-| daily | ingest, `update --calibrate-tau`, monitor, assurance, export, status — these run even while status is red (a fired stop must keep ingesting or its window never clears); STOP at `update --apply` | none | you approve each update. A fired stop condition SUSPENDS exploration (the monitor writes it into the posterior state; `decide` stops drawing; exploitation continues; tau holds) until a human runs `update --resume-exploration` |
+| daily | ingest, `features`, `update --calibrate-tau`, monitor, assurance, export, status — these run even while status is red (a fired stop must keep ingesting or its window never clears); STOP at `update --apply` | none | you approve each update. A fired stop condition SUSPENDS exploration (the monitor writes it into the posterior state; `decide` stops drawing; exploitation continues; tau holds) until a human runs `update --resume-exploration` |
 
 Every stop writes `reports/launch_readiness.md` (`--report` regenerates
 it), a failed step included (journaled with the step's own exit message,

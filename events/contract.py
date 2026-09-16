@@ -55,6 +55,11 @@ def _json_scalar(v):
                     "JSON-serialisable; emit native types")
 
 
+# recorded on every decision the batch caller emits since the feature
+# table (design 5.10), OPTIONAL so a decision from before then still loads:
+# the two demand-rate features the forecast stood on, null when unknown
+DECISION_OPTIONAL = ["sku_ref_sales_rate_30d", "prior_episode_ref_sales_rate"]
+
 OUTCOME_REQUIRED = [
     "outcome_id", "decision_id", "units_sold", "starting_inventory",
     "ending_inventory", "applied_price", "is_stockout", "execution_status",

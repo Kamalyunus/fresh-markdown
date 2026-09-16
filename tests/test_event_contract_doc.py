@@ -3,7 +3,7 @@
 import os
 import re
 
-from events.contract import DECISION_REQUIRED, OUTCOME_REQUIRED
+from events.contract import DECISION_OPTIONAL, DECISION_REQUIRED, OUTCOME_REQUIRED
 
 DOC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                    "docs", "event_contract.html")
@@ -86,7 +86,7 @@ def test_the_completeness_counts_the_doc_names_are_the_ones_the_code_reports():
 def test_the_doc_invents_no_fields():
     """A field the doc names but the system does not know is worse than a
     missing one: it gets built, sent, and silently ignored."""
-    known = set(DECISION_REQUIRED) | set(OUTCOME_REQUIRED) | NOT_EVENT_FIELDS
+    known = set(DECISION_REQUIRED) | set(DECISION_OPTIONAL) | set(OUTCOME_REQUIRED) | NOT_EVENT_FIELDS
     invented = sorted(documented_fields() - known)
     assert not invented, (
         f"docs/event_contract.html names {invented}, which no event carries. "

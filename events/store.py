@@ -23,7 +23,7 @@ import os
 from events.pairs import hour_key
 # the contract -- the required fields and the value checks -- is
 # events.contract; the names stay here for callers
-from events.contract import (DECISION_REQUIRED, OUTCOME_REQUIRED, ISO_DAY,      # noqa: F401
+from events.contract import (DECISION_OPTIONAL, DECISION_REQUIRED, OUTCOME_REQUIRED, ISO_DAY,      # noqa: F401
                              finite_number, _json_scalar, _is_iso_day,
                              _validate_decision, _validate_outcome)
 
@@ -58,9 +58,16 @@ def _episode_path(evt):
     if not isinstance(path, list) or evt.get("episode_id") is None:
         return None
     try:
-        return {"date": str(evt["date"]), "hour_of_day": int(evt["hour_of_day"]),
-                "hours_remaining": int(evt["hours_remaining"]),
-                "mu_ref_path": [float(m) for m in path]}
+        out = {"date": str(evt["date"]), "hour_of_day": int(evt["hour_of_day"]),
+               "hours_remaining": int(evt["hours_remaining"]),
+               "mu_ref_path": [float(m) for m in path],
+               # the features the forecast stood on (contract.DECISION_OPTIONAL):
+               # None on a decision recorded before they were
+               "features": None}
+        if all(f in evt for f in DECISION_OPTIONAL):
+            out["features"] = tuple(None if evt[f] is None else float(evt[f])
+                                    for f in DECISION_OPTIONAL)
+        return out
     except (KeyError, TypeError, ValueError):
         return None
 

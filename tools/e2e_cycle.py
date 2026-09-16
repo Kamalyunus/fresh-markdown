@@ -83,6 +83,7 @@ def run(cfg, prepared, out_dir, episodes=20, hours=3, opening_hour=10, seed=0,
         "episodes_opened": len(chosen), "hours": hours, "opening_hour": opening_hour,
         "epsilon_true": epsilon_true, "seed": seed,
         "batches": pricer.batches,
+        "features": pricer.tables,
         "decisions": paired["decisions"],
         # a rejected state is held at the shop's fallback and priced again
         # next hour, as the simulator does: counted by reason, never dropped

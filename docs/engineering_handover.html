@@ -489,7 +489,7 @@
 
 <figure class="timeline">
 <svg viewBox="0 0 1000 400" role="img" style="max-width:100%;height:auto;display:block;color:var(--ink);font-family:var(--body)"
-     aria-label="The pilot as a timeline. Before launch and on launch day the owner runs the chain and sets the launch date. Every hour engineering sends twelve-field requests to the engine, gets a price and a decision id back, applies it and logs failed pushes. Every morning engineering's cron hands yesterday's feed and failures to the engine's daily lane, which ingests, walks the budget, monitors, runs assurance, exports, and stops at the operator gate the owner approves on cadence. When the factor schedule falls short the same morning run refreshes the extract through yesterday, re-fits the level factors and re-seals, so the cron host holds the Redshift credentials. When a stop fires the engine suspends exploration while pricing continues, and the owner investigates and resumes.">
+     aria-label="The pilot as a timeline. Before launch and on launch day the owner runs the chain and sets the launch date. Every hour engineering sends twelve-field requests to the engine, gets a price and a decision id back, applies it and logs failed pushes. Every morning engineering's cron hands yesterday's feed and failures to the engine's daily lane, which ingests, writes the day's feature table, walks the budget, monitors, runs assurance, exports, and stops at the operator gate the owner approves on cadence. When the factor schedule falls short the same morning run refreshes the extract through yesterday, re-fits the level factors and re-seals, so the cron host holds the Redshift credentials. When a stop fires the engine suspends exploration while pricing continues, and the owner investigates and resumes.">
   <defs>
     <marker id="hd-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
@@ -546,9 +546,9 @@
     <text x="320" y="200" font-family="var(--data)" font-size="11.5">ops.price_batch</text>
     <text x="320" y="214">state → decide → store</text>
     <text x="320" y="228">posterior read once</text>
-    <text x="520" y="200">ingest · budget walk</text>
-    <text x="520" y="214">monitor · assurance</text>
-    <text x="520" y="228">export · status</text>
+    <text x="520" y="200">ingest · feature table</text>
+    <text x="520" y="214">budget walk · monitor</text>
+    <text x="520" y="228">assurance · export · status</text>
     <text x="720" y="200">pull the extract · re-fit</text>
     <text x="720" y="214">the level · re-seal, when</text>
     <text x="720" y="228">the schedule falls short</text>
@@ -601,8 +601,8 @@
       <tbody>
         <tr><td>Before launch</td><td>The whole chain to the launch gate: the extract pull, the bootstrap, tuning, shadow, the seal. Every MEASURED value is pasted by the process; the owner decisions stop it with the evidence.</td><td><code>python3 -m ops.advance</code>, repeated until it stops on <code>data.launch_date</code></td><td>the owner's agent</td></tr>
         <tr><td>Launch day</td><td>The owner sets the launch date; <code>advance</code> then schedules the level factors through the week being priced and re-seals. <code>ops.status</code> must be green before the first hour is priced.</td><td>edit <code>data.launch_date</code>; <code>python3 -m ops.advance</code></td><td>the owner</td></tr>
-        <tr><td>Every clock hour</td><td>One batch per hour, one request per open episode in the twelve fields; a price or a row-scoped rejection per request; every decision in the store before its price returns. You apply exactly that price and log the pushes that failed.</td><td><code>python3 -m ops.price_batch --requests &lt;hour&gt; --history &lt;trailing feed&gt; --out &lt;hour&gt;.jsonl --report &lt;hour&gt;.json</code></td><td>engineering</td></tr>
-        <tr><td>Every morning</td><td>Yesterday's feed and yesterday's failed pushes through the lane, in this order: ingest the outcomes, walk the exploration budget, monitor, assurance, export the paired tables, status. Stops at the operator gate. Runs even while status is red.</td><td><code>python3 -m ops.advance --feed &lt;yesterday.parquet&gt; --failures &lt;yesterday failed pushes&gt;</code></td><td>engineering's cron</td></tr>
+        <tr><td>Every clock hour</td><td>One batch per hour, one request per open episode in the twelve fields; a price or a row-scoped rejection per request; every decision in the store before its price returns. You apply exactly that price and log the pushes that failed.</td><td><code>python3 -m ops.price_batch --requests &lt;hour&gt; --features features/&lt;today&gt;.parquet --out &lt;hour&gt;.jsonl --report &lt;hour&gt;.json</code></td><td>engineering</td></tr>
+        <tr><td>Every morning</td><td>Yesterday's feed and yesterday's failed pushes through the lane, in this order: ingest the outcomes, build today's feature table (yesterday's rows join the rolling feed history; the two features per SKU and centre are written once for the day's batches), walk the exploration budget, monitor, assurance, export the paired tables, status. Stops at the operator gate. Runs even while status is red.</td><td><code>python3 -m ops.advance --feed &lt;yesterday.parquet&gt; --failures &lt;yesterday failed pushes&gt;</code></td><td>engineering's cron</td></tr>
         <tr><td>On cadence</td><td>The operator gate: the elasticity belief moves, cell by cell, bounded, only where a cell's batch carries the evidence. A second run that consumes nothing is correct. Never run this yourself.</td><td><code>python3 -m daily.update --apply</code></td><td>the owner</td></tr>
         <tr><td>Every week</td><td>The extract refresh, the level re-fit and the re-seal. The same morning <code>advance</code> run does all three on its own rule, when the factor schedule no longer reaches the week being priced: it pulls the extract through yesterday, prepares it, re-fits, re-seals, then runs the lane. Nothing extra to schedule; the cron host holds <code>REDSHIFT_*</code> in <code>~/.env</code>, and that morning takes the pull's runtime. It stops only when an extract that already reaches yesterday still cannot reach the week, which is a source-data problem for the owner.</td><td>automatic inside <code>ops.advance --feed</code></td><td>the engine, from engineering's cron</td></tr>
         <tr><td>When a stop fires</td><td>The monitor writes a suspension into the posterior state. The next batch reads it and stops drawing exploration prices; ordinary pricing and the whole morning lane keep running. The red status row names what clears it.</td><td><code>python3 -m daily.update --resume-exploration</code> after investigating</td><td>the owner</td></tr>
@@ -628,8 +628,10 @@ original_price, cost, current_discount</pre>
 <p class="prose">The reference caller:</p>
 
 <pre class="json">python3 -m ops.price_batch --requests &lt;hour&gt;.jsonl|.parquet|.csv \
-    --history &lt;trailing hourly FLC table&gt; \
+    --features features/&lt;today&gt;.parquet \
     --out &lt;hour&gt;.response.jsonl --report &lt;hour&gt;.report.json</pre>
+
+<p class="prose"><code>features/&lt;today&gt;.parquet</code> is the day's feature table. The morning lane writes it (the "every morning" column of §03) from the rolling hourly feed: the two demand-rate features every episode opening today reads, one row per SKU and centre plus a pooled row per SKU. Both features read strictly before the opening date, so one table per morning is exactly what a batch would compute for itself; the batch joins on SKU and centre and reads no history. That is what keeps the hourly path to "join, predict once, solve, commit". Before the first morning has run, <code>--history &lt;trailing hourly FLC table&gt;</code> computes the same features inside the batch.</p>
 
 <p class="prose">Every request is read in one spelling before anything else: ids as text (a <code>7</code>, a <code>"7"</code> and a <code>7.0</code> are one item), the day as <code>YYYY-MM-DD</code> (a parquet timestamp is fine), counts as integers. The response has one row per request, in the request's order:</p>
 
@@ -710,6 +712,8 @@ original_price, cost, current_discount</pre>
         <tr><td><code>rejected_before_the_engine</code>, <code>rejected_by_the_engine</code></td><td>Rows refused, by reason</td><td>Explained per reason</td></tr>
         <tr><td><code>requests_with_unknown_features</code></td><td>Entry requests whose SKU has no trailing history behind them, so the forecast starts from "unknown"</td><td>A few new SKUs; a whole batch means the history table or the id spelling does not meet the requests</td></tr>
         <tr><td><code>non_entry_requests_without_stored_path</code></td><td>Later hours of episodes the store never priced at entry</td><td>Zero once you are live; non-zero means an episode's entry hour was skipped or its id changed mid-window</td></tr>
+        <tr><td><code>features_as_of</code></td><td>The day the feature table the batch priced on was built for</td><td>Today</td></tr>
+        <tr><td><code>entry_requests_on_stale_features</code></td><td>Entry requests priced on a table built for an earlier day; priced, never refused</td><td>Zero; non-zero means the morning lane did not run</td></tr>
         <tr><td><code>exploration_suspended</code>, <code>tau_in_force</code></td><td>Whether the monitor has suspended exploration (exploitation pricing continues)</td><td>Read, do not act</td></tr>
       </tbody>
     </table>
@@ -752,7 +756,7 @@ original_price, cost, current_discount</pre>
     <li><strong><code>hours_remaining</code> means hours.</strong> Hours left in the window, this one included, at least 1 and at most <code>data.max_window_hours</code> (config); a larger value is rejected as a feed defect. Within one id it decrements by exactly one per hour, with the one restock exception above. Build that consistency check into your side: any other jump means the id is stitching two windows together or a feed hour is missing.</li>
     <li><strong><code>current_discount</code></strong> is <code>null</code> on the first hour of an episode and a fraction (<code>0.15</code>, not <code>15</code>) on every later one. Prices only hold or deepen within an episode; the engine's action set enforces it.</li>
     <li><strong><code>cost</code> and <code>original_price</code></strong> are per-request inputs, per hour, per FC. Cost sets the price floor; a stale or missing cost either blocks legal discounts or rejects the row.</li>
-    <li><strong><code>--history</code></strong> is the trailing hourly FLC table the two demand-rate features read (the prepared extract plus every hour fed since); it must reach back at least <code>data.ref_rate_window_days</code> (config) before the batch's day, in the same id spelling as the requests.</li>
+    <li><strong>The feature table is the morning's, in the morning's id spelling.</strong> A batch joins its entry requests to <code>features/&lt;today&gt;.parquet</code> on SKU and centre; a SKU absent from it prices as "unknown" and is counted. A table from an earlier day still prices and is counted (<code>entry_requests_on_stale_features</code>): a non-zero count means the morning lane did not run. <code>--history</code> exists for the day before the first morning.</li>
     <li><strong>The feed keeps every priced hour</strong>, zero-sale hours included. Outcomes are built from the feed, so a priced hour the feed drops is a completeness miss (contract §07), and the zero-sale rows are most of the evidence.</li>
     <li><strong>One request per hour per episode.</strong> A second request for a priced hour is refused (<code>already_priced</code>); two rows for one hour in one batch are both refused (<code>duplicate_request</code>).</li>
   </ul>
@@ -765,7 +769,8 @@ original_price, cost, current_discount</pre>
 
   <ul class="plain">
     <li><strong>Outcomes.</strong> <code>daily.ingest_outcomes</code> builds them from the feed and matches them to decisions on <code>(sku_id, fc, date, hour_of_day)</code>; the outcome id is that key. You keep the feed landing.</li>
-    <li><strong>Forecasts.</strong> The engine resolves demand from the frozen model; a later hour of an episode is priced from the entry decision's stored forecast path, so nothing is recomputed on your side.</li>
+    <li><strong>Features.</strong> The morning lane builds the day's feature table from the feed you already deliver; the batch joins to it. You never compute a rate.</li>
+    <li><strong>Forecasts.</strong> The engine resolves demand from the frozen model; a later hour of an episode is priced from the entry decision's stored forecast path and the features it recorded, so nothing is recomputed on your side.</li>
     <li><strong>Monitoring and guardrails.</strong> The monitor, assurance and the stop conditions run inside <code>advance --feed</code>.</li>
   </ul>
 
@@ -813,6 +818,7 @@ original_price, cost, current_discount</pre>
         <tr><td><code>requests/&lt;date&gt;T&lt;hh&gt;.jsonl</code></td><td>What you send, one file per hour, twelve fields</td></tr>
         <tr><td><code>decisions/&lt;date&gt;T&lt;hh&gt;.jsonl</code></td><td>What you get back, one response row per request</td></tr>
         <tr><td><code>feed/&lt;date&gt;.parquet</code></td><td>The hourly FLC feed you already produce, in its source column names</td></tr>
+        <tr><td><code>features/&lt;date&gt;.parquet</code></td><td>The day's feature table the batches priced on, as the morning lane writes it</td></tr>
         <tr><td><code>exports/decisions.parquet</code>, <code>exports/outcomes.parquet</code></td><td>The paired tables the daily lane exports for the warehouse</td></tr>
         <tr><td><code>e2e_report.json</code></td><td>The cycle's counts</td></tr>
       </tbody>
@@ -823,7 +829,8 @@ original_price, cost, current_discount</pre>
 
 <p class="prose"><strong>Step 3 — price a batch from real data.</strong> Build one hour's requests from the prepared extract, one row per open episode, and write it twice: as JSONL and as parquet with a datetime <code>date</code> column. Price each with the full source table as history, then send the JSONL batch a second time:</p>
 
-<pre class="json">python3 -m ops.price_batch --requests &lt;file&gt; --history data/flc_raw.parquet \
+<pre class="json">python3 -m daily.features --as-of &lt;the day&gt;          # seeds the rolling feed from data/flc_raw.parquet
+python3 -m ops.price_batch --requests &lt;file&gt; --features features/&lt;the day&gt;.parquet \
     --out sim/batch/&lt;name&gt;.jsonl --report sim/batch/&lt;name&gt;.json --workers 0</pre>
 
 <p class="prose">Check: ids echo the request ids; every priced row sits on the discount grid (<code>pricing.tier_step</code> in config); JSONL and parquet price identically; the resend returns <code>already_priced</code> on every row; unknown-feature requests are few and are genuinely new SKUs. Steps 1 and 3 write to the event store the config names, so clear that store before launch.</p>

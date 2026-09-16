@@ -1313,6 +1313,10 @@ def test_the_e2e_cycle_prices_ingests_and_pairs(workspace, tmp_path):
 
     first = rep["batches"][0]
     assert first["requests"] == first["decisions"] > 0        # every entry priced
+    # the production path: every batch priced on the day's feature table,
+    # written once under features/ (the morning lane's step), no history read
+    assert first["features_as_of"] == rep["launch_date"] and first["history_rows"] == 0
+    assert all(os.path.exists(p) for p in rep["features"].values()) and rep["features"]
     assert rep["decisions"] == sum(b["decisions"] for b in rep["batches"])
     assert rep["decisions"] == rep["feed_rows"]                # one feed row per priced hour
     ing = rep["ingest"]

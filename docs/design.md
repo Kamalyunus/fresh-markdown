@@ -803,9 +803,25 @@ requests in (JSONL, parquet or CSV), one response row per request out, in
 request order: the price to apply and the `decision_id`, or `rejected`
 with the reason. It resolves what the engine needs beyond the request by
 the one home for each — `engine.state.build_states` (the frozen model's
-`mu_ref_path`, `r` from the lookup; the pilot simulator computes its
-features through the same `ref_rate_features`), one `PosteriorStore` read
-per batch, one config digest — commits every decision before returning
+`mu_ref_path` on the two demand-rate features read off the DAY'S FEATURE
+TABLE, `r` from the lookup), one `PosteriorStore` read per batch, one
+config digest. The feature table (`engine.state.ref_rate_table`,
+`features/<date>.parquet`) is written once each morning by
+`daily.features` from the rolling hourly feed (`features.history_path`,
+the last `features.history_days` days, seeded from the raw extract): one
+row per SKU × FC plus a pooled row per SKU (`fc = "*"`, the fallback a
+SKU new to a centre reads). Both features read strictly before the
+opening date — the trailing window is closed on the left, the prior
+episode started earlier — so the table's row IS what a batch computing
+them itself over the trailing history returns (`ref_rate_features`, the
+one home both paths call; the equality is a test). A batch joins on SKU
+and FC and reads no history; `--history` computes the same features
+inside the batch for the day before the first morning. The decision
+event records the two features it stood on (`events.contract
+.DECISION_OPTIONAL`), so a later hour and a restock extension read them
+back rather than as of another day. The batch report carries
+`features_as_of` and `entry_requests_on_stale_features` (priced, counted:
+a stopped morning lane, never a refusal) — commits every decision before returning
 its price, and refuses row by row, never the batch: a request that cannot
 become a state (`validate_request`: every field, a layable day, the
 counts through `engine.decide.count_failures` — the same three checks and
@@ -2189,7 +2205,7 @@ python3 -m evaluate.pilot_sim [--days N] [--fault name:arg] [--workers N]
 #   the weeks AFTER launch vs a simulated shop, per pilot_sim.yaml (§11.3)
 python3 -m tools.e2e_cycle [--episodes N] [--hours H]
 #   one whole integration cycle under sim/e2e: requests -> decisions -> feed -> outcomes (§5.10)
-python3 -m ops.price_batch --requests <hour.jsonl> --history <flc.parquet> --out decisions.jsonl
+python3 -m ops.price_batch --requests <hour.jsonl> --features features/<today>.parquet --out decisions.jsonl
 #   Lane B's reference caller: one hour's requests in, a price per request out (§5.10)
 
 # tuning loop
@@ -2199,6 +2215,7 @@ python3 -m ops.tune --apply      # paste MEASURED values, log decisions
 # daily production loop -- advance --feed runs it in this order (once a week,
 # when the factor schedule falls behind, it first re-runs steps 0-1, 3b and 11)
 python3 -m daily.ingest_outcomes --feed <yesterday's parquet>
+python3 -m daily.features --feed <yesterday's parquet>   # today's feature table for Lane B's batches
 python3 -m daily.update --calibrate-tau   # tau walks every closed day, no operator
 python3 -m daily.monitor
 python3 -m daily.assurance
