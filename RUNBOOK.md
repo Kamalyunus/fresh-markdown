@@ -4,8 +4,8 @@ For the engineering team and the product owner. The order of operations is
 code — `python3 -m ops.advance` — so this document is about the parts
 the process cannot do: what engineering builds, what the owner decides, and
 what a stop or a red line means. The authoritative spec is
-`docs/design.md`; the integration contract is `docs/event_contract.html`
-(engineering's one-page handover: `docs/engineering_handover.html`);
+`docs/design.md`; engineering's page is `docs/engineering_handover.html`
+(the process, then the integration contract as its appendices);
 `REVIEW_GUIDE.md` maps the code by risk tier; `AGENTS.md` is what an agent
 reads before touching the repo.
 
@@ -166,13 +166,22 @@ The engine is `engine.decide`: state in, price + decision event out, or
 validate. Engineering owns everything on the other side of the event
 contract:
 
-- the hourly scheduler and transport that call the engine per SKU × FC
-  (the 12-field request in `docs/event_contract.html` §03).
-  **`ops.price_batch` is the reference caller** — one hour's requests in
-  (JSONL/parquet/CSV), a price per request out, or `rejected` with the
-  reason per row; the posterior read once per batch; every decision in the
-  store before its price returns; an hour already priced refused
-  (`already_priced`). Every request is read in one spelling (ids as the
+- the hourly cron: the shelf at the top of the hour in the feed's own
+  schema (the snapshot) carrying the `episode_id` THEY assign — the
+  producers own the data and, in time, the pipeline, so the id is theirs;
+  `ops.assign_episode_ids` is the chain's rule (`EPISODE_RULE`) as a
+  script for one hour against the hour before, to run or port — through
+  **`ops.price_hour`** — which reads the id as given (a new id is an
+  entry, the id the store last priced on the shelf continues it), takes
+  the anchor from the price in force, evaluates the rule only to count
+  the ids that disagree (`episode_ids_disagreeing_with_the_rule`,
+  `LIVE_RULE`), builds the 12-field requests and prices them through
+  `ops.price_batch` (the caller beneath it: requests in, a price per
+  request out) — then applying the `apply_price` column it returns.
+  `ops.check_inputs` checks their three tables (snapshot, feed, failed
+  pushes) before launch, the id column included. The posterior is
+  read once per batch; every decision is in the store before its price
+  returns; an hour already priced is refused (`already_priced`). Every request is read in one spelling (ids as the
   hour key spells them, the day as `YYYY-MM-DD`), so a parquet timestamp
   or an id read back as `7.0` prices and writes. Call it as it is (a file
   drop per hour) or lift the service out of it: `engine.state.build_states`

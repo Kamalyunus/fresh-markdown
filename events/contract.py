@@ -1,7 +1,7 @@
 """events.contract -- what a decision and an outcome event must carry.
 
 The field lists (`DECISION_REQUIRED`, `OUTCOME_REQUIRED`) and the value
-checks the store runs before an event lands (`docs/event_contract.html`
+checks the store runs before an event lands (`docs/engineering_handover.html`
 is the human-readable page; `tests/test_event_contract_doc.py` keeps the
 two in step). The store (events.store) enforces these; nothing else
 re-derives them.

@@ -1,0 +1,69 @@
+"""ops.check_inputs -- engineering's three files, checked against what the
+chain needs, with the count and the fix on every line."""
+import pandas as pd
+
+from conftest import source_row, source_window, write_extract
+from ops import check_inputs
+
+
+def _verdicts(rows):
+    return {r["check"]: r["verdict"] for r in rows}
+
+
+def test_a_fraction_discount_and_a_bad_counter_fail_a_snapshot(cfg, tmp_path):
+    good = [source_row(hour=18, skuseq=s, inventory=3.0, flc_window=4.0, units_sold=None,
+                       ending_inventory=None, final_price=None,
+                       episode_id=f"{s}|F1|2026-03-02T18") for s in (1, 2)]
+    snap = tmp_path / "snap.csv"
+    pd.DataFrame(good).to_csv(snap, index=False)
+    v = _verdicts(check_inputs.check_snapshot(str(snap), cfg).rows)
+    assert all(x == "PASS" for x in v.values()), v
+    bad = [dict(r, discount=0.25) for r in good] + [source_row(hour=18, skuseq=3, discount=0.3,
+                                                                flc_window=9000.0, episode_id=None)]
+    pd.DataFrame(bad).to_csv(snap, index=False)
+    v = _verdicts(check_inputs.check_snapshot(str(snap), cfg).rows)
+    assert v["discount is a PERCENT (25.0, not 0.25)"] == "FAIL"
+    cap = cfg["data"]["max_window_hours"]
+    assert v[f"flc_window means hours still to come: 0..{cap - 1} on stocked rows"] == "FAIL"
+    assert v["episode_id present and never null (the producer's)"] == "FAIL"
+    # the column absent altogether is the same failure, with every row counted
+    pd.DataFrame(good).drop(columns=["episode_id"]).to_csv(snap, index=False)
+    v = _verdicts(check_inputs.check_snapshot(str(snap), cfg).rows)
+    assert v["episode_id present and never null (the producer's)"] == "FAIL"
+
+
+def _idle(rows, i):
+    """Hour `i` of a source window sells nothing, the chain stays whole."""
+    rows = [dict(r) for r in rows]
+    rows[i]["units_sold"] = 0
+    for j in range(i, len(rows) - 1):
+        rows[j]["ending_inventory"] = rows[j]["inventory"] - rows[j]["units_sold"]
+        rows[j + 1]["inventory"] = rows[j]["ending_inventory"]
+    return rows
+
+
+def test_a_feed_runs_through_the_chain_and_its_waterfall_is_read(cfg, tmp_path):
+    rows = _idle(source_window(1, 10, 5, day="2026-03-02"), 1) \
+        + source_window(2, 12, 4, day="2026-03-02")
+    feed = write_extract(tmp_path, rows, name="feed.parquet")
+    out = check_inputs.check_feed(str(feed), cfg).rows
+    v = _verdicts(out)
+    assert v["the preparation chain runs on the feed"] == "PASS"
+    assert v["zero-sale hours are present"] in ("PASS", "FAIL")     # measured, never skipped
+    assert v["windows closed by the write-off zero"] == "PASS"
+    assert not any(r["verdict"] == "FAIL" for r in out), out
+    # a feed with no idle hour at all is the completeness trap, named
+    busy = source_window(1, 10, 5, day="2026-03-02")
+    feed2 = write_extract(tmp_path, busy, name="busy.parquet")
+    assert _verdicts(check_inputs.check_feed(str(feed2), cfg).rows)["zero-sale hours are present"] == "FAIL"
+
+
+def test_a_failures_table_must_name_shelf_hours(cfg, tmp_path):
+    f = tmp_path / "fail.csv"
+    pd.DataFrame([{"skuseq": 1, "fc": "F1", "date": "2026-03-02", "hour": 10, "reason": "timeout"},
+                  {"skuseq": None, "fc": "F1", "date": "2026-03-02", "hour": 11, "reason": "x"}]
+                 ).to_csv(f, index=False)
+    v = _verdicts(check_inputs.check_failures(str(f), cfg).rows)
+    assert v["every row names one shelf-hour"] == "FAIL"
+    text = check_inputs.render(check_inputs.check_failures(str(f), cfg).rows)
+    assert "1 FAIL" in text and "-> a row with a null id" in text

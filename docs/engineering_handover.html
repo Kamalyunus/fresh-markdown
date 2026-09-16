@@ -1,4 +1,4 @@
-<title>Engineering handover — Lane B and the daily cron</title>
+<title>Lane B Handoff</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&display=swap">
@@ -444,52 +444,40 @@
   }
 </style>
 
+
 <div class="wrap">
 
 <header class="masthead">
-  <p class="eyebrow">Perishable Markdown MVP · engineering handover</p>
-  <h1>Engineering handover — Lane B and the daily cron</h1>
-  <p class="standfirst">This is the one page for the engineering team. It says what you receive, how the pilot runs hour by hour and morning by morning (§03, with the picture), what you build, the constraints the engine will hold you to, how the same timeline is rehearsed against a simulated shop, and who owns what. The binding integration contract is <code>docs/event_contract.html</code> (field by field, with a worked episode); <code>RUNBOOK.md</code> is the operator's document. Where this page and the contract disagree, the contract wins.</p>
+  <p class="eyebrow">Perishable Markdown MVP · Lane B handoff</p>
+  <h1>Lane B handoff — the process, the scripts, the contract</h1>
+  <p class="standfirst">
+    One page for the engineering team, written so the pilot can be run with the least possible
+    back-and-forth. The principle: <strong>we wrote the scripts; you supply the data you already
+    produce, apply the price we return, and run two cron jobs.</strong> Nothing here asks you to
+    build a request or compute a feature — those are derived by our code from the hourly table
+    you deliver today. One thing in the data is yours: the <code>episode_id</code> that names a
+    clearance window. You own the data, and in time the whole pipeline, so you assign it; the rule
+    is written down and shipped as a script you can run as-is or port (0.2). The phases below are in the order they happen; every
+    task says what you do, the command, what it produces, what to check, and what to send or do
+    next. The contract that used to be a separate page is the appendix, for reading a decision
+    when you need to.
+  </p>
+  <div class="ataglance">
+    <div><b>3</b><span>tables you deliver, all in your feed's own schema</span></div>
+    <div><b>2</b><span>cron jobs you run: one hourly, one each morning</span></div>
+    <div><b>1</b><span>column you apply to the shelf: <code>apply_price</code></span></div>
+    <div><b>0</b><span>fields, ids or features you build</span></div>
+  </div>
 </header>
 
+<section id="the-loop">
+  <h2><span class="num">01</span>The loop, and who does what in it</h2>
 
-<section id="the-big-picture">
-  <h2><span class="num">01</span>The big picture</h2>
-
-<p class="prose">The markdown engine is a black box to you. Once per clock hour you send one price request per open clearance episode (SKU × FC), get back a price or a row-scoped rejection with a reason, put exactly that price on the shelf, and report the pushes that failed. The engine forecasts, optimises, explores, learns and monitors itself. You never produce outcomes or forecasts: outcomes are built by the engine from the hourly FLC feed you already produce.</p>
-
-</section>
-
-
-<section id="what-you-receive-from-us">
-  <h2><span class="num">02</span>What you receive from us</h2>
-
-  <div class="tscroll">
-    <table>
-      <thead><tr><th>What</th><th>It is</th><th>How it reaches you</th></tr></thead>
-      <tbody>
-        <tr><td><code>docs/event_contract.html</code></td><td>The contract: request fields (§03), the decision the engine logs (§04), the outcome it builds from your feed (§05), one worked episode (§06), the gates the events feed (§07), the checklist (§08)</td><td>The HTML file is self-contained; share it</td></tr>
-        <tr><td><code>ops.price_batch</code></td><td>The reference caller: one hour's requests in, one response row per request out. Run it as a file drop per hour, or lift <code>engine.state.build_states</code> into your service</td><td>In the repo</td></tr>
-        <tr><td><code>tools.e2e_cycle</code></td><td>A runnable rehearsal of the whole cycle (requests → decisions → shop feed → ingest → exports) against the real artifacts, in a throwaway workspace</td><td>In the repo</td></tr>
-        <tr><td><code>artifacts/</code></td><td>The sealed bundle the engine prices with: model, calibration, prior, dispersion lookup, posterior, thresholds, <code>bundle.json</code></td><td>Deployed beside the engine, never edited by hand</td></tr>
-        <tr><td><code>config.yaml</code></td><td>Every tunable the engine reads (tier step, entry offsets, <code>max_window_hours</code>, the event store path, …)</td><td>Deployed beside the engine; the owner's file</td></tr>
-        <tr><td>the event store (<code>events.store_dir</code> in config)</td><td>The decision and outcome log the engine reads and writes: one decision per hour, one outcome per decision, duplicates refused and counted</td><td>Shared state on disk (or its equivalent) reachable by the hourly caller and the daily cron</td></tr>
-        <tr><td><code>data.launch_date</code> in config</td><td>Null until the owner sets it on launch day</td><td>The owner sets it</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-</section>
-
-
-<section id="the-pilot-as-it-runs">
-  <h2><span class="num">03</span>The pilot, as it runs</h2>
-
-<p class="prose">Read this before the field lists. It is the same timeline the pilot simulator rehearses (§07), with your shop in place of the simulated one: one owner phase before launch, then three clocks that keep ticking for the life of the pilot.</p>
+<p class="prose">The engine is a black box to you. Every hour it is handed the shelf as it stands and returns a price per item. Every morning it is handed yesterday's hourly feed and learns from what happened. Once a week it refreshes its own extract and re-fits. When something goes wrong it suspends exploration and keeps pricing. The owner approves the learning step and investigates stops; you never do either.</p>
 
 <figure class="timeline">
 <svg viewBox="0 0 1000 400" role="img" style="max-width:100%;height:auto;display:block;color:var(--ink);font-family:var(--body)"
-     aria-label="The pilot as a timeline. Before launch and on launch day the owner runs the chain and sets the launch date. Every hour engineering sends twelve-field requests to the engine, gets a price and a decision id back, applies it and logs failed pushes. Every morning engineering's cron hands yesterday's feed and failures to the engine's daily lane, which ingests, writes the day's feature table, walks the budget, monitors, runs assurance, exports, and stops at the operator gate the owner approves on cadence. When the factor schedule falls short the same morning run refreshes the extract through yesterday, re-fits the level factors and re-seals, so the cron host holds the Redshift credentials. When a stop fires the engine suspends exploration while pricing continues, and the owner investigates and resumes.">
+     aria-label="The pilot as a timeline. Before launch and on launch day the owner runs the chain and sets the launch date. Every hour engineering dumps the shelf snapshot in the feed's own schema with the episode ids it assigns, runs ops.price_hour, applies the price it returns and logs failed pushes. Every morning engineering's cron hands yesterday's feed and failures to the engine's daily lane, which ingests, writes the day's feature table, walks the budget, monitors, runs assurance, exports, and stops at the operator gate the owner approves on cadence. When the factor schedule falls short the same morning run refreshes the extract through yesterday, re-fits the level factors and re-seals, so the cron host holds the Redshift credentials. When a stop fires the engine suspends exploration while pricing continues, and the owner investigates and resumes.">
   <defs>
     <marker id="hd-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
@@ -543,8 +531,8 @@
     <text x="900" y="104" font-family="var(--data)" font-size="11.5">daily.update</text>
     <text x="900" y="118" font-family="var(--data)" font-size="11.5">--resume-exploration</text>
 
-    <text x="320" y="200" font-family="var(--data)" font-size="11.5">ops.price_batch</text>
-    <text x="320" y="214">state → decide → store</text>
+    <text x="320" y="200" font-family="var(--data)" font-size="11.5">ops.price_hour</text>
+    <text x="320" y="214">ids · state → decide → store</text>
     <text x="320" y="228">posterior read once</text>
     <text x="520" y="200">ingest · feature table</text>
     <text x="520" y="214">budget walk · monitor</text>
@@ -556,9 +544,9 @@
     <text x="900" y="214">pricing and the lane</text>
     <text x="900" y="228">keep running</text>
 
-    <text x="320" y="310">send the 12-field requests</text>
-    <text x="320" y="324">apply the returned price</text>
-    <text x="320" y="338">log the failed pushes</text>
+    <text x="320" y="310">snapshot + episode ids</text>
+    <text x="320" y="324">run ops.price_hour · apply</text>
+    <text x="320" y="338">apply_price · log failed pushes</text>
     <text x="520" y="310">cron:</text>
     <text x="520" y="324" font-family="var(--data)" font-size="11.5">ops.advance --feed …</text>
     <text x="520" y="338" font-family="var(--data)" font-size="11.5">--failures …</text>
@@ -579,7 +567,7 @@
   </g>
   <g font-size="11" fill="currentColor" fill-opacity=".8">
     <text x="294" y="270" text-anchor="end">requests</text>
-    <text x="346" y="270">price + decision_id</text>
+    <text x="346" y="270">apply_price + decision_id</text>
     <text x="419" y="284" text-anchor="middle">the hourly feed</text>
     <text x="506" y="270">runs the lane</text>
     <text x="534" y="176" text-anchor="end">stops at the gate</text>
@@ -593,60 +581,1157 @@
 <figcaption>The pilot as three parties on one clock. Tinted boxes are the engine, which is our code and runs unchanged; the rest is what you and the owner do around it. Every hour is a request and a price; every morning is one cron call that runs the whole lane and stops at the gate; the weekly extract refresh and re-fit, and a suspension, are both things that same morning run does on its own rule.</figcaption>
 </figure>
 
-<p class="prose">What runs at each tick, the command, and who runs it:</p>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>Who</th><th>Does</th><th>Never does</th></tr></thead>
+      <tbody>
+        <tr><td>You (engineering)</td><td>Deliver the three tables, the snapshot carrying the <code>episode_id</code> you assign by the written rule (<code>ops.assign_episode_ids</code>, run or ported); run the hourly and the morning cron; apply <code>apply_price</code> to the shelf; report the pushes that failed; escalate a red morning to the owner with the file it names</td><td>Run <code>daily.update --apply</code> or <code>--resume-exploration</code>; edit <code>artifacts/</code> or <code>config.yaml</code>; compute features; alter a snapshot to get a price</td></tr>
+        <tr><td>The engine (our code, on your host)</td><td>Read your ids as given and count the ones that disagree with the rule; derive the anchors from the snapshot; price; keep the event store; build outcomes from the feed; walk the exploration budget; monitor; refit weekly; suspend itself when a stop fires</td><td>Apply a price; rename or reassign an episode id; touch your systems</td></tr>
+        <tr><td>The owner</td><td>Run the chain to the launch gate and set the launch date; approve the learning step on cadence; investigate a fired stop and resume exploration; read every red row you escalate</td><td>Run your crons</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="phase-0-setup">
+  <h2><span class="num">02</span>Phase 0 · Setup, once, before launch</h2>
+
+<p class="prose">Seven tasks. Each ends with something to send us, so we can confirm from the file rather than a call.</p>
+
+  <h3>0.1 · Provision the pricing host</h3>
+  <div class="tscroll"><table><tbody>
+    <tr><td>You do</td><td>A Linux host with Python 3.11+. Clone the repository at the tag the owner names; <code>pip install -r requirements.txt</code>. Put the Redshift credentials in <code>~/.env</code> as <code>REDSHIFT_*</code> (the weekly refresh pulls the extract with them). The owner runs the pre-launch chain on this host (it pulls its own extract), or copies <code>artifacts/</code>, <code>data/</code> and <code>config.yaml</code> onto it.</td></tr>
+    <tr><td>Command</td><td><code>python3 -m ops.status</code></td></tr>
+    <tr><td>Produces</td><td>The status table on stdout.</td></tr>
+    <tr><td>Check</td><td>It runs. Before launch the launch rows read red (<code>data.launch_date</code> is null); every other row green.</td></tr>
+    <tr><td>Then</td><td>Send us the status output.</td></tr>
+  </tbody></table></div>
+
+  <h3>0.2 · The three tables you deliver</h3>
+
+<p class="prose">All three are in your hourly feed's own column names. Nothing is renamed on your side; the chain maps them. Percent stays percent.</p>
 
   <div class="tscroll">
     <table>
-      <thead><tr><th>When</th><th>What runs</th><th>The command</th><th>Who</th></tr></thead>
+      <thead><tr><th>Table</th><th>When</th><th>Rows</th><th>Columns</th></tr></thead>
       <tbody>
-        <tr><td>Before launch</td><td>The whole chain to the launch gate: the extract pull, the bootstrap, tuning, shadow, the seal. Every MEASURED value is pasted by the process; the owner decisions stop it with the evidence.</td><td><code>python3 -m ops.advance</code>, repeated until it stops on <code>data.launch_date</code></td><td>the owner's agent</td></tr>
-        <tr><td>Launch day</td><td>The owner sets the launch date; <code>advance</code> then schedules the level factors through the week being priced and re-seals. <code>ops.status</code> must be green before the first hour is priced.</td><td>edit <code>data.launch_date</code>; <code>python3 -m ops.advance</code></td><td>the owner</td></tr>
-        <tr><td>Every clock hour</td><td>One batch per hour, one request per open episode in the twelve fields; a price or a row-scoped rejection per request; every decision in the store before its price returns. You apply exactly that price and log the pushes that failed.</td><td><code>python3 -m ops.price_batch --requests &lt;hour&gt; --features features/&lt;today&gt;.parquet --workers 0 --out &lt;hour&gt;.jsonl --report &lt;hour&gt;.json</code></td><td>engineering</td></tr>
-        <tr><td>Every morning</td><td>Yesterday's feed and yesterday's failed pushes through the lane, in this order: ingest the outcomes, build today's feature table (yesterday's rows join the rolling feed history; the two features per SKU and centre are written once for the day's batches), walk the exploration budget, monitor, assurance, export the paired tables, status. Stops at the operator gate. Runs even while status is red.</td><td><code>python3 -m ops.advance --feed &lt;yesterday.parquet&gt; --failures &lt;yesterday failed pushes&gt;</code></td><td>engineering's cron</td></tr>
-        <tr><td>On cadence</td><td>The operator gate: the elasticity belief moves, cell by cell, bounded, only where a cell's batch carries the evidence. A second run that consumes nothing is correct. Never run this yourself.</td><td><code>python3 -m daily.update --apply</code></td><td>the owner</td></tr>
-        <tr><td>Every week</td><td>The extract refresh, the level re-fit and the re-seal. The same morning <code>advance</code> run does all three on its own rule, when the factor schedule no longer reaches the week being priced: it pulls the extract through yesterday, prepares it, re-fits, re-seals, then runs the lane. Nothing extra to schedule; the cron host holds <code>REDSHIFT_*</code> in <code>~/.env</code>, and that morning takes the pull's runtime. It stops only when an extract that already reaches yesterday still cannot reach the week, which is a source-data problem for the owner.</td><td>automatic inside <code>ops.advance --feed</code></td><td>the engine, from engineering's cron</td></tr>
-        <tr><td>When a stop fires</td><td>The monitor writes a suspension into the posterior state. The next batch reads it and stops drawing exploration prices; ordinary pricing and the whole morning lane keep running. The red status row names what clears it.</td><td><code>python3 -m daily.update --resume-exploration</code> after investigating</td><td>the owner</td></tr>
+        <tr><td><b>Snapshot</b><br><code>snapshots/&lt;date&gt;T&lt;hh&gt;.parquet</code></td><td>Every hour, at the top of the hour</td><td>One row per shelf (SKU × FC) on clearance right now, with this hour's opening stock; plus, when you can, the rows of the hour that just closed (sales and ending stock known)</td><td><code>date, hour, skuseq, fc, inventory, discount, normal_asp, cogs_wo_vat, flc_window, category, subcategory, episode_id</code>; for the closed hour also <code>units_sold, ending_inventory, final_price</code>. <code>discount</code> is the price in force on the shelf, in percent. <code>flc_window</code> is the hours still to come after this one. <code>episode_id</code> is the clearance window the row belongs to, assigned by you (0.2a); a row without one is not priced.</td></tr>
+        <tr><td><b>Feed</b><br><code>feed/&lt;date&gt;.parquet</code></td><td>Every morning, yesterday's day</td><td>Every shelf-hour of the day, zero-sale hours included, the write-off zero in <code>ending_inventory</code> on a window's last row</td><td>The full feed schema, exactly as today</td></tr>
+        <tr><td><b>Failed pushes</b><br><code>failures/&lt;date&gt;.csv</code></td><td>Every morning, with the feed; omitted on a day with none</td><td>One row per hour whose returned price did not reach the shelf</td><td><code>skuseq, fc, date, hour, reason</code></td></tr>
       </tbody>
     </table>
   </div>
 
-<p class="prose">Two loops run at different speeds inside the morning lane, and they are kept apart on purpose. The budget loop is fast and automatic: every morning, spend against budget nudges how much the engine will pay for information. The learning loop is slow and gated: only at the operator gate does the elasticity belief move. Nothing you build touches either loop; your cron call starts the morning and the gate stops it.</p>
+<p class="prose">The closed hour's rows in the snapshot are optional but worth it: with them the engine checks your ids against the rule exactly as the offline chain reads a sell-out and a restock; without them it checks against its last decision on the shelf, the counter and the opening stock.</p>
+
+  <h3>0.2a · Assign the episode id</h3>
+
+<p class="prose">The id says "these hours are the same clearance window". It is the one column in the snapshot that is not already in your feed, and it is yours: you know whether a listing was extended or relisted, and the pipeline will be yours to run. The rule is the one our offline chain applies to your history, stated for one clock hour so it needs nothing but this hour's rows and last hour's:</p>
+
+  <div class="note">
+    <p><b>A shelf's row continues last hour's episode on that shelf when all three hold:</b> last hour's row is exactly one hour earlier; it did not close the shelf (<code>ending_inventory</code> is not the write-off zero); and the counter stepped down by one, or stepped up or stayed flat while stock arrived (<code>ending_inventory &gt; inventory − units_sold</code> last hour). Otherwise the row opens a new episode named <code>skuseq|fc|&lt;date&gt;T&lt;hour&gt;</code>. Any unique name works for a new window; that one is ours.</p>
+  </div>
+
+  <div class="tscroll"><table><tbody>
+    <tr><td>You do</td><td>Either run our script on each hour's rows before writing the snapshot, or port the rule into the job that writes it. Either way the ids must come out the same as the rule's, because the engine checks every hour and counts the disagreements.</td></tr>
+    <tr><td>Command</td><td><code>python3 -m ops.assign_episode_ids --hour &lt;this hour's rows&gt; --previous &lt;last hour's rows, with their ids&gt; --out snapshots/&lt;date&gt;T&lt;hh&gt;.parquet</code>. The first hour ever has no <code>--previous</code> and opens every shelf.</td></tr>
+    <tr><td>Produces</td><td>The same rows with one column added, <code>episode_id</code>, and a line of counts: continued, new, rows naming no shelf-hour.</td></tr>
+    <tr><td>Check</td><td>After the first hour, most shelves continue; a new id appears when a listing opens or the write-off zero closed the shelf. Within one id the counter steps down by one an hour, stepping up only on the hour after stock arrived.</td></tr>
+    <tr><td>Then</td><td>If you port it, run both on the same two hours and diff the ids; send us the diff (empty) and the counts.</td></tr>
+  </tbody></table></div>
+
+  <h3>0.3 · Check the three tables</h3>
+  <div class="tscroll"><table><tbody>
+    <tr><td>You do</td><td>Produce one sample of each table from your real systems: one hour's snapshot, one full day's feed, one failed-push file (even an empty one with the header).</td></tr>
+    <tr><td>Command</td><td><code>python3 -m ops.check_inputs --snapshot snapshots/&lt;hour&gt;.parquet --feed feed/&lt;date&gt;.parquet --failures failures/&lt;date&gt;.csv --report checks.json</code></td></tr>
+    <tr><td>Produces</td><td>One line per check: PASS, WARN or FAIL, the count behind it, and what to fix. The feed is run through the real preparation chain and every stage's drop is listed. Exit 1 on any FAIL.</td></tr>
+    <tr><td>Check</td><td>Zero FAIL. Read every WARN; a large drop at a waterfall stage is a producer defect, not a filter working.</td></tr>
+    <tr><td>Then</td><td>Fix what a FAIL line names, re-run until clean, send us <code>checks.json</code>.</td></tr>
+  </tbody></table></div>
+
+  <h3>0.4 · Watch one whole cycle against our simulated shop</h3>
+  <div class="tscroll"><table><tbody>
+    <tr><td>You do</td><td>Nothing of yours is needed yet. This runs the exact hourly script and the outcome side of the morning lane against a shop we simulate from the owner's extract.</td></tr>
+    <tr><td>Command</td><td><code>python3 -m tools.e2e_cycle --input data/prepared.parquet --episodes 50 --hours 6 --workers 0</code></td></tr>
+    <tr><td>Produces</td><td>Under <code>sim/e2e/</code>: <code>snapshots/</code> (what you will send), <code>decisions/</code> (what you will get back), <code>features/</code>, <code>feed/</code>, <code>exports/</code>, and <code>e2e_report.json</code>.</td></tr>
+    <tr><td>Check</td><td>In the report: <code>price_mismatches</code>, <code>decisions_colliding_on_hour</code>, <code>outcomes_per_decision_over_one</code>, <code>missing_stockout_field</code> all zero; the second hour's batch shows <code>episodes_continued</code> above zero.</td></tr>
+    <tr><td>Then</td><td>Open one snapshot and one decisions file side by side: that is the whole hourly interface. Send us the report.</td></tr>
+  </tbody></table></div>
+
+  <h3>0.5 · Dry-run the hourly script on your real snapshot</h3>
+  <div class="tscroll"><table><tbody>
+    <tr><td>You do</td><td>Take the snapshot sample from 0.3.</td></tr>
+    <tr><td>Command</td><td><code>python3 -m daily.features --as-of &lt;the snapshot's day&gt;</code> (seeds the rolling feed from the extract and writes the day's feature table), then<br><code>python3 -m ops.price_hour --snapshot snapshots/&lt;hour&gt;.parquet --features features/&lt;day&gt;.parquet --workers 0 --dry-run --out dry.csv --report dry.json</code></td></tr>
+    <tr><td>Produces</td><td><code>dry.csv</code>, the response you would apply; <code>dry.json</code>, the hour's counts. Nothing is committed: the dry run prices against a scratch copy of the event store.</td></tr>
+    <tr><td>Check</td><td><code>episodes_new</code> equals the number of stocked shelves (the store has priced nothing yet, so every id is an entry); <code>shelves_without_episode_id</code> is zero; every <code>rejected</code> reason is one from Appendix I and is explained by your data; <code>requests_with_unknown_features</code> is a handful of new SKUs, not the whole file.</td></tr>
+    <tr><td>Then</td><td>Send us <code>dry.json</code> and the first twenty rows of <code>dry.csv</code>.</td></tr>
+  </tbody></table></div>
+
+  <h3>0.6 · Wire the applier and schedule the crons, disabled</h3>
+  <div class="tscroll"><table><tbody>
+    <tr><td>You do</td><td>Build the one piece that is yours: read the response file and, for every row whose <code>rejected</code> is null, put <code>apply_price</code> (or <code>apply_discount_pct</code>, the same number in your unit) on that shelf; for a row with <code>rejected</code> set, leave the shelf as it is. Record every push that did not reach the shelf. Schedule the hourly job (Phase 2) a few minutes after each hour and the morning job (Phase 3) after the feed lands, both disabled until launch day.</td></tr>
+    <tr><td>Check</td><td>Replay <code>dry.csv</code> through the applier in a non-live mode; every priced row maps to one shelf.</td></tr>
+    <tr><td>Then</td><td>Tell us the two cron times.</td></tr>
+  </tbody></table></div>
+</section>
+
+<section id="phase-1-launch">
+  <h2><span class="num">03</span>Phase 1 · Launch day</h2>
+
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>Step</th><th>Who</th><th>What happens</th><th>Go / no-go</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>Owner</td><td>Sets <code>data.launch_date</code> in <code>config.yaml</code> and runs <code>python3 -m ops.advance</code>. The factor schedule is re-fit through the week being priced and the bundle re-sealed.</td><td><code>python3 -m ops.status</code> green.</td></tr>
+        <tr><td>2</td><td>Owner</td><td>Runs the morning step once by hand so the first day has a feature table: <code>python3 -m daily.features --as-of &lt;launch day&gt;</code>.</td><td><code>features/&lt;launch day&gt;.parquet</code> exists.</td></tr>
+        <tr><td>3</td><td>You</td><td>Enable the hourly cron.</td><td>The first hour's report: <code>decisions</code> above zero, <code>rejected_by_the_engine</code> explained, <code>features_as_of</code> equals today.</td></tr>
+        <tr><td>4</td><td>You</td><td>Apply the first hour's prices; confirm on one shelf that the price shown equals <code>apply_price</code>.</td><td>Any mismatch: stop the cron and send us the response file and the shelf reading.</td></tr>
+        <tr><td>5</td><td>You</td><td>Enable the morning cron. Its first run is the morning after launch day.</td><td>Exit 0 and a stop that reads "LAUNCHED — the operator gate is yours".</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="phase-2-every-hour">
+  <h2><span class="num">04</span>Phase 2 · Every clock hour</h2>
+
+<p class="prose">Four steps, one command. The cron does the first three; the fourth is a table you append to during the day.</p>
+
+  <div class="tscroll"><table><tbody>
+    <tr><td>1 · Snapshot</td><td>Write <code>snapshots/&lt;date&gt;T&lt;hh&gt;.parquet</code>: every shelf on clearance now with its opening stock, counter, the price in force and its <code>episode_id</code> (0.2a: <code>ops.assign_episode_ids</code> against last hour's rows, or your port of it), plus the rows of the hour that just closed.</td></tr>
+    <tr><td>2 · Price</td><td><code>python3 -m ops.price_hour --snapshot snapshots/&lt;date&gt;T&lt;hh&gt;.parquet --features features/&lt;date&gt;.parquet --workers 0 --out decisions/&lt;date&gt;T&lt;hh&gt;.csv --report reports/hours/&lt;date&gt;T&lt;hh&gt;.json</code></td></tr>
+    <tr><td>3 · Apply</td><td>For each response row with <code>rejected</code> null: put <code>apply_price</code> on that shelf. With <code>rejected</code> set: leave the shelf as it is.</td></tr>
+    <tr><td>4 · Report</td><td>Append every push that did not reach the shelf to <code>failures/&lt;date&gt;.csv</code>: <code>skuseq, fc, date, hour, reason</code>.</td></tr>
+  </tbody></table></div>
+
+<p class="prose">What the script does with the snapshot, so its output makes sense: it keys every row on (skuseq, fc, date, hour) and reads your <code>episode_id</code> as given. An id the store has never priced on that shelf is an entry decision; the id the store last priced on that shelf continues the episode, anchored on the <code>discount</code> your snapshot says is on the shelf, so a push that failed last hour is priced from the price shoppers actually see. It also evaluates the rule of 0.2a itself — against the closed rows when you send them, else against its last decision on the shelf — and counts the ids that disagree with it; it never overrides yours. It reads the day's feature table, prices, commits every decision to the event store, and writes the response.</p>
+
+  <h3>The response file</h3>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>skuseq, fc, date, hour</code></td><td>The shelf-hour, echoed from your snapshot</td></tr>
+        <tr><td><code>episode_id</code></td><td>Your id, echoed; null on a row that was not priced</td></tr>
+        <tr><td><code>decision_id</code></td><td>The handle of the decision in the event store; null when rejected</td></tr>
+        <tr><td><code>apply_discount_pct</code></td><td>The discount to put on the shelf, in percent, on the same grid the engine plans on</td></tr>
+        <tr><td><code>apply_price</code></td><td>The same decision as a price; put exactly this number on the shelf</td></tr>
+        <tr><td><code>is_exploration</code></td><td>Whether this price was an exploration draw; for reading only</td></tr>
+        <tr><td><code>rejected</code></td><td>Null when priced; otherwise the reason this shelf was not priced (Appendix I). Hold the shelf.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>The hour's report, and what to do with each count</h3>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>Key</th><th>Expected</th><th>If not</th></tr></thead>
+      <tbody>
+        <tr><td><code>shelves</code>, <code>decisions</code>, <code>shelves_empty</code></td><td>Every stocked shelf priced; empty shelves counted, not priced</td><td>A gap between shelves and decisions + empty is the rejected count below</td></tr>
+        <tr><td><code>episodes_new</code>, <code>episodes_continued</code></td><td>Mostly continued after the first hour; new ones when listings open</td><td>Every shelf new every hour: your ids change every hour (a date-keyed or hour-keyed id), or an hour was skipped</td></tr>
+        <tr><td><code>shelves_without_episode_id</code></td><td>Zero</td><td>Rows arrived without an id; they were not priced. The id step (0.2a) did not run on this hour</td></tr>
+        <tr><td><code>episode_ids_disagreeing_with_the_rule</code>, <code>disagreements_sample</code></td><td>Zero, or a handful the sample explains</td><td>Your port of the rule and ours read a close or a restock differently; the ids were priced as you sent them. Compare the sample's rows against 0.2a; send us the report if it is not clear which side is wrong</td></tr>
+        <tr><td><code>closed_rows_seen</code></td><td>The number of shelves that closed last hour, when you send the closed rows</td><td>Zero while you meant to send them: the closed rows are not one hour before the batch hour</td></tr>
+        <tr><td><code>rejected_by_the_engine</code></td><td>Empty, or a few rows with a reason from Appendix I</td><td>A whole hour rejected for one reason: a column changed meaning upstream; stop and send us the report</td></tr>
+        <tr><td><code>features_as_of</code></td><td>Today</td><td>An earlier day: the morning cron did not run; the hour still priced</td></tr>
+        <tr><td><code>entry_requests_on_stale_features</code></td><td>Zero</td><td>See above</td></tr>
+        <tr><td><code>requests_with_unknown_features</code></td><td>A few new SKUs</td><td>Every entry unknown: the snapshot's ids are spelt differently from the feed's</td></tr>
+        <tr><td><code>exploration_suspended</code></td><td>False</td><td>True: a stop condition fired; the engine keeps pricing without exploring; nothing for you to do</td></tr>
+        <tr><td><code>quarantined</code></td><td>Zero</td><td>A decision the store refused: send us the report</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+<p class="prose">Three rules. One call per clock hour per snapshot. Re-running an hour is safe: every shelf comes back <code>already_priced</code> and nothing changes. Never edit a snapshot to get a price out; the next hour's snapshot is the retry.</p>
+</section>
+
+<section id="phase-3-every-morning">
+  <h2><span class="num">05</span>Phase 3 · Every morning</h2>
+
+  <div class="tscroll"><table><tbody>
+    <tr><td>You do</td><td>Land yesterday's feed and yesterday's failed pushes, then run one command.</td></tr>
+    <tr><td>Command</td><td><code>python3 -m ops.advance --feed feed/&lt;yesterday&gt;.parquet --failures failures/&lt;yesterday&gt;.csv</code> (omit <code>--failures</code> on a day with none)</td></tr>
+    <tr><td>Produces</td><td>In order: outcomes built from the feed and matched to yesterday's decisions; <code>features/&lt;today&gt;.parquet</code> for today's hours; the exploration budget walked; <code>reports/monitor.json</code>, <code>reports/assurance.json</code>; the paired tables under <code>exports/</code>; the status table; <code>reports/launch_readiness.md</code>. Once a week, before all of that, the extract is refreshed and the level factors re-fit (Phase 4).</td></tr>
+    <tr><td>Check</td><td>Exit code 0 and the closing stop reads "LAUNCHED — the operator gate is yours". A red status row is printed with its reason and the lane still ran.</td></tr>
+    <tr><td>Then</td><td>Nothing, on a green morning. On a non-zero exit or a red row: send the owner <code>reports/launch_readiness.md</code> and the console output, and leave the crons running. Do not run <code>daily.update --apply</code>; the owner does, on cadence.</td></tr>
+  </tbody></table></div>
+
+<p class="prose">Two loops run inside that command at different speeds, and neither needs you. The budget loop is automatic: every morning, spend against budget nudges how much the engine will pay for information. The learning loop is gated: only when the owner runs the operator gate does the elasticity belief move.</p>
+</section>
+
+<section id="phase-4-every-week">
+  <h2><span class="num">06</span>Phase 4 · Every week, inside the morning run</h2>
+
+<p class="prose">Nothing extra to schedule. When the factor schedule no longer reaches the week being priced, the morning run pulls the extract through yesterday with the credentials on the host, prepares it, re-fits the level factors, re-seals the bundle, then runs the lane. That morning takes the pull's runtime. It stops, and needs the owner, only when an extract that already reaches yesterday still cannot reach the week, which means the source stopped delivering rows.</p>
+</section>
+
+<section id="phase-5-incidents">
+  <h2><span class="num">07</span>Phase 5 · When something is wrong</h2>
+
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>You see</th><th>It means</th><th>Who acts</th><th>Do</th></tr></thead>
+      <tbody>
+        <tr><td>The hourly script exits non-zero</td><td>The host, the config or the bundle moved, not your data</td><td>You, then us</td><td>Hold every shelf at its current price; send the console output; do not retry with an edited snapshot</td></tr>
+        <tr><td>A whole hour rejected for one reason</td><td>A snapshot column changed meaning upstream</td><td>You</td><td>Run <code>ops.check_inputs --snapshot</code> on it; fix the line it names</td></tr>
+        <tr><td><code>episode_ids_disagreeing_with_the_rule</code> climbs, or every shelf is new every hour</td><td>The id step is off: your port drifted from the rule, or it read last hour's rows from the wrong file</td><td>You</td><td>Run <code>ops.assign_episode_ids</code> on the same two hours and diff against your ids; the shelves were priced as you named them, so a wrongly split episode may have been re-entered at a higher price — tell us the hours affected</td></tr>
+        <tr><td><code>exploration_suspended: true</code> in the hour's report</td><td>A stop condition fired in the morning run; exploitation pricing continues</td><td>The owner</td><td>Nothing. The owner investigates and runs <code>daily.update --resume-exploration</code></td></tr>
+        <tr><td>The morning run prints a red row</td><td>Named in the row: event quality, assurance, a stop condition, a stale bundle</td><td>The owner</td><td>Send <code>reports/launch_readiness.md</code>; leave both crons running, the lane keeps ingesting</td></tr>
+        <tr><td>The morning run stops on "the extract is current but the factor schedule does not reach the week"</td><td>The source stopped delivering rows</td><td>The owner and your data team</td><td>Check the extract's latest date at the source</td></tr>
+        <tr><td><code>features_as_of</code> behind today</td><td>The morning cron did not run or failed before the feature step</td><td>You</td><td>Run the morning command by hand; the hours keep pricing meanwhile</td></tr>
+        <tr><td>A shelf shows a price that is not <code>apply_price</code></td><td>A push failed or a rounding happened on your side</td><td>You</td><td>Report it in the failures table; the gate on silent mismatches suspends exploration at one percent</td></tr>
+        <tr><td>The feed for a day is late</td><td>The morning run has nothing to ingest</td><td>You</td><td>Run the morning command when it lands; a day's delay is absorbed, the budget walk holds</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="rules-and-ownership">
+  <h2><span class="num">08</span>Rules, and who owns what</h2>
+
+<ul class="plain">
+    <li><strong>Reload the posterior once per batch</strong> if you lift the engine into a long-lived service (<code>PosteriorStore.reload()</code> before pricing). The monitor writes suspensions and <code>--apply</code> writes updates into the same file from other processes; a handle that never reloads keeps exploring on a suspended pilot. <code>ops.price_batch</code> does this for you.</li>
+    <li><strong>The exploration budget comes from the store</strong> (<code>PosteriorStore.tau</code>), never from <code>exploration.tau_initial</code> in config, which is only the launch value.</li>
+    <li><strong>Never run <code>daily.update --apply</code>.</strong> It is the operator's gate.</li>
+    <li><strong>Safety is structural</strong>, not configured on your side: the cost floor and the never-rises-within-a-window rule live in the engine's action set. There is nothing for the caller to check or enforce.</li>
+    <li><strong>The bundle is sealed.</strong> Do not edit <code>artifacts/</code> or <code>config.yaml</code>; a moved file shows as a red seal row in <code>ops.status</code> and the lane stops.</li>
+  </ul>
+
+
+
+<div class="tscroll">
+    <table>
+      <thead><tr><th>Responsibility</th><th>Owner</th></tr></thead>
+      <tbody>
+        <tr><td>Artifacts, model, config, the prior gate, <code>data.launch_date</code></td><td>The product owner</td></tr>
+        <tr><td>Hourly caller, price application, failed-push reporting, the daily cron, the feed</td><td>Engineering</td></tr>
+        <tr><td>Outcomes, forecasts, learning, monitoring, guardrails, stop conditions</td><td>The engine</td></tr>
+      </tbody>
+    </table>
+  </div>
+
 
 </section>
 
-<section id="what-you-build">
-  <h2><span class="num">04</span>What you build</h2>
+<section id="rehearsals">
+  <h2><span class="num">09</span>The rehearsals, and what each proves</h2>
 
-  <h3>1. The hourly caller</h3>
+<p class="prose">Three rehearsals exist, and none of them is production minus one piece; each is closest on a different axis. Production is real demand, with the engine's price on the shelf, and the loop closed: the engine's own prices produce the outcomes it learns from.</p>
 
-<p class="prose">One batch per clock hour, one request per open episode, in the twelve fields of contract §03, in this order:</p>
+  <div class="tscroll">
+    <table>
+      <thead><tr><th></th><th>Shadow</th><th>Pilot simulator</th><th>The e2e cycle</th></tr></thead>
+      <tbody>
+        <tr><td>The demand</td><td>real: your hold-out history</td><td>assumed elasticity</td><td>assumed elasticity</td></tr>
+        <tr><td>The engine's price on the shelf</td><td>never; re-anchored on legacy's price each hour</td><td>yes</td><td>yes</td></tr>
+        <tr><td>Outcomes from the engine's own prices</td><td>no: legacy's outcomes, stamped "not applied"</td><td>yes</td><td>yes</td></tr>
+        <tr><td>The daily lane, learning, stops</td><td>not run</td><td>all of it, day after day</td><td>ingest and export only</td></tr>
+        <tr><td>Your interface exercised</td><td>no</td><td>no: states handed to the engine directly</td><td>yes: the twelve fields, the feed, the pairing</td></tr>
+        <tr><td>What it proves</td><td>the engine behaves on real data, and what exploration would cost; the owner's launch gate</td><td>the machine holds together over time: the alarms fire on their causes, the learner converges, the lane never deadlocks</td><td>your loop can be closed at all</td></tr>
+        <tr><td>Who runs it</td><td>the owner, once, before launch</td><td>the owner</td><td>you</td></tr>
+      </tbody>
+    </table>
+  </div>
 
-<pre class="json">episode_id, sku_id, fc, category, subcategory,
-date, hour_of_day, hours_remaining, q,
-original_price, cost, current_discount</pre>
+<p class="prose">The one thing no rehearsal can give before launch is the engine's prices meeting real demand. That is the pilot itself, which is why the first weeks are gated daily and every stop condition is armed from day one.</p>
 
-<p class="prose">The reference caller:</p>
 
-<pre class="json">python3 -m ops.price_batch --requests &lt;hour&gt;.jsonl|.parquet|.csv \
-    --features features/&lt;today&gt;.parquet --workers 0 \
-    --out &lt;hour&gt;.response.jsonl --report &lt;hour&gt;.report.json</pre>
+</section>
 
-<p class="prose"><code>--workers 0</code> prices the batch's solves across every core but one; omitted, the batch runs in one process. The solve is the one step that scales with the number of requests, so this is the posture for the pricing host. The answer is byte-identical either way: each decision draws from its own random stream seeded by its hour key, results return in request order, and only the parent process touches the event store. The join to the feature table, the one model prediction, and the commit stay in the parent on purpose.</p>
+<section id="appendices">
+  <h2><span class="num">10</span>Appendices — the contract, for reading a decision</h2>
+<p class="prose">What follows is the integration contract, unchanged: the words (A), the shape (B), the request our script builds from your snapshot (C), the decision the engine logs (D), the outcome it builds from your feed (E), one episode end to end in captured payloads (F), the gates the events feed (G), the parts that have caused the most trouble (H), and every rejection reason (I). References to §01 to §08 inside the appendices are to these letters.</p>
+</section>
 
-<p class="prose"><code>features/&lt;today&gt;.parquet</code> is the day's feature table. The morning lane writes it (the "every morning" column of §03) from the rolling hourly feed: the two demand-rate features every episode opening today reads, one row per SKU and centre plus a pooled row per SKU. Both features read strictly before the opening date, so one table per morning is exactly what a batch would compute for itself; the batch joins on SKU and centre and reads no history. That is what keeps the hourly path to "join, predict once, solve, commit". Before the first morning has run, <code>--history &lt;trailing hourly FLC table&gt;</code> computes the same features inside the batch.</p>
+<section id="conventions">
+  <h2><span class="num">A·01</span>First, the words — definitions and claims to align on before anything else</h2>
+  <div class="prose">
+    <p>
+      <strong>This section is the agenda for the alignment conversation, and it comes first on
+      purpose:</strong> every field, gate and number later on this page uses these words in the
+      agent's sense, and your team may use some of them differently. Agree here, then read the
+      rest.
+    </p>
+  </div>
 
-<p class="prose">Every request is read in one spelling before anything else: ids as text (a <code>7</code>, a <code>"7"</code> and a <code>7.0</code> are one item), the day as <code>YYYY-MM-DD</code> (a parquet timestamp is fine), counts as integers. The response has one row per request, in the request's order:</p>
+  <div class="tscroll">
+    <table>
+      <caption>The vocabulary, as the agent uses it. One line each; the claims table below says where each reading came from.</caption>
+      <thead>
+        <tr><th>Word</th><th>What the agent means by it</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><b>Episode</b></td><td>One clearance window of one SKU at one FC: the run of consecutive selling hours from open to close. Not a calendar day — windows cross midnight. A restock, even one extending the window, is the SAME episode; a relisting is a new one.</td></tr>
+        <tr><td><b>Decision</b></td><td>One priced hour: the agent is asked once per SKU × FC per hour and returns one price.</td></tr>
+        <tr><td><b>Outcome</b></td><td>What that hour did: units sold, inventory in and out, the price in force. One per decision, built by the agent from your table.</td></tr>
+        <tr><td><b>Restock</b></td><td>Stock arrived during an hour: the close count exceeds <code>starting − sold</code> (including an hour that sold more than it opened with).</td></tr>
+        <tr><td><b>Write-off</b></td><td>How a listing closes: the source zeroes <code>ending_inventory</code> on the final row and the remainder is disposed of.</td></tr>
+        <tr><td><b>Leftover</b></td><td>Stock on hand at the close: <code>max(0, starting − sold)</code> on the final row — never the zeroed field itself.</td></tr>
+        <tr><td><b>Shrink</b></td><td>Stock that left mid-window with no sale and no write-off (<code>0 &lt; ending &lt; starting − sold</code>): damage, transfer, sampling.</td></tr>
+        <tr><td><b>Scrap</b></td><td><strong>Leftover + shrink</strong> — every unit paid for that produced no revenue. This is the quantity in IL, the budget base and the scrap guardrail.</td></tr>
+        <tr><td><b>Stockout / censored hour</b></td><td>The shelf EMPTIED: the hour reconciles and <code>starting − sold == 0</code>. Demand that hour is known only as "at least sold". A write-off is not a stockout; neither is a restocked over-sell.</td></tr>
+      </tbody>
+    </table>
+  </div>
 
-<pre class="json">{&quot;episode_id&quot;: ..., &quot;sku_id&quot;: ..., &quot;fc&quot;: ..., &quot;date&quot;: ..., &quot;hour_of_day&quot;: ...,
- &quot;decision_id&quot;: &quot;&lt;id&gt;&quot;, &quot;applied_discount&quot;: 0.15, &quot;applied_price&quot;: 8500.0,
- &quot;is_exploration&quot;: false, &quot;rejected&quot;: null}</pre>
+  <div class="prose">
+    <p>
+      Behind those words sits a small set of claims about what your table's columns
+      <em>mean</em>. None of them came from you: each was <strong>inferred from the
+      extract</strong> and verified only against the data itself. You are the producers — you
+      own whether each claim is true. For each one, confirm it or say what the real rule is. A
+      correction is cheap: every claim has exactly one implementation in the agent
+      (<code>common/episodes.py</code>, mostly), so fixing a wrong reading is one code change
+      on the agent's side and <strong>zero work on yours</strong>. A wrong claim left
+      unconfirmed is the expensive case — every derivation on top of it is wrong silently.
+    </p>
+  </div>
 
-<p class="prose">or, for a request the engine will not price:</p>
+  <div class="tscroll">
+    <table>
+      <caption>Confirm or correct each claim. "Self-check" names the diagnostic the agent runs against every new extract; it can detect a convention BREAKING, but only you can say whether the reading was right in the first place.</caption>
+      <thead>
+        <tr><th>#</th><th>The agent's claim about your data</th><th>What stands on it</th><th>Self-check</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>C1</td><td><code>ending_inventory</code> is the <strong>counted</strong> end-of-hour quantity, arrivals included — so <code>ending[t] == starting[t+1]</code> inside a window, with no exception</td><td>The whole inventory chain: episode integrity, restock and shrink detection</td><td>continuity check on every extract; violating episodes are dropped and counted</td></tr>
+        <tr><td>C2</td><td>When a listing closes, the source <strong>writes the remainder off by zeroing</strong> <code>ending_inventory</code> on the final row. That zero is the ONLY closure signal, and true leftover is <code>max(0, starting − sold)</code> there</td><td>Which episodes count as finished; ALL scrap and IL figures; the scrap guardrail</td><td><code>write_off_convention_in_force</code>, <code>final_rows_without_closure_sentinel</code>; a sentinel-free feed reads every episode unclosed, loudly</td></tr>
+        <tr><td>C3</td><td>The feed <strong>stops emitting rows when inventory reaches zero</strong> — an empty shelf ends the episode, so a sold-out hour can only be the last one. <strong>Question for you</strong> (the C5 correction makes it live): after a sell-out, if stock arrives in a LATER hour, does the feed resume rows under the same listing? If yes, this claim is incomplete the way C5 was — a censored hour could then sit mid-episode</td><td>Censoring: which hours enter the demand model as "at least this much"; <code>is_stockout</code></td><td><code>censoring_off_last_row</code> — rows that emptied mid-episode should be zero</td></tr>
+        <tr><td>C4</td><td><code>discount</code> is a <strong>percent</strong> of list (25.0, not 0.25); <code>final_price</code> is the <em>realised</em> price and reads <strong>0 on zero-sale rows</strong>, so the offered price is <code>normal_asp × (1 − discount/100)</code> and never reconstructed from <code>final_price</code></td><td>Every price the agent reads or compares, including the price-mismatch gate</td><td>a row whose discount is outside [0, 100) percent is refused and counted (<code>unusable_feed_rows</code>) — a unit change would refuse everything, loudly</td></tr>
+        <tr><td>C5</td><td><code>flc_window</code> is a <strong>nominal</strong> countdown: it decrements one per elapsed hour inside a window, is usually still positive when a listing closes (it does NOT signal the end), resets <em>upward</em> when a new window starts, and windows entering already-negative are the manufacturing pattern resolving within ~24h. <strong>Confirmed by you:</strong> it can also step UP <em>mid-window</em> when a restock extends the window — same listing, same episode (§03's restock rule) — and it moves <strong>from the hour after</strong> the stock arrives; the restocked hour itself still counts down. The agent's <em>historical</em> derivation reads it the same way: an upward step after a restocked hour (C9) continues the window, any other reset opens one, and a zeroed <code>ending_inventory</code> (C2) closes the listing whatever the counter does next — even when that hour also restocked</td><td>Episode boundaries in historical data; the DP's planning horizon; the negative-window recovery</td><td>counter decrements 1/hour, up-steps allowed only on restocked hours; <code>episodes_entering_negative_but_longer_than_cap</code> should be near zero</td></tr>
+        <tr><td>C6</td><td>An hour where <code>0 &lt; ending &lt; starting − sold</code> is <strong>shrink</strong> — stock genuinely left without a sale or write-off (damage, transfer, sampling), not a feed error — and those units belong in scrap. If your definition of scrap counts only disposal at close, the guardrail means something different: say so</td><td>Scrap = leftover + shrink; IL; the exploration budget base; the scrap-deterioration guardrail</td><td><code>unreconciled_anomalies</code> locates shrink by category and month; corr(shrink, sales) separates real shrink from feed-timing skew</td></tr>
+        <tr><td>C7</td><td>A stocked hour that <strong>sold nothing still gets a row</strong> (~3 hours in 4)</td><td>Outcome completeness; demand evidence at shallow discounts</td><td>the completeness gate (§07)</td></tr>
+        <tr><td>C8</td><td>Two rows for one (SKU, FC, hour) is a <strong>defect with no true state</strong> — neither copy is preferable</td><td>Both copies are ignored everywhere (offline drop; the ingester matches neither)</td><td><code>duplicate_hour_rows_dropped</code> / <code>feed_duplicate_hours</code>, both counted</td></tr>
+        <tr><td>C9</td><td><code>ending &gt; starting − sold</code> means <strong>stock arrived during the hour</strong> (a restock), including an hour that sold more than it opened with</td><td>The restock classification; the rule that a restock never excludes an episode; the stockout carve-out</td><td>restock counts per extract; the flow identity still closes</td></tr>
+      </tbody>
+    </table>
+  </div>
 
-<pre class="json">{..., &quot;decision_id&quot;: null, &quot;applied_discount&quot;: null, &quot;applied_price&quot;: null,
- &quot;is_exploration&quot;: null, &quot;rejected&quot;: &quot;&lt;reason&gt;&quot;}</pre>
+  <div class="note risk">
+    <h4>How to disagree</h4>
+    <p>
+      Don't adapt your data to the claims — the claims exist to describe YOUR data. If C2's
+      zero means something else in your system, if discounts are fractions somewhere, if the
+      counter can legitimately jump, say which claim and what the real rule is. The agent has
+      one implementation per claim, so the correction lands in one place — and the
+      self-checks then verify the corrected reading against the next extract.
+    </p>
+  </div>
+</section>
 
-<p class="prose">A rejection is always row-scoped: the rest of the batch prices. Every reason the system can return is below; several can appear on one row, joined by <code>; </code>. Validate the first two groups on your side before sending, and you will never see them.</p>
+<section id="shape">
+  <h2><span class="num">B·02</span>The shape of it</h2>
+  <div class="prose">
+    <p>
+      One SKU in one fulfilment centre inside a clearance window is an <em>episode</em>. Every
+      hour of that episode is a <em>decision interval</em>: the agent is asked for a price,
+      it logs what it decided, you apply the price, the hour ends, and the agent reads the
+      outcome back from the hourly feed.
+    </p>
+    <p>
+      Both streams are append-only JSONL with durable writes and duplicate detection. Nothing is
+      ever silently dropped — an event that fails validation is written to a quarantine file with
+      the reason attached, and the quarantine count is a monitored number.
+    </p>
+  </div>
+
+  <div class="tscroll">
+    <table>
+      <caption>Who owns what. The dividing rule: you own the DATA and what it means; the agent owns every DERIVATION built on those meanings — and when a meaning is corrected, the fix is a change to the agent's code, never new work on your side.</caption>
+      <thead>
+        <tr><th>You (engineering) own</th><th>The agent owns</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>The production table: its grain (one row per SKU × FC × hour), its keys, and <strong>what every column means</strong> — including the conventions in §01, which the agent inferred from your data and you are asked to confirm or correct</td><td>The decision: forecast, DP, exploration, and the 39-field decision event</td></tr>
+        <tr><td><code>episode_id</code>: what counts as one clearance window (§03) — you know whether a listing was extended or relisted; the agent cannot</td><td>Every derivation on top of your conventions: outcome construction, the restock / write-off / shrink classification, stockout and censoring, scrap accounting, decision matching, all ids except <code>episode_id</code></td></tr>
+        <tr><td>Applying the returned price, and knowing whether the push succeeded (the failures table)</td><td>Learning, monitoring, guardrails, and the audit trail</td></tr>
+        <tr><td>The daily landing of the table: a row for every priced hour, zero-sale hours included</td><td>Fixing its own code when you correct a convention in §01</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="flow">
+    <div>
+      <span class="step">You</span>
+      <b>Price request</b>
+      <span class="d">12 fields of state: what the item is, how much is left, how long it has, what price is in force now.</span>
+    </div>
+    <div>
+      <span class="step">Agent</span>
+      <b>Decision event</b>
+      <span class="d">39 fields. The price it chose, everything it chose from, and every input it used — enough to re-solve the decision later.</span>
+    </div>
+    <div>
+      <span class="step">You</span>
+      <b>Price goes live</b>
+      <span class="d">The applied price must be the one the agent returned, or the mismatch rate climbs. A failed push is reported — that is the one outcome fact only you know.</span>
+    </div>
+    <div>
+      <span class="step">Agent</span>
+      <b>Outcome event</b>
+      <span class="d">Built from the hourly feed: units sold, inventory in and out, the price in force — matched to the decision by SKU, FC, date, hour.</span>
+    </div>
+  </div>
+
+  <div class="note">
+    <h4>Where the production table fits — and what stays yours</h4>
+    <p>
+      The interface on the outcome side is <strong>the hourly FLC production table you
+      already maintain</strong> (<code>sb_scm.fresh_flc_detail</code>: inventory, units sold,
+      discount, list price, cost, window counter per SKU × FC × hour). Hourly, keep your
+      working state however you like — JSON, a temp table, anything; none of it is read.
+      What matters is that <strong>once a day</strong> the table carries a row for every
+      priced hour of the previous day — zero-sale hours included, which it does today —
+      and <code>daily.ingest_outcomes</code> runs on it as a daily batch, builds the
+      outcome events, and matches them to decisions. Daily is not a compromise: learning
+      (<code>daily.update</code>) is itself a daily batch, so an hourly outcome stream
+      would buy nothing.
+    </p>
+    <p>
+      The JSONL event streams described on this page are the agent's own storage — you never
+      write or read JSON. Your two deliverables are both tables: the production table you
+      already ship, and a small failed-pushes table (see §05). Going the other way, the agent
+      dumps its decision and outcome logs as tables daily (<code>daily.export_events</code>
+      — parquet, list fields JSON-encoded; <code>--since</code> cuts both tables on the
+      decision's trading day, so an hour-23 outcome ships with its decision; an outcome whose
+      decision is not in the store has no trading day and is skipped and counted, never
+      dated by guesswork) for loading into the warehouse; those tables are a derived
+      convenience for analytics and joins, never the audit record.
+    </p>
+  </div>
+
+  <div class="note">
+    <h4>Why the decision event is so wide</h4>
+    <p>
+      It is an audit trail, not a log line. <code>daily.assurance</code> takes a logged
+      decision, re-runs the solver from the event's own fields, and checks it gets the same
+      price back. That is how a drifted model artifact or a bad config deploy is caught in
+      production — but it only works if the event carries the full demand forecast
+      (<code>mu_ref_path</code>) and the price already in force (<code>anchor_discount</code>),
+      not just this hour's summary. None of those 39 fields is yours to produce.
+    </p>
+  </div>
+</section>
+
+<section id="request">
+  <h2><span class="num">C·03</span>What you send to request a price</h2>
+  <div class="prose">
+    <p>
+      Twelve fields, once per SKU × FC per hour. The agent resolves everything else itself —
+      the demand forecast from the frozen model, the dispersion parameter from its lookup table,
+      the reference discount from config.
+    </p>
+  </div>
+
+  <div class="tscroll">
+    <table>
+      <caption>Example values are the 17:00 entry decision of the worked episode in §06.</caption>
+      <thead>
+        <tr><th>Field</th><th>Type</th><th>Example</th><th>What it is, and the trap in it</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="f">episode_id</td><td class="t">string</td><td class="ex">"EP-88213-4471"</td><td><strong>You assign this, and it is the one field with a construction rule</strong> — see the box below. One id per clearance window, stable across midnight.</td></tr>
+        <tr><td class="f">sku_id</td><td class="t">string</td><td class="ex">"SKU-88213"</td><td>—</td></tr>
+        <tr><td class="f">fc</td><td class="t">string</td><td class="ex">"FC-04"</td><td>Fulfilment centre. Episodes are per SKU × FC, not per SKU.</td></tr>
+        <tr><td class="f">category</td><td class="t">string</td><td class="ex">"vegetables"</td><td>Selects the reference discount and the learning cell.</td></tr>
+        <tr><td class="f">subcategory</td><td class="t">string</td><td class="ex">"leafy_greens"</td><td>Selects the dispersion parameter and the level factor.</td></tr>
+        <tr><td class="f">date</td><td class="t">string</td><td class="ex">"2026-08-19"</td><td>The pricing hour's calendar date, exactly <code>YYYY-MM-DD</code> — any other spelling quarantines the event. With <code>hour_of_day</code> it is the key the outcome ingester matches feed rows to decisions on, and the day every daily series (tau walk, guardrail, spend) buckets by.</td></tr>
+        <tr><td class="f">hour_of_day</td><td class="t">int</td><td class="ex">17</td><td>—</td></tr>
+        <tr><td class="f">hours_remaining</td><td class="t">int ≥ 1</td><td class="ex">4</td><td>Hours left in the window, this one included. Drives the planning horizon; see the trap in §08.</td></tr>
+        <tr><td class="f">q</td><td class="t">int ≥ 0</td><td class="ex">3</td><td>Units on hand at the top of the hour.</td></tr>
+        <tr><td class="f">original_price</td><td class="t">float &gt; 0</td><td class="ex">10000.0</td><td>Undiscounted price. Must be present — a null or zero rejects the state.</td></tr>
+        <tr><td class="f">cost</td><td class="t">float</td><td class="ex">4000.0</td><td>Unit cost, within <code>[0, original_price]</code>. Sets the price floor; no tier below it is ever offered.</td></tr>
+        <tr><td class="f">current_discount</td><td class="t">float | null</td><td class="ex null">null</td><td><strong>The discount already in force.</strong> <code>null</code> on the episode's first decision, and a fraction (0.15, not 15) on every later one. It constrains the action set — prices never move back up within an episode.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note risk">
+    <h4><code>episode_id</code>: what it means, and how to assign it</h4>
+    <p>
+      An <em>episode</em> is <strong>one clearance window</strong> of one SKU at one FC: the
+      run of consecutive selling hours from the hour the window opens until the listing
+      closes. The id's job is to say "these hours are the same window", and the pricing logic
+      leans on it through <code>current_discount</code>: prices may only hold or deepen
+      <em>within</em> an episode, and a new episode is a fresh entry decision.
+    </p>
+    <p>How to assign it (the exact rule, and the script that applies it, is task 0.2a; what follows is the same rule in words):</p>
+    <ul class="plain">
+      <li><b>Open a new id when a new window starts</b> — the first hour a SKU × FC comes on
+          clearance, recognisable in the source by the window counter resetting upward (a new
+          <code>flc_window</code> value larger than the previous hour's would decrement to).
+          Any scheme is fine as long as it is unique per window; ours is
+          <code>sku | fc | first hour of the window</code>.</li>
+      <li><b>Keep that id for every subsequent hour of the window</b>, however many calendar
+          days it spans. Windows of 36 hours are common; midnight is an ordinary hour.</li>
+      <li><b>Never derive it from the calendar date.</b> A date-keyed id splits one window
+          into two at midnight. The second "episode" then starts with
+          <code>current_discount = null</code>, the agent treats it as a fresh entry, and
+          the price can move back UP mid-window — breaking the one guarantee (prices never
+          rise within an episode) the system treats as structural. The horizon and the
+          learning evidence for those hours are wrong too.</li>
+      <li><b>Two windows back-to-back are two ids</b>, even with no gap between them: the
+          close of one listing and the open of the next each carry their own entry
+          decision.</li>
+      <li><b>A restock does NOT open a new id.</b> Stock arriving mid-window — even one that
+          <em>extends</em> the window, so <code>hours_remaining</code> jumps UP — is the same
+          listing and keeps its id; just send the new, larger counter and the agent re-plans
+          over the longer horizon. The id changes only when the listing actually closed and a
+          new one opened. This is the case that matters: a new id here resets the price
+          anchor, and the price could rise on shoppers who saw yesterday's — the one move the
+          system guarantees never happens within a listing.</li>
+    </ul>
+    <p>
+      Consistency check worth building in: within one <code>episode_id</code>,
+      <code>hours_remaining</code> should decrement by exactly one per elapsed hour, with one
+      allowed exception — it may step UP on the hour <em>after</em> stock arrived (a
+      window-extending restock; the restocked hour itself still counts down). Any other
+      jump means the id is stitching two windows together or a feed hour is missing.
+    </p>
+  </div>
+
+  <div class="note">
+    <h4>How to call it — the reference batch caller, and a whole cycle to watch first</h4>
+    <p>
+      You do not build these requests: <code>ops.price_hour</code> builds them from your snapshot (Phase 2) and hands them to <code>ops.price_batch</code>, the caller beneath it — one hour's requests in, one response row per request out, in request order. Documented here so a request and a decision can be read. It resolves everything the engine needs
+      beyond the request (the forecast path, the dispersion parameter, the reference discount), reads
+      the posterior <em>once per batch</em>, commits every decision to the event store before
+      returning its price, and refuses row by row, never the batch:
+    </p>
+<pre class="json">python3 -m ops.price_batch --requests 2026-08-19T17.jsonl \
+    --features features/2026-08-19.parquet --workers 0 --out decisions.jsonl [--report report.json]
+
+<span class="c">// one request line: the 17:00 entry decision of §06</span>
+{"episode_id": "EP-88213-4471", "sku_id": "SKU-88213", "fc": "FC-04", "category": "vegetables",
+ "subcategory": "leafy_greens", "date": "2026-08-19", "hour_of_day": 17, "hours_remaining": 4,
+ "q": 3, "original_price": 10000.0, "cost": 4000.0, "current_discount": null}
+
+<span class="c">// its response row: put applied_price on the shelf; decision_id is the handle</span>
+{"episode_id": "EP-88213-4471", "sku_id": "SKU-88213", "fc": "FC-04", "date": "2026-08-19",
+ "hour_of_day": 17, "decision_id": "d7557c60-5fad-4336-84ac-06775172f3e5",
+ "applied_discount": 0.3, "applied_price": 7000.0, "is_exploration": false, "rejected": null}
+
+<span class="c">// a refused one: no price, the reason -- the rest of the batch priced</span>
+{"episode_id": "EP-88213-4472", "sku_id": "SKU-88214", "fc": "FC-04", "date": "2026-08-19",
+ "hour_of_day": 17, "decision_id": null, "applied_discount": null, "applied_price": null,
+ "is_exploration": null, "rejected": "cost must not exceed original_price"}</pre>
+    <ul>
+      <li><code>--features</code> is the day's feature table, <code>features/&lt;today&gt;.parquet</code>,
+          which the morning lane writes (<code>daily.features</code>, inside <code>advance --feed</code>)
+          from the rolling hourly feed: the two demand-rate features an episode opening today reads,
+          per SKU × FC plus a pooled row per SKU. Both features read strictly before the opening
+          date, so one table per morning is exactly what a batch would have computed for itself;
+          the batch joins on SKU and FC and reads no history. <code>--history</code> (the trailing
+          hourly FLC table, source schema, at least <code>ref_rate_window_days</code> deep) is the
+          alternative when no table exists yet: the same features, computed inside the batch. The
+          batch report's <code>features_as_of</code> says which day's table it priced on, and
+          <code>entry_requests_on_stale_features</code> counts entry requests priced on an older one
+          (a stopped morning lane), never refused.</li>
+      <li>One batch per hour. A request for an hour the store already holds a decision for is refused
+          (<code>already_priced</code>) — a retried batch never puts two prices on one feed row; two
+          requests for one hour in the same batch are both refused (<code>duplicate_request</code>).
+          The event store itself holds one decision per hour: a second one is refused there too,
+          whatever path it took.</li>
+      <li>Every request is read in ONE spelling before anything else looks at it: ids as the hour
+          key spells them (an id your table reads back as <code>7.0</code>, a JSONL <code>"7"</code>
+          and an integer <code>7</code> name one SKU; the same for <code>fc</code>,
+          <code>episode_id</code> and <code>category</code>), the <code>date</code> as
+          <code>YYYY-MM-DD</code> (a parquet timestamp column prices and writes), counts as
+          integers. A null <code>original_price</code> or <code>cost</code>, or one that is not a
+          number, rejects that row before the engine; a zero, a negative or a cost above list is
+          the engine's rejection, per row.</li>
+      <li><b>A later hour of an episode is priced on the entry forecast.</b> The demand path is
+          predicted ONCE, at the episode's first decision; a request that carries a
+          <code>current_discount</code> for an <code>episode_id</code> the store knows is priced
+          on that stored path, sliced to the hour — so what the shelf is priced on never changes
+          mid-window and the assurance re-solve reproduces it. Only a restock that grew
+          <code>hours_remaining</code> extends the path, by prediction on the features as of the
+          episode's opening. A later request for an episode the store has never priced (a listing
+          already on clearance when the pilot started) gets a fresh forecast and is counted
+          (<code>non_entry_requests_without_stored_path</code> in the batch report). This is one
+          more reason the id must stay stable across midnight: a new id mid-window is a new
+          forecast.</li>
+      <li>The batch report (<code>--report</code>) also counts
+          <code>requests_with_unknown_features</code>: fresh forecasts with no history behind them
+          (the model prices those as "unknown"). A whole batch reading so means the
+          <code>--history</code> table does not meet the requests — an id spelling, or a table cut
+          before the trailing window.</li>
+      <li>A state the engine rejects comes back as <code>rejected</code> with the reason — the
+          <code>StateRejected</code> path below, per row; your fallback applies to that row.</li>
+      <li>Call it as it is (a file drop per hour) or lift the service out of it:
+          <code>engine.state.build_states</code> is the one request → state (it returns the states
+          and the two counts above); the rest of the module is plumbing.</li>
+    </ul>
+    <p>
+      Before any of it exists on your side, <code>python3 -m tools.e2e_cycle</code> runs one whole
+      cycle in a workspace under <code>sim/e2e</code> against a simulated shop — requests per hour,
+      decisions back, the feed the shop wrote, <code>daily.ingest_outcomes</code> naming the
+      outcomes, <code>daily.export_events</code> writing the paired tables — and prints the paired
+      table. Every file it writes is one you will produce or read.
+    </p>
+  </div>
+
+  <div class="note risk">
+    <h4>The agent refuses rather than returning an unsafe price</h4>
+    <p>
+      If the state is inconsistent — negative inventory, cost above list, a horizon that
+      disagrees with itself, no feasible tier at or below the current price — the call raises
+      <code>StateRejected</code> and no price comes back. Your integration needs a defined
+      fallback for that path. It is deliberately not a silent default.
+    </p>
+  </div>
+</section>
+
+<section id="decision">
+  <h2><span class="num">D·04</span>What the agent logs per decision</h2>
+  <div class="prose">
+    <p>
+      Thirty-nine required fields, all written by the agent. Listed here so you can
+      size storage and know what you can query later — not because you produce any of it. Three more
+      diagnostic fields (<code>event</code>, <code>solver_latency_s</code>,
+      <code>nb_tail_mass_max</code>) are written but not required.
+    </p>
+  </div>
+
+  <div class="tscroll">
+    <table>
+      <caption>Grouped by what the field is for. All 39 are mandatory — an event missing any one of them is quarantined, not written. Examples are the same 17:00 entry decision.</caption>
+      <thead>
+        <tr><th>Field</th><th>Example</th><th>Purpose</th></tr>
+      </thead>
+      <tbody>
+        <tr class="grouphead"><td colspan="3">Identity — 4</td></tr>
+        <tr><td class="f">decision_id</td><td class="ex">"d7557c60-5fad-…"</td><td>Immutable UUID, minted by the agent; the ingester matches the feed row back to it.</td></tr>
+        <tr><td class="f">episode_id</td><td class="ex">"EP-88213-4471"</td><td>As supplied.</td></tr>
+        <tr><td class="f">is_entry</td><td class="ex">true</td><td>True on the episode's first decision.</td></tr>
+        <tr><td class="f">timestamp</td><td class="ex">"2026-08-19T02:25:12+00:00"</td><td>UTC with offset.</td></tr>
+
+        <tr class="grouphead"><td colspan="3">Entity — 4</td></tr>
+        <tr><td class="f">sku_id · fc</td><td class="ex">"SKU-88213" · "FC-04"</td><td>As supplied.</td></tr>
+        <tr><td class="f">category · subcategory</td><td class="ex">"vegetables" · "leafy_greens"</td><td>As supplied.</td></tr>
+
+        <tr class="grouphead"><td colspan="3">State at decision time — 6</td></tr>
+        <tr><td class="f">date</td><td class="ex">"2026-08-19"</td><td>As supplied; the feed-matching key with <code>hour_of_day</code>.</td></tr>
+        <tr><td class="f">hour_of_day · hours_remaining</td><td class="ex">17 · 4</td><td>As supplied.</td></tr>
+        <tr><td class="f">q_remaining</td><td class="ex">3</td><td>As supplied (your <code>q</code>).</td></tr>
+        <tr><td class="f">original_price · cost</td><td class="ex">10000.0 · 4000.0</td><td>As supplied.</td></tr>
+
+        <tr class="grouphead"><td colspan="3">The action space — 3</td></tr>
+        <tr><td class="f">d_max</td><td class="ex">0.6</td><td>Deepest discount the cost floor permits. Here ₩4,000 cost against a ₩10,000 list price.</td></tr>
+        <tr><td class="f">feasible_tier_count</td><td class="ex">25</td><td>Size of the full price grid — 0% to 60% in 2.5% steps.</td></tr>
+        <tr><td class="f">action_set_size</td><td class="ex">5</td><td>Actions allowed at <em>this</em> decision. Five here because entry uses a coarse arm set; from the next hour on it is every tier at or below the anchor. Distinct from the grid, and what explorability is judged on.</td></tr>
+
+        <tr class="grouphead"><td colspan="3">What it recommended — 4</td></tr>
+        <tr><td class="f">optimal_price · optimal_discount</td><td class="ex">8500.0 · 0.15</td><td>The cost-minimising choice.</td></tr>
+        <tr><td class="f">expected_il</td><td class="ex">10048.795016024469</td><td>Expected inventory loss under the <em>applied</em> action, in won — the objective.</td></tr>
+        <tr><td class="f">expected_denominator</td><td class="ex">7242.0524034908485</td><td>Predicted revenue base, for predicted-vs-realised tracking.</td></tr>
+
+        <tr class="grouphead"><td colspan="3">What it applied — 7</td></tr>
+        <tr><td class="f">applied_price · applied_discount</td><td class="ex">7000.0 · 0.3</td><td>What actually went out. Differs from optimal only on an exploration — as here.</td></tr>
+        <tr><td class="f">is_exploration</td><td class="ex">true</td><td>Whether this hour was a deliberate experiment.</td></tr>
+        <tr><td class="f">exploration_cost</td><td class="ex">2385.0286259173663</td><td>Expected IL given up to run it. Zero when not exploring.</td></tr>
+        <tr><td class="f">affordable_set_size</td><td class="ex">3</td><td>How many alternatives were within budget.</td></tr>
+        <tr><td class="f">tau_current</td><td class="ex">3202.33</td><td>The exploration budget in force, in won. <code>null</code> while exploration is suspended by a stop condition: the decision was priced at the optimum with no draw. A long-lived caller holds one <code>PosteriorStore</code> and calls <code>reload()</code> once per decision batch, before its first <code>decide()</code>: the monitor's suspension and <code>daily.update</code>'s cells and tau are written to the same file by other processes and are invisible to the handle until then; <code>decide()</code> itself never re-reads the file.</td></tr>
+        <tr><td class="f">delta_min</td><td class="ex">0.1459</td><td>The smallest distance from the reference discount, in log price, a forced tier may sit at (level-bias scale over |ε|); tiers closer to the reference were neither drawn nor budgeted — the learner reads outcomes against <code>reference_mu</code>. 0 before the scale is measured.</td></tr>
+
+        <tr class="grouphead"><td colspan="3">Inputs that make it reproducible — 7</td></tr>
+        <tr><td class="f">epsilon_posterior_mean</td><td class="ex">-1.0</td><td>The learned price response. Always negative.</td></tr>
+        <tr><td class="f">epsilon_posterior_std</td><td class="ex">0.6</td><td>Its uncertainty. Both are at the cold-start prior here.</td></tr>
+        <tr><td class="f">reference_discount · reference_mu</td><td class="ex">0.3 · 0.8</td><td>The anchor the forecast is quoted at, and the forecast there.</td></tr>
+        <tr><td class="f">mu_ref_path</td><td class="ex">[0.8, 0.8, 0.62, 0.41]</td><td><strong>The full remaining-hours forecast</strong>, not just this hour — one entry per remaining hour, and its length must equal <code>hours_remaining</code>. Every tier's value depends on the whole path.</td></tr>
+        <tr><td class="f">anchor_discount</td><td class="ex null">null</td><td>The price in force, which fixed the action set. <code>null</code> at entry; a fraction thereafter.</td></tr>
+        <tr><td class="f">sku_ref_sales_rate_30d</td><td class="ex">0.83</td><td><span class="tag cond">optional</span> The trailing reference sales rate the forecast stood on — the SKU's units per anchor-priced hour over the thirty days before the episode opened, read off the day's feature table (§03). <code>null</code> when the SKU had no history ("unknown"). A later hour of the episode reads it back from here, never as of another day. Recorded since the feature table; absent from the worked episode in §06, captured before it.</td></tr>
+        <tr><td class="f">prior_episode_ref_sales_rate</td><td class="ex">0.75</td><td><span class="tag cond">optional</span> The previous episode's reference sales rate for the same SKU × FC, the second feature the forecast stood on; <code>null</code> when there was none.</td></tr>
+        <tr><td class="f">dispersion_r</td><td class="ex">0.919</td><td>Demand variance parameter used.</td></tr>
+
+        <tr class="grouphead"><td colspan="3">Versions — 4</td></tr>
+        <tr><td class="f">baseline_model_version</td><td class="ex">"baseline-20260811043259"</td><td>Which frozen model produced the forecast.</td></tr>
+        <tr><td class="f">posterior_version</td><td class="ex">0</td><td>Which learning state was in force. Increments on every applied update.</td></tr>
+        <tr><td class="f">config_version</td><td class="ex">"1.0.0"</td><td>The config's human label. It is not bumped by pastes, so it is a name, not a fingerprint.</td></tr>
+        <tr><td class="f">config_digest</td><td class="ex">"35ab97a15c14aad1"</td><td>SHA-256 prefix of the whole config the decision was priced with. Matches the <code>environment.config_digest</code> of exactly one seal in <code>artifacts/history/</code>, which holds that config verbatim and names the model and library versions in force. Computed per decision by the engine, or once per batch by the caller and passed in — then recorded exactly as passed, never verified, so it must be the digest of the very config the batch prices with.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="outcome">
+  <h2><span class="num">E·05</span>The outcome event — built from your feed</h2>
+  <div class="prose">
+    <p>
+      <strong>You do not produce this event.</strong> <code>daily.ingest_outcomes</code>
+      constructs exactly one finalized outcome per decision from the hourly FLC feed — the
+      same snapshot the bootstrap already ingests — matched by (SKU, FC, date, hour). The
+      fields are listed so you know what gets stored and what the feed must carry. The only
+      per-hour fact that must come from you is a <strong>failed price push</strong>: one row
+      per failed hour — a table (parquet/CSV) or JSONL, your choice — with
+      <code>sku_id</code>, <code>fc</code>, <code>date</code>, <code>hour_of_day</code>,
+      <code>reason</code>. No row means the push succeeded. A failed-push row that matches no
+      decision is counted (<code>push_failures_unmatched</code> in the ingest report) rather than
+      dropped silently — a non-zero count means your table and the agent's decisions disagree on
+      the hour key; a row naming no hour at all (a null id, a blank line) costs itself, counted as
+      <code>push_failures_unkeyable</code>, never the batch. The table may use the feed's own column
+      names (<code>skuseq</code>, <code>hour</code>). An empty feed is a whole day of gaps
+      (<code>feed_empty</code>), never a day outside the feed.
+    </p>
+  </div>
+
+  <div class="tscroll">
+    <table>
+      <caption>Example values are the 18:00 outcome of the worked episode — a zero-sale hour, which is the common case.</caption>
+      <thead>
+        <tr><th>Field</th><th>Source</th><th>Type</th><th>Example</th><th>Rule</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="f">outcome_id</td><td><span class="tag">derived</span></td><td class="t">string</td><td class="ex">"feed-SKU-88213|FC-04|2026-08-19T18"</td><td>The hour's key — <code>feed-&lt;sku_id&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code> — so you can name the outcome a feed row will produce before it exists, and re-ingesting the same feed dedups instead of double-counting. Two decisions priced for one hour (a retried batch) match neither: counted as <code>decisions_colliding_on_hour</code>, and completeness falls by both. The store holds ONE outcome per decision: a second one naming a decision already answered (an id scheme that moved, a re-ingest under another key) is refused and counted (<code>outcomes_per_decision_over_one</code>); the first one stands.</td></tr>
+        <tr><td class="f">decision_id</td><td><span class="tag">derived</span></td><td class="t">string</td><td class="ex">"faf79b6c-fde0-…"</td><td>The decision the feed row matched on (SKU, FC, date, hour).</td></tr>
+        <tr><td class="f">units_sold</td><td><span class="tag you">feed</span></td><td class="t">int ≥ 0</td><td class="ex">0</td><td><strong>Zero-sale hours count.</strong> They are roughly three quarters of all hours and they are evidence, not noise — the feed carries them already.</td></tr>
+        <tr><td class="f">starting_inventory</td><td><span class="tag you">feed</span></td><td class="t">int ≥ 0</td><td class="ex">2</td><td>The feed's inventory at the top of the hour. Should equal the decision's <code>q_remaining</code>.</td></tr>
+        <tr><td class="f">ending_inventory</td><td><span class="tag you">feed</span></td><td class="t">int ≥ 0</td><td class="ex">2</td><td>The feed's close-of-hour count. When it does not equal <code>starting − sold</code>, the ingester derives <code>adjustment_reason</code> from the break.</td></tr>
+        <tr><td class="f">applied_price</td><td><span class="tag">derived</span></td><td class="t">float</td><td class="ex">5500.0</td><td>A finite number (numpy numerics accepted, booleans and infinities quarantined). The OFFERED price from the feed: <code>normal_asp × (1 − discount)</code> — never the realised-price column, which is zeroed on no-sale rows. The gap to the agent's recommendation is a monitored number — see §07.</td></tr>
+        <tr><td class="f">is_stockout</td><td><span class="tag">derived</span></td><td class="t">bool</td><td class="ex">false</td><td>The shelf EMPTIED: the hour reconciles and <code>starting − sold == 0</code>. Deliberately NOT <code>sold ≥ starting</code> — on a restocked hour that reads true while customers never faced an empty shelf, and demand was observed exactly.</td></tr>
+        <tr><td class="f">execution_status</td><td><span class="tag you">you</span></td><td class="t">string</td><td class="ex">"ok"</td><td><code>"ok"</code> unless the hour appears in your failures file — then <code>"failed"</code>, and the outcome is stored but excluded from learning, which is the correct handling of an hour where the price never went live.</td></tr>
+        <tr><td class="f">finalized_at</td><td><span class="tag">derived</span></td><td class="t">timestamp</td><td class="ex">"2026-08-19T19:00:00+00:00"</td><td>The hour's close, UTC.</td></tr>
+        <tr class="groupsep"><td class="f">adjustment_reason</td><td><span class="tag">derived</span></td><td class="t">string</td><td class="ex">"episode_close_write_off"</td><td>Derived by <code>common.episodes.adjustment_reason</code> whenever inventory does not reconcile — omitted otherwise. Exactly three values; see the box below for what they mean in the feed.</td></tr>
+        <tr><td class="f">execution_failure_reason</td><td><span class="tag cond">conditional</span></td><td class="t">string</td><td class="ex">"price_push_timeout"</td><td>Your failures file's <code>reason</code>, when the push failed. The failures row is keyed like the feed — <code>sku_id</code>, <code>fc</code>, <code>date</code>, <code>hour_of_day</code> — and every key is normalised on read: a datetime <code>date</code> column, or an integer id read back as <code>7.0</code>, matches the same hour as the text spelling.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note risk">
+    <h4>The inventory breaks, and what the ingester does with them</h4>
+    <p>
+      When a clearance window closes with stock still on hand, the source writes the remainder
+      off and reports <code>ending_inventory = 0</code> — about 13.5% of episodes end that way.
+      The ingester classifies every non-reconciling hour itself, with the same rule the offline
+      chain uses, so nothing here is yours to implement. For reference, given
+      <code>leftover = max(starting − sold, 0)</code>:
+    </p>
+    <ul class="plain">
+      <li><code>intraday_restock</code> — <code>ending &gt; leftover</code>. Stock was added mid-window.</li>
+      <li><code>episode_close_write_off</code> — <code>ending == 0</code> while <code>leftover &gt; 0</code>.</li>
+      <li><code>unexplained_shortfall</code> — <code>0 &lt; ending &lt; leftover</code>. Shrink: units left
+          the shelf that no sale or write-off accounts for. Named, not quarantined — the units stay
+          visible through <code>units_shrink</code> and <code>episode_scrap</code>, and shrink runs at
+          roughly 2.8% of decision hours, so leaving it unnamed fails the completeness gate for a
+          reason no integration work can fix.</li>
+    </ul>
+    <p style="margin-top:12px">
+      The write-off is recognised by the zero itself, never by position in the episode.
+      Anything matching none of the three quarantines with the reason attached — the
+      quarantine file is where a genuinely uninterpretable feed hour stays visible.
+    </p>
+  </div>
+</section>
+
+<section id="worked">
+  <h2><span class="num">F·06</span>One episode, end to end</h2>
+  <div class="prose">
+    <p>
+      Every payload below was produced by running the real decision path — not written by hand.
+      One SKU of leafy greens, three units, a four-hour window, ₩10,000 list price against a
+      ₩4,000 unit cost. Three priced hours and three outcomes, including the two shapes that
+      cause integration trouble: a zero-sale hour and an episode-close write-off.
+    </p>
+  </div>
+
+  <div class="hourline">
+    <div>
+      <span class="h">17:00 · entry</span>
+      <b>₩7,000</b>
+      <span class="d">3 units, 4 hours left. Recommended ₩8,500; explored to ₩7,000. One sells.</span>
+    </div>
+    <div>
+      <span class="h">18:00</span>
+      <b>₩5,500</b>
+      <span class="d">2 units, 3 hours left. Recommended ₩7,000; explored to ₩5,500. Nothing sells.</span>
+    </div>
+    <div>
+      <span class="h">20:00 · last hour</span>
+      <b>₩4,250</b>
+      <span class="d">2 units, 1 hour left. Recommended ₩5,500; explored to ₩4,250. One sells; one is written off.</span>
+    </div>
+  </div>
+
+  <h3>The entry decision, in full</h3>
+  <div class="prose">
+    <p>
+      All 42 fields the agent writes — the 39 required plus <code>event</code>,
+      <code>solver_latency_s</code> and <code>nb_tail_mass_max</code>. This is the widest payload
+      in the contract, and none of it is yours to produce.
+    </p>
+  </div>
+
+  <div class="payload">
+    <div class="hd"><b>decisions.jsonl</b><span>17:00 — the episode's first price</span></div>
+<pre class="json">{
+  "event": "decision",
+  "decision_id": "d7557c60-5fad-4336-84ac-06775172f3e5",
+  "episode_id": "EP-88213-4471",
+  "is_entry": <mark>true</mark>,
+  "sku_id": "SKU-88213",
+  "fc": "FC-04",
+  "category": "vegetables",
+  "subcategory": "leafy_greens",
+  "date": "2026-08-19",
+  "hour_of_day": 17,
+  "hours_remaining": 4,
+  "q_remaining": 3,
+  "original_price": 10000.0,
+  "cost": 4000.0,
+  "d_max": 0.6,
+  "feasible_tier_count": 25,
+  "action_set_size": 5,
+  "optimal_price": 8500.0,
+  "optimal_discount": 0.15,
+  "expected_il": 10048.795016024469,
+  "expected_denominator": 7242.0524034908485,
+  "applied_price": <mark>7000.0</mark>,
+  "applied_discount": 0.3,
+  "is_exploration": <mark>true</mark>,
+  "exploration_cost": 2385.0286259173663,
+  "affordable_set_size": 3,
+  "tau_current": 3202.33,
+  "delta_min": 0.1459,
+  "epsilon_posterior_mean": -1.0,
+  "epsilon_posterior_std": 0.6,
+  "reference_discount": 0.3,
+  "reference_mu": 0.8,
+  "mu_ref_path": <mark>[0.8, 0.8, 0.62, 0.41]</mark>,
+  "anchor_discount": <mark>null</mark>,
+  "dispersion_r": 0.919,
+  "baseline_model_version": "baseline-20260811043259",
+  "posterior_version": 0,
+  "config_version": "1.0.0",
+  "config_digest": "35ab97a15c14aad1",
+  "solver_latency_s": 0.008332459000030212,
+  "nb_tail_mass_max": 1.563900841383692e-06,
+  "timestamp": "2026-08-19T02:25:12.932987+00:00"
+}</pre>
+  </div>
+
+  <div class="note">
+    <h4>Reading the highlighted fields</h4>
+    <p>
+      <code>is_entry: true</code> and <code>anchor_discount: null</code> go together — this is
+      the first price, so nothing constrains it from above and <code>action_set_size</code> is 5,
+      the coarse entry arms rather than the full 25-tier grid.
+    </p>
+    <p>
+      <code>mu_ref_path</code> has four entries because <code>hours_remaining</code> is 4. That
+      correspondence is enforced: a mismatch rejects the state outright.
+    </p>
+    <p>
+      <code>applied_price</code> is ₩7,000 while <code>optimal_price</code> is ₩8,500, because
+      <code>is_exploration</code> is true. The service gave up ₩2,385 of expected IL to learn
+      something about price response at 30% off. See the note under the next payload — the
+      frequency of this will surprise people.
+    </p>
+  </div>
+
+  <h3>The next two hours</h3>
+  <div class="prose">
+    <p>
+      Same shape, so only the fields that moved are shown. Everything omitted is identical to
+      the entry decision.
+    </p>
+  </div>
+
+  <div class="payload">
+    <div class="hd"><b>decisions.jsonl</b><span>18:00 and 20:00 — abbreviated</span></div>
+<pre class="json">{
+  "decision_id": "faf79b6c-fde0-4f0f-8e19-9c274a0d4d43",
+  "is_entry": false,
+  "hour_of_day": 18,
+  "hours_remaining": 3,
+  "q_remaining": 2,
+  "action_set_size": <mark>13</mark>,          <span class="c">// every tier at or below the anchor</span>
+  "optimal_price": 7000.0,
+  "optimal_discount": 0.3,
+  "expected_il": 8694.450236769328,
+  "expected_denominator": 7487.081079775469,
+  "applied_price": 5500.0,
+  "applied_discount": 0.45,
+  "is_exploration": true,
+  "exploration_cost": 1925.6683304158578,
+  "affordable_set_size": 9,
+  "reference_mu": 0.8,
+  "mu_ref_path": [0.8, 0.62, 0.41],
+  "anchor_discount": <mark>0.3</mark>            <span class="c">// what 17:00 applied</span>
+}
+
+{
+  "decision_id": "d4ab8f32-9533-4896-afe4-976d63d0e68b",
+  "is_entry": false,
+  "hour_of_day": 20,
+  "hours_remaining": 1,
+  "q_remaining": 2,
+  "action_set_size": 7,
+  "optimal_price": 5500.0,
+  "optimal_discount": 0.45,
+  "expected_il": 8979.840326057289,
+  "expected_denominator": 5599.087577470224,
+  "applied_price": 4250.0,
+  "applied_discount": 0.575,
+  "is_exploration": true,
+  "exploration_cost": 751.4162237666824,
+  "affordable_set_size": 6,
+  "reference_mu": <mark>0.41</mark>,             <span class="c">// demand decays toward the window close</span>
+  "mu_ref_path": [0.41],
+  "anchor_discount": 0.45
+}</pre>
+  </div>
+
+  <div class="note risk">
+    <h4>There is no exploration <em>rate</em> — plan for a lot of it</h4>
+    <p>
+      All three hours above explored, and that is not the seed being unlucky. The rule is
+      simply: compute what every alternative price would cost in expected IL, keep the ones
+      costing no more than <code>tau_current</code>, and if that set is non-empty, <strong>draw
+      from it uniformly</strong>. There is no probability schedule, no base rate, no cap.
+    </p>
+    <p>
+      So a large share of priced hours will carry a price that is not the recommended one, and
+      <code>applied_price</code> will differ from <code>optimal_price</code> on all of them.
+      That is the product working, not a bug in the integration — but it is worth knowing before
+      someone builds an alert on the divergence. The budget <code>tau_current</code> is what
+      controls the volume, and it is recalibrated daily from realised spend.
+    </p>
+  </div>
+
+  <h3>What exploitation looks like</h3>
+  <div class="prose">
+    <p>
+      For contrast, a different episode at its price floor. Anchored at 60% off with a ₩4,000
+      cost, exactly one action remains, so the decision is <em>structurally</em> non-explorable
+      and the three exploration fields go quiet.
+    </p>
+  </div>
+
+  <div class="payload">
+    <div class="hd"><b>decisions.jsonl</b><span>a decision with nothing left to explore</span></div>
+<pre class="json">{
+  "decision_id": "30540c38-2b9c-4316-9ed5-92f8604e3cb9",
+  "episode_id": "EP-90114-2280",
+  "hour_of_day": 21,
+  "hours_remaining": 1,
+  "q_remaining": 1,
+  "d_max": 0.6,
+  "action_set_size": <mark>1</mark>,
+  "optimal_price": 4000.0,
+  "optimal_discount": 0.6,
+  "expected_il": 4823.130960570155,
+  "applied_price": <mark>4000.0</mark>,          <span class="c">// == optimal_price</span>
+  "applied_discount": 0.6,
+  "is_exploration": <mark>false</mark>,
+  "exploration_cost": <mark>0.0</mark>,
+  "affordable_set_size": <mark>0</mark>,
+  "anchor_discount": 0.6
+}</pre>
+  </div>
+
+  <h3>The three outcomes</h3>
+  <div class="prose">
+    <p>
+      What the ingester constructs from the feed for those three hours; the third one carries
+      the derived <code>adjustment_reason</code>.
+    </p>
+  </div>
+
+  <div class="payload">
+    <div class="hd"><b>outcomes.jsonl</b><span>ordinary · zero-sale · episode-close write-off</span></div>
+<pre class="json"><span class="c">// 17:00 — one unit sells. 3 − 1 = 2, so inventory reconciles and no
+//         adjustment_reason is needed.</span>
+{
+  "event": "outcome",
+  "outcome_id": "feed-SKU-88213|FC-04|2026-08-19T17",
+  "decision_id": "d7557c60-5fad-4336-84ac-06775172f3e5",
+  "units_sold": 1,
+  "starting_inventory": 3,
+  "ending_inventory": 2,
+  "applied_price": 7000.0,
+  "is_stockout": false,
+  "execution_status": "ok",
+  "finalized_at": "2026-08-19T18:00:00+00:00"
+}
+
+<span class="c">// 18:00 — nothing sells. This is the MOST COMMON outcome shape, roughly
+//         three hours in four, and it must be sent. It is the observation
+//         that says demand was low at ₩5,500.</span>
+{
+  "event": "outcome",
+  "outcome_id": "feed-SKU-88213|FC-04|2026-08-19T18",
+  "decision_id": "faf79b6c-fde0-4f0f-8e19-9c274a0d4d43",
+  "units_sold": <mark>0</mark>,
+  "starting_inventory": 2,
+  "ending_inventory": 2,
+  "applied_price": 5500.0,
+  "is_stockout": false,
+  "execution_status": "ok",
+  "finalized_at": "2026-08-19T19:00:00+00:00"
+}
+
+<span class="c">// 20:00 — the window closes. One unit sells, one remains, and the source
+//         zeroes the field: 2 − 1 = 1 expected, 0 reported. WITHOUT the
+//         adjustment_reason this event is quarantined and never lands.</span>
+{
+  "event": "outcome",
+  "outcome_id": "feed-SKU-88213|FC-04|2026-08-19T20",
+  "decision_id": "d4ab8f32-9533-4896-afe4-976d63d0e68b",
+  "units_sold": 1,
+  "starting_inventory": 2,
+  "ending_inventory": <mark>0</mark>,
+  "applied_price": 4250.0,
+  "is_stockout": false,
+  "execution_status": "ok",
+  "finalized_at": "2026-08-19T21:00:00+00:00",
+  "adjustment_reason": <mark>"episode_close_write_off"</mark>
+}</pre>
+  </div>
+
+  <div class="note">
+    <h4>The write-off shape</h4>
+    <p>
+      That last payload is why the classification exists: the source zeroes the field at close,
+      so 2 − 1 = 1 expected against 0 reported. The ingester names it
+      <code>episode_close_write_off</code>; unnamed, the store would quarantine it and event
+      completeness would fall by the ~13.5% of episodes that end holding stock.
+    </p>
+    <p>
+      Note also that <code>is_stockout</code> is <code>false</code> on all three, including the
+      write-off. Stockout means the shelf emptied — the hour reconciles with
+      <code>starting − sold == 0</code> — so neither a write-off (stock remained) nor a
+      restocked hour that sold past its opening count (the shelf never sat empty) is one.
+    </p>
+  </div>
+</section>
+
+<section id="gates">
+  <h2><span class="num">G·07</span>The thresholds these feed</h2>
+  <div class="prose">
+    <p>
+      Event quality is gated, and two of these gates can suspend the system. Worth knowing before
+      you scope, because they set the reliability bar on the outcome stream.
+    </p>
+  </div>
+
+  <div class="tscroll">
+    <table>
+      <thead>
+        <tr><th>Gate</th><th class="n">Threshold</th><th>What breaches it</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="f">event completeness</td><td class="t n">≥ 99%</td><td>Outcomes landing per decision. A priced hour missing from the feed, a feed hour the ingester cannot interpret, or two decisions priced for one hour (a retried batch: neither matched, <code>decisions_colliding_on_hour</code>) shows up here first. The decision side is counted in production too, in the monitor's safety block over the trailing window: <code>decisions_colliding_on_hour</code>, and <code>decisions_without_outcome</code> — decisions on a day the feed has already answered for (<code>decisions_answered_through</code>, over <code>decisions_on_answered_days</code>) that no outcome names; today's decisions are pending, not gaps.</td></tr>
+        <tr><td class="f">outcomes per decision</td><td class="t n">exactly 1</td><td>The store refuses a second outcome for a decision it already holds one for and counts it (<code>outcomes_per_decision_over_one</code>, in the ingest report and the monitor's safety block); the learner never consumes two outcomes for one hour.</td></tr>
+        <tr><td class="f">duplicate or unmatched</td><td class="t n">≤ 1%</td><td>Outcomes with no matching decision over the finalized outcomes of the trailing <code>event_quality_window_days</code> (14) of trading days, plus repeated ids counted all-time (a duplicate line has no trading day; a producer that re-appends one is broken, not an incident that ages out). The mismatch rate reads the same window, so one incident stops re-firing a lifted stop once history dilutes it.</td></tr>
+        <tr><td class="f">price mismatch</td><td class="t n">≤ 1%</td><td>Outcomes whose offered price (from the feed) differs from the decision's by more than <code>1e-6</code>. This is the "did the agent's price actually go live" check — it catches silent push failures your failures table missed; a failure you reported shows the old price by definition and is counted apart (<code>push_failures_reported</code>), never as a mismatch.</td></tr>
+        <tr><td class="f">missing stockout field</td><td class="t n">exactly 0</td><td>Any outcome at all without <code>is_stockout</code>. Enforced by the store: such an outcome never lands (refused on emit with the reason in the quarantine, skipped on load) and is counted — <code>missing_stockout_field</code>, in the ingest report and the monitor's safety block. Every outcome the ingester builds carries the field, so a non-zero count means a line reached <code>outcomes.jsonl</code> by another route.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <h4>Exactly-once, on the agent's side</h4>
+    <p>
+      Outcome ids are the hour's key (<code>feed-&lt;sku&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code>),
+      so re-running the ingester over the same feed dedups instead of double-counting, and
+      learning consumes each <code>outcome_id</code> once; a price batch re-sent for an hour
+      already priced is refused before it reaches the store. Nothing on your side needs
+      exactly-once delivery — the feed just needs to keep carrying every hour.
+    </p>
+  </div>
+</section>
+
+<section id="feasibility">
+  <h2><span class="num">H·08</span>The parts worth checking first</h2>
+  <div class="prose">
+    <p>
+      Ranked by how much trouble they have caused in replay and shadow. If your team can answer
+      these five, the rest of the contract is routine field plumbing. Separate from feasibility,
+      §01 lists the <em>meanings</em> the agent has assumed about your table — those need your
+      sign-off, not your engineering time.
+    </p>
+  </div>
+
+  <ol class="check">
+    <li>
+      <span class="sev med">med</span>
+      <b>Have you watched one cycle run end to end?</b>
+      <p>
+        <code>python3 -m tools.e2e_cycle</code> (§03) prices hourly request batches through
+        <code>ops.price_batch</code>, sells them in a simulated shop, writes the feed, ingests the
+        outcomes and exports the paired tables, all under <code>sim/e2e</code>. The files it writes
+        are the files you will produce and read; a question about a field is faster asked of them.
+      </p>
+    </li>
+    <li>
+      <span class="sev hard">hard</span>
+      <b>Is <code>episode_id</code> stable across midnight?</b>
+      <p>
+        The full assignment rule is in the box under §03. Thirty-six-hour windows are common;
+        a date-derived key splits one window into two, resets the price anchor mid-window
+        (the price can then rise — the one guarantee the system treats as structural), and
+        makes every horizon in the second half wrong.
+      </p>
+    </li>
+    <li>
+      <span class="sev hard">hard</span>
+      <b>Does <code>hours_remaining</code> mean hours, reliably?</b>
+      <p>
+        It has to equal the number of hours actually left in the window, this one included. The
+        service plans over exactly that many hours and rejects the state if its forecast path and
+        your counter disagree. Upstream data has historically carried very large values here from
+        defects; anything above 120 hours is treated as bad data, not a long window.
+      </p>
+    </li>
+    <li>
+      <span class="sev med">medium</span>
+      <b>Does the hourly feed keep carrying every priced hour — zero-sale hours included?</b>
+      <p>
+        Outcomes are built from the feed, so a priced hour the feed drops is a completeness
+        miss. Roughly three quarters of hours sell nothing, and those rows are the evidence —
+        the feed carries them today; it must keep doing so for the pilot SKUs.
+      </p>
+    </li>
+    <li>
+      <span class="sev med">medium</span>
+      <b>Can you report a failed price push?</b>
+      <p>
+        The one outcome fact only you know. One table row per failed hour (<code>sku_id</code>,
+        <code>fc</code>, <code>date</code>, <code>hour_of_day</code>, <code>reason</code>);
+        silence means the push succeeded. The feed's own discount column backstops this — a
+        price that never went live shows up as a mismatch — but the explicit report is what
+        separates "push failed" from "feed skew".
+      </p>
+    </li>
+    <li>
+      <span class="sev med">medium</span>
+      <b>Are <code>cost</code> and <code>original_price</code> available per hour, per FC?</b>
+      <p>
+        Cost sets the price floor, so a stale or missing cost either blocks legal discounts or
+        permits below-cost ones. Both are per-request inputs, not reference data the agent holds.
+      </p>
+    </li>
+  </ol>
+</section>
+
+
+<section id="rejection-reasons">
+  <h2><span class="num">I</span>Every rejection reason</h2>
+
+<p class="prose">A rejection is always row-scoped: the rest of the batch prices. Every reason the system can return is below; several can appear on one row, joined by <code>; </code>. Validate the first three groups on your side before sending, and you will never see them.</p>
+
+<p class="prose"><strong>Refused by the hourly script — the snapshot row itself (<code>ops.price_hour</code>).</strong> These rows never become requests; <code>ops.check_inputs --snapshot</code> catches all three before launch.</p>
+
+  <div class="tscroll">
+    <table>
+      <thead><tr><th><code>rejected</code> reads</th><th>Whose</th><th>Cause</th></tr></thead>
+      <tbody>
+        <tr><td><code>row names no shelf-hour</code></td><td>yours</td><td>One of <code>skuseq, fc, date, hour</code> is null or unreadable</td></tr>
+        <tr><td><code>empty shelf: nothing to price</code></td><td>yours</td><td><code>inventory</code> is 0 or less; the shelf is counted in <code>shelves_empty</code></td></tr>
+        <tr><td><code>episode_id missing: the producer assigns it (ops.assign_episode_ids)</code></td><td>yours</td><td>The row carries no <code>episode_id</code>; the id step (0.2a) did not run on this hour. Counted in <code>shelves_without_episode_id</code></td></tr>
+      </tbody>
+    </table>
+  </div>
 
 <p class="prose"><strong>Refused before the engine — the request itself (<code>validate_request</code>).</strong></p>
 
@@ -745,151 +1830,24 @@ original_price, cost, current_discount</pre>
 
 <p class="prose">Omit <code>--failures</code> on a day with none. One command runs the lane in order: ingest outcomes (from the feed, matched to decisions on <code>sku_id, fc, date, hour_of_day</code>), walk the exploration budget, monitor (guardrails and stop conditions), assurance, export the paired tables, status. It stops at <code>daily.update --apply</code>, the operator's gate, and never runs it. It keeps running the lane while status is red; a red stop names the row and what clears it.</p>
 
-</section>
-
-
-<section id="constraints-the-engine-holds-you-to">
-  <h2><span class="num">05</span>Constraints the engine holds you to</h2>
-
-  <ul class="plain">
-    <li><strong><code>episode_id</code> is stable across midnight.</strong> An episode is one clearance window of one SKU at one FC, from the hour it opens to the hour the listing closes; windows cross midnight. Never derive the id from the calendar date: a date-keyed id splits one window in two, the second half arrives with <code>current_discount = null</code>, the engine treats it as a fresh entry, and the price can move back up on shoppers who saw yesterday's — the one move the system guarantees never happens inside a window. The full assignment rule is the box under contract §03.</li>
-    <li><strong>A restock keeps the id.</strong> Stock arriving mid-window, even one that extends the window so <code>hours_remaining</code> jumps up, is the same listing: send the new, larger counter and the engine re-plans over the longer horizon. The counter moves from the hour after the arrival.</li>
-    <li><strong>A sell-out closes the window.</strong> When the shelf empties, that hour is the last hour of the episode; if stock later arrives under the same listing, those hours are a new episode with a new id and a fresh entry (<code>current_discount = null</code>). Rows that continue an emptied window under the old id are flagged and not priced.</li>
-    <li><strong><code>hours_remaining</code> means hours.</strong> Hours left in the window, this one included, at least 1 and at most <code>data.max_window_hours</code> (config); a larger value is rejected as a feed defect. Within one id it decrements by exactly one per hour, with the one restock exception above. Build that consistency check into your side: any other jump means the id is stitching two windows together or a feed hour is missing.</li>
-    <li><strong><code>current_discount</code></strong> is <code>null</code> on the first hour of an episode and a fraction (<code>0.15</code>, not <code>15</code>) on every later one. Prices only hold or deepen within an episode; the engine's action set enforces it.</li>
-    <li><strong><code>cost</code> and <code>original_price</code></strong> are per-request inputs, per hour, per FC. Cost sets the price floor; a stale or missing cost either blocks legal discounts or rejects the row.</li>
-    <li><strong>The feature table is the morning's, in the morning's id spelling.</strong> A batch joins its entry requests to <code>features/&lt;today&gt;.parquet</code> on SKU and centre; a SKU absent from it prices as "unknown" and is counted. A table from an earlier day still prices and is counted (<code>entry_requests_on_stale_features</code>): a non-zero count means the morning lane did not run. <code>--history</code> exists for the day before the first morning.</li>
-    <li><strong>The feed keeps every priced hour</strong>, zero-sale hours included. Outcomes are built from the feed, so a priced hour the feed drops is a completeness miss (contract §07), and the zero-sale rows are most of the evidence.</li>
-    <li><strong>One request per hour per episode.</strong> A second request for a priced hour is refused (<code>already_priced</code>); two rows for one hour in one batch are both refused (<code>duplicate_request</code>).</li>
-  </ul>
 
 </section>
 
-
-<section id="what-you-do-not-build">
-  <h2><span class="num">06</span>What you do not build</h2>
-
-  <ul class="plain">
-    <li><strong>Outcomes.</strong> <code>daily.ingest_outcomes</code> builds them from the feed and matches them to decisions on <code>(sku_id, fc, date, hour_of_day)</code>; the outcome id is that key. You keep the feed landing.</li>
-    <li><strong>Features.</strong> The morning lane builds the day's feature table from the feed you already deliver; the batch joins to it. You never compute a rate.</li>
-    <li><strong>Forecasts.</strong> The engine resolves demand from the frozen model; a later hour of an episode is priced from the entry decision's stored forecast path and the features it recorded, so nothing is recomputed on your side.</li>
-    <li><strong>Monitoring and guardrails.</strong> The monitor, assurance and the stop conditions run inside <code>advance --feed</code>.</li>
-  </ul>
-
-</section>
-
-
-<section id="how-to-prove-the-integration-end-to-end">
-  <h2><span class="num">07</span>The rehearsals: what each one proves, and this timeline against a simulated shop</h2>
-
-<p class="prose">Three rehearsals exist, and none of them is production minus one piece; each is closest on a different axis. Production is real demand, with the engine's price on the shelf, and the loop closed: the engine's own prices produce the outcomes it learns from.</p>
-
-  <div class="tscroll">
-    <table>
-      <thead><tr><th></th><th>Shadow</th><th>Pilot simulator</th><th>The e2e cycle</th></tr></thead>
-      <tbody>
-        <tr><td>The demand</td><td>real: your hold-out history</td><td>assumed elasticity</td><td>assumed elasticity</td></tr>
-        <tr><td>The engine's price on the shelf</td><td>never; re-anchored on legacy's price each hour</td><td>yes</td><td>yes</td></tr>
-        <tr><td>Outcomes from the engine's own prices</td><td>no: legacy's outcomes, stamped "not applied"</td><td>yes</td><td>yes</td></tr>
-        <tr><td>The daily lane, learning, stops</td><td>not run</td><td>all of it, day after day</td><td>ingest and export only</td></tr>
-        <tr><td>Your interface exercised</td><td>no</td><td>no: states handed to the engine directly</td><td>yes: the twelve fields, the feed, the pairing</td></tr>
-        <tr><td>What it proves</td><td>the engine behaves on real data, and what exploration would cost; the owner's launch gate</td><td>the machine holds together over time: the alarms fire on their causes, the learner converges, the lane never deadlocks</td><td>your loop can be closed at all</td></tr>
-        <tr><td>Who runs it</td><td>the owner, once, before launch</td><td>the owner</td><td>you</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-<p class="prose">The one thing no rehearsal can give before launch is the engine's prices meeting real demand. That is the pilot itself, which is why the first weeks are gated daily and every stop condition is armed from day one.</p>
-
-<p class="prose">The pilot simulator (<code>evaluate.pilot_sim</code>) runs the timeline in §03 for real, against a shop it simulates: demand at an assumed elasticity, faults injected where they would arise in your systems, a control arm on the old markdown path. The engine and the whole daily lane are the production code. What changes between the rehearsal and the pilot is only who plays the shop and who plays you:</p>
-
-  <div class="tscroll">
-    <table>
-      <thead><tr><th>Phase</th><th>In the simulator</th><th>In production</th></tr></thead>
-      <tbody>
-        <tr><td>The shop</td><td>demand drawn at an assumed elasticity, at the frozen model's own level</td><td>your store</td></tr>
-        <tr><td>Openings</td><td>hold-out episodes from your extract, re-dated onto simulated days</td><td>your live clearance windows</td></tr>
-        <tr><td>Every hour</td><td>the simulator hands the engine its states directly; the integration cycle below sends the twelve fields through <code>ops.price_batch</code> instead</td><td>your caller sends the twelve fields to <code>ops.price_batch</code></td></tr>
-        <tr><td>Applying the price</td><td>the shop applies it, or a fault makes it fail, mismatch, or go missing</td><td>you apply it, report the failures</td></tr>
-        <tr><td>The feed</td><td>the shop writes hourly rows in your source schema</td><td>your hourly FLC feed</td></tr>
-        <tr><td>Every morning</td><td>the same lane functions in the same order, at a configured hour</td><td><code>ops.advance --feed --failures</code> on your cron</td></tr>
-        <tr><td>The gate</td><td><code>--apply</code> runs itself on the cadence</td><td>the owner approves it</td></tr>
-        <tr><td>Every week</td><td>the extract is rebuilt from every simulated hour; the real prepare chain, re-fit and re-seal run on it</td><td>the morning run pulls the extract from the source, prepares, re-fits and re-seals</td></tr>
-        <tr><td>Stops</td><td>the monitor suspends; the grading checks each stop fired on its cause and only then</td><td>the monitor suspends; the owner investigates and resumes</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-<p class="prose">So a report from the simulator says nothing about what the engine will earn (the shop's elasticity was an input) and everything about whether the machine holds together: prices never rise inside an episode or fall below cost, every hour with stock is priced and stored, the alarms fire on their causes and stay quiet otherwise, the learner moves toward the truth it was given inside its own uncertainty, and the lane runs day after day without deadlocking.</p>
-
-<h3>Proving your side before any of your code exists</h3>
-
-<p class="prose">Nothing below needs your code. It needs the sealed bundle in <code>artifacts/</code> and a prepared extract under <code>data/</code>; the owner's agent produces both (<code>ops.bootstrap_loop</code>, then <code>ops.init_posterior</code>).</p>
-
-<p class="prose"><strong>Step 1 — watch one cycle.</strong></p>
-
-<pre class="json">python3 -m tools.e2e_cycle --input data/prepared.parquet --episodes 50 --hours 6 --workers 0</pre>
-
-<p class="prose">This wipes and rebuilds <code>sim/e2e/</code> and writes every file you will handle in production:</p>
-
-  <div class="tscroll">
-    <table>
-      <thead><tr><th>File under <code>sim/e2e/</code></th><th>What it represents</th></tr></thead>
-      <tbody>
-        <tr><td><code>requests/&lt;date&gt;T&lt;hh&gt;.jsonl</code></td><td>What you send, one file per hour, twelve fields</td></tr>
-        <tr><td><code>decisions/&lt;date&gt;T&lt;hh&gt;.jsonl</code></td><td>What you get back, one response row per request</td></tr>
-        <tr><td><code>feed/&lt;date&gt;.parquet</code></td><td>The hourly FLC feed you already produce, in its source column names</td></tr>
-        <tr><td><code>features/&lt;date&gt;.parquet</code></td><td>The day's feature table the batches priced on, as the morning lane writes it</td></tr>
-        <tr><td><code>exports/decisions.parquet</code>, <code>exports/outcomes.parquet</code></td><td>The paired tables the daily lane exports for the warehouse</td></tr>
-        <tr><td><code>e2e_report.json</code></td><td>The cycle's counts</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-<p class="prose"><strong>Step 2 — read the counts.</strong> In <code>e2e_report.json</code> and the printed summary, these must be zero: <code>price_mismatches</code>, <code>decisions_colliding_on_hour</code>, <code>outcomes_per_decision_over_one</code>, <code>missing_stockout_field</code>. <code>requests_with_unknown_features</code> and <code>non_entry_requests_without_stored_path</code> should be zero here too (the harness prices every entry hour and feeds the history it built); a non-zero count in your own integration is a plumbing fault — an id spelling, a history table cut short, an entry hour skipped. Every rejection is listed with its reason.</p>
-
-<p class="prose"><strong>Step 3 — price a batch from real data.</strong> Build one hour's requests from the prepared extract, one row per open episode, and write it twice: as JSONL and as parquet with a datetime <code>date</code> column. Price each with the full source table as history, then send the JSONL batch a second time:</p>
-
-<pre class="json">python3 -m daily.features --as-of &lt;the day&gt;          # seeds the rolling feed from data/flc_raw.parquet
-python3 -m ops.price_batch --requests &lt;file&gt; --features features/&lt;the day&gt;.parquet \
-    --out sim/batch/&lt;name&gt;.jsonl --report sim/batch/&lt;name&gt;.json --workers 0</pre>
-
-<p class="prose">Check: ids echo the request ids; every priced row sits on the discount grid (<code>pricing.tier_step</code> in config); JSONL and parquet price identically; the resend returns <code>already_priced</code> on every row; unknown-feature requests are few and are genuinely new SKUs. Steps 1 and 3 write to the event store the config names, so clear that store before launch.</p>
-
-<p class="prose"><strong>Step 4 — the checklist.</strong> Contract §08, in the order things go wrong: have you watched one cycle run; is <code>episode_id</code> stable across midnight; does <code>hours_remaining</code> mean hours; does the feed keep every priced hour, zero-sale hours included; can you report a failed push; are <code>cost</code> and <code>original_price</code> available per hour, per FC.</p>
-
-</section>
-
-
-<section id="operational-rules">
-  <h2><span class="num">08</span>Operational rules</h2>
-
-  <ul class="plain">
-    <li><strong>Reload the posterior once per batch</strong> if you lift the engine into a long-lived service (<code>PosteriorStore.reload()</code> before pricing). The monitor writes suspensions and <code>--apply</code> writes updates into the same file from other processes; a handle that never reloads keeps exploring on a suspended pilot. <code>ops.price_batch</code> does this for you.</li>
-    <li><strong>The exploration budget comes from the store</strong> (<code>PosteriorStore.tau</code>), never from <code>exploration.tau_initial</code> in config, which is only the launch value.</li>
-    <li><strong>Never run <code>daily.update --apply</code>.</strong> It is the operator's gate.</li>
-    <li><strong>Safety is structural</strong>, not configured on your side: the cost floor and the never-rises-within-a-window rule live in the engine's action set. There is nothing for the caller to check or enforce.</li>
-    <li><strong>The bundle is sealed.</strong> Do not edit <code>artifacts/</code> or <code>config.yaml</code>; a moved file shows as a red seal row in <code>ops.status</code> and the lane stops.</li>
-  </ul>
-
-</section>
-
-
-<section id="who-owns-what">
-  <h2><span class="num">09</span>Who owns what</h2>
-
-  <div class="tscroll">
-    <table>
-      <thead><tr><th>Responsibility</th><th>Owner</th></tr></thead>
-      <tbody>
-        <tr><td>Artifacts, model, config, the prior gate, <code>data.launch_date</code></td><td>The product owner</td></tr>
-        <tr><td>Hourly caller, price application, failed-push reporting, the daily cron, the feed</td><td>Engineering</td></tr>
-        <tr><td>Outcomes, forecasts, learning, monitoring, guardrails, stop conditions</td><td>The engine</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-</section>
+<footer>
+  <p>
+    Field lists are read directly from the running system — <code>events/store.py</code>
+    (<code>DECISION_REQUIRED</code>, <code>OUTCOME_REQUIRED</code>),
+    <code>engine/decide.py</code> for what the agent emits,
+    <code>daily/ingest_outcomes.py</code> for how outcomes are built from the feed, and
+    <code>config.yaml</code> for every threshold quoted in Appendix G.
+  </p>
+  <p>
+    Every payload in §06 was generated by running the real decision path against the frozen
+    artifacts and capturing what it emitted — including the write-off, classified by the same
+    <code>adjustment_reason</code> function the ingester runs. The long unrounded floats are
+    shown as they arrive, not tidied.
+  </p>
+</footer>
 
 
 </div>

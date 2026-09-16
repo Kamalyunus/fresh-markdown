@@ -1312,7 +1312,10 @@ def test_the_e2e_cycle_prices_ingests_and_pairs(workspace, tmp_path):
     rep = json.load(open(os.path.join(out_dir, "e2e_report.json")))
 
     first = rep["batches"][0]
-    assert first["requests"] == first["decisions"] > 0        # every entry priced
+    assert first["shelves"] == first["decisions"] > 0         # every shelf priced
+    assert first["episodes_new"] == first["shelves"]          # the first hour opens them all
+    later = rep["batches"][1]
+    assert later["episodes_continued"] > 0 and later["closed_rows_seen"] > 0
     # the production path: every batch priced on the day's feature table,
     # written once under features/ (the morning lane's step), no history read
     assert first["features_as_of"] == rep["launch_date"] and first["history_rows"] == 0
@@ -1332,18 +1335,20 @@ def test_the_e2e_cycle_prices_ingests_and_pairs(workspace, tmp_path):
     assert all(o == outcome_id_of(hour_key(s, f, d, h))
                for o, s, f, d, h in zip(m.outcome_id, m.sku_id, m.fc, m.date, m.hour_of_day))
 
-    # the first hour's batch, sent again: every request is refused as
-    # already priced -- two decisions never land on one feed row
+    # the first hour's snapshot, sent again through the same script: every
+    # shelf is refused as already priced -- two decisions never land on
+    # one feed row
+    from ops import price_hour
     with open(rep["config_path"]) as f:
         c = yaml.safe_load(f)
-    history = price_batch.load_history("data/prepared.parquet", c)
-    rows, events, again = price_batch.run(
-        c, price_batch.read_requests(first["requests_path"]), history)
+    table = pd.read_parquet(rep["features"][rep["launch_date"]])
+    rows, events, again = price_hour.run(
+        c, price_hour.read_snapshot(first["snapshot_path"]), hour=first["hour"], features=table)
     assert not events and again["decisions"] == 0
     assert all(r["rejected"].startswith("already_priced") for r in rows)
 
     # every write went under the workspace; production is byte-identical
     assert {p: file_digest(p) for p in frozen} == frozen
     assert not os.path.exists(cfg["posterior"]["path"])
-    for sub in ("requests", "decisions", "feed", "exports", "events_store"):
+    for sub in ("snapshots", "decisions", "feed", "features", "exports", "events_store"):
         assert os.listdir(os.path.join(out_dir, sub))

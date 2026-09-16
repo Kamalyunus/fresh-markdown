@@ -249,7 +249,7 @@ def quality_counts(decisions, outcomes, cfg, duplicate_counts=None, pairs=None,
             continue
         # a push engineering REPORTED as failed is not a silent mismatch:
         # the gate catches the failures the failures table missed
-        # (docs/event_contract.html); the reported ones are counted apart
+        # (docs/engineering_handover.html); the reported ones are counted apart
         # and NOT compared, so the rate is over the pushes actually judged
         if not is_learnable(o):
             reported += 1

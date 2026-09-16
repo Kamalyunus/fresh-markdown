@@ -6,7 +6,7 @@ import re
 from events.contract import DECISION_OPTIONAL, DECISION_REQUIRED, OUTCOME_REQUIRED
 
 DOC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                   "docs", "event_contract.html")
+                   "docs", "engineering_handover.html")
 
 # Names the doc prints that are deliberately not event fields: the two
 # conditional outcome fields, and the request-state names, which differ from
@@ -38,14 +38,14 @@ def documented_fields():
 def test_every_required_decision_field_is_documented():
     missing = [f for f in DECISION_REQUIRED if f not in documented_fields()]
     assert not missing, (
-        f"docs/event_contract.html does not mention {missing}. A required "
+        f"docs/engineering_handover.html does not mention {missing}. A required "
         "field absent from the contract is one an integration will not send.")
 
 
 def test_every_required_outcome_field_is_documented():
     missing = [f for f in OUTCOME_REQUIRED if f not in documented_fields()]
     assert not missing, (
-        f"docs/event_contract.html does not mention {missing}. The outcome "
+        f"docs/engineering_handover.html does not mention {missing}. The outcome "
         "event is what the feed ingester stores -- it must be whole.")
 
 
@@ -89,5 +89,5 @@ def test_the_doc_invents_no_fields():
     known = set(DECISION_REQUIRED) | set(DECISION_OPTIONAL) | set(OUTCOME_REQUIRED) | NOT_EVENT_FIELDS
     invented = sorted(documented_fields() - known)
     assert not invented, (
-        f"docs/event_contract.html names {invented}, which no event carries. "
+        f"docs/engineering_handover.html names {invented}, which no event carries. "
         "Either the schema was renamed and the doc was not, or it is a typo.")

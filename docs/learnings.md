@@ -917,6 +917,27 @@ now. Dates are owner sign-off.
   the features it stood on so a later hour never recomputes them as of
   another day. The hourly path is now join, predict once, solve, commit.
 
+- **The handoff asked engineering to speak our language.** Twelve fields,
+  an episode id, an anchor discount: every one derivable from the hourly
+  table they already produce, and the id rule was the one integration bug
+  that kept recurring. `ops.price_hour` takes the shelf snapshot in the
+  feed's own schema and answers in their units; `ops.check_inputs` turns
+  the contract's checklist into a script result. The handover page
+  became a process — phases, tasks, outputs, actions — with the contract
+  as its appendices, and the rehearsal drives the same script the cron
+  will.
+
+- **The consumer must not define the producer's data** (owner). The first
+  cut of `ops.price_hour` derived the episode id itself, against the
+  store's latest decision — convenient, and wrong in ownership: the id
+  names the producers' listing, they know whether it was extended or
+  relisted, and the whole pipeline will one day be theirs to run. The
+  id went back to them, with the rule shipped as a script
+  (`ops.assign_episode_ids`: one hour's rows against the hour before,
+  nothing else) to run or port; the hourly script reads the id as
+  given, refuses a row without one, and evaluates the rule only to count
+  disagreements. What we own is the check, never the assignment.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,

@@ -350,3 +350,18 @@ def test_an_episodes_path_carries_the_features_its_entry_stood_on(cfg, tmp_path)
     assert store.episode_paths["EP-old"]["features"] is None
     assert store.episode_paths["EP-new"]["features"] == (0.75, None)
     assert EventStore(cfg, root=store.root).episode_paths["EP-new"]["features"] == (0.75, None)
+
+
+def test_the_store_knows_the_latest_decision_on_every_shelf(cfg, tmp_path):
+    """ops.price_hour continues an episode from the store's latest decision
+    per (sku, fc): the later hour wins whatever order the lines were
+    written in, and a reload reads the same."""
+    from conftest import decision_event
+    store = EventStore(cfg, root=str(tmp_path / "e"))
+    assert store.emit_decision(decision_event(decision_id="D18", episode_id="EP", hour_of_day=18,
+                                              hours_remaining=3, q_remaining=2))
+    assert store.emit_decision(decision_event(decision_id="D17", episode_id="EP", hour_of_day=17,
+                                              hours_remaining=4, q_remaining=3))
+    last = store.latest_by_shelf[("S0", "FC-04")]
+    assert last["hour_of_day"] == 18 and last["hours_remaining"] == 3 and last["q_remaining"] == 2
+    assert EventStore(cfg, root=store.root).latest_by_shelf[("S0", "FC-04")] == last

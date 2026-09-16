@@ -7,8 +7,8 @@ Legacy history cannot point-identify price elasticity (price is collinear
 with hour-of-day under the legacy ramp), so history supplies baseline
 demand, dispersion, correlation structure and a bounded prior — elasticity
 itself is learned in production from IL-budgeted randomized exploration.
-Engineering's handover page is [`docs/engineering_handover.html`](docs/engineering_handover.html);
-the integration contract it points at is `docs/event_contract.html`.
+Engineering's page is [`docs/engineering_handover.html`](docs/engineering_handover.html):
+the process phase by phase, then the integration contract as its appendices.
 
 ## Layout
 
@@ -106,13 +106,17 @@ run, the faults, the paths — live in `pilot_sim.yaml` beside
 
 ```bash
 python3 -m tools.e2e_cycle --episodes 20 --hours 3     # one integration cycle under sim/e2e
-python3 -m ops.price_batch --requests hour.jsonl --features features/<today>.parquet --out decisions.jsonl
+python3 -m ops.assign_episode_ids --hour rows.parquet --previous last_hour.parquet --out snapshots/<hour>.parquet   # the producers' id step (theirs to run or port)
+python3 -m ops.check_inputs --snapshot s.parquet --feed f.parquet --failures x.csv   # their three tables, checked
+python3 -m ops.price_hour --snapshot snapshots/<hour>.parquet --features features/<today>.parquet --out <hour>.csv
+python3 -m ops.price_batch --requests hour.jsonl --features features/<today>.parquet --out decisions.jsonl   # the 12-field caller beneath it
 ```
 
 The cycle is what engineering's Lane B does in production, run once
 against the simulated shop — the pilot simulator's own, driven hour by
-hour with a pricer that goes through `ops.price_batch` (the reference
-caller — the contract's 12 fields in, a price per request out) instead of
+hour with a pricer that goes through `ops.price_hour` (the hourly script:
+the shelf snapshot in the feed's schema in, with the episode ids the
+producers assign — the shop assigns them here — a price per shelf out) instead of
 the engine — then the feed the shop wrote, `daily.ingest_outcomes` naming
 the outcomes from the feed row, the exported pair tables.
 

@@ -126,7 +126,7 @@ def validate_state(s, tiers, anchor_discount, mu_ref_path, cfg):
 def decide(state, posterior_store, event_store, cfg, rng, tau_current,
            baseline_version, spread_sink=None, config_digest=None):
     """Price one decision interval and emit the decision event (design 5.10;
-    field contract in docs/event_contract.html). `state` carries the episode
+    field contract in docs/engineering_handover.html). `state` carries the episode
     context (mu_ref_path index 0 = now; current_discount None at entry).
     `spread_sink` receives (costs, log moves, delta_min) over the admissible
     tiers out of band, before the draw, so the record is tau-independent.

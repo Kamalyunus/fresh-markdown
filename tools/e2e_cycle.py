@@ -2,8 +2,10 @@
 
 What engineering's Lane B does in production, run once against a
 simulated shop so the whole loop can be seen before a line of their code
-exists: price requests in the contract's 12 fields go in per hour
-(`ops.price_batch`), decisions come back with the price to apply and the
+exists: the shelf at the top of the hour goes in, in the feed's own
+schema with the episode ids the shop assigns as the producer would
+(`ops.assign_episode_ids` is the rule; `ops.price_hour` reads the ids as
+given and builds the requests), decisions come back with the price to apply and the
 `decision_id`, the shop applies them and sells, the hourly feed lands in
 the source schema, `daily.ingest_outcomes` builds the outcomes and names
 them from the feed row (`feed-<sku>|<fc>|<date>T<hh>`), and
@@ -100,8 +102,9 @@ def _print(rep):
     print(f"workspace {rep['workspace']}  launch {rep['launch_date']}  "
           f"episodes {rep['episodes_opened']}  hours {len(rep['batches'])}")
     for b in rep["batches"]:
-        print(f"  {b['hour']}: {b['requests']} requests -> {b['decisions']} priced "
-              f"({b['explored']} explored), {b['rejected']} rejected   {b['decisions_path']}")
+        print(f"  {b['hour']}: {b['shelves']} shelves -> {b['decisions']} priced "
+              f"({b['episodes_new']} new, {b['episodes_continued']} continued, "
+              f"{b['explored']} explored), {b['rejected']} rejected   {b['decisions_path']}")
     ing = rep["ingest"]
     print(f"feed {rep['feed_rows']} rows -> {rep['feed_path']}")
     print(f"ingest: {ing['outcomes_built']} outcomes built, {ing['emitted']} emitted, "

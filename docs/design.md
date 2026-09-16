@@ -761,7 +761,7 @@ which is what lets a day whose outcomes arrived late be walked (§5.8).
 The source-data conventions everything below stands on (the write-off
 sentinel, shrink, the counter, percent discounts) were inferred from the
 extract, not decreed: they are registered as claims in
-`docs/event_contract.html` §01, owned by the data's producers, and a
+`docs/engineering_handover.html` §01, owned by the data's producers, and a
 corrected claim is a code change here, never work on their side.
 
 Validation checks nine invariants and **rejects the state rather than
@@ -798,10 +798,25 @@ decision is refused on emit, skipped on load and counted
 outcomes for one hour; an outcome without `is_stockout` never lands
 either (`missing_stockout_field`, the contract's §07 gate).
 
-**Lane B's reference caller is `ops.price_batch`** — one hour's 12-field
-requests in (JSONL, parquet or CSV), one response row per request out, in
-request order: the price to apply and the `decision_id`, or `rejected`
-with the reason. It resolves what the engine needs beyond the request by
+**Lane B's hourly script is `ops.price_hour`** — the shelf at the top of
+the hour in the feed's own schema in, with the `episode_id` the data
+producers assign (they own the data and will own the pipeline, so the id
+that names their listing is theirs; `ops.assign_episode_ids` is
+`EPISODE_RULE` stated for one clock hour against the hour before, shipped
+for them to run or port). The script reads the id as given — a new id is
+an entry decision, the id the store last priced on the shelf continues
+the episode — takes the anchor from the price in force the snapshot
+carries, turns the feed's counter into the horizon through
+`planning_horizon`, and evaluates the rule only to COUNT the ids that
+disagree with it (`episode_ids_disagreeing_with_the_rule`, `LIVE_RULE`),
+never to override one; a response per shelf out in the feed's units
+(`apply_discount_pct`, `apply_price`, or `rejected` — a row without an
+id is rejected, never guessed). `ops.check_inputs` checks engineering's
+three tables against what the chain needs, the feed through the real
+waterfall. Beneath it, **`ops.price_batch`** — one hour's
+12-field requests in (JSONL, parquet or CSV), one response row per request
+out, in request order: the price to apply and the `decision_id`, or
+`rejected` with the reason. It resolves what the engine needs beyond the request by
 the one home for each — `engine.state.build_states` (the frozen model's
 `mu_ref_path` on the two demand-rate features read off the DAY'S FEATURE
 TABLE, `r` from the lookup), one `PosteriorStore` read per batch, one

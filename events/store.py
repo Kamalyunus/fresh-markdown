@@ -1,4 +1,4 @@
-"""events.store -- decision and outcome event log (design 5.10; the field-level contract is docs/event_contract.html).
+"""events.store -- decision and outcome event log (design 5.10; the field-level contract is docs/engineering_handover.html).
 
 Append-only JSONL with duplicate detection, durable writes, and replay. The
 logger never silently discards a malformed event: invalid events are
@@ -114,6 +114,9 @@ class EventStore:
         self._hour_keys = set()          # every hour a stored decision priced
         self._decisions_with_outcome = set()
         self.episode_paths = {}          # episode_id -> the latest decision's path
+        # (sku, fc) -> the latest decision on that shelf: what ops.price_hour
+        # continues an episode from (the chain's window rule, live)
+        self.latest_by_shelf = {}
         for kind, path in (("decision", self.paths["decisions"]),
                            ("outcome", self.paths["outcomes"])):
             torn = []
@@ -153,6 +156,15 @@ class EventStore:
             if key in self._hour_keys:
                 self.completeness_counts["decisions_on_priced_hour"] += 1
             self._hour_keys.add(key)
+            shelf, when = key[:2], (key[2], key[3])
+            last = self.latest_by_shelf.get(shelf)
+            if last is None or (last["date"], last["hour_of_day"]) <= when:
+                self.latest_by_shelf[shelf] = {
+                    "episode_id": evt.get("episode_id"), "date": key[2],
+                    "hour_of_day": key[3],
+                    "hours_remaining": evt.get("hours_remaining"),
+                    "applied_discount": evt.get("applied_discount"),
+                    "q_remaining": evt.get("q_remaining")}
         path = _episode_path(evt)
         if path is not None:
             # the hour the episode OPENED survives every later decision: a

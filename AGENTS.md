@@ -210,10 +210,12 @@ then run `ops.advance` until `reports/launch_readiness.md` says it is
 waiting on `data.launch_date`; the agent pulls the extract per the config's
 split and hold-out dates (`REDSHIFT_*` in `~/.env`), derives every MEASURED
 value, and stops at each owner decision with the evidence. ENGINEERING
-builds Lane B against `docs/event_contract.html` (the caller —
-`ops.price_batch` is the reference, `tools.e2e_cycle` the rehearsal —
-applying the price, reporting failed pushes) and runs the daily lane
-(`advance --feed`) on a cron; `docs/engineering_handover.html` is their page.
+builds Lane B against `docs/engineering_handover.html`, their page
+(`ops.price_hour`: the feed's rows in with the episode id THEY assign —
+`assign_episode_ids` is the rule as their script; ids read as given,
+disagreements counted — a price per shelf out; `price_batch` beneath it;
+`check_inputs` gates their tables; `tools.e2e_cycle` rehearses; they apply
+the price, report failed pushes, cron the daily lane `advance --feed`).
 
 It owns the order and recomputes state from disk every run. Phase by
 phase — what runs, which config keys move, and who moves them:
@@ -335,7 +337,7 @@ fixture re-derives fixture values — read them, never commit them
 | the weeks after launch, before launch (`evaluate.pilot_sim` drives `pilot_shop` + `pilot_grade`: real engine + daily lane vs a simulated shop; settings in `pilot_sim.yaml`, key table in §11.3) | §11.3 |
 | posterior, update, operator gate | §5.9, §5.11 |
 | monitoring, guardrails, stop conditions, the pilot read | §5.12, §11, §12 |
-| events, integration, quarantine | `docs/event_contract.html`; `events/store.py` |
+| events, integration, quarantine | `docs/engineering_handover.html`; `events/store.py` |
 | provenance, seal, freshness, the audit trail (`common/history.py`; `artifacts/history/<bundle>/<sealed_at>/`) | §5.14a; rule 18 |
 | operating the chain end to end, phase order | `ops/advance.py` (`--plan`); rule 1b |
 | operator runbook, review tiers | `RUNBOOK.md`, `REVIEW_GUIDE.md` |
@@ -347,15 +349,15 @@ fixture re-derives fixture values — read them, never commit them
   records, `common/` defines, `fit/` builds the frozen artifacts,
   `evaluate/` grades them (backtest, shadow, thresholds), `daily/` is the
   production lane in run order, `ops/` drives and gates (`advance`,
-  `bootstrap_loop`, `tune`, `status`, `init_posterior`, `seal`; `price_batch`
-  is Lane B's caller), `tools/` is out of review scope. A new module goes
-  where its reader is.
-- Run modules as `python3 -m package.module` from the repo root.
+  `bootstrap_loop`, `tune`, `status`, `init_posterior`, `seal`; `price_hour`
+  and `price_batch` are Lane B's callers, `check_inputs` its gate,
+  `assign_episode_ids` the producers' id rule), `tools/` is out of review
+  scope. A new module goes where its reader is; run `python3 -m package.module` from the root.
 - `--workers N` (`0` = all cores but one) parallelises backtest, shadow,
   `pilot_sim` and `price_batch` (each hour's batch); reports are
-  byte-identical serial or parallel — results return in submission order
-  and only the parent touches the event store; each decision draws its own
-  RNG (`common.parallel.keyed_rng`). Quote the sampling caveat with any
+  byte-identical serial or parallel — results return in submission order,
+  only the parent touches the event store, each decision draws its own RNG
+  (`common.parallel.keyed_rng`). Quote the sampling caveat with any
   sampled-run count — a sample's zero is not the window's.
 - Tests: shared builders live in `tests/conftest.py` (`cfg`,
   `decision_event`/`outcome_event`, `episode_frame`, `_reports`,
@@ -363,8 +365,7 @@ fixture re-derives fixture values — read them, never commit them
   session when `data/` is empty, so a fresh clone's `pytest` passes) —
   extend those, never add a per-file copy. Test a behaviour by calling the
   function; an `inspect.getsource` assertion is reserved for an architecture
-  ban (no second copy of X, no shared state in a worker) that no behavioural
-  test can express.
+  ban (no second copy of X, no shared worker state) no behavioural test can express.
 - Synthetic fixtures: `tools/make_dummy_flc.py` (`--policy randomized` =
   recoverable elasticity, `--policy legacy` = the production confound). It
   must keep emitting both source inventory conventions — regenerate the
@@ -378,11 +379,11 @@ fixture re-derives fixture values — read them, never commit them
 ## Maintaining the documents
 
 The doc surface is small on purpose: `docs/design.md` (the spec),
-`docs/learnings.md` (superseded designs), `docs/event_contract.html` (the
-integration contract), `docs/engineering_handover.html` (engineering's one
-page), this file, `README.md`, `RUNBOOK.md`, `REVIEW_GUIDE.md`. Two are test-guarded: `design.md` (every waterfall stage,
+`docs/learnings.md` (superseded designs), `docs/engineering_handover.html`
+(engineering's one page: the process, then the contract as appendices),
+this file, `README.md`, `RUNBOOK.md`, `REVIEW_GUIDE.md`. Two are test-guarded: `design.md` (every waterfall stage,
 gate, flag and population must appear, no retired rule may read as live —
-`test_docs_match_the_code.py`) and `event_contract.html` (checked against
+`test_docs_match_the_code.py`) and the handover's contract appendices (checked against
 `events/store.py` both ways; its quoted thresholds are NOT guarded — re-read
 them when `monitoring.*` moves; the worked episode is real solver output,
 regenerate it rather than hand-patch numbers).

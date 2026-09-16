@@ -1,6 +1,6 @@
 """engine.state -- the price request becomes the engine's state (design 5.10).
 
-The 12-field request (docs/event_contract.html section 03) is not what
+The 12-field request (docs/engineering_handover.html section 03) is not what
 `engine.decide` prices: the engine also needs the frozen model's
 `mu_ref_path` over the remaining hours -- whose two demand-rate features
 are computed point-in-time from the trailing feed by the one home,

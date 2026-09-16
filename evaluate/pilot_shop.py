@@ -30,14 +30,14 @@ import yaml
 
 from common import episodes, provenance
 from common.config import reference_discount
-from common.io import read_json, write_json, write_jsonl
+from common.io import read_json, write_json
 from common.parallel import EpisodePool, resolve_workers
 from daily import assurance, export_events, monitor
 from daily import ingest_outcomes as ingest
 from daily import update
 from engine import dp as dp_mod
 from engine.posterior import PosteriorStore
-from engine.state import (HISTORY_COLS as HIST_COLS, REQUEST_FIELDS, assemble_state,
+from engine.state import (HISTORY_COLS as HIST_COLS, assemble_state,
                           ref_rate_table,
                           batch_context, hour_grid, price_one, ref_rate_features)
 from events.pairs import hour_key, match_pairs, outcome_id_of, price_matches
@@ -47,7 +47,7 @@ from evaluate.pilot_world import FEED_SCHEMA, World
 from fit import prepare_data
 from fit.artifacts import load_bundle
 from fit.train_baseline import fit_level_calibration, schedule_reaches
-from ops import price_batch
+from ops import price_hour
 from ops import seal as seal_mod
 from ops import status
 
@@ -749,11 +749,14 @@ class PilotSim:
 # ------------------------------------------------------------------ Lane B
 
 class LaneBPricer:
-    """The integration cycle's pricer: the hour's states as the contract's
-    12-field requests through ops.price_batch -- which builds its own
-    states (engine.state.build_states) and commits every decision itself
-    -- with the request and decision files engineering would see under
-    `out_dir`. Bound to the shop by PilotSim (`bind`); every batch's
+    """The integration cycle's pricer: the hour's shelves as the top-of-hour
+    SNAPSHOT in the feed's own schema (what engineering hands over, the
+    shop assigning the episode ids as the producer does), plus the hour
+    that just closed from the shop's feed rows, through ops.price_hour --
+    which reads the ids as given, derives the anchors, builds the
+    requests, prices (ops.price_batch) and commits every decision
+    itself -- with the snapshot and response files engineering would see
+    under `out_dir`. Bound to the shop by PilotSim (`bind`); every hour's
     counts are kept in `batches`."""
 
     def __init__(self, out_dir, workers=None, seed=0):
@@ -779,26 +782,51 @@ class LaneBPricer:
             self.table_date, self.tables[date] = date, path
         return self.table
 
+    def snapshot(self, pilot, date, hour):
+        """The shelf at the top of the hour in the feed's schema (sales and
+        ending stock unknown yet), then the rows of the hour that just
+        closed as the shop's feed carries them."""
+        rows = []
+        for ep, s in zip(pilot, map(self.sim._pilot_state, pilot)):
+            anchor = s["current_discount"]
+            # the shop is the producer: it assigns the episode id
+            rows.append({"episode_id": ep["episode_id"],
+                         "date": date, "hour": hour, "skuseq": s["sku_id"], "fc": s["fc"],
+                         "inventory": float(s["q"]),
+                         "discount": None if anchor is None else float(anchor) * 100.0,
+                         "units_sold": None, "normal_asp": float(s["original_price"]),
+                         "final_price": None, "cogs_wo_vat": float(s["cost"]),
+                         "ending_inventory": None,
+                         "flc_window": float(episodes.window_counter(s["hours_remaining"])),
+                         "category": s["category"], "subcategory": s["subcategory"]})
+        prev = pd.Timestamp(date) + pd.Timedelta(hours=int(hour) - 1)
+        prev_day = prev.strftime("%Y-%m-%d")
+        rows += [dict(r, date=prev_day) for r in self.sim.feed_by_day.get(prev_day, [])
+                 if int(r["hour"]) == prev.hour]
+        return rows
+
     def __call__(self, pilot, k, date, hour):
         sim = self.sim
-        requests = [{f: s[f] for f in REQUEST_FIELDS} for s in map(sim._pilot_state, pilot)]
         tag = f"{date}T{hour:02d}"
-        req_path = os.path.join(self.out_dir, "requests", f"{tag}.jsonl")
-        write_jsonl(req_path, requests, fields=REQUEST_FIELDS)
-        rows, events, rep = price_batch.run(
-            sim.cfg, requests, workers=self.workers, seed=self.seed, store=sim.store,
-            model=sim.model, posterior=sim.posterior, r_lookup=self.r_lookup,
-            features=self.features_for(date))
-        dec_path = os.path.join(self.out_dir, "decisions", f"{tag}.jsonl")
-        price_batch.write_rows(rows, dec_path)
-        self.batches.append({"hour": tag, "requests_path": req_path,
+        snapshot = self.snapshot(pilot, date, hour)
+        snap_path = os.path.join(self.out_dir, "snapshots", f"{tag}.csv")
+        os.makedirs(os.path.dirname(snap_path), exist_ok=True)
+        pd.DataFrame(snapshot).to_csv(snap_path, index=False)
+        response, events, rep = price_hour.run(
+            sim.cfg, price_hour.snapshot_rows(snapshot), hour=tag,
+            features=self.features_for(date), workers=self.workers, seed=self.seed,
+            store=sim.store, model=sim.model, posterior=sim.posterior, r_lookup=self.r_lookup)
+        dec_path = os.path.join(self.out_dir, "decisions", f"{tag}.csv")
+        os.makedirs(os.path.dirname(dec_path), exist_ok=True)
+        price_hour.write_response(response, dec_path)
+        self.batches.append({"hour": tag, "snapshot_path": snap_path,
                              "decisions_path": dec_path, **rep})
         by_id = {e["decision_id"]: e for e in events}
-        # a rejected request holds the shelf (the shop's defined fallback),
-        # a priced one is already in the store: the shop must not emit it twice
+        # a rejected shelf holds its price (the shop's defined fallback), a
+        # priced one is already in the store: the shop must not emit it twice
         return [{"evt": None, "rejected": r["rejected"]} if r["rejected"] else
                 {"evt": by_id[r["decision_id"]], "rejected": None, "committed": True}
-                for r in rows]
+                for r in response[:len(pilot)]]
 
 
 PAIR_COLS = ("decision_id", "outcome_id", "sku_id", "fc", "date", "hour_of_day",
