@@ -63,7 +63,7 @@ process changed (before, after, why, source), the config in force, status,
 and what is waited on. Its stops, in order: a moved training input
 (`--retrain` is yours) · a tune BLOCK · a MEASURED value a report could not
 derive · a failed shadow gate · the owner keys · `data.launch_date` · a
-stale extract (after launch, a refreshed extract moves the split manifest alone; the next `advance` absorbs it with the weekly re-fit and re-seal, not a red stop) · then the daily lane
+the weekly extract refresh (after launch it is the cron's own step, not a stop: when the factor schedule falls behind the week being priced, `advance` pulls the extract through yesterday, prepares it, re-fits and re-seals in the same run; it stops only when an extract that already reaches yesterday still cannot reach the week) · then the daily lane
 (ingest, tau walk, monitor, assurance, export, status — it runs even
 while `status` is red, because the rows that go red after launch, a fired
 stop or an assurance verdict, are refreshed only by this lane; stopping
@@ -207,7 +207,10 @@ contract:
 - the daily cron: `advance --feed <yesterday's hourly parquet> --failures
   <that day's failed pushes>` (omit `--failures` on a day with none), which
   ingests outcomes, walks tau, writes monitor/assurance/status/exports and
-  stops at `--apply`.
+  stops at `--apply`. Once a week the same call refreshes the extract
+  (`download_flc` through yesterday, `prepare_data`, the level re-fit, the
+  re-seal) before the lane runs, so the cron host holds `REDSHIFT_*` in
+  `~/.env` and the pull's runtime lands in that morning.
 
 Outcomes are NOT engineering's to produce: `daily.ingest_outcomes`
 builds them from the hourly FLC feed, matched to decisions by (SKU, FC,

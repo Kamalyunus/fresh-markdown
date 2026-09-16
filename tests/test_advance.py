@@ -25,6 +25,7 @@ def _state(**over):
         "schedule_end": "2026-09-07", "expected_schedule_end": "2026-09-07",
         "this_week": "2026-08-31",
         "events": True, "feed": None, "cadence": 7,
+        "prepared_through": "2026-08-27", "yesterday": "2026-08-30",
         "extract_range": ("2026-03-01", "2026-08-28"),
         "status": {"failing": [], "checks": []},
     }
@@ -114,7 +115,13 @@ def test_owner_values_stop_the_driver_with_their_evidence():
     assert not any("launch_date" in d for d in steps[0]["detail"])
 
 
-def test_launch_day_refits_the_schedule_once_and_stops_on_a_stale_extract():
+def test_launch_day_refits_the_schedule_once_and_refreshes_a_stale_extract():
+    """After launch the weekly extract refresh is the cron's own step, never
+    an owner stop: a schedule behind the week being priced on an extract
+    that stops short of yesterday pulls and prepares (the re-fit and
+    re-seal follow on the re-evaluated state). Only an extract that already
+    reaches yesterday and STILL cannot reach the week is a stop -- a data
+    problem, not a missed refresh."""
     steps = advance.plan(_state(launched=False))
     assert steps[0]["phase"] == "launch" and "launch_date" in steps[0]["why"]
     steps = advance.plan(_state(schedule_scope="pre-launch -- through 2026-08-09"))
@@ -122,7 +129,13 @@ def test_launch_day_refits_the_schedule_once_and_stops_on_a_stale_extract():
                                              "ops.seal"]
     steps = advance.plan(_state(schedule_end="2026-08-17",
                                 expected_schedule_end="2026-08-17"))
-    assert steps[0]["kind"] == "stop" and "stale" in steps[0]["why"]
+    assert [s["args"][0] for s in steps] == ["fit.download_flc", "fit.prepare_data"]
+    assert steps[0]["args"][1:] == ["--start-date", "2026-03-01"]   # through yesterday
+    assert steps[1]["reevaluate"] and all(s["phase"] == "launch" for s in steps)
+    steps = advance.plan(_state(schedule_end="2026-08-17",
+                                expected_schedule_end="2026-08-17",
+                                prepared_through="2026-08-30"))
+    assert steps[0]["kind"] == "stop" and "current" in steps[0]["why"]
 
 
 def test_the_daily_lane_ends_at_the_operator_gate_never_past_it():

@@ -489,7 +489,7 @@
 
 <figure class="timeline">
 <svg viewBox="0 0 1000 400" role="img" style="max-width:100%;height:auto;display:block;color:var(--ink);font-family:var(--body)"
-     aria-label="The pilot as a timeline. Before launch and on launch day the owner runs the chain and sets the launch date. Every hour engineering sends twelve-field requests to the engine, gets a price and a decision id back, applies it and logs failed pushes. Every morning engineering's cron hands yesterday's feed and failures to the engine's daily lane, which ingests, walks the budget, monitors, runs assurance, exports, and stops at the operator gate the owner approves on cadence. When the factor schedule falls short the same morning run re-fits the level factors and re-seals, on an extract the owner refreshes. When a stop fires the engine suspends exploration while pricing continues, and the owner investigates and resumes.">
+     aria-label="The pilot as a timeline. Before launch and on launch day the owner runs the chain and sets the launch date. Every hour engineering sends twelve-field requests to the engine, gets a price and a decision id back, applies it and logs failed pushes. Every morning engineering's cron hands yesterday's feed and failures to the engine's daily lane, which ingests, walks the budget, monitors, runs assurance, exports, and stops at the operator gate the owner approves on cadence. When the factor schedule falls short the same morning run refreshes the extract through yesterday, re-fits the level factors and re-seals, so the cron host holds the Redshift credentials. When a stop fires the engine suspends exploration while pricing continues, and the owner investigates and resumes.">
   <defs>
     <marker id="hd-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
@@ -517,7 +517,6 @@
   <g stroke="currentColor" stroke-opacity=".55" stroke-width="1" style="fill:var(--surface)">
     <rect x="35" y="72" width="170" height="56" rx="6"/>
     <rect x="435" y="72" width="170" height="56" rx="6"/>
-    <rect x="635" y="72" width="170" height="56" rx="6"/>
     <rect x="815" y="72" width="170" height="56" rx="6"/>
   </g>
   <!-- engine: the real code, tinted -->
@@ -531,6 +530,7 @@
   <g stroke="currentColor" stroke-opacity=".55" stroke-width="1" style="fill:var(--surface)">
     <rect x="235" y="292" width="170" height="56" rx="6"/>
     <rect x="435" y="292" width="170" height="56" rx="6"/>
+    <rect x="635" y="292" width="170" height="56" rx="6"/>
   </g>
   <g font-size="12" text-anchor="middle" fill="currentColor">
     <text x="120" y="90">run <tspan font-family="var(--data)" font-size="11.5">ops.advance</tspan> to the</text>
@@ -539,9 +539,6 @@
     <text x="520" y="90" font-family="var(--data)" font-size="11.5">daily.update --apply</text>
     <text x="520" y="104">the operator gate,</text>
     <text x="520" y="118">on cadence</text>
-    <text x="720" y="90">refresh the extract</text>
-    <text x="720" y="104">when advance says</text>
-    <text x="720" y="118">it is stale</text>
     <text x="900" y="90">investigate, then</text>
     <text x="900" y="104" font-family="var(--data)" font-size="11.5">daily.update</text>
     <text x="900" y="118" font-family="var(--data)" font-size="11.5">--resume-exploration</text>
@@ -552,9 +549,9 @@
     <text x="520" y="200">ingest · budget walk</text>
     <text x="520" y="214">monitor · assurance</text>
     <text x="520" y="228">export · status</text>
-    <text x="720" y="200">level re-fit + re-seal</text>
-    <text x="720" y="214">when the schedule</text>
-    <text x="720" y="228">falls short of the week</text>
+    <text x="720" y="200">pull the extract · re-fit</text>
+    <text x="720" y="214">the level · re-seal, when</text>
+    <text x="720" y="228">the schedule falls short</text>
     <text x="900" y="200">exploration suspended</text>
     <text x="900" y="214">pricing and the lane</text>
     <text x="900" y="228">keep running</text>
@@ -565,6 +562,9 @@
     <text x="520" y="310">cron:</text>
     <text x="520" y="324" font-family="var(--data)" font-size="11.5">ops.advance --feed …</text>
     <text x="520" y="338" font-family="var(--data)" font-size="11.5">--failures …</text>
+    <text x="720" y="310">nothing extra: the same</text>
+    <text x="720" y="324">cron call; the host holds</text>
+    <text x="720" y="338" font-family="var(--data)" font-size="11.5">REDSHIFT_* in ~/.env</text>
   </g>
   <g stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#hd-arrow)">
     <line x1="300" y1="292" x2="300" y2="240"/>
@@ -573,7 +573,7 @@
     <line x1="500" y1="292" x2="500" y2="240"/>
     <line x1="540" y1="182" x2="540" y2="130"/>
     <line x1="605" y1="210" x2="633" y2="210"/>
-    <line x1="720" y1="182" x2="720" y2="130"/>
+    <line x1="720" y1="292" x2="720" y2="240"/>
     <line x1="900" y1="182" x2="900" y2="130"/>
     <path d="M590,238 L590,256 L900,256 L900,240"/>
   </g>
@@ -584,14 +584,13 @@
     <text x="506" y="270">runs the lane</text>
     <text x="534" y="176" text-anchor="end">stops at the gate</text>
     <text x="619" y="176" text-anchor="middle">schedule short</text>
-    <text x="714" y="150" text-anchor="end">needs the fresh</text>
-    <text x="714" y="164" text-anchor="end">prepared extract</text>
+    <text x="726" y="270">once a week</text>
     <text x="894" y="150" text-anchor="end">the red status row</text>
     <text x="894" y="164" text-anchor="end">names the resume path</text>
-    <text x="760" y="252" text-anchor="middle">a stop condition fires</text>
+    <text x="812" y="252" text-anchor="middle">a stop condition fires</text>
   </g>
 </svg>
-<figcaption>The pilot as three parties on one clock. Tinted boxes are the engine, which is our code and runs unchanged; the rest is what you and the owner do around it. Every hour is a request and a price; every morning is one cron call that runs the whole lane and stops at the gate; the weekly re-fit and a suspension are both things that same morning run does on its own rule.</figcaption>
+<figcaption>The pilot as three parties on one clock. Tinted boxes are the engine, which is our code and runs unchanged; the rest is what you and the owner do around it. Every hour is a request and a price; every morning is one cron call that runs the whole lane and stops at the gate; the weekly extract refresh and re-fit, and a suspension, are both things that same morning run does on its own rule.</figcaption>
 </figure>
 
 <p class="prose">What runs at each tick, the command, and who runs it:</p>
@@ -605,7 +604,7 @@
         <tr><td>Every clock hour</td><td>One batch per hour, one request per open episode in the twelve fields; a price or a row-scoped rejection per request; every decision in the store before its price returns. You apply exactly that price and log the pushes that failed.</td><td><code>python3 -m ops.price_batch --requests &lt;hour&gt; --history &lt;trailing feed&gt; --out &lt;hour&gt;.jsonl --report &lt;hour&gt;.json</code></td><td>engineering</td></tr>
         <tr><td>Every morning</td><td>Yesterday's feed and yesterday's failed pushes through the lane, in this order: ingest the outcomes, walk the exploration budget, monitor, assurance, export the paired tables, status. Stops at the operator gate. Runs even while status is red.</td><td><code>python3 -m ops.advance --feed &lt;yesterday.parquet&gt; --failures &lt;yesterday failed pushes&gt;</code></td><td>engineering's cron</td></tr>
         <tr><td>On cadence</td><td>The operator gate: the elasticity belief moves, cell by cell, bounded, only where a cell's batch carries the evidence. A second run that consumes nothing is correct. Never run this yourself.</td><td><code>python3 -m daily.update --apply</code></td><td>the owner</td></tr>
-        <tr><td>Every week</td><td>The level re-fit and re-seal. The same morning <code>advance</code> run does it on its own rule, when the factor schedule no longer reaches the week being priced. It needs a prepared extract that covers the latest weeks; when it does not, <code>advance</code> stops and names the refresh.</td><td>automatic inside the morning run; the refresh: <code>python3 -m fit.download_flc</code>, <code>python3 -m fit.prepare_data</code></td><td>the engine; the owner refreshes</td></tr>
+        <tr><td>Every week</td><td>The extract refresh, the level re-fit and the re-seal. The same morning <code>advance</code> run does all three on its own rule, when the factor schedule no longer reaches the week being priced: it pulls the extract through yesterday, prepares it, re-fits, re-seals, then runs the lane. Nothing extra to schedule; the cron host holds <code>REDSHIFT_*</code> in <code>~/.env</code>, and that morning takes the pull's runtime. It stops only when an extract that already reaches yesterday still cannot reach the week, which is a source-data problem for the owner.</td><td>automatic inside <code>ops.advance --feed</code></td><td>the engine, from engineering's cron</td></tr>
         <tr><td>When a stop fires</td><td>The monitor writes a suspension into the posterior state. The next batch reads it and stops drawing exploration prices; ordinary pricing and the whole morning lane keep running. The red status row names what clears it.</td><td><code>python3 -m daily.update --resume-exploration</code> after investigating</td><td>the owner</td></tr>
       </tbody>
     </table>
@@ -789,7 +788,7 @@ original_price, cost, current_discount</pre>
         <tr><td>The feed</td><td>the shop writes hourly rows in your source schema</td><td>your hourly FLC feed</td></tr>
         <tr><td>Every morning</td><td>the same lane functions in the same order, at a configured hour</td><td><code>ops.advance --feed --failures</code> on your cron</td></tr>
         <tr><td>The gate</td><td><code>--apply</code> runs itself on the cadence</td><td>the owner approves it</td></tr>
-        <tr><td>Every week</td><td>the extract is rebuilt from every simulated hour; the real prepare chain, re-fit and re-seal run on it</td><td>the owner refreshes the extract; the morning run re-fits and re-seals</td></tr>
+        <tr><td>Every week</td><td>the extract is rebuilt from every simulated hour; the real prepare chain, re-fit and re-seal run on it</td><td>the morning run pulls the extract from the source, prepares, re-fits and re-seals</td></tr>
         <tr><td>Stops</td><td>the monitor suspends; the grading checks each stop fired on its cause and only then</td><td>the monitor suspends; the owner investigates and resumes</td></tr>
       </tbody>
     </table>

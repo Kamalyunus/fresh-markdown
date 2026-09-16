@@ -104,10 +104,13 @@ def probe(cfg, root="reports", feed=None, retrain=False, failures=None):
     # this week, and that is a data problem to stop on, not a loop to run.
     this_week = episodes.week_key(
         pd.Series([pd.Timestamp.now("UTC").tz_localize(None)]))[0]
-    expected_end = None
+    expected_end, prepared_through = None, None
     if os.path.exists(PREPARED):
-        last = episodes.week_key(pd.read_parquet(PREPARED, columns=["date"]).date).max()
+        dates = pd.read_parquet(PREPARED, columns=["date"]).date
+        last = episodes.week_key(dates).max()
         expected_end = episodes.week_after(last)
+        prepared_through = str(pd.Timestamp(dates.max()).date())
+    yesterday = str((pd.Timestamp.now("UTC").tz_localize(None) - pd.Timedelta(days=1)).date())
     # a refreshed extract after launch moves the split manifest alone; the
     # weekly re-fit + re-seal is the step that absorbs it (not a red stop)
     manifest_moved = any("split_manifest" in p for p in seal.get("problems") or [])
@@ -138,6 +141,12 @@ def probe(cfg, root="reports", feed=None, retrain=False, failures=None):
         "expected_schedule_end": expected_end,
         "manifest_moved": manifest_moved,
         "this_week": this_week,
+        # how far the prepared extract reaches, and the day a refresh can
+        # reach (download_flc clips at yesterday): the weekly refresh is
+        # the cron's own step once launched, a stop only when a fresh
+        # extract still cannot reach the week being priced
+        "prepared_through": prepared_through,
+        "yesterday": yesterday,
         "events": os.path.isdir(events_dir) and bool(os.listdir(events_dir)),
         "feed": feed,
         # engineering's failed-push table for the same day (RUNBOOK Lane B):
@@ -343,11 +352,24 @@ def _plan_launch(st):
                       "schedule", ["python3 -m fit.train_baseline --input "
                                    f"{PREPARED} --fit-calibration, then ops.seal"])]
     if st["schedule_end"] < st["this_week"]:
-        return [_stop("launch", "the extract is stale: no re-fit can reach the "
-                      "week being priced",
-                      [f"schedule ends {st['schedule_end']}, this week is "
-                       f"{st['this_week']} -- refresh data/prepared.parquet "
-                       "(download_flc + prepare_data), then run again"])]
+        fresh = (st.get("prepared_through") or "") >= (st.get("yesterday") or "")
+        if fresh:
+            return [_stop("launch", "the extract is current but the factor schedule "
+                          "does not reach the week being priced",
+                          [f"schedule ends {st['schedule_end']}, this week is "
+                           f"{st['this_week']}, the extract reaches "
+                           f"{st['prepared_through']} -- the source stopped "
+                           "delivering rows, or the re-fit could not schedule "
+                           "them: read the calibration artifact's coverage"])]
+        # after launch the weekly refresh is this run's own step (engineering's
+        # cron owns it; REDSHIFT_* on the cron host): pull through yesterday,
+        # prepare, then the re-fit + re-seal above absorb the moved manifest
+        start, _ = st["extract_range"]
+        return [_run("refresh the extract (through yesterday)",
+                     ["fit.download_flc", "--start-date", str(start)], phase="launch"),
+                _run("prepare the extract",
+                     ["fit.prepare_data", "--input", RAW, "--out", PREPARED],
+                     phase="launch", reevaluate=True)]
     return None
 
 

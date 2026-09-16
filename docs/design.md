@@ -2153,7 +2153,7 @@ recover exploitation outcomes.
 
 ```
 step                                          writes
-0. fit.download_flc                     data/flc_raw.parquet   (Redshift; REDSHIFT_* from ~/.env)
+0. fit.download_flc                     data/flc_raw.parquet   (Redshift; REDSHIFT_* from ~/.env; after launch, advance --feed re-runs 0-1 weekly when the schedule falls behind)
 1. fit.prepare_data --input <raw>       data/prepared.parquet, artifacts/split_manifest.json
 3. fit.train_baseline --input prepared  artifacts/baseline_model.txt, feature_schema.json
 3b. fit.train_baseline --fit-calibration      artifacts/calibration.json    ┐
@@ -2196,7 +2196,8 @@ python3 -m ops.price_batch --requests <hour.jsonl> --history <flc.parquet> --out
 python3 -m ops.tune              # what to change, on what evidence
 python3 -m ops.tune --apply      # paste MEASURED values, log decisions
 
-# daily production loop -- advance --feed runs it in this order
+# daily production loop -- advance --feed runs it in this order (once a week,
+# when the factor schedule falls behind, it first re-runs steps 0-1, 3b and 11)
 python3 -m daily.ingest_outcomes --feed <yesterday's parquet>
 python3 -m daily.update --calibrate-tau   # tau walks every closed day, no operator
 python3 -m daily.monitor

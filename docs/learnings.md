@@ -897,6 +897,16 @@ now. Dates are owner sign-off.
   discarded, and a report whose digest is the live one is not diffed
   against the config.
 
+- **The weekly refresh was an owner stop.** After launch the factor
+  schedule must reach the week being priced, which needs an extract that
+  reaches yesterday. `advance` stopped and told the owner to refresh it,
+  so the one weekly step the pilot depends on sat outside the cron that
+  runs everything else, on a person's calendar. The `--feed` run now
+  pulls the extract through yesterday, prepares it, re-fits and re-seals
+  when the schedule falls behind, and stops only when a current extract
+  still cannot reach the week, which is a data problem. The cron host
+  holds the Redshift credentials; that is the whole cost.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,
