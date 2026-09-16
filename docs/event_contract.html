@@ -729,7 +729,7 @@
       returning its price, and refuses row by row, never the batch:
     </p>
 <pre class="json">python3 -m ops.price_batch --requests 2026-08-19T17.jsonl \
-    --features features/2026-08-19.parquet --out decisions.jsonl [--report report.json] [--workers N]
+    --features features/2026-08-19.parquet --workers 0 --out decisions.jsonl [--report report.json]
 
 <span class="c">// one request line: the 17:00 entry decision of §06</span>
 {"episode_id": "EP-88213-4471", "sku_id": "SKU-88213", "fc": "FC-04", "category": "vegetables",
