@@ -780,7 +780,26 @@ original_price, cost, current_discount</pre>
 
 
 <section id="how-to-prove-the-integration-end-to-end">
-  <h2><span class="num">07</span>The rehearsal: this timeline against a simulated shop</h2>
+  <h2><span class="num">07</span>The rehearsals: what each one proves, and this timeline against a simulated shop</h2>
+
+<p class="prose">Three rehearsals exist, and none of them is production minus one piece; each is closest on a different axis. Production is real demand, with the engine's price on the shelf, and the loop closed: the engine's own prices produce the outcomes it learns from.</p>
+
+  <div class="tscroll">
+    <table>
+      <thead><tr><th></th><th>Shadow</th><th>Pilot simulator</th><th>The e2e cycle</th></tr></thead>
+      <tbody>
+        <tr><td>The demand</td><td>real: your hold-out history</td><td>assumed elasticity</td><td>assumed elasticity</td></tr>
+        <tr><td>The engine's price on the shelf</td><td>never; re-anchored on legacy's price each hour</td><td>yes</td><td>yes</td></tr>
+        <tr><td>Outcomes from the engine's own prices</td><td>no: legacy's outcomes, stamped "not applied"</td><td>yes</td><td>yes</td></tr>
+        <tr><td>The daily lane, learning, stops</td><td>not run</td><td>all of it, day after day</td><td>ingest and export only</td></tr>
+        <tr><td>Your interface exercised</td><td>no</td><td>no: states handed to the engine directly</td><td>yes: the twelve fields, the feed, the pairing</td></tr>
+        <tr><td>What it proves</td><td>the engine behaves on real data, and what exploration would cost; the owner's launch gate</td><td>the machine holds together over time: the alarms fire on their causes, the learner converges, the lane never deadlocks</td><td>your loop can be closed at all</td></tr>
+        <tr><td>Who runs it</td><td>the owner, once, before launch</td><td>the owner</td><td>you</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+<p class="prose">The one thing no rehearsal can give before launch is the engine's prices meeting real demand. That is the pilot itself, which is why the first weeks are gated daily and every stop condition is armed from day one.</p>
 
 <p class="prose">The pilot simulator (<code>evaluate.pilot_sim</code>) runs the timeline in §03 for real, against a shop it simulates: demand at an assumed elasticity, faults injected where they would arise in your systems, a control arm on the old markdown path. The engine and the whole daily lane are the production code. What changes between the rehearsal and the pilot is only who plays the shop and who plays you:</p>
 
