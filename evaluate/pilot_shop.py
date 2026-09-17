@@ -457,6 +457,11 @@ class PilotSim:
         ending = 0 if close else left                      # write-off sentinel
         row = self.world.feed_row(tpl, date, hour, q, shelf, sold, ending,
                                   hours_remaining=tpl["n_hours"] - t)
+        # the shop is the producer: its feed rows carry the episode id it
+        # assigned, as the nightly feed is asked to (handover 0.2a) -- the
+        # snapshot's closed rows read it, so the live rule's check is the
+        # producer's own answer against the producer's own script
+        row["episode_id"] = ep["episode_id"]
         if not self.world.draw_fault("missing"):
             self.feed_by_day.setdefault(date, []).append(row)
             if self.world.draw_fault("duplicate"):

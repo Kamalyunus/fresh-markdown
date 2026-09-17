@@ -150,10 +150,10 @@ def run(cfg, requests, history=None, workers=None, seed=0, store=None, model=Non
             engine_rejected[res["rejected"]] += 1
             continue
         if not store.emit_decision(res["evt"]):
-            # the store refused the event (quarantine.jsonl says why, or
-            # another batch priced the hour first): an hour not in the
-            # record is not priced
-            rejected[i] = "quarantined: the store refused the decision event"
+            # the store refused the event and says why (another run
+            # committed the hour between plan() and here, or quarantine):
+            # an hour not in the record is not priced
+            rejected[i] = store.last_refusal or "the store refused the decision event"
             quarantined += 1
             continue
         priced[i] = res["evt"]              # request order: to_price is
@@ -162,10 +162,15 @@ def run(cfg, requests, history=None, workers=None, seed=0, store=None, model=Non
     # seen, not priced), so the hour is not mistaken later for one
     # engineering never sent. The store itself skips an hour it holds a
     # decision for, which is what `already_priced` means.
-    rejections = 0
+    rejections, recorded = 0, set()
     for i, reason in sorted(rejected.items()):
         evt = rejection_event(canon.get(i, requests[i]), reason)
-        if evt is not None and store.emit_rejection(evt):
+        # one record per shelf-hour: two requests for one hour
+        # (duplicate_request) are one refused shelf-hour, not a duplicate
+        if evt is None or evt["rejection_id"] in recorded:
+            continue
+        recorded.add(evt["rejection_id"])
+        if store.emit_rejection(evt):
             rejections += 1
 
     rows = []

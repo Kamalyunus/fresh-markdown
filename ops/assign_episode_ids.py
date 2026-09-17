@@ -6,7 +6,10 @@ pipeline, engine included, will be theirs to run. This module is the
 reference implementation of the rule the offline chain applies
 (common.windows.EPISODE_RULE), stated for one clock hour with nothing but
 this hour's rows and the previous hour's rows (already carrying their
-ids): no engine, no store, no state beyond last hour's file.
+ids): no engine, no store, no model, no state beyond last hour's file --
+it imports pandas and this repo's `common/` and `events.pairs` only, so
+it runs where the producers run. tests/test_assign_episode_ids.py holds
+the parity check against the chain over a whole synthetic day.
 
     A shelf's row continues last hour's episode on that shelf when ALL hold:
     last hour's row is exactly one hour earlier; it did not close the shelf
@@ -24,8 +27,7 @@ import argparse
 
 import pandas as pd
 
-from common.windows import planning_horizon
-from engine.state import hours_between
+from common.windows import hours_between
 from events.pairs import ident, iso_day
 
 RULE = ("continue last hour's episode on the shelf when last hour's row is one "
@@ -57,12 +59,13 @@ def continues(prev, row):
         return False
     ending, start, sold = (_num(prev.get("ending_inventory")), _num(prev.get("inventory")),
                            _num(prev.get("units_sold")))
-    if ending is not None and ending <= 0:
+    if ending is not None and ending == 0:
         return False                                       # the write-off zero closed it
     c_prev, c_now = _num(prev.get("flc_window")), _num(row.get("flc_window"))
     if c_prev is None or c_now is None:
         return False
-    step = planning_horizon(c_now) - planning_horizon(c_prev)
+    # the raw counter step, exactly as common.windows.window_signals diffs it
+    step = c_now - c_prev
     if step == -1:
         return True
     if step < -1:

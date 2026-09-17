@@ -982,6 +982,33 @@ now. Dates are owner sign-off.
   whose type changes between days is worse for a warehouse than a null a
   load can see.
 
+- **A fresh-eyes review before launch found what the build had walked past**
+  (owner, 09-17). Four reviewers with separate briefs — the hourly path,
+  redundancy, structure and handoff, the daily lane — and eight defects
+  confirmed. The one that mattered most was created by an improvement:
+  with the decision id the shelf-hour, two overlapping hourly runs each
+  built an in-memory index, both priced the hour, and the second line was
+  dropped on the next load as a duplicate — silently, where UUIDs had
+  made the same collision loud. The store now takes a lock on every emit
+  and re-reads each stream's tail past what it has consumed before it
+  checks (`_consume`), so the second run is refused with the reason
+  named. Two crashes came from what the hourly script HANDED the store:
+  an unreadable counter recorded as-is on a rejection took the next hour
+  down on `float()`, and a null opening stock did the same on the restock
+  test — both now read as unknown. The disagreement count compared the
+  producer's answer against the last DECISION while the rule stepped from
+  the last SEEN hour, so a listing that opened during a refused hour was
+  reported as a contradiction; both are read from the record the rule
+  stepped from. And the store-only rule claimed more than it could know:
+  it never sees a close or a restock, so only a counter reset is decisive
+  from there — the rest is counted as not decidable, which is also the
+  nudge to send the closed rows. Two rules that were meant to be one
+  disagreed at the edges (`<= 0` against `== 0`; truncated against raw
+  counters), caught by a parity test over a synthetic day that should
+  have existed from the start; and the producers' script imported one
+  helper from the engine and so loaded LightGBM — `hours_between` moved
+  to `common.windows`, where the rule lives.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,

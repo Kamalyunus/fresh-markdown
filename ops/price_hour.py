@@ -21,11 +21,12 @@ when they ride along, else the last hour SEEN on that shelf -- but only to
 COUNT the ids that disagree with it (`episode_ids_disagreeing_with_the_rule`,
 with a sample), never to override the producer's id. Every refused row is
 RECORDED (events.store rejections: seen, not priced), so a shelf held
-through a rejection still gives the rule an hour to step from. Where it
-cannot be evaluated even so the answer is unknown, counted as
-`episode_ids_the_rule_could_not_check` and never read as a contradiction
--- and since our own refusals are now in the record, what remains is an
-hour engineering did not send.
+through a rejection still gives the rule an hour to step from. From the
+store alone only a counter RESET is decisive; the rest is counted as
+`episode_ids_not_decidable_from_the_store` (it vanishes when the closed
+rows ride along). A shelf with no hour to step from at all is
+`episode_ids_the_rule_could_not_check` -- and since our own refusals are
+in the record, that is an hour engineering did not send.
 
 Run: python3 -m ops.price_hour --snapshot <top-of-hour rows> \\
         --features features/<today>.parquet --out <hour>.csv --report <hour>.json \\
@@ -42,9 +43,9 @@ import pandas as pd
 
 from common.config import load_config
 from common.io import read_rows, write_json, write_jsonl
-from common.windows import planning_horizon
+from common.windows import hours_between, planning_horizon
 from ops.assign_episode_ids import continues as rule_continues
-from engine.state import hours_between, load_history
+from engine.state import load_history
 from events.contract import rejection_event
 from events.pairs import ident, iso_day
 from events.store import EventStore
@@ -54,18 +55,15 @@ from ops import price_batch
 LIVE_RULE = ("The producer's episode_id is read as given. Checked against the chain's "
              "rule (ops.assign_episode_ids.RULE): a shelf continues last hour's "
              "episode when that hour was one earlier, did not close the shelf, and "
-             "the counter stepped down by one or up/flat with stock arrived. A "
-             "disagreement is counted and sampled, never overridden; a row the "
-             "rule cannot be evaluated against (a gap, a missing counter) is "
-             "counted as unchecked, never as a disagreement.")
+             "the counter stepped down by one or up/flat with stock arrived. With "
+             "last hour's closed row the check is the producer's own script; from "
+             "the store alone only a counter RESET is decisive (the store never sees "
+             "a close or a restock), so the rest is counted as not decidable. A "
+             "disagreement is counted and sampled, never overridden; a shelf with no "
+             "hour to step from is counted as a gap, never as a disagreement.")
 
 RESPONSE_COLS = ("skuseq", "fc", "date", "hour", "episode_id", "decision_id",
                  "apply_discount_pct", "apply_price", "is_exploration", "rejected")
-
-# what a request needs from a snapshot row, in the canonical names
-_NEEDED = ("episode_id", "sku_id", "fc", "date", "hour_of_day", "starting_inventory",
-           "hours_remaining", "original_price", "cost", "category", "subcategory")
-
 
 def read_snapshot(path):
     """The snapshot file's rows (parquet, CSV or JSONL in the feed's
@@ -125,21 +123,26 @@ def split_hours(rows, hour=None):
     return when, openings, closed
 
 
-def rule_says_continues(last, row, closed_row):
-    """What the chain's rule would say for this row: True, False, or None
-    where it CANNOT be said.
+def rule_says_continues(seen, row, closed_row):
+    """What the chain's rule says for this row, as (verdict, basis):
+    verdict True/False/None, basis one of "closed_row", "reset", "gap",
+    "indeterminate".
 
     With the closed row (last hour's feed row) it is
     ops.assign_episode_ids.RULE exactly -- the same inputs the producer's
-    own script had, so its answer is decisive and never None.
+    own script had, so the verdict is decisive ("closed_row").
 
-    Without it the store's latest decision stands in for last hour, and it
-    only stands in when it IS last hour. A gap (an hour we rejected, a
-    missed cron hour, a shelf that left clearance and came back) leaves the
-    rule with nothing to step from, and so does a missing counter or an
-    unreadable remaining stock. Those are None: unknown, never a
-    contradiction. Reading a gap as "a new window" would report every held
-    shelf after a rejection as a disagreement."""
+    Without it the last hour SEEN on the shelf (a decision or a recorded
+    rejection, EventStore.last_seen_by_shelf) stands in, and it can only
+    say one thing for certain: the counter RESET (stepped down by two or
+    more), which is a new window whatever else happened ("reset", False).
+    A step of minus one is only consistent with continuing -- the store
+    never sees a sell-out close; a flat or upward step needs the ending
+    stock the store never holds. Those are "indeterminate": neither a
+    disagreement nor a gap, and they vanish when the closed rows ride
+    along. No seen hour exactly one hour back, or an unreadable counter on
+    either side, is a "gap": nothing to step from -- and since our own
+    refusals are recorded, a gap is an hour engineering did not send."""
     if closed_row is not None:
         prev = {"date": closed_row["key"][2], "hour": closed_row["key"][3],
                 "ending_inventory": closed_row.get("ending_inventory"),
@@ -148,52 +151,72 @@ def rule_says_continues(last, row, closed_row):
                 "flc_window": closed_row.get("hours_remaining"), "episode_id": "x"}
         now = {"date": row["key"][2], "hour": row["key"][3],
                "flc_window": row.get("hours_remaining")}
-        return rule_continues(prev, now)
-    if last is None or last.get("hours_remaining") is None:
-        return None
-    if hours_between(last["date"], last["hour_of_day"], row["key"][2], row["key"][3]) != 1:
-        return None                              # not last hour: nothing to step from
-    if not _finite(row.get("hours_remaining")):
-        return None
-    step = float(planning_horizon(row["hours_remaining"])) - float(last["hours_remaining"])
-    if step == -1:
-        return True
+        return rule_continues(prev, now), "closed_row"
+    if seen is None:
+        return None, "gap"
+    last_h, now_c = _num(seen.get("hours_remaining")), _num(row.get("hours_remaining"))
+    if last_h is None or now_c is None:
+        return None, "gap"
+    if hours_between(seen["date"], seen["hour_of_day"], row["key"][2], row["key"][3]) != 1:
+        return None, "gap"                       # not last hour: nothing to step from
+    step = float(planning_horizon(now_c)) - last_h
     if step < -1:
-        return False
-    q_last = _num(last.get("q_remaining"))
-    if q_last is None:
-        return None                              # the restock test needs last hour's stock
-    return float(row["starting_inventory"]) > q_last
+        return False, "reset"
+    return None, "indeterminate"
 
 
-def build_requests(openings, closed, latest, seen=None):
+def _producers_id_last_hour(closed_row, seen_entry):
+    """The producer's own episode id for the hour the rule stepped from:
+    the closed row's when it rides along and carries one; else the id we
+    recorded for that same hour (a decision or a rejection carries the
+    producer's id as it was sent), so a producer who omits ids on the
+    closed rows still gets the check; else None (nothing to compare)."""
+    if closed_row is not None:
+        eid = closed_row.get("episode_id")
+        if eid is not None and not (isinstance(eid, float) and eid != eid) and str(eid).strip():
+            return eid
+        if seen_entry is not None and (seen_entry["date"], seen_entry["hour_of_day"]) == \
+                (closed_row["key"][2], closed_row["key"][3]):
+            return seen_entry.get("episode_id")
+        return None
+    return seen_entry.get("episode_id") if seen_entry is not None else None
+
+
+def build_requests(openings, closed, latest, seen):
     """The engine's 12-field requests for the openings that can be priced,
-    aligned with `openings` (None where a row is not sent), and the
-    counts: shelves empty, unkeyable, without an episode id, episodes new
-    and continued (by the producer's id), the ids that disagree with the
-    rule (with a sample), and the ids the rule could not be evaluated
-    against at all -- coverage, so a silent skip cannot pass for
-    agreement."""
-    requests = []
+    and the refusals, both aligned with `openings` (a row is in exactly one
+    of them), plus the counts: shelves empty, unkeyable, without an episode
+    id, episodes new and continued (by the producer's id against the last
+    DECISION -- what the anchor and the stored path come from), the ids
+    that disagree with the rule (with a sample), the ids the rule could not
+    check (a gap: no hour to step from) and the ids not decidable from the
+    store alone (they vanish when the closed rows ride along). `latest` is
+    EventStore.latest_by_shelf, `seen` its last_seen_by_shelf."""
+    requests, refused = [], []
     counts = {"shelves_empty": 0, "shelves_unkeyable": 0, "shelves_without_episode_id": 0,
               "episodes_new": 0, "episodes_continued": 0,
               "episode_ids_disagreeing_with_the_rule": 0,
               "episode_ids_the_rule_could_not_check": 0,
+              "episode_ids_not_decidable_from_the_store": 0,
               "rejections_recorded_before_the_request": 0, "disagreements_sample": []}
+
+    def refuse(count, why):
+        counts[count] += 1
+        requests.append(None)
+        refused.append(why)
+
     for r in openings:
         if r["key"] is None:
-            counts["shelves_unkeyable"] += 1
-            requests.append(None)
+            refuse("shelves_unkeyable", "row names no shelf-hour")
             continue
         q = _num(r.get("starting_inventory"))
         if q is not None and q <= 0:
-            counts["shelves_empty"] += 1
-            requests.append(None)
+            refuse("shelves_empty", "empty shelf: nothing to price")
             continue
         eid = r.get("episode_id")
         if eid is None or (isinstance(eid, float) and eid != eid) or str(eid).strip() == "":
-            counts["shelves_without_episode_id"] += 1
-            requests.append(None)
+            refuse("shelves_without_episode_id",
+                   "episode_id missing: the producer assigns it (ops.assign_episode_ids)")
             continue
         eid = str(eid)
         sku, fc, day, hour = r["key"]
@@ -205,31 +228,39 @@ def build_requests(openings, closed, latest, seen=None):
         else:
             counts["episodes_new"] += 1
             anchor = None
-        # the rule steps from the last hour SEEN on the shelf, priced or
-        # refused (EventStore.last_seen_by_shelf), so a shelf held through a
-        # rejection is not a gap; `latest` stays the decision the anchor and
-        # the continued test come from
-        rule = rule_says_continues((seen or latest).get((sku, fc)), r,
-                                   closed.get((sku, fc)))
-        if rule is None:
+        # the rule is checked against the record it STEPS FROM -- last
+        # hour's closed row when it rides along, else the last hour seen on
+        # the shelf, priced or refused -- and so is the producer's own
+        # answer: did their id at this hour keep that record's id?
+        closed_row = closed.get((sku, fc))
+        seen_entry = seen.get((sku, fc))
+        verdict, basis = rule_says_continues(seen_entry, r, closed_row)
+        prev_id = _producers_id_last_hour(closed_row, seen_entry)
+        if basis == "gap" or prev_id is None:
             counts["episode_ids_the_rule_could_not_check"] += 1
-        elif last is not None and rule != continued:
+        elif basis == "indeterminate":
+            counts["episode_ids_not_decidable_from_the_store"] += 1
+        elif verdict != (str(prev_id) == eid):
             counts["episode_ids_disagreeing_with_the_rule"] += 1
             if len(counts["disagreements_sample"]) < 10:
                 counts["disagreements_sample"].append({
                     "skuseq": sku, "fc": fc, "episode_id": eid,
-                    "producer": "continued" if continued else "new",
-                    "rule": "continued" if rule else "new"})
+                    "producer": "continued" if str(prev_id) == eid else "new",
+                    "rule": "continued" if verdict else "new", "basis": basis})
         requests.append({
             "episode_id": eid, "sku_id": sku, "fc": fc,
             "category": r.get("category"), "subcategory": r.get("subcategory"),
             "date": day, "hour_of_day": hour,
+            # an unreadable counter goes as None: validate_request refuses
+            # it with the reason, and the rejection record carries None
+            # rather than a value the rule would choke on next hour
             "hours_remaining": (planning_horizon(r["hours_remaining"])
-                                if _finite(r.get("hours_remaining")) else r.get("hours_remaining")),
+                                if _finite(r.get("hours_remaining")) else None),
             "q": r.get("starting_inventory"),
             "original_price": r.get("original_price"), "cost": r.get("cost"),
             "current_discount": anchor})
-    return requests, counts
+        refused.append(None)
+    return requests, refused, counts
 
 
 def run(cfg, snapshot_rows, hour=None, features=None, history=None, workers=None,
@@ -239,27 +270,36 @@ def run(cfg, snapshot_rows, hour=None, features=None, history=None, workers=None
     scratch copy of the store and commits nothing. Returns (response
     rows, events, report)."""
     if dry_run:
+        # a scratch COPY of the store, removed when the run is over: nothing
+        # a dry run writes can reach the real record, and nothing it copies
+        # outlives it
         scratch = tempfile.mkdtemp(prefix="price_hour_dry_")
-        src = cfg["events"]["store_dir"]
-        if os.path.isdir(src):
-            shutil.rmtree(scratch)
-            shutil.copytree(src, scratch)
-        store = EventStore(cfg, root=scratch)
-    store = store or EventStore(cfg)
+        try:
+            src = cfg["events"]["store_dir"]
+            if os.path.isdir(src):
+                shutil.rmtree(scratch)
+                shutil.copytree(src, scratch)
+            return _run(cfg, snapshot_rows, hour, features, history, workers, seed,
+                        EventStore(cfg, root=scratch), True, model, posterior, r_lookup)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+    return _run(cfg, snapshot_rows, hour, features, history, workers, seed,
+                store or EventStore(cfg), False, model, posterior, r_lookup)
+
+
+def _run(cfg, snapshot_rows, hour, features, history, workers, seed, store, dry_run,
+         model, posterior, r_lookup):
     when, openings, closed = split_hours(snapshot_rows, hour)
-    requests, counts = build_requests(openings, closed, store.latest_by_shelf,
-                                      store.last_seen_by_shelf)
+    requests, refused, counts = build_requests(openings, closed, store.latest_by_shelf,
+                                               store.last_seen_by_shelf)
     sent = [r for r in requests if r is not None]
     rows, events, rep = price_batch.run(cfg, sent, history, workers=workers, seed=seed,
                                         store=store, features=features, model=model,
                                         posterior=posterior, r_lookup=r_lookup)
     answered = iter(rows)
     response = []
-    for r, req in zip(openings, requests):
+    for r, req, why in zip(openings, requests, refused):
         if req is None:
-            why = ("row names no shelf-hour" if r["key"] is None
-                   else "empty shelf: nothing to price" if (_num(r.get("starting_inventory")) or 0) <= 0
-                   else "episode_id missing: the producer assigns it (ops.assign_episode_ids)")
             # recorded as SEEN, not priced: the shelf reached us at this
             # hour, so next hour's rule steps from it instead of reading a
             # gap (a row naming no shelf-hour records nothing -- there is no

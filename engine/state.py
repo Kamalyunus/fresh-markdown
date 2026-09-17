@@ -29,6 +29,7 @@ from common.config import reference_discount
 from common.parallel import keyed_rng
 from common.provenance import config_fingerprint
 from engine.decide import StateRejected, count_failures, decide
+from common.windows import hours_between                      # noqa: F401  (its home; callers keep the name)
 from events.pairs import ident, ident_series, iso_day
 from fit.fit_dispersion import lookup_r
 from fit import prepare_data
@@ -113,14 +114,6 @@ def hour_grid(day, opening_hour, n_hours):
     base = pd.Timestamp(day) + pd.Timedelta(hours=opening_hour)
     return [((base + pd.Timedelta(hours=k)).strftime("%Y-%m-%d"),
              int((base + pd.Timedelta(hours=k)).hour)) for k in range(n_hours)]
-
-
-def hours_between(day_a, hour_a, day_b, hour_b):
-    """Whole hours from (day_a, hour_a) to (day_b, hour_b); negative when
-    b is earlier."""
-    a = pd.Timestamp(day_a) + pd.Timedelta(hours=int(hour_a))
-    b = pd.Timestamp(day_b) + pd.Timedelta(hours=int(hour_b))
-    return int(round((b - a).total_seconds() / 3600.0))
 
 
 def ref_rate_features(history, openings, cfg):

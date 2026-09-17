@@ -175,9 +175,11 @@ contract:
   entry, the id the store last priced on the shelf continues it), takes
   the anchor from the price in force, evaluates the rule only to count
   the ids that disagree (`episode_ids_disagreeing_with_the_rule`,
-  `LIVE_RULE`; a gap the rule cannot step from is counted as
-  `episode_ids_the_rule_could_not_check`, never as a contradiction, and
-  sending the closed rows nearly removes it), builds the 12-field requests and prices them through
+  `LIVE_RULE`; from the store alone only a counter reset is decisive,
+  the rest is `episode_ids_not_decidable_from_the_store` and vanishes
+  when the closed rows ride along; a shelf with no hour to step from is
+  `episode_ids_the_rule_could_not_check`, a gap, never a contradiction),
+  builds the 12-field requests and prices them through
   `ops.price_batch` (the caller beneath it: requests in, a price per
   request out) — then applying the `apply_price` column it returns.
   `ops.check_inputs` checks their three tables (snapshot, feed, failed
@@ -253,7 +255,8 @@ decisions to the hourly feed is a four-column join with no rename and no
 cast; a SKU id that is not an integer is null in `skuseq` and counted.
 Two decisions priced for one hour (a retried batch) match neither and
 are counted (`decisions_colliding_on_hour`); the store itself refuses a
-second decision for a priced hour and a second outcome for a decision
+second decision for a priced hour — under the store's lock, with the tail re-read first, so two
+overlapping hourly runs cannot both price an hour — and a second outcome for a decision
 (`outcomes_per_decision_over_one`), and an outcome without `is_stockout`
 never lands (`missing_stockout_field`). The monitor's safety block
 carries the decision side of completeness — `decisions_colliding_on_hour`

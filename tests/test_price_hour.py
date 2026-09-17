@@ -6,6 +6,7 @@ force, the chain's rule evaluated only to COUNT disagreements
 nothing."""
 import json
 import os
+import tempfile
 
 import pandas as pd
 import pytest
@@ -145,24 +146,29 @@ def test_the_producers_ids_are_read_as_given_and_only_checked_against_the_rule(t
     assert by["7"]["episode_id"] == "7|F1|2026-08-19T18"         # closed -> new
     assert by["8"]["episode_id"] == "8|F1|2026-08-19T17"         # restock -> continued
     assert by["9"]["episode_id"] == "9|F1|2026-08-19T18"         # reset -> new
-    # without the closed rows: 8's opening above its last remaining stock reads as a restock
+    # without the closed rows the store never sees a close or a restock:
+    # 8's opening above its last stock is NOT decidable, only counted so
     latest = store.latest_by_shelf[("8", "F1")]
     assert price_hour.rule_says_continues(latest, price_hour.read_snapshot(
-        _write(tmp_path, [_snap(skuseq=8, hour=19, inventory=9.0, flc_window=4.0)], "o.csv"))[0], None)
-    # the producer keeps 9 on its first id although the rule says a new listing:
-    # priced as continued, counted as a disagreement, never overridden
+        _write(tmp_path, [_snap(skuseq=8, hour=19, inventory=9.0, flc_window=4.0)], "o.csv"))[0],
+        None) == (None, "indeterminate")
+    # the producer keeps 9 on its first id although the closed row said a
+    # new listing: priced as continued, counted as a disagreement, never
+    # overridden -- and on the store path a counter RESET is the one
+    # decisive contradiction
     contra = price_hour.read_snapshot(_write(tmp_path, [
         _snap(skuseq=9, hour=19, inventory=2.0, flc_window=4.0, episode_id="9|F1|2026-08-19T18")], "c.csv"))
     response, ev, rep = _price(cfg, contra, store, posterior, model, table)
     assert response[0]["episode_id"] == "9|F1|2026-08-19T18" and not ev[0]["is_entry"]
     assert rep["episodes_continued"] == 1 and rep["episode_ids_disagreeing_with_the_rule"] == 0
+    assert rep["episode_ids_not_decidable_from_the_store"] == 1      # step -1: consistent, not proof
     contra2 = price_hour.read_snapshot(_write(tmp_path, [
-        _snap(skuseq=9, hour=20, inventory=2.0, flc_window=6.0, episode_id="9|F1|2026-08-19T18")], "d.csv"))
+        _snap(skuseq=9, hour=20, inventory=2.0, flc_window=1.0, episode_id="9|F1|2026-08-19T18")], "d.csv"))
     response, ev, rep = _price(cfg, contra2, store, posterior, model, table)
     assert response[0]["episode_id"] == "9|F1|2026-08-19T18" and not ev[0]["is_entry"]
-    assert rep["episode_ids_disagreeing_with_the_rule"] == 1
+    assert rep["episode_ids_disagreeing_with_the_rule"] == 1        # continued across a reset
     assert rep["disagreements_sample"] == [{"skuseq": "9", "fc": "F1", "episode_id": "9|F1|2026-08-19T18",
-                                            "producer": "continued", "rule": "new"}]
+                                            "producer": "continued", "rule": "new", "basis": "reset"}]
 
 
 def test_a_refused_hour_is_recorded_so_the_shelf_is_still_checkable_next_hour(tmp_path):
@@ -217,19 +223,75 @@ def test_a_gap_is_unknown_to_the_rule_never_a_disagreement(tmp_path):
     assert rep["episodes_continued"] == 1 and rep["episodes_new"] == 0
     assert rep["episode_ids_disagreeing_with_the_rule"] == 0
     assert rep["episode_ids_the_rule_could_not_check"] == 1     # counted, not hidden
-    latest = store.latest_by_shelf[("7", "F1")]
-    assert price_hour.rule_says_continues(latest, gap[0], None) is None
+    seen = store.last_seen_by_shelf[("7", "F1")]
+    assert price_hour.rule_says_continues(seen, gap[0], None) == (None, "gap")
     # with last hour's closed row the rule is decisive again
     closed = _snap(hour=19, inventory=2.0, flc_window=2.0, units_sold=1, ending_inventory=1.0)
     now = price_hour.snapshot_rows([_snap(hour=20, inventory=1.0, flc_window=1.0, episode_id=eid)])[0]
-    assert price_hour.rule_says_continues(None, now, price_hour.snapshot_rows([closed])[0]) is True
+    assert price_hour.rule_says_continues(None, now, price_hour.snapshot_rows([closed])[0]) == (True, "closed_row")
+
+
+def test_an_unreadable_counter_or_stock_is_refused_and_never_crashes_the_next_hour(tmp_path):
+    """A row whose counter cannot be read is refused with the reason and
+    RECORDED with a null counter -- not with the unreadable value, which
+    the rule would have choked on next hour and taken the whole batch
+    down. A null opening stock on a shelf seen last hour is the same
+    story on the other side of the comparison."""
+    cfg, store, posterior, model, table = _world(tmp_path)
+    bad = price_hour.read_snapshot(_write(tmp_path, [
+        _snap(hour=17, inventory=3.0, flc_window="abc")]))
+    response, _, rep = _price(cfg, bad, store, posterior, model, table)
+    assert response[0]["rejected"] and rep["rejections_recorded"] == 1
+    assert store.last_seen_by_shelf[("7", "F1")]["hours_remaining"] is None
+    nxt = price_hour.read_snapshot(_write(tmp_path, [
+        _snap(hour=18, inventory=2.0, flc_window=2.0, episode_id="7|F1|2026-08-19T17")], "n.csv"))
+    _, _, rep = _price(cfg, nxt, store, posterior, model, table)           # no ValueError
+    assert rep["decisions"] == 1 and rep["episode_ids_the_rule_could_not_check"] == 1
+    # a null opening stock: refused by the engine, recorded, and no TypeError
+    # on a shelf whose last hour is in the store
+    nul = price_hour.read_snapshot(_write(tmp_path, [
+        _snap(hour=19, inventory=None, flc_window=1.0, episode_id="7|F1|2026-08-19T17")], "z.csv"))
+    response, _, rep = _price(cfg, nul, store, posterior, model, table)
+    assert response[0]["rejected"] and rep["decisions"] == 0
+
+
+def test_the_producers_answer_is_read_from_the_record_the_rule_stepped_from(tmp_path):
+    """A new listing opened during a refused hour: the last DECISION is on
+    the old id, the last SEEN hour (the rejection) on the new one. The
+    rule steps from the seen hour, so the producer's own answer must be
+    read there too -- judged against the decision it reported a
+    disagreement where the ids were exactly right. The entry/continuation
+    for the ENGINE still follows the last decision (no stored path for
+    the new id: an entry)."""
+    cfg, store, posterior, model, table = _world(tmp_path)
+    _price(cfg, price_hour.read_snapshot(_write(tmp_path, [
+        _snap(hour=16, inventory=3.0, flc_window=5.0)])), store, posterior, model, table)
+    # hour 17: a new listing F opens on the shelf, and the row is refused
+    refused = price_hour.read_snapshot(_write(tmp_path, [
+        _snap(hour=17, inventory=4.0, flc_window=3.0, cogs_wo_vat=99999.0,
+              episode_id="F")], "r.csv"))
+    _, _, rep = _price(cfg, refused, store, posterior, model, table)
+    assert rep["rejections_recorded"] == 1
+    # hour 18 on F, the counter stepping down by one -- consistent, and the
+    # engine prices it as an entry (no stored path for F)
+    nxt = price_hour.read_snapshot(_write(tmp_path, [
+        _snap(hour=18, inventory=3.0, flc_window=2.0, episode_id="F")], "n.csv"))
+    _, ev, rep = _price(cfg, nxt, store, posterior, model, table)
+    assert ev[0]["is_entry"] and rep["episodes_new"] == 1
+    assert rep["episode_ids_disagreeing_with_the_rule"] == 0
+    assert rep["episode_ids_the_rule_could_not_check"] == 0
+    assert rep["episode_ids_not_decidable_from_the_store"] == 1
 
 
 def test_a_dry_run_prices_and_commits_nothing(tmp_path):
+    import glob
     cfg, store, posterior, model, table = _world(tmp_path)
     rows = price_hour.read_snapshot(_write(tmp_path, [_snap()]))
+    before = set(glob.glob(os.path.join(tempfile.gettempdir(), "price_hour_dry_*")))
     response, events, rep = _price(cfg, rows, None, posterior, model, table, dry_run=True)
     assert rep["dry_run"] and rep["decisions"] == 1 and response[0]["decision_id"]
+    # the scratch copy of the store does not outlive the run
+    assert set(glob.glob(os.path.join(tempfile.gettempdir(), "price_hour_dry_*"))) == before
     assert not EventStore(cfg).load_decisions()                   # the real store is untouched
     response2, _, rep2 = _price(cfg, rows, None, posterior, model, table)
     assert rep2["decisions"] == 1                                 # the hour is still free to price

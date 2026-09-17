@@ -117,6 +117,16 @@ def last_rows(d, order=("date", "hour_of_day")):
     return d.sort_values(list(order)).groupby("episode_id").tail(1)
 
 
+def hours_between(day_a, hour_a, day_b, hour_b):
+    """Whole hours from (day_a, hour_a) to (day_b, hour_b); negative when
+    b is earlier. The one clock-step reading the live rule, the hourly
+    script and the producers' script share -- here, not in the engine, so
+    the producers' script needs no engine."""
+    a = pd.Timestamp(day_a) + pd.Timedelta(hours=int(hour_a))
+    b = pd.Timestamp(day_b) + pd.Timedelta(hours=int(hour_b))
+    return int(round((b - a).total_seconds() / 3600.0))
+
+
 # ------------------------------------------------- the window boundary rule
 
 # Persisted with the split manifest; production must derive identical boundaries.

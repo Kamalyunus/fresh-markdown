@@ -791,7 +791,16 @@ attached**, never silently dropped. Two invariants live in the store and
 nowhere else (two callers once re-derived each from a full parse, and two
 concurrent batches could both pass a caller's check): **one decision per
 hour** — `priced_hours` is the store's index, a second decision for a
-priced hour is refused and counted (`decisions_on_priced_hour`) — and
+priced hour is refused and counted (`decisions_on_priced_hour`); every
+emit takes the store's lock (an exclusive flock on `<root>/.lock`) and
+re-reads each stream's tail past what this store has consumed before it
+checks, so two hourly runs that overlap — a retry launched while the
+first still runs — cannot both price an hour: the second re-reads the
+first's line and is refused, loudly, with the reason in `last_refusal`
+(the batch caller's response names it). Without the lock both appended,
+and with the decision id being the shelf-hour the second line was
+dropped on the next load as a duplicate, silently, while engineering may
+have applied the second price — and
 **one outcome per decision** — a second outcome naming an answered
 decision is refused on emit, skipped on load and counted
 (`outcomes_per_decision_over_one`), so the learner can never consume two
@@ -809,13 +818,21 @@ the episode — takes the anchor from the price in force the snapshot
 carries, turns the feed's counter into the horizon through
 `planning_horizon`, and evaluates the rule only to COUNT the ids that
 disagree with it (`episode_ids_disagreeing_with_the_rule`, `LIVE_RULE`),
-never to override one. The rule answers True, False or UNKNOWN: with the
-closed rows it has exactly what the producer's script had and is decisive,
-but standing the store's latest decision in for last hour only works when
-it IS last hour, so a gap (an hour the batch refused, a missed cron hour, a
-shelf that left clearance and returned) is `episode_ids_the_rule_could_not_check`
-rather than a contradiction — reading a gap as a new window reported every
-shelf held through a rejection as a disagreement; a response per shelf out in the feed's units
+never to override one. The rule answers with a verdict and its BASIS:
+with last hour's closed row it has exactly what the producer's script had
+and is decisive; from the store alone (the last hour SEEN on the shelf,
+priced or refused) only a counter RESET is decisive, because the store
+never sees a sell-out close or a restock — a step of minus one is merely
+consistent, an up or flat step needs the ending stock — so those rows are
+`episode_ids_not_decidable_from_the_store` (they vanish when the closed
+rows ride along), and a shelf with no hour to step from at all is
+`episode_ids_the_rule_could_not_check`: a gap, an hour engineering did not
+send. The producer's own answer is read from the same record the rule
+stepped from (did their id keep that record's id?), never from the last
+decision — judged there it reported a disagreement where a new listing
+had correctly opened during a refused hour. A first version read every gap
+as a new window and reported every shelf held through a rejection as a
+disagreement; a response per shelf out in the feed's units
 (`apply_discount_pct`, `apply_price`, or `rejected` — a row without an
 id is rejected, never guessed). `ops.check_inputs` checks engineering's
 three tables against what the chain needs, the feed through the real

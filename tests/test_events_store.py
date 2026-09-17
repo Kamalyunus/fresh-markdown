@@ -397,3 +397,92 @@ def test_the_store_knows_the_latest_decision_on_every_shelf(cfg, tmp_path):
     last = store.latest_by_shelf[("S0", "FC-04")]
     assert last["hour_of_day"] == 18 and last["hours_remaining"] == 3 and last["q_remaining"] == 2
     assert EventStore(cfg, root=store.root).latest_by_shelf[("S0", "FC-04")] == last
+
+
+# ------------------------------------------------ two processes, one store
+def test_two_stores_on_one_directory_cannot_both_price_an_hour(cfg, tmp_path):
+    """Two hourly runs that overlap (a retry launched while the first is
+    still running) each built their index at construction and each saw
+    the hour unpriced. Both appended; with the decision id being the
+    shelf-hour the second line was then dropped on the next load as a
+    duplicate, silently, while engineering may have applied the second
+    price. Every emit now takes the store's lock and re-reads the tail
+    first: the second run is refused, loudly, with the reason named."""
+    root = str(tmp_path / "events")
+    a, b = EventStore(cfg, root=root), EventStore(cfg, root=root)
+    assert a.emit_decision(decision_event(applied_price=8500.0))
+    assert not b.emit_decision(decision_event(applied_price=7000.0))
+    assert b.completeness_counts["decisions_on_priced_hour"] == 1
+    assert b.last_refusal.startswith("already_priced")
+    assert sum(1 for _ in open(os.path.join(root, "decisions.jsonl"))) == 1
+    c = EventStore(cfg, root=root)
+    assert [d["applied_price"] for d in c.load_decisions()] == [8500.0]
+    assert c.duplicate_counts["decision"] == 0
+    # the refresh sees the other's outcomes and rejections too
+    assert a.emit_outcome(_outcome())
+    assert not b.emit_outcome(_outcome())
+    assert b.duplicate_counts["outcome"] == 1
+    from events.contract import rejection_event
+    rej = rejection_event({"sku_id": "S1", "fc": "FC-04", "date": "2026-08-19",
+                           "hour_of_day": 9, "episode_id": "E", "hours_remaining": 3,
+                           "q_remaining": 2}, "cost must not exceed original_price")
+    assert a.emit_rejection(dict(rej)) and not b.emit_rejection(dict(rej))
+    assert b.duplicate_counts["rejection"] == 1
+    assert b.last_seen_by_shelf[("S1", "FC-04")]["hour_of_day"] == 9   # seen through the refresh
+
+
+def test_a_torn_tail_written_by_another_process_is_quarantined_on_refresh(cfg, tmp_path):
+    """A write that died mid-append leaves a line with no newline. The
+    refresh before the next emit quarantines it, closes the line, and the
+    emit's own append does not glue onto it."""
+    root = str(tmp_path / "events")
+    store = _store(cfg, tmp_path)
+    assert store.emit_decision(decision_event(decision_id="D1"))
+    with open(os.path.join(root, "decisions.jsonl"), "a") as f:
+        f.write('{"decision_id": "D2", "torn": tr')          # no newline, invalid JSON
+    assert store.emit_decision(decision_event(decision_id="D3", hour_of_day=18))
+    assert store.quarantined_this_run == 1
+    again = EventStore(cfg, root=root)
+    assert [d["decision_id"] for d in again.load_decisions()] == ["D1", "D3"]
+
+
+def test_rejection_emits_dedup_quarantine_and_yield_to_a_priced_hour(cfg, tmp_path):
+    """The store-level rules for the third stream: a malformed rejection is
+    quarantined ONCE (the quarantine key knows the rejection id); a repeat
+    is a duplicate; an hour the store holds a decision for takes no
+    rejection; and on reopen the seen index is rebuilt from both streams
+    with the decision winning its own hour."""
+    from events.contract import rejection_event
+    root = str(tmp_path / "events")
+    store = _store(cfg, tmp_path)
+    bad = rejection_event({"sku_id": "S1", "fc": "FC-04", "date": "2026-08-19",
+                           "hour_of_day": 9, "episode_id": "E", "hours_remaining": 3,
+                           "q_remaining": 2}, "")                    # an empty reason
+    assert not store.emit_rejection(dict(bad)) and not store.emit_rejection(dict(bad))
+    assert store.quarantined_this_run == 1 and len(store.load_quarantine()) == 1
+    good = rejection_event({"sku_id": "S1", "fc": "FC-04", "date": "2026-08-19",
+                            "hour_of_day": 10, "episode_id": "E", "hours_remaining": 2,
+                            "q_remaining": 2}, "cost must not exceed original_price")
+    assert store.emit_rejection(dict(good)) and not store.emit_rejection(dict(good))
+    assert store.duplicate_counts["rejection"] == 1
+    # the hour the decision_event builder prices (S0, 17) is priced: no rejection lands there
+    assert store.emit_decision(decision_event())
+    priced_hour = rejection_event({"sku_id": "S0", "fc": "FC-04", "date": "2026-08-19",
+                                   "hour_of_day": 17, "episode_id": "EP", "hours_remaining": 2,
+                                   "q_remaining": 2}, "already_priced")
+    assert not store.emit_rejection(priced_hour) and store.load_rejections()[0] == good
+    again = EventStore(cfg, root=root)
+    assert again.last_seen_by_shelf[("S1", "FC-04")]["priced"] is False
+    assert again.last_seen_by_shelf[("S0", "FC-04")]["priced"] is True
+
+
+def test_the_reset_guard_sees_through_a_symlink(cfg, tmp_path):
+    real = tmp_path / "real_store"
+    real.mkdir()
+    link = tmp_path / "events_link"
+    os.symlink(real, link)
+    cfg2 = {**cfg, "events": {**cfg["events"], "store_dir": str(link)}}
+    assert EventStore(cfg2, root=str(link)).emit_decision(decision_event())
+    with pytest.raises(ValueError, match="production event store"):
+        EventStore(cfg2, root=str(real), reset=True)                # the target of the link
+    assert len(EventStore(cfg2, root=str(real)).load_decisions()) == 1

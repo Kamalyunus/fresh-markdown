@@ -55,3 +55,45 @@ def test_the_cli_adds_only_the_episode_id_column(tmp_path):
     got = pd.read_csv(out18)
     assert list(got.columns) == cols + ["episode_id"]
     assert got.episode_id.iloc[0] == "7|F1|2026-08-19T17"
+
+
+def test_the_script_and_the_chain_draw_the_same_window_boundaries_over_a_whole_day(synth_flc):
+    """The one parity check: hour by hour over a synthetic day, the
+    producers' script (this hour's rows against last hour's) must open a
+    window exactly where the chain's vector rule (common.windows,
+    over the whole frame) opens one. The close test is `ending == 0`, the
+    write-off sentinel, on both sides; the counter step is the raw
+    difference on both sides. A gap here is a disagreement the checker
+    would report that the producers could never avoid."""
+    from common import windows
+    from fit.prepare_data import SOURCE_TO_CANONICAL
+    raw = pd.read_parquet(synth_flc)
+    raw["date"] = raw["date"].astype(str)
+    skus = sorted(raw.skuseq.unique())[:80]
+    day = raw[raw.skuseq.isin(skus)].sort_values(["skuseq", "fc", "date", "hour"])
+    day = day[day.date.isin(sorted(day.date.unique())[:10])].reset_index(drop=True)
+    assert len(day) > 100 and windows.window_starts(
+        day.rename(columns=SOURCE_TO_CANONICAL)).sum() > 10     # enough windows to disagree on
+    # the chain, over the frame at once
+    canon = day.rename(columns=SOURCE_TO_CANONICAL)
+    chain_opens = windows.window_starts(canon).to_numpy()
+    # the script, one clock hour at a time, each hour against the last
+    hours = sorted(set(zip(day.date, day.hour)))
+    prev, ids = [], {}
+    for d, h in hours:
+        rows = day[(day.date == d) & (day.hour == h)].to_dict("records")
+        out, _ = aid.assign(rows, prev)
+        for r, o in zip(rows, out):
+            ids[(r["skuseq"], r["fc"], d, h)] = o["episode_id"]
+        prev = out
+    script_ids = [ids[(r.skuseq, r.fc, r.date, r.hour)] for r in day.itertuples()]
+    script_opens = pd.Series(script_ids).ne(
+        pd.Series(script_ids).groupby([day.skuseq, day.fc]).shift()).to_numpy()
+    assert script_opens.tolist() == chain_opens.tolist()
+
+
+def test_only_the_write_off_zero_closes_a_shelf():
+    """`ending == 0` is the contract's sentinel and the chain's test; a
+    negative ending is a defect the chain carries, not a close."""
+    assert aid.continues(_row(17, ending_inventory=-1.0), _row(18, flc_window=2.0))
+    assert not aid.continues(_row(17, ending_inventory=0.0), _row(18, flc_window=2.0))

@@ -26,8 +26,10 @@ when we declined to price it, and a gap in that index means a genuinely
 missing hour.
 """
 
+import fcntl
 import json
 import os
+from contextlib import contextmanager
 
 from events.pairs import hour_key
 # the contract -- the required fields and the value checks -- is
@@ -44,7 +46,7 @@ def _quarantine_key(evt):
     kinds share one quarantine file, so the kind is part of the key --
     otherwise an id collision silently swallows the second event. An
     unparseable line is keyed on its own text (`raw_line`)."""
-    for kind in ("outcome", "decision"):
+    for kind in ("outcome", "decision", "rejection"):
         ident = evt.get(f"{kind}_id")
         if ident is not None:
             return (kind, ident)
@@ -83,6 +85,11 @@ def _episode_path(evt):
         return None
 
 
+# the three event streams, in the order they are consumed: decisions
+# first, so a rejection beside a priced hour never wins the seen index
+STREAMS = ("decision", "outcome", "rejection")
+
+
 class EventStore:
     def __init__(self, cfg, root=None, reset=False):
         self.cfg = cfg
@@ -113,15 +120,16 @@ class EventStore:
         # quarantined_event_count grows on every re-run over the same store,
         # and the shadow gate reads it
         self._quarantined_ids = set()
-        for i, parsed, raw in self._lines(self.paths["quarantine"]):
-            if parsed is None:
-                continue                  # a torn quarantine line: skipped
-            # a foreign writer's record may carry anything under `event`
-            evt = parsed.get("event")
-            key = _quarantine_key(evt) if isinstance(evt, dict) else None
-            if key is not None:
-                self._quarantined_ids.add(key)
-        self._terminate_last_line(self.paths["quarantine"])
+        with self._locked():
+            for i, parsed, raw in self._lines(self.paths["quarantine"]):
+                if parsed is None:
+                    continue              # a torn quarantine line: skipped
+                # a foreign writer's record may carry anything under `event`
+                evt = parsed.get("event")
+                key = _quarantine_key(evt) if isinstance(evt, dict) else None
+                if key is not None:
+                    self._quarantined_ids.add(key)
+            self._terminate_last_line(self.paths["quarantine"])
 
         self._ids = {"decision": set(), "outcome": set(), "rejection": set()}
         self._hour_keys = set()          # every hour a stored decision priced
@@ -134,43 +142,111 @@ class EventStore:
         # what the live episode-id rule steps from, so a hold through a
         # rejection is not read as a gap
         self.last_seen_by_shelf = {}
-        for kind, path in (("decision", self.paths["decisions"]),
-                           ("outcome", self.paths["outcomes"]),
-                           ("rejection", self.paths["rejections"])):
-            torn = []
-            for i, parsed, raw in self._lines(path):
-                if parsed is None:
-                    torn.append((i, raw))
+        # how far into each stream THIS store has read: every emit re-reads
+        # the tail past it under the lock before it checks the invariants,
+        # so a line another process appended since construction is seen
+        self._offsets = {k: 0 for k in STREAMS}
+        self._line_counts = {k: 0 for k in STREAMS}
+        # why the last emit was refused (a caller's response line names it)
+        self.last_refusal = None
+        with self._locked():
+            for kind in STREAMS:
+                self._consume(kind)
+
+    @contextmanager
+    def _locked(self):
+        """The one lock every writer and every loader takes: an exclusive
+        flock on `<root>/.lock`. Two hourly runs that overlap (a retry
+        launched while the first still runs) each hold an in-memory index
+        built at construction; without this, both saw the hour unpriced,
+        both appended, and -- the decision id being the shelf-hour -- the
+        second line was silently dropped on the next load while
+        engineering may have applied the second price. Under the lock the
+        second run re-reads the first's line and refuses the hour, loudly
+        (`decisions_on_priced_hour`)."""
+        with open(os.path.join(self.root, ".lock"), "w") as fd:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+
+    def _consume(self, kind):
+        """Register every complete line of `kind`'s stream past the offset
+        this store has consumed, and move the offset. Called under the
+        lock: at construction (from zero) and before every emit (the tail
+        another process may have appended since). A torn last line -- a
+        write that died mid-append -- is quarantined with the reason,
+        closed with a newline so the next append cannot glue onto it, and
+        consumed."""
+        path = self.paths[kind + "s"]
+        if not os.path.exists(path):
+            return
+        torn, partial = [], False
+        with open(path, "rb") as f:
+            f.seek(self._offsets[kind])
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+                if not line.endswith(b"\n"):
+                    partial = True
+                    self._line_counts[kind] += 1
+                    torn.append((self._line_counts[kind],
+                                 line.decode(errors="replace")))
+                    break
+                self._line_counts[kind] += 1
+                # a torn line can split a multi-byte character: decoded with
+                # a replacement mark it is one more unparseable line to
+                # quarantine, never a UnicodeDecodeError
+                raw = line.decode(errors="replace").rstrip("\n")
+                if not raw.strip():
                     continue
-                ident = parsed.get(f"{kind}_id")
-                if ident is None:
-                    # a foreign line with no id: not an event the matcher
-                    # can pair, and registering None counted every later
-                    # id-less line as a duplicate of it
+                try:
+                    parsed = json.loads(raw)
+                    if not isinstance(parsed, dict):
+                        raise ValueError("not a JSON object")
+                except ValueError:
+                    torn.append((self._line_counts[kind], raw))
                     continue
-                if ident in self._ids[kind]:
-                    self.duplicate_counts[kind] += 1
-                    continue
-                self._ids[kind].add(ident)
-                if kind == "decision":
-                    self._register_decision(parsed)
-                elif kind == "rejection":
-                    # decisions loaded first: an hour that was ultimately
-                    # priced stays priced in the index, whatever a foreign
-                    # writer left in this stream beside it
-                    if _decision_key(parsed) not in self._hour_keys:
-                        self._register_seen(parsed, priced=False)
-                else:
-                    self._register_outcome(parsed)
-            for i, raw in torn:
-                # a partial write (power loss mid-append) must not make the
-                # store unconstructable: the line is quarantined with the
-                # reason and the stream stays readable
-                self._quarantine(
-                    {"stream": f"{kind}s", "line_no": i, "raw_line": raw},
-                    [f"unparseable JSONL line {i} in {kind}s.jsonl (torn "
-                     "write?) -- skipped on load"])
+                self._register_line(kind, parsed)
+            self._offsets[kind] = f.tell()
+        if partial:
             self._terminate_last_line(path)
+            self._offsets[kind] = os.path.getsize(path)
+        for i, raw in torn:
+            # a partial write (power loss mid-append) must not make the
+            # store unconstructable: the line is quarantined with the
+            # reason and the stream stays readable
+            self._quarantine(
+                {"stream": f"{kind}s", "line_no": i, "raw_line": raw},
+                [f"unparseable JSONL line {i} in {kind}s.jsonl (torn "
+                 "write?) -- skipped on load"])
+
+    def _register_line(self, kind, parsed):
+        """One parsed line of a stream entering the indexes (on load or on
+        a tail refresh): a line with no id is not an event; a repeated id
+        is counted and not registered twice."""
+        ident = parsed.get(f"{kind}_id")
+        if ident is None:
+            # a foreign line with no id: not an event the matcher can
+            # pair, and registering None counted every later id-less line
+            # as a duplicate of it
+            return
+        if ident in self._ids[kind]:
+            self.duplicate_counts[kind] += 1
+            return
+        self._ids[kind].add(ident)
+        if kind == "decision":
+            self._register_decision(parsed)
+        elif kind == "rejection":
+            # decisions are consumed first: an hour that was ultimately
+            # priced stays priced in the index, whatever a foreign writer
+            # left in this stream beside it
+            if _decision_key(parsed) not in self._hour_keys:
+                self._register_seen(parsed, priced=False)
+        else:
+            self._register_outcome(parsed)
 
     def _register_seen(self, evt, priced):
         """`last_seen_by_shelf`: the latest hour this shelf reached us at,
@@ -245,7 +321,7 @@ class EventStore:
         directory; and never the PRODUCTION store, which is append-only for
         the life of the pilot and is the one record `daily.update` learns
         from."""
-        if os.path.abspath(self.root) == os.path.abspath(self.cfg["events"]["store_dir"]):
+        if os.path.realpath(self.root) == os.path.realpath(self.cfg["events"]["store_dir"]):
             raise ValueError(
                 "refusing to reset the production event store "
                 f"({self.root}): it is the append-only record the daily lane "
@@ -254,6 +330,7 @@ class EventStore:
         for path in self.paths.values():
             if os.path.exists(path):
                 os.remove(path)
+        # (the lock file stays: another process may be holding it)
 
     @staticmethod
     def _lines(path):
@@ -295,6 +372,15 @@ class EventStore:
             f.flush()
             os.fsync(f.fileno())
 
+    def _write(self, kind, evt):
+        """Append one event to its stream and move this store's offset past
+        it, so the next tail refresh does not read our own line back as a
+        duplicate. Under the lock, so the file's end IS our line."""
+        path = self.paths[kind + "s"]
+        self._append(path, evt)
+        self._offsets[kind] = os.path.getsize(path)
+        self._line_counts[kind] += 1
+
     def _quarantine(self, evt, problems):
         # idempotent like the good streams. An event with no usable id cannot
         # be deduped and is always appended -- better a double count on a
@@ -307,7 +393,27 @@ class EventStore:
         self.quarantined_this_run += 1
         self._append(self.paths["quarantine"], {"event": evt, "problems": problems})
 
+    def _refresh(self):
+        for kind in STREAMS:
+            self._consume(kind)
+
     def emit_decision(self, evt):
+        with self._locked():
+            self._refresh()
+            return self._emit_decision(evt)
+
+    def emit_outcome(self, evt):
+        with self._locked():
+            self._refresh()
+            return self._emit_outcome(evt)
+
+    def emit_rejection(self, evt):
+        with self._locked():
+            self._refresh()
+            return self._emit_rejection(evt)
+
+    def _emit_decision(self, evt):
+        self.last_refusal = None
         missing = [f for f in DECISION_REQUIRED if f not in evt]
         problems = ([f"missing fields: {missing}"] if missing
                     else _validate_decision(evt))
@@ -318,6 +424,7 @@ class EventStore:
                             f"{evt.get('sku_id')!r}, {evt.get('fc')!r}, "
                             f"{evt.get('date')!r}, {evt.get('hour_of_day')!r}")
         if problems:
+            self.last_refusal = "quarantined: " + "; ".join(problems)
             self._quarantine(evt, problems)
             return False
         # the hour gate runs FIRST and stays the reported signal. The
@@ -328,20 +435,22 @@ class EventStore:
             # the hour is already priced: a second decision would put two
             # prices on one feed row, and ingest would match neither
             self.completeness_counts["decisions_on_priced_hour"] += 1
+            self.last_refusal = "already_priced: another run committed this hour first"
             return False
         if evt["decision_id"] in self._ids["decision"]:
             # the backstop: an id already held whose hour this store does
             # not index (a foreign line replayed in, a hand-built event)
             self.duplicate_counts["decision"] += 1
+            self.last_refusal = "duplicate decision id"
             return False
         # append FIRST: an id registered before a failed write (disk full)
         # would refuse the retry as a duplicate of an event never written
-        self._append(self.paths["decisions"], evt)
+        self._write("decision", evt)
         self._ids["decision"].add(evt["decision_id"])
         self._register_decision(evt)
         return True
 
-    def emit_outcome(self, evt):
+    def _emit_outcome(self, evt):
         missing = [f for f in OUTCOME_REQUIRED if f not in evt]
         problems = ([f"missing fields: {missing}"] if missing
                     else _validate_outcome(evt))
@@ -359,12 +468,12 @@ class EventStore:
             # learner as a second hour of evidence
             self.completeness_counts["outcomes_per_decision_over_one"] += 1
             return False
-        self._append(self.paths["outcomes"], evt)     # append first, as above
+        self._write("outcome", evt)                   # append first, as above
         self._ids["outcome"].add(evt["outcome_id"])
         self._decisions_with_outcome.add(evt["decision_id"])
         return True
 
-    def emit_rejection(self, evt):
+    def _emit_rejection(self, evt):
         """Record a shelf-hour that reached us and was NOT priced. It never
         enters `priced_hours`, so the hour stays free to price if the data
         that refused it is corrected; it only says the shelf was SEEN. An
@@ -382,7 +491,7 @@ class EventStore:
             return False
         if _decision_key(evt) in self._hour_keys:
             return False
-        self._append(self.paths["rejections"], evt)   # append first, as above
+        self._write("rejection", evt)                 # append first, as above
         self._ids["rejection"].add(evt["rejection_id"])
         self._register_seen(evt, priced=False)
         return True

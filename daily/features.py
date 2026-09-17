@@ -66,7 +66,10 @@ def build(cfg, feed_path=None, as_of=None, out=None):
     episodes opening on `as_of` (today) written to `out`
     (features/<as_of>.parquet). Returns the morning's report."""
     fc = cfg["features"]
-    as_of = iso_day(as_of or dt.date.today())
+    # today in UTC, the clock ops.advance names yesterday by -- never the
+    # host's local date, which a cron just after midnight UTC would read as
+    # yesterday and write a table one day short
+    as_of = iso_day(as_of or dt.datetime.now(dt.timezone.utc).date())
     raw = rolling_history(cfg, feed_path)
     hist = load_history(fc["history_path"], cfg)
     table = ref_rate_table(hist, as_of, cfg)
