@@ -19,7 +19,11 @@ was not priced.
 The rule is still evaluated here -- against the rows of the hour before,
 when they ride along, else the store's latest decision -- but only to
 COUNT the ids that disagree with it (`episode_ids_disagreeing_with_the_rule`,
-with a sample), never to override the producer's id.
+with a sample), never to override the producer's id. Where the rule cannot
+be evaluated at all (a gap: an hour we refused, a missed cron hour, a
+shelf that left clearance and came back) the answer is unknown and the row
+is counted as such (`episode_ids_the_rule_could_not_check`), never read as
+a contradiction.
 
 Run: python3 -m ops.price_hour --snapshot <top-of-hour rows> \\
         --features features/<today>.parquet --out <hour>.csv --report <hour>.json \\
@@ -48,7 +52,9 @@ LIVE_RULE = ("The producer's episode_id is read as given. Checked against the ch
              "rule (ops.assign_episode_ids.RULE): a shelf continues last hour's "
              "episode when that hour was one earlier, did not close the shelf, and "
              "the counter stepped down by one or up/flat with stock arrived. A "
-             "disagreement is counted and sampled, never overridden.")
+             "disagreement is counted and sampled, never overridden; a row the "
+             "rule cannot be evaluated against (a gap, a missing counter) is "
+             "counted as unchecked, never as a disagreement.")
 
 RESPONSE_COLS = ("skuseq", "fc", "date", "hour", "episode_id", "decision_id",
                  "apply_discount_pct", "apply_price", "is_exploration", "rejected")
@@ -117,10 +123,20 @@ def split_hours(rows, hour=None):
 
 
 def rule_says_continues(last, row, closed_row):
-    """What the chain's rule would say for this row: with the closed row
-    (last hour's feed row) it is ops.assign_episode_ids.RULE exactly;
-    without it, the store's latest decision stands in for last hour and
-    stock arrived is read as this opening above its remaining stock."""
+    """What the chain's rule would say for this row: True, False, or None
+    where it CANNOT be said.
+
+    With the closed row (last hour's feed row) it is
+    ops.assign_episode_ids.RULE exactly -- the same inputs the producer's
+    own script had, so its answer is decisive and never None.
+
+    Without it the store's latest decision stands in for last hour, and it
+    only stands in when it IS last hour. A gap (an hour we rejected, a
+    missed cron hour, a shelf that left clearance and came back) leaves the
+    rule with nothing to step from, and so does a missing counter or an
+    unreadable remaining stock. Those are None: unknown, never a
+    contradiction. Reading a gap as "a new window" would report every held
+    shelf after a rejection as a disagreement."""
     if closed_row is not None:
         prev = {"date": closed_row["key"][2], "hour": closed_row["key"][3],
                 "ending_inventory": closed_row.get("ending_inventory"),
@@ -131,30 +147,35 @@ def rule_says_continues(last, row, closed_row):
                "flc_window": row.get("hours_remaining")}
         return rule_continues(prev, now)
     if last is None or last.get("hours_remaining") is None:
-        return False
+        return None
     if hours_between(last["date"], last["hour_of_day"], row["key"][2], row["key"][3]) != 1:
-        return False
+        return None                              # not last hour: nothing to step from
     if not _finite(row.get("hours_remaining")):
-        return False
+        return None
     step = float(planning_horizon(row["hours_remaining"])) - float(last["hours_remaining"])
     if step == -1:
         return True
     if step < -1:
         return False
     q_last = _num(last.get("q_remaining"))
-    return q_last is not None and float(row["starting_inventory"]) > q_last
+    if q_last is None:
+        return None                              # the restock test needs last hour's stock
+    return float(row["starting_inventory"]) > q_last
 
 
 def build_requests(openings, closed, latest):
     """The engine's 12-field requests for the openings that can be priced,
     aligned with `openings` (None where a row is not sent), and the
     counts: shelves empty, unkeyable, without an episode id, episodes new
-    and continued (by the producer's id), and the ids that disagree with
-    the rule (with a sample)."""
+    and continued (by the producer's id), the ids that disagree with the
+    rule (with a sample), and the ids the rule could not be evaluated
+    against at all -- coverage, so a silent skip cannot pass for
+    agreement."""
     requests = []
     counts = {"shelves_empty": 0, "shelves_unkeyable": 0, "shelves_without_episode_id": 0,
               "episodes_new": 0, "episodes_continued": 0,
-              "episode_ids_disagreeing_with_the_rule": 0, "disagreements_sample": []}
+              "episode_ids_disagreeing_with_the_rule": 0,
+              "episode_ids_the_rule_could_not_check": 0, "disagreements_sample": []}
     for r in openings:
         if r["key"] is None:
             counts["shelves_unkeyable"] += 1
@@ -181,7 +202,9 @@ def build_requests(openings, closed, latest):
             counts["episodes_new"] += 1
             anchor = None
         rule = rule_says_continues(last, r, closed.get((sku, fc)))
-        if last is not None and rule != continued:
+        if rule is None:
+            counts["episode_ids_the_rule_could_not_check"] += 1
+        elif last is not None and rule != continued:
             counts["episode_ids_disagreeing_with_the_rule"] += 1
             if len(counts["disagreements_sample"]) < 10:
                 counts["disagreements_sample"].append({

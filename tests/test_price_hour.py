@@ -165,6 +165,32 @@ def test_the_producers_ids_are_read_as_given_and_only_checked_against_the_rule(t
                                             "producer": "continued", "rule": "new"}]
 
 
+def test_a_gap_is_unknown_to_the_rule_never_a_disagreement(tmp_path):
+    """An hour we refused to price stores no decision, so next hour the
+    store's latest decision is two hours back and the rule has nothing to
+    step from. That is unknown, not "a new window": counting it would
+    report every shelf held through a rejection as a disagreement. The
+    closed rows, when they ride along, answer it properly."""
+    cfg, store, posterior, model, table = _world(tmp_path)
+    first = price_hour.read_snapshot(_write(tmp_path, [_snap(hour=17, inventory=3.0, flc_window=4.0)]))
+    _, ev1, _ = _price(cfg, first, store, posterior, model, table)
+    eid = ev1[0]["episode_id"]
+    # hour 18 is never priced (rejected upstream, or a missed cron hour);
+    # hour 19 arrives on the producer's same id, the shelf having been held
+    gap = price_hour.read_snapshot(_write(tmp_path, [
+        _snap(hour=19, inventory=2.0, flc_window=2.0, episode_id=eid)], "g.csv"))
+    _, _, rep = _price(cfg, gap, store, posterior, model, table)
+    assert rep["episodes_continued"] == 1 and rep["episodes_new"] == 0
+    assert rep["episode_ids_disagreeing_with_the_rule"] == 0
+    assert rep["episode_ids_the_rule_could_not_check"] == 1     # counted, not hidden
+    latest = store.latest_by_shelf[("7", "F1")]
+    assert price_hour.rule_says_continues(latest, gap[0], None) is None
+    # with last hour's closed row the rule is decisive again
+    closed = _snap(hour=19, inventory=2.0, flc_window=2.0, units_sold=1, ending_inventory=1.0)
+    now = price_hour.snapshot_rows([_snap(hour=20, inventory=1.0, flc_window=1.0, episode_id=eid)])[0]
+    assert price_hour.rule_says_continues(None, now, price_hour.snapshot_rows([closed])[0]) is True
+
+
 def test_a_dry_run_prices_and_commits_nothing(tmp_path):
     cfg, store, posterior, model, table = _world(tmp_path)
     rows = price_hour.read_snapshot(_write(tmp_path, [_snap()]))

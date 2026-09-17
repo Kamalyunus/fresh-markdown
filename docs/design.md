@@ -809,7 +809,13 @@ the episode — takes the anchor from the price in force the snapshot
 carries, turns the feed's counter into the horizon through
 `planning_horizon`, and evaluates the rule only to COUNT the ids that
 disagree with it (`episode_ids_disagreeing_with_the_rule`, `LIVE_RULE`),
-never to override one; a response per shelf out in the feed's units
+never to override one. The rule answers True, False or UNKNOWN: with the
+closed rows it has exactly what the producer's script had and is decisive,
+but standing the store's latest decision in for last hour only works when
+it IS last hour, so a gap (an hour the batch refused, a missed cron hour, a
+shelf that left clearance and returned) is `episode_ids_the_rule_could_not_check`
+rather than a contradiction — reading a gap as a new window reported every
+shelf held through a rejection as a disagreement; a response per shelf out in the feed's units
 (`apply_discount_pct`, `apply_price`, or `rejected` — a row without an
 id is rejected, never guessed). `ops.check_inputs` checks engineering's
 three tables against what the chain needs, the feed through the real

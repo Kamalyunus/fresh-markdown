@@ -175,7 +175,9 @@ contract:
   entry, the id the store last priced on the shelf continues it), takes
   the anchor from the price in force, evaluates the rule only to count
   the ids that disagree (`episode_ids_disagreeing_with_the_rule`,
-  `LIVE_RULE`), builds the 12-field requests and prices them through
+  `LIVE_RULE`; a gap the rule cannot step from is counted as
+  `episode_ids_the_rule_could_not_check`, never as a contradiction, and
+  sending the closed rows nearly removes it), builds the 12-field requests and prices them through
   `ops.price_batch` (the caller beneath it: requests in, a price per
   request out) — then applying the `apply_price` column it returns.
   `ops.check_inputs` checks their three tables (snapshot, feed, failed
