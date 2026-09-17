@@ -953,6 +953,21 @@ now. Dates are owner sign-off.
   of both ids on purpose: it is the producers' and can be relabelled, and an
   audit record's identity may not move when an upstream label does.
 
+- **What we refuse belongs in the record too** (owner, 09-17). The live
+  episode-id rule steps from the last hour the store saw on a shelf, and
+  a refused hour stored nothing, so a shelf held through a rejection
+  looked exactly like a shelf whose hour never arrived. The first fix was
+  honest but weak: answer UNKNOWN for a gap rather than pretend the window
+  restarted. The owner's point went further — we already send the rejected
+  row back with its reason, so keep it. A third stream (`rejections`,
+  `rej-<sku>|<fc>|<date>T<hh>`) now records every shelf-hour seen and not
+  priced. It carries no price, never enters `priced_hours` (a corrected
+  hour is still free to price), and never reaches the pairing or the
+  evidence; `last_seen_by_shelf` spans decisions and rejections while
+  `latest_by_shelf` stays decisions-only, since the anchor and the
+  continued test must come from a real price. The check that was noise is
+  now a signal: an unknown is an hour engineering did not send.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,

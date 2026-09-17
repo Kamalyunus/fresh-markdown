@@ -124,6 +124,14 @@ def decision_id_of(key):
     return f"dec-{sku}|{fc}|{day}T{hour:02d}"
 
 
+def rejection_id_of(key):
+    """The rejection id for the hour keyed `key`: "rej-<sku>|<fc>|<date>T<hh>",
+    the third prefix over the one key. One record per shelf-hour refused, so
+    re-running a refused hour collides with its own earlier copy."""
+    sku, fc, day, hour = key
+    return f"rej-{sku}|{fc}|{day}T{hour:02d}"
+
+
 def is_learnable(o):
     return o.get("execution_status") in LEARNABLE_STATUSES
 

@@ -1,4 +1,4 @@
-"""events.store -- decision and outcome event log (design 5.10; the field-level contract is docs/engineering_handover.html).
+"""events.store -- decision, outcome and rejection event log (design 5.10; the field-level contract is docs/engineering_handover.html).
 
 Append-only JSONL with duplicate detection, durable writes, and replay. The
 logger never silently discards a malformed event: invalid events are
@@ -15,6 +15,15 @@ migration and every future double-outcome path close on this). The
 store also keeps, per episode, the latest decision's stored forecast
 (`episode_paths`), which a later request of the same episode is priced
 on (engine.state.build_states slices it, design 5.10).
+
+A third stream records the shelf-hours that reached us and were NOT
+priced (`rejections`, contract.REJECTION_REQUIRED). A rejection is not a
+decision: it holds no price, never enters `priced_hours`, the pairing or
+the evidence. It exists so that a refused hour is distinguishable from an
+hour engineering never sent -- `last_seen_by_shelf` spans decisions AND
+rejections, so the live episode-id rule can step from the hour before even
+when we declined to price it, and a gap in that index means a genuinely
+missing hour.
 """
 
 import json
@@ -23,9 +32,11 @@ import os
 from events.pairs import hour_key
 # the contract -- the required fields and the value checks -- is
 # events.contract; the names stay here for callers
-from events.contract import (DECISION_OPTIONAL, DECISION_REQUIRED, OUTCOME_REQUIRED, ISO_DAY,      # noqa: F401
+from events.contract import (DECISION_OPTIONAL, DECISION_REQUIRED, OUTCOME_REQUIRED,              # noqa: F401
+                             REJECTION_REQUIRED, ISO_DAY,
                              finite_number, _json_scalar, _is_iso_day,
-                             _validate_decision, _validate_outcome)
+                             _validate_decision, _validate_outcome,
+                             _validate_rejection)
 
 
 def _quarantine_key(evt):
@@ -78,13 +89,13 @@ class EventStore:
         self.root = root or cfg["events"]["store_dir"]
         os.makedirs(self.root, exist_ok=True)
         self.paths = {k: os.path.join(self.root, f"{k}.jsonl")
-                      for k in ("decisions", "outcomes", "quarantine")}
+                      for k in ("decisions", "outcomes", "rejections", "quarantine")}
         if reset:
             self._reset()
         # duplicates seen by THIS store: on emit, and -- because a foreign
         # producer may write the JSONL directly -- while loading. Either way
         # the same id twice is what the duplicate gate exists to catch.
-        self.duplicate_counts = {"decision": 0, "outcome": 0}
+        self.duplicate_counts = {"decision": 0, "outcome": 0, "rejection": 0}
         # what the two invariants refused, on emit and on load (a foreign
         # writer): a second decision for a priced hour (counted; both stay
         # in the record, and ingest matches neither), a second outcome for
@@ -112,15 +123,20 @@ class EventStore:
                 self._quarantined_ids.add(key)
         self._terminate_last_line(self.paths["quarantine"])
 
-        self._ids = {"decision": set(), "outcome": set()}
+        self._ids = {"decision": set(), "outcome": set(), "rejection": set()}
         self._hour_keys = set()          # every hour a stored decision priced
         self._decisions_with_outcome = set()
         self.episode_paths = {}          # episode_id -> the latest decision's path
-        # (sku, fc) -> the latest decision on that shelf: what ops.price_hour
-        # continues an episode from (the chain's window rule, live)
+        # (sku, fc) -> the latest decision on that shelf: the anchor
+        # ops.price_hour falls back to, and the episode it continues
         self.latest_by_shelf = {}
+        # (sku, fc) -> the latest hour SEEN on that shelf, priced or refused:
+        # what the live episode-id rule steps from, so a hold through a
+        # rejection is not read as a gap
+        self.last_seen_by_shelf = {}
         for kind, path in (("decision", self.paths["decisions"]),
-                           ("outcome", self.paths["outcomes"])):
+                           ("outcome", self.paths["outcomes"]),
+                           ("rejection", self.paths["rejections"])):
             torn = []
             for i, parsed, raw in self._lines(path):
                 if parsed is None:
@@ -138,6 +154,12 @@ class EventStore:
                 self._ids[kind].add(ident)
                 if kind == "decision":
                     self._register_decision(parsed)
+                elif kind == "rejection":
+                    # decisions loaded first: an hour that was ultimately
+                    # priced stays priced in the index, whatever a foreign
+                    # writer left in this stream beside it
+                    if _decision_key(parsed) not in self._hour_keys:
+                        self._register_seen(parsed, priced=False)
                 else:
                     self._register_outcome(parsed)
             for i, raw in torn:
@@ -150,10 +172,28 @@ class EventStore:
                      "write?) -- skipped on load"])
             self._terminate_last_line(path)
 
+    def _register_seen(self, evt, priced):
+        """`last_seen_by_shelf`: the latest hour this shelf reached us at,
+        whether it was priced or refused. The live episode-id rule steps
+        from it, so an hour we declined to price is no longer a gap -- and a
+        gap that remains is an hour engineering did not send."""
+        key = _decision_key(evt)
+        if key is None:
+            return None
+        shelf, when = key[:2], (key[2], key[3])
+        seen = self.last_seen_by_shelf.get(shelf)
+        if seen is None or (seen["date"], seen["hour_of_day"]) <= when:
+            self.last_seen_by_shelf[shelf] = {
+                "episode_id": evt.get("episode_id"), "date": key[2],
+                "hour_of_day": key[3],
+                "hours_remaining": evt.get("hours_remaining"),
+                "q_remaining": evt.get("q_remaining"), "priced": priced}
+        return key
+
     def _register_decision(self, evt):
         """The hour and the episode path of a decision entering the record
         (on load: a collision is counted, the line stays)."""
-        key = _decision_key(evt)
+        key = self._register_seen(evt, priced=True)
         if key is not None:
             if key in self._hour_keys:
                 self.completeness_counts["decisions_on_priced_hour"] += 1
@@ -192,7 +232,7 @@ class EventStore:
         return self._hour_keys
 
     def _reset(self):
-        """Empty THIS store's own three streams, for a HARNESS whose run is a
+        """Empty THIS store's own four streams, for a HARNESS whose run is a
         fresh evaluation: shadow re-run over the store an earlier run left
         re-prices the same shelf-hours, and since the decision id IS the
         shelf-hour (events.pairs.decision_id_of) every one of them collides
@@ -201,7 +241,7 @@ class EventStore:
         per-run counters (`quarantined_this_run`) were built to work around
         exactly that.
 
-        Only the three files this class writes are removed, never the
+        Only the files this class writes are removed, never the
         directory; and never the PRODUCTION store, which is append-only for
         the life of the pilot and is the one record `daily.update` learns
         from."""
@@ -324,6 +364,29 @@ class EventStore:
         self._decisions_with_outcome.add(evt["decision_id"])
         return True
 
+    def emit_rejection(self, evt):
+        """Record a shelf-hour that reached us and was NOT priced. It never
+        enters `priced_hours`, so the hour stays free to price if the data
+        that refused it is corrected; it only says the shelf was SEEN. An
+        hour this store already holds a DECISION for is not recorded at
+        all -- that hour was priced, and a rejection beside it would make
+        `last_seen` ambiguous."""
+        missing = [f for f in REJECTION_REQUIRED if f not in evt]
+        problems = ([f"missing fields: {missing}"] if missing
+                    else _validate_rejection(evt))
+        if problems:
+            self._quarantine(evt, problems)
+            return False
+        if evt["rejection_id"] in self._ids["rejection"]:
+            self.duplicate_counts["rejection"] += 1
+            return False
+        if _decision_key(evt) in self._hour_keys:
+            return False
+        self._append(self.paths["rejections"], evt)   # append first, as above
+        self._ids["rejection"].add(evt["rejection_id"])
+        self._register_seen(evt, priced=False)
+        return True
+
     def _load(self, path, id_field=None, outcome=False):
         """The readable stream: torn lines were quarantined at construction
         and are skipped, as is a line carrying no id at all (not an event);
@@ -359,6 +422,11 @@ class EventStore:
 
     def load_outcomes(self):
         return self._load(self.paths["outcomes"], "outcome_id", outcome=True)
+
+    def load_rejections(self):
+        """The shelf-hours seen and not priced. Never part of the pairing or
+        the evidence: read for the record and the export."""
+        return self._load(self.paths["rejections"], "rejection_id")
 
     def load_quarantine(self):
         return self._load(self.paths["quarantine"])

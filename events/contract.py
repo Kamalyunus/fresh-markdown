@@ -1,10 +1,10 @@
-"""events.contract -- what a decision and an outcome event must carry.
+"""events.contract -- what a decision, an outcome and a rejection must carry.
 
-The field lists (`DECISION_REQUIRED`, `OUTCOME_REQUIRED`) and the value
-checks the store runs before an event lands (`docs/engineering_handover.html`
-is the human-readable page; `tests/test_event_contract_doc.py` keeps the
-two in step). The store (events.store) enforces these; nothing else
-re-derives them.
+The field lists (`DECISION_REQUIRED`, `OUTCOME_REQUIRED`,
+`REJECTION_REQUIRED`) and the value checks the store runs before an event
+lands (`docs/engineering_handover.html` is the human-readable page;
+`tests/test_event_contract_doc.py` keeps the two in step). The store
+(events.store) enforces these; nothing else re-derives them.
 """
 
 import datetime
@@ -66,6 +66,20 @@ OUTCOME_REQUIRED = [
     "finalized_at",
 ]
 
+# A shelf-hour that reached us and was NOT priced, with the reason the
+# response carried. It is not a decision (no price, so it never enters
+# `priced_hours`, the pairing, or the evidence) and not an outcome; it is
+# the record that the shelf WAS SEEN at that hour. Without it a refused
+# hour is indistinguishable from an hour engineering never sent, and the
+# episode-id rule -- which steps from what the store last saw on a shelf --
+# had to answer "unknown" for every shelf held through a rejection.
+# `episode_id` is required but may be null: a row refused FOR having no id
+# is exactly the case worth recording.
+REJECTION_REQUIRED = [
+    "rejection_id", "episode_id", "sku_id", "fc", "date", "hour_of_day",
+    "hours_remaining", "q_remaining", "reason", "timestamp",
+]
+
 
 def _is_iso_day(v):
     """Exactly `YYYY-MM-DD`, and a real calendar date -- a strict check,
@@ -85,6 +99,43 @@ def _validate_decision(evt):
         problems.append("date must be an ISO 'YYYY-MM-DD' string (the trading "
                         f"day ingest and the daily series key on); got "
                         f"{evt.get('date')!r}")
+    return problems
+
+
+def rejection_event(row, reason, timestamp=None):
+    """The rejection event for a refused shelf-hour: `row` is the request or
+    the snapshot row it was built from (canonical names), `reason` the string
+    the response carries. The ONE builder -- both refusal paths (the hourly
+    script's own, before a request exists, and the batch's) go through it, so
+    the record is one shape. Returns None when the row names no shelf-hour,
+    which is the one refusal nothing can be recorded for."""
+    from events.pairs import hour_key, rejection_id_of      # local: pairs is id-only
+    try:
+        key = hour_key(row.get("sku_id"), row.get("fc"), row.get("date"),
+                       row.get("hour_of_day"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return {
+        "event": "rejection",
+        "rejection_id": rejection_id_of(key),
+        "episode_id": row.get("episode_id"),
+        "sku_id": key[0], "fc": key[1], "date": key[2], "hour_of_day": key[3],
+        # what the live episode-id rule steps from next hour
+        "hours_remaining": row.get("hours_remaining"),
+        "q_remaining": row.get("q_remaining", row.get("q")),
+        "reason": reason,
+        "timestamp": timestamp or datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+
+def _validate_rejection(evt):
+    problems = []
+    if not _is_iso_day(evt.get("date")):
+        problems.append("date must be an ISO 'YYYY-MM-DD' string; got "
+                        f"{evt.get('date')!r}")
+    if not isinstance(evt.get("reason"), str) or not evt["reason"].strip():
+        problems.append("reason must be the non-empty string the response "
+                        f"carried; got {evt.get('reason')!r}")
     return problems
 
 

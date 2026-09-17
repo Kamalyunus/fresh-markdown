@@ -17,13 +17,15 @@ discount to apply as a percent and the price it makes, or the reason it
 was not priced.
 
 The rule is still evaluated here -- against the rows of the hour before,
-when they ride along, else the store's latest decision -- but only to
+when they ride along, else the last hour SEEN on that shelf -- but only to
 COUNT the ids that disagree with it (`episode_ids_disagreeing_with_the_rule`,
-with a sample), never to override the producer's id. Where the rule cannot
-be evaluated at all (a gap: an hour we refused, a missed cron hour, a
-shelf that left clearance and came back) the answer is unknown and the row
-is counted as such (`episode_ids_the_rule_could_not_check`), never read as
-a contradiction.
+with a sample), never to override the producer's id. Every refused row is
+RECORDED (events.store rejections: seen, not priced), so a shelf held
+through a rejection still gives the rule an hour to step from. Where it
+cannot be evaluated even so the answer is unknown, counted as
+`episode_ids_the_rule_could_not_check` and never read as a contradiction
+-- and since our own refusals are now in the record, what remains is an
+hour engineering did not send.
 
 Run: python3 -m ops.price_hour --snapshot <top-of-hour rows> \\
         --features features/<today>.parquet --out <hour>.csv --report <hour>.json \\
@@ -43,6 +45,7 @@ from common.io import read_rows, write_json, write_jsonl
 from common.windows import planning_horizon
 from ops.assign_episode_ids import continues as rule_continues
 from engine.state import hours_between, load_history
+from events.contract import rejection_event
 from events.pairs import ident, iso_day
 from events.store import EventStore
 from fit.prepare_data import SOURCE_TO_CANONICAL
@@ -163,7 +166,7 @@ def rule_says_continues(last, row, closed_row):
     return float(row["starting_inventory"]) > q_last
 
 
-def build_requests(openings, closed, latest):
+def build_requests(openings, closed, latest, seen=None):
     """The engine's 12-field requests for the openings that can be priced,
     aligned with `openings` (None where a row is not sent), and the
     counts: shelves empty, unkeyable, without an episode id, episodes new
@@ -175,7 +178,8 @@ def build_requests(openings, closed, latest):
     counts = {"shelves_empty": 0, "shelves_unkeyable": 0, "shelves_without_episode_id": 0,
               "episodes_new": 0, "episodes_continued": 0,
               "episode_ids_disagreeing_with_the_rule": 0,
-              "episode_ids_the_rule_could_not_check": 0, "disagreements_sample": []}
+              "episode_ids_the_rule_could_not_check": 0,
+              "rejections_recorded_before_the_request": 0, "disagreements_sample": []}
     for r in openings:
         if r["key"] is None:
             counts["shelves_unkeyable"] += 1
@@ -201,7 +205,12 @@ def build_requests(openings, closed, latest):
         else:
             counts["episodes_new"] += 1
             anchor = None
-        rule = rule_says_continues(last, r, closed.get((sku, fc)))
+        # the rule steps from the last hour SEEN on the shelf, priced or
+        # refused (EventStore.last_seen_by_shelf), so a shelf held through a
+        # rejection is not a gap; `latest` stays the decision the anchor and
+        # the continued test come from
+        rule = rule_says_continues((seen or latest).get((sku, fc)), r,
+                                   closed.get((sku, fc)))
         if rule is None:
             counts["episode_ids_the_rule_could_not_check"] += 1
         elif last is not None and rule != continued:
@@ -238,7 +247,8 @@ def run(cfg, snapshot_rows, hour=None, features=None, history=None, workers=None
         store = EventStore(cfg, root=scratch)
     store = store or EventStore(cfg)
     when, openings, closed = split_hours(snapshot_rows, hour)
-    requests, counts = build_requests(openings, closed, store.latest_by_shelf)
+    requests, counts = build_requests(openings, closed, store.latest_by_shelf,
+                                      store.last_seen_by_shelf)
     sent = [r for r in requests if r is not None]
     rows, events, rep = price_batch.run(cfg, sent, history, workers=workers, seed=seed,
                                         store=store, features=features, model=model,
@@ -250,6 +260,16 @@ def run(cfg, snapshot_rows, hour=None, features=None, history=None, workers=None
             why = ("row names no shelf-hour" if r["key"] is None
                    else "empty shelf: nothing to price" if (_num(r.get("starting_inventory")) or 0) <= 0
                    else "episode_id missing: the producer assigns it (ops.assign_episode_ids)")
+            # recorded as SEEN, not priced: the shelf reached us at this
+            # hour, so next hour's rule steps from it instead of reading a
+            # gap (a row naming no shelf-hour records nothing -- there is no
+            # shelf to record it against)
+            refused = rejection_event(
+                {**r, "hours_remaining": (planning_horizon(r["hours_remaining"])
+                                          if _finite(r.get("hours_remaining")) else None),
+                 "q_remaining": _num(r.get("starting_inventory"))}, why)
+            if refused is not None and store.emit_rejection(refused):
+                counts["rejections_recorded_before_the_request"] += 1
             response.append({"skuseq": r.get("sku_id"), "fc": r.get("fc"),
                              "date": r.get("date"), "hour": r.get("hour_of_day"),
                              "episode_id": None, "decision_id": None,

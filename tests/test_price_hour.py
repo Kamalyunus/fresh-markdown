@@ -165,6 +165,40 @@ def test_the_producers_ids_are_read_as_given_and_only_checked_against_the_rule(t
                                             "producer": "continued", "rule": "new"}]
 
 
+def test_a_refused_hour_is_recorded_so_the_shelf_is_still_checkable_next_hour(tmp_path):
+    """A refused row is not priced, but it IS seen. Recording it
+    (events.store rejections) keeps the shelf's chain unbroken, so the rule
+    steps from the refused hour instead of reporting a gap -- and what stays
+    unknown is then an hour engineering never sent."""
+    cfg, store, posterior, model, table = _world(tmp_path)
+    first = price_hour.read_snapshot(_write(tmp_path, [_snap(hour=17, inventory=3.0, flc_window=4.0)]))
+    _, ev1, _ = _price(cfg, first, store, posterior, model, table)
+    eid = ev1[0]["episode_id"]
+    # hour 18: the cost is impossible, so the engine refuses the row
+    bad = price_hour.read_snapshot(_write(tmp_path, [
+        _snap(hour=18, inventory=2.0, flc_window=3.0, cogs_wo_vat=99999.0,
+              episode_id=eid)], "b.csv"))
+    response, _, rep = _price(cfg, bad, store, posterior, model, table)
+    assert response[0]["rejected"] and response[0]["decision_id"] is None
+    assert rep["rejections_recorded"] == 1
+    seen = store.last_seen_by_shelf[("7", "F1")]
+    assert (seen["date"], seen["hour_of_day"], seen["priced"]) == ("2026-08-19", 18, False)
+    assert store.latest_by_shelf[("7", "F1")]["hour_of_day"] == 17     # still the decision
+    assert ("7", "F1", "2026-08-19", 18) not in store.priced_hours     # not priced
+    # hour 19 on the producer's same id: the rule steps from the refused
+    # hour, agrees, and nothing is reported as unknown
+    nxt = price_hour.read_snapshot(_write(tmp_path, [
+        _snap(hour=19, inventory=2.0, flc_window=2.0, episode_id=eid)], "n.csv"))
+    _, _, rep = _price(cfg, nxt, store, posterior, model, table)
+    assert rep["episodes_continued"] == 1
+    assert rep["episode_ids_the_rule_could_not_check"] == 0
+    assert rep["episode_ids_disagreeing_with_the_rule"] == 0
+    # the rejection is in the record, with the reason the response carried
+    rej = store.load_rejections()
+    assert len(rej) == 1 and rej[0]["rejection_id"] == "rej-7|F1|2026-08-19T18"
+    assert rej[0]["episode_id"] == eid and rej[0]["reason"] == response[0]["rejected"]
+
+
 def test_a_gap_is_unknown_to_the_rule_never_a_disagreement(tmp_path):
     """An hour we refused to price stores no decision, so next hour the
     store's latest decision is two hours back and the rule has nothing to

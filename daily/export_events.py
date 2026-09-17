@@ -61,8 +61,13 @@ def export(store, out_dir, since=None):
     undated = 0
     if since:
         decisions, outcomes, undated = since_filter(decisions, outcomes, since)
+    # the shelf-hours seen and NOT priced, with the reason the response
+    # carried: cut on their own date, which they carry directly
+    rejections = [r for r in store.load_rejections()
+                  if not since or str(r.get("date", "")) >= since]
     written = {}
-    for name, events in (("decisions", decisions), ("outcomes", outcomes)):
+    for name, events in (("decisions", decisions), ("outcomes", outcomes),
+                         ("rejections", rejections)):
         df = _frame(events)
         path = os.path.join(out_dir, f"{name}.parquet")
         df.to_parquet(path, index=False)

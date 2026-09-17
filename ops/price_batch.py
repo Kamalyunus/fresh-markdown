@@ -39,6 +39,7 @@ from common.parallel import map_episodes
 from engine.state import (HISTORY_COLS, REQUEST_FIELDS, batch_context, build_states,   # noqa: F401
                           load_history, table_as_of,
                           canonical_request, price_one, validate_request)
+from events.contract import rejection_event
 from events.pairs import colliding_keys, hour_key, ident_series
 from events.store import EventStore
 from fit import prepare_data
@@ -157,6 +158,16 @@ def run(cfg, requests, history=None, workers=None, seed=0, store=None, model=Non
             continue
         priced[i] = res["evt"]              # request order: to_price is
 
+    # every refused request is RECORDED as a rejection (events.store:
+    # seen, not priced), so the hour is not mistaken later for one
+    # engineering never sent. The store itself skips an hour it holds a
+    # decision for, which is what `already_priced` means.
+    rejections = 0
+    for i, reason in sorted(rejected.items()):
+        evt = rejection_event(canon.get(i, requests[i]), reason)
+        if evt is not None and store.emit_rejection(evt):
+            rejections += 1
+
     rows = []
     for i, r in enumerate(requests):
         base = {f: canon.get(i, r).get(f)
@@ -177,6 +188,10 @@ def run(cfg, requests, history=None, workers=None, seed=0, store=None, model=Non
         "rejected": len(requests) - len(events),
         "rejected_before_the_engine": len(requests) - len(to_price),
         "rejected_by_the_engine": dict(engine_rejected),
+        # refused hours RECORDED as seen-not-priced, so next hour's rule can
+        # step from them: fewer than `rejected` when a refusal names no
+        # shelf-hour, or the hour already holds a decision (`already_priced`)
+        "rejections_recorded": rejections,
         "quarantined": quarantined,
         "explored": sum(1 for e in events if e["is_exploration"]),
         # a fresh forecast with no history behind it prices as "unknown";

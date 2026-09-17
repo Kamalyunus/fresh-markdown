@@ -121,9 +121,9 @@ And the standing prohibitions:
     `EventStore.episode_paths`); the day's feature table — `ref_rate_table`
     (`daily.features` writes, the batch joins); the worker body — `engine.state.price_one`,
     its context — `batch_context`; per-decision seeding —
-    `common.parallel.keyed_rng` (the pool — `EpisodePool`); the hour key and
-    BOTH event ids — `events.pairs.hour_key`, `outcome_id_of`, `decision_id_of`
-    (two prefixes over the key; the episode is never in either); id spelling —
+    `common.parallel.keyed_rng` (the pool — `EpisodePool`); the hour key and every
+    event id — `events.pairs.hour_key`, `outcome_id_of`, `decision_id_of`,
+    `rejection_id_of` (prefixes over the key; the episode is never in one); id spelling —
     `ident`; two claims on one key — `colliding_keys`; one decision per hour and
     one outcome per decision — the STORE (`priced_hours`, `completeness_counts`);
     the event field lists — `events.contract`; the bundle — `fit.artifacts.load_bundle`

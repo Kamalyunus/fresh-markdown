@@ -890,7 +890,19 @@ shelf-hour is then what the id SAYS, so a re-priced hour collides with its
 own earlier copy instead of landing a second price on one feed row, and a
 harness re-run over a store it already filled is caught rather than
 silently doubled (`EventStore(reset=True)`, which shadow passes and the
-production store refuses). The episode is deliberately NOT in either id:
+production store refuses). **A third stream records the shelf-hours that
+reached us and were NOT priced** (`rejection_id = rej-<sku>|<fc>|<date>T<hh>`,
+`contract.REJECTION_REQUIRED`, both refusal paths through the one builder
+`contract.rejection_event`): it holds no price, never enters `priced_hours`
+— so a corrected hour stays free to price — and never reaches the pairing
+or the evidence. It exists because a refused hour was indistinguishable
+from an hour engineering never sent: `EventStore.last_seen_by_shelf` spans
+decisions AND rejections, so the live episode-id rule steps from the hour
+before even when we declined to price it, and the unknown count
+(`episode_ids_the_rule_could_not_check`) now means a MISSING hour rather
+than one of our own refusals. `latest_by_shelf` stays decisions-only: it is
+where the anchor and the continued test come from. The episode is
+deliberately NOT in any of the three ids:
 `episode_id` is the producers' and can be relabelled, and an audit
 record's identity may not move when an upstream label does. Ingest still
 matches on the four key fields, never on the string. `tools.e2e_cycle` runs one whole cycle — requests, decisions, the

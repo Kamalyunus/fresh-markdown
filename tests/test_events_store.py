@@ -38,7 +38,7 @@ def test_duplicate_ids_written_by_a_foreign_producer_are_counted_on_load(cfg, tm
         f.write(json.dumps(o) + "\n")
 
     store = EventStore(cfg, root=str(root))
-    assert store.duplicate_counts == {"decision": 2, "outcome": 1}
+    assert store.duplicate_counts == {"decision": 2, "outcome": 1, "rejection": 0}
     # counted, and loaded ONCE: a duplicate line must never reach the
     # learner as a second outcome or the matcher as a second decision
     assert len(store.load_decisions()) == 1 and len(store.load_outcomes()) == 1
@@ -74,7 +74,7 @@ def test_a_failed_append_leaves_no_id_behind_so_the_retry_is_not_a_duplicate(cfg
     monkeypatch.setattr(store, "_append", real_append)
 
     assert store.emit_decision(decision_event()) and store.emit_outcome(_outcome())
-    assert store.duplicate_counts == {"decision": 0, "outcome": 0}
+    assert store.duplicate_counts == {"decision": 0, "outcome": 0, "rejection": 0}
     assert len(store.load_decisions()) == 1 and len(store.load_outcomes()) == 1
     # and a real second emit is still refused: the decision id IS the
     # shelf-hour, so it trips the hour gate, which is the reported signal
@@ -103,7 +103,7 @@ def test_a_harness_store_resets_and_the_production_store_refuses_to(cfg, tmp_pat
 
     fresh = EventStore(cfg, root=root, reset=True)
     assert fresh.load_decisions() == [] and fresh.load_outcomes() == []
-    assert os.path.exists(stray)                       # only the three streams went
+    assert os.path.exists(stray)                       # only its own streams went
     assert fresh.emit_decision(decision_event())       # the same hour prices again
 
     cfg2 = {**cfg, "events": {**cfg["events"], "store_dir": root}}
@@ -321,7 +321,7 @@ def test_id_less_foreign_lines_are_not_duplicates_of_each_other(cfg, tmp_path):
         f.write(json.dumps({"note": "a marker line"}) + "\n")
         f.write(json.dumps({"note": "another"}) + "\n")
     store = EventStore(cfg, root=str(root))
-    assert store.duplicate_counts == {"decision": 0, "outcome": 0}
+    assert store.duplicate_counts == {"decision": 0, "outcome": 0, "rejection": 0}
     # ... and are not loaded either: every consumer indexes by the id
     assert [d.get("decision_id") for d in store.load_decisions()] == ["D1"]
     # a real repeat is still one

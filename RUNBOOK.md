@@ -238,10 +238,15 @@ contract:
 Outcomes are NOT engineering's to produce: `daily.ingest_outcomes`
 builds them from the hourly FLC feed, matched to decisions by (SKU, FC,
 date, hour), deriving `adjustment_reason`, `is_stockout` and the offered
-price itself. Both event ids are the hour's key —
-`feed-<sku>|<fc>|<date>T<hh>` and `dec-<sku>|<fc>|<date>T<hh>` — so
-engineering can name either from the feed row and a pair differs only in
-its prefix; two decisions priced for one hour (a retried batch) match neither and
+price itself. Every event id is the hour's key —
+`feed-<sku>|<fc>|<date>T<hh>`, `dec-<sku>|<fc>|<date>T<hh>` and, for a
+shelf-hour seen but NOT priced, `rej-<sku>|<fc>|<date>T<hh>` — so
+engineering can name any of them from the feed row and they differ only in
+their prefix. A rejection holds no price, never enters `priced_hours` (a
+corrected hour stays free to price) and never reaches the evidence; it is
+there so a refused hour is distinguishable from an hour that was never
+sent, which is what makes `episode_ids_the_rule_could_not_check` mean a
+missing hour. Two decisions priced for one hour (a retried batch) match neither and
 are counted (`decisions_colliding_on_hour`); the store itself refuses a
 second decision for a priced hour and a second outcome for a decision
 (`outcomes_per_decision_over_one`), and an outcome without `is_stockout`

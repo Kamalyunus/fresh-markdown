@@ -73,15 +73,28 @@ def test_since_cuts_both_tables_on_the_trading_day(tmp_path):
     assert store.emit_outcome(outcome(outcome_id="O-orphan", decision_id="D-gone",
                                       finalized_at="2026-08-18T12:00:00+00:00"))
 
+    # a shelf-hour seen and NOT priced rides along, cut on its own date
+    from events.contract import rejection_event
+    assert store.emit_rejection(rejection_event(
+        {"sku_id": "S9", "fc": "FC-04", "date": "2026-08-18", "hour_of_day": 9,
+         "episode_id": "E9", "hours_remaining": 3, "q_remaining": 2},
+        "cost must not exceed original_price"))
+
     def rows(since):
         out, _ = export(store, str(tmp_path / "exports"), since=since)
-        return {name: sorted(pd.read_parquet(path)[f"{name[:-1]}_id"])
-                for name, (path, _) in out.items()}
+        got = {}
+        for name, (path, _) in out.items():
+            df = pd.read_parquet(path)
+            got[name] = sorted(df[f"{name[:-1]}_id"]) if len(df) else []
+        return got
 
-    assert rows("2026-08-19") == {"decisions": ["D-next"], "outcomes": ["O-next"]}
+    assert rows("2026-08-19") == {"decisions": ["D-next"], "outcomes": ["O-next"],
+                                  "rejections": []}
     assert rows("2026-08-18") == {"decisions": ["D-late", "D-next"],
-                                  "outcomes": ["O-late", "O-next", "O-orphan"]}
+                                  "outcomes": ["O-late", "O-next", "O-orphan"],
+                                  "rejections": ["rej-S9|FC-04|2026-08-18T09"]}
     assert rows(None)["outcomes"] == ["O-late", "O-next", "O-orphan"]
+    assert rows(None)["rejections"] == ["rej-S9|FC-04|2026-08-18T09"]
 
 
 def test_an_orphan_outcome_with_no_finalized_at_is_skipped_and_counted(tmp_path):
