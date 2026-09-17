@@ -8,6 +8,8 @@ never charged. Every per-day series shares `decision_day` -- the trading
 date the decision priced, never the UTC wall clock of its outcome.
 """
 
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -75,15 +77,46 @@ def ident_series(s):
     return out
 
 
+def hour_int(hour):
+    """An hour of the day as the one int the key spells, or ValueError: a
+    fractional or non-finite value names no hour (17.5 is not 17 -- every
+    hand-rolled `int(float(h))` truncated it to one)."""
+    h = float(hour)
+    if not np.isfinite(h) or h != int(h):
+        raise ValueError(f"not an hour: {hour!r}")
+    return int(h)
+
+
 def hour_key(sku, fc, date, hour):
     """The (sku, fc, day, hour) a feed row, a decision and a price request
     meet on -- the ONE key, spelt one way. Raises on a value that names no
     hour or no item; the caller decides whether that costs one row or one
     decision, never the batch."""
-    h = float(hour)
-    if not np.isfinite(h) or h != int(h):
-        raise ValueError(f"not an hour: {hour!r}")
-    return (ident(sku), ident(fc), iso_day(date), int(h))
+    return (ident(sku), ident(fc), iso_day(date), hour_int(hour))
+
+
+def shelf_hour_tag(key):
+    """`<sku>|<fc>|<date>T<hh>` for a hour key: the one spelling of a
+    shelf-hour that every event id and the producers' new episode id are
+    a prefix over (common.windows.assign_episode_ids spells the same tag
+    vectorised for the history)."""
+    sku, fc, day, hour = key
+    return f"{sku}|{fc}|{day}T{hour:02d}"
+
+
+def as_number(v):
+    """`v` as a finite float, or None: None, NaN, inf, a non-numeric string
+    or a value that will not parse all read as "no number". The one
+    lenient reading the hourly scripts use on the feed's cells (a JSONL
+    snapshot may carry "3"); engine.decide.finite_number is the STRICT
+    test a contract value must pass and stays separate on purpose."""
+    if isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
 
 
 def colliding_keys(keys):
@@ -104,8 +137,7 @@ def outcome_id_of(key):
     computable by anyone holding the feed row -- engineering can name the
     outcome an hour will produce before it exists -- and the same on every
     re-ingest, so a re-run dedups instead of double-counting."""
-    sku, fc, day, hour = key
-    return f"feed-{sku}|{fc}|{day}T{hour:02d}"
+    return "feed-" + shelf_hour_tag(key)
 
 
 def decision_id_of(key):
@@ -120,16 +152,14 @@ def decision_id_of(key):
     The episode is deliberately NOT in it. The episode id is the producers'
     and can be relabelled (a corrected relist, a drifted port); an audit
     record's identity may not move when an upstream label does."""
-    sku, fc, day, hour = key
-    return f"dec-{sku}|{fc}|{day}T{hour:02d}"
+    return "dec-" + shelf_hour_tag(key)
 
 
 def rejection_id_of(key):
     """The rejection id for the hour keyed `key`: "rej-<sku>|<fc>|<date>T<hh>",
     the third prefix over the one key. One record per shelf-hour refused, so
     re-running a refused hour collides with its own earlier copy."""
-    sku, fc, day, hour = key
-    return f"rej-{sku}|{fc}|{day}T{hour:02d}"
+    return "rej-" + shelf_hour_tag(key)
 
 
 def is_learnable(o):

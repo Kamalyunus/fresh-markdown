@@ -1,7 +1,6 @@
 """ops.price_batch -- the batch surface Lane B calls: row-scoped refusals,
-the one hour key, one spelling of every request, the outcome id
-engineering can name from the feed, and a later hour priced on the entry
-forecast."""
+one spelling of every request, and a later hour priced on the entry
+forecast. The hour key and the ids over it are tests/test_pairs.py's."""
 
 import json
 import math
@@ -10,17 +9,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from conftest import load_config
+from conftest import R_LOOKUP, load_config, ref_rate_history
 from engine.posterior import PosteriorStore
 from engine.state import (HISTORY_COLS, REQUEST_FIELDS, build_states,
                           canonical_request, validate_request)
-from events.pairs import decision_id_of, hour_key, outcome_id_of
+from events.pairs import hour_key
 from events.store import EventStore
 from ops.price_batch import RESPONSE_FIELDS, plan, read_requests, run, write_rows
 
 CFG = load_config()
-R_LOOKUP = {"fallback_order": ["subcategory", "category", "global"],
-            "subcategory": {}, "category": {}, "global": 0.9}
 
 
 def _req(**over):
@@ -45,19 +42,6 @@ class _Model:
         self.calls.append(frame.copy())
         return np.full(len(frame), self.mu)
 
-
-def _history(skus=(7,), days=range(1, 19), sku_dtype=None):
-    """Anchor-priced hours for `skus` on August `days`: one episode a day
-    selling one unit at the reference discount, so both rate features
-    resolve to 1.0 for an opening on the 19th."""
-    rows = [{"episode_id": f"{s}|F1|2026-08-{d:02d}T10", "sku_id": s, "fc": "F1",
-             "category": "VEG", "date": f"2026-08-{d:02d}", "hour_of_day": 10,
-             "starting_inventory": 3, "units_sold": 1, "total_discount": 0.30}
-            for s in skus for d in days]
-    h = pd.DataFrame(rows, columns=list(HISTORY_COLS))
-    if sku_dtype:
-        h["sku_id"] = h["sku_id"].astype(sku_dtype)
-    return h
 
 
 def _world(tmp_path, cfg=None):
@@ -140,26 +124,6 @@ def test_requests_read_from_jsonl_or_a_table_and_a_bad_line_costs_itself(tmp_pat
     assert validate_request(rows[0], CFG) == []
 
 
-def test_both_event_ids_are_the_hours_key_computable_from_the_feed_row():
-    """Two prefixes over one key, so engineering can name either before it
-    exists and a pair differs only in its prefix. The EPISODE is in neither:
-    it is the producers' and can be relabelled, and an audit record's
-    identity may not move when an upstream label does."""
-    k = hour_key(7.0, "F1", pd.Timestamp("2026-08-19"), 17)
-    assert k == ("7", "F1", "2026-08-19", 17)
-    assert outcome_id_of(k) == "feed-7|F1|2026-08-19T17"
-    assert decision_id_of(k) == "dec-7|F1|2026-08-19T17"
-    assert outcome_id_of(k).split("-", 1)[1] == decision_id_of(k).split("-", 1)[1]
-    assert decision_id_of(hour_key("7", "F1", "2026-08-19", 5)) == "dec-7|F1|2026-08-19T05"
-    assert outcome_id_of(hour_key("7", "F1", "2026-08-19", 5)) == "feed-7|F1|2026-08-19T05"
-    with pytest.raises(ValueError):
-        hour_key(7.5, "F1", "2026-08-19", 17)
-    with pytest.raises(ValueError):
-        hour_key(7, "F1", "2026-08-19", float("nan"))
-    with pytest.raises(ValueError):
-        hour_key(None, "F1", "2026-08-19", 17)
-
-
 def test_response_rows_carry_the_contract_fields_only_and_always_write(tmp_path):
     rows = [{"episode_id": "E1", "sku_id": 7, "fc": "F1", "date": "2026-08-19",
              "hour_of_day": 17, "decision_id": "D1", "applied_discount": 0.1,
@@ -190,7 +154,7 @@ def test_a_parquet_request_table_with_a_datetime_date_prices_commits_and_writes(
         date=pd.to_datetime("2026-08-19")).to_parquet(table)
     requests = read_requests(str(table))
     assert isinstance(requests[0]["date"], pd.Timestamp)
-    rows, events, rep = run(cfg, requests, _history(skus=(7, 8)), store=store,
+    rows, events, rep = run(cfg, requests, ref_rate_history(skus=(7, 8)), store=store,
                             model=_Model(), posterior=posterior, r_lookup=R_LOOKUP)
     assert rep["decisions"] == 2 and rep["rejected"] == 0, rep
     assert all(e["date"] == "2026-08-19" and e["sku_id"] in ("7", "8") for e in events)
@@ -201,7 +165,7 @@ def test_a_parquet_request_table_with_a_datetime_date_prices_commits_and_writes(
     assert [g["date"] for g in got] == ["2026-08-19", "2026-08-19"]
     assert all(g["decision_id"] and g["rejected"] is None for g in got)
     # the same hour sent again is refused by the store's own index
-    rows, events, again = run(cfg, requests, _history(skus=(7, 8)), store=store,
+    rows, events, again = run(cfg, requests, ref_rate_history(skus=(7, 8)), store=store,
                               model=_Model(), posterior=posterior, r_lookup=R_LOOKUP)
     assert not events and all(r["rejected"].startswith("already_priced") for r in rows)
 
@@ -213,7 +177,7 @@ def test_an_id_dtype_mismatch_does_not_price_on_unknown_features(tmp_path):
     sides, and a request priced on no history is counted."""
     cfg, store, posterior = _world(tmp_path)
     model = _Model()
-    hist = _history(skus=(7,), sku_dtype="int64")
+    hist = ref_rate_history(skus=(7,), sku_dtype="int64")
     rows, events, rep = run(cfg, [_req(sku_id="7")], hist, store=store, model=model,
                             posterior=posterior, r_lookup=R_LOOKUP)
     assert rep["decisions"] == 1 and rep["requests_with_unknown_features"] == 0
@@ -234,7 +198,7 @@ def test_a_null_price_and_an_integer_category_are_row_scoped(tmp_path):
     reqs = [_req(cost=None),                                   # rejected: null
             _req(episode_id="E2", sku_id=8, category=12),      # prices on GLOBAL
             _req(episode_id="E3", sku_id=9, original_price=None)]
-    rows, events, rep = run(cfg, reqs, _history(skus=(7, 8, 9)), store=store,
+    rows, events, rep = run(cfg, reqs, ref_rate_history(skus=(7, 8, 9)), store=store,
                             model=_Model(), posterior=posterior, r_lookup=R_LOOKUP)
     assert rep["decisions"] == 1 and rep["rejected_before_the_engine"] == 2
     assert "cost is null" in rows[0]["rejected"]
@@ -255,14 +219,14 @@ def test_a_later_hour_of_a_known_episode_is_priced_on_the_entry_forecast_sliced(
                      "mu_ref_path": [0.9, 0.7, 0.5, 0.3],
                      "opened": ("2026-08-19", 17)}}
     later = _req(hour_of_day=18, hours_remaining=3, q=2, current_discount=0.3)
-    states, notes = build_states([later], _history(), CFG, model, R_LOOKUP,
+    states, notes = build_states([later], ref_rate_history(), CFG, model, R_LOOKUP,
                                  episode_paths=stored)
     assert states[0]["mu_ref_path"] == [0.7, 0.5, 0.3]
     assert model.calls == [] and notes["non_entry_requests_without_stored_path"] == 0
     # the window grew by two hours (a restock): the slice, then two
     # predicted hours on the opening's features
     restock = _req(hour_of_day=19, hours_remaining=4, q=5, current_discount=0.3)
-    states, _ = build_states([restock], _history(), CFG, model, R_LOOKUP,
+    states, _ = build_states([restock], ref_rate_history(), CFG, model, R_LOOKUP,
                              episode_paths=stored)
     assert states[0]["mu_ref_path"] == [0.5, 0.3, 0.5, 0.5]
     assert len(model.calls) == 1
@@ -271,11 +235,11 @@ def test_a_later_hour_of_a_known_episode_is_priced_on_the_entry_forecast_sliced(
     # a later request the store does not know falls back to a fresh
     # forecast, counted -- a listing already on clearance at launch
     model = _Model(mu=0.5)
-    states, notes = build_states([later], _history(), CFG, model, R_LOOKUP, episode_paths={})
+    states, notes = build_states([later], ref_rate_history(), CFG, model, R_LOOKUP, episode_paths={})
     assert states[0]["mu_ref_path"] == [0.5, 0.5, 0.5]
     assert notes["non_entry_requests_without_stored_path"] == 1
     # and an entry request is always a fresh forecast
-    states, notes = build_states([_req()], _history(), CFG, model, R_LOOKUP,
+    states, notes = build_states([_req()], ref_rate_history(), CFG, model, R_LOOKUP,
                                  episode_paths=stored)
     assert states[0]["mu_ref_path"] == [0.5] * 4 and notes["requests_with_unknown_features"] == 0
 
@@ -285,13 +249,13 @@ def test_the_batch_prices_a_later_hour_from_the_store_it_committed_to(tmp_path):
     hour of the same episode is priced on (events.store.episode_paths)."""
     cfg, store, posterior = _world(tmp_path)
     model = _Model()
-    rows, events, _ = run(cfg, [_req()], _history(), store=store, model=model,
+    rows, events, _ = run(cfg, [_req()], ref_rate_history(), store=store, model=model,
                           posterior=posterior, r_lookup=R_LOOKUP)
     entry = events[0]
     calls_after_entry = len(model.calls)
     later = _req(hour_of_day=18, hours_remaining=3, q=2,
                  current_discount=entry["applied_discount"])
-    rows, events, rep = run(cfg, [later], _history(), store=store, model=model,
+    rows, events, rep = run(cfg, [later], ref_rate_history(), store=store, model=model,
                             posterior=posterior, r_lookup=R_LOOKUP)
     assert rep["decisions"] == 1 and rep["non_entry_requests_without_stored_path"] == 0
     assert events[0]["mu_ref_path"] == entry["mu_ref_path"][1:]
@@ -329,7 +293,7 @@ def test_the_feature_table_prices_exactly_as_the_history_does():
     resolve to the same features, the same forecast and the same count
     whether the batch reads the history or the table."""
     from engine.state import ref_rate_table, table_as_of
-    hist = _history(skus=(7, 8))
+    hist = ref_rate_history(skus=(7, 8))
     table = ref_rate_table(hist, "2026-08-19", CFG)
     assert table_as_of(table) == "2026-08-19"
     assert set(table.fc) == {"F1", "*"} and set(table.sku_id) == {"7", "8"}
@@ -356,7 +320,7 @@ def test_a_batch_on_the_days_table_reads_no_history_and_counts_a_stale_one(tmp_p
     for an earlier day is counted, not refused."""
     from engine.state import ref_rate_table
     cfg, store, posterior = _world(tmp_path)
-    table = ref_rate_table(_history(), "2026-08-19", cfg)
+    table = ref_rate_table(ref_rate_history(), "2026-08-19", cfg)
     rows, events, rep = run(cfg, [_req()], store=store, model=_Model(),
                             posterior=posterior, r_lookup=R_LOOKUP, features=table)
     assert rep["decisions"] == 1 and rep["history_rows"] == 0

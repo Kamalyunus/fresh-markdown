@@ -35,10 +35,10 @@ FAILURE_COLUMNS = (("skuseq", "sku_id"), ("fc",), ("date",), ("hour", "hour_of_d
 
 
 def _read(path):
-    if path.endswith(".parquet"):
-        return pd.read_parquet(path)
-    if path.endswith(".csv"):
-        return pd.read_csv(path)
+    """The file as a frame -- dtypes matter to the checks below, so parquet
+    and CSV are read natively and JSONL through common.io.read_rows."""
+    if path.endswith((".parquet", ".csv")):
+        return pd.read_parquet(path) if path.endswith(".parquet") else pd.read_csv(path)
     return pd.DataFrame(read_rows(path))
 
 
@@ -180,10 +180,16 @@ def _check_feed_episode_ids(canon, c):
     c.gate("episode_id never null (the feed's copy of the producers' id)",
            int(ids.isna().sum()),
            "a feed row with no episode id: the id step did not run for that hour")
-    theirs = ids.astype(str)
-    opens_theirs = theirs.ne(theirs.groupby([canon.sku_id, canon.fc]).shift())
+    # the boundary compare runs on the rows that CARRY an id: a null is
+    # its own FAIL above, not the token "nan" grouped as a window, and it
+    # must not break the row after it either -- the id is carried across
+    # it (ffill within the shelf) so the compare reads the last id seen
+    shelf = [canon.sku_id, canon.fc]
+    theirs = ids.where(ids.notna()).astype(object).groupby(shelf).ffill()
+    opens_theirs = theirs.ne(theirs.groupby(shelf).shift())
+    has_id = ids.notna().to_numpy()
     c.gate("the producers' ids group the same windows EPISODE_RULE derives",
-           int((opens_theirs != window_starts(canon)).sum()),
+           int(((opens_theirs != window_starts(canon)) & has_id).sum()),
            "rows where their id opens a window and the rule does not, or the "
            "reverse: the live ids and the history's derived ids would disagree. "
            "Run ops.assign_episode_ids over the same day and diff")

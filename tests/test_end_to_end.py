@@ -1275,13 +1275,13 @@ def test_the_pilot_simulator_walks_past_launch_date(workspace, tmp_path):
 
 
 def test_the_e2e_cycle_prices_ingests_and_pairs(workspace, tmp_path):
-    """One integration cycle as engineering will run it: hourly request
-    batches through ops.price_batch (in parallel), the shop's feed, the
-    outcome ingest, the exports -- in a workspace of its own, production
-    untouched. The outcome ids are the ones the feed row names, and a
-    batch re-sent for a priced hour is refused, never priced twice."""
+    """One integration cycle as engineering will run it: the shelf snapshot
+    in the feed's own schema through ops.price_hour every hour (in
+    parallel), the shop's feed, the outcome ingest, the exports -- in a
+    workspace of its own, production untouched. The outcome ids are the
+    ones the feed row names, and a snapshot re-sent for a priced hour is
+    refused, never priced twice."""
     from tools import e2e_cycle
-    from ops import price_batch
     from common.provenance import file_digest
     from events.pairs import hour_key, outcome_id_of
 

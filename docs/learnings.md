@@ -1009,6 +1009,26 @@ now. Dates are owner sign-off.
   helper from the engine and so loaded LightGBM — `hours_between` moved
   to `common.windows`, where the rule lives.
 
+- **What the build had spelt twice** (owner, 09-17, the review's second
+  pass). The shelf-hour tag was formatted in five places and the hour
+  parsed by hand in three, each `int(float(h))` truncating 17.5 to 17
+  where the one key function raises; three by-extension file readers sat
+  beside the shared one, and the producers' script's own let a NaN cell
+  through as a truthy id; "is this a number" had four spellings. One
+  home each now: `shelf_hour_tag` and `hour_int` beside `hour_key`,
+  `as_number` for the lenient feed-cell reading (the strict
+  `finite_number` stays the contract's test on purpose), `write_frame` in
+  `common.io`, one shelf-index upsert in the store, one response-row
+  builder per script. The tests had the same shape: the id formulas
+  asserted in three files (now `test_pairs.py`), the closed/restock/reset
+  trio built twice, two builders copied verbatim (now `conftest`'s
+  `ref_rate_history`, `shelf_row`, `R_LOOKUP`), three docstrings still
+  describing the design the reversal removed. What was NOT consolidated,
+  deliberately: the store-only rule and the producers' rule take
+  different inputs and answer differently, and the vector rule in
+  `common.windows` and the scalar one in the script are two homes with a
+  parity test between them rather than one home with two callers.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,

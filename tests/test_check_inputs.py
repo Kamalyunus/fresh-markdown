@@ -97,3 +97,15 @@ def test_a_failures_table_must_name_shelf_hours(cfg, tmp_path):
     assert v["every row names one shelf-hour"] == "FAIL"
     text = check_inputs.render(check_inputs.check_failures(str(f), cfg).rows)
     assert "1 FAIL" in text and "-> a row with a null id" in text
+
+
+def test_a_null_feed_id_fails_its_own_gate_and_is_not_a_window_boundary(cfg, tmp_path):
+    """A null id read through astype(str) became the token "nan" and
+    opened a window of its own in the boundary compare, so one missing id
+    reported two disagreements on top of the null it already was."""
+    rows = _idle(source_window(1, 10, 5, day="2026-03-02"), 1)
+    ids = ["W"] * len(rows)
+    ids[2] = None
+    v = _verdicts(check_inputs.check_feed(_feed_with_ids(tmp_path, rows, ids, "null_mid.parquet"), cfg).rows)
+    assert v["episode_id never null (the feed's copy of the producers' id)"] == "FAIL"
+    assert v["the producers' ids group the same windows EPISODE_RULE derives"] == "PASS"

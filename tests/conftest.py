@@ -312,6 +312,40 @@ def _shelf(hours, counters, start, sold, end, day="2026-03-01", sku="S", fc="F")
                          ending_inventory=end, date=day, sku_id=sku, fc=fc)
 
 
+# ------------------------------------------------ Lane B's shared builders
+
+R_LOOKUP = {"fallback_order": ["subcategory", "category", "global"],
+            "subcategory": {}, "category": {}, "global": 0.9}
+
+
+def ref_rate_history(skus=(7,), days=range(1, 19), sku_dtype=None):
+    """Anchor-priced hours for `skus` on August `days`: one episode a day
+    selling one unit at the reference discount, so both rate features
+    resolve to 1.0 for an opening on the 19th. The one history the batch
+    caller's and the hourly script's tests price against."""
+    from engine.state import HISTORY_COLS
+    rows = [{"episode_id": f"{s}|F1|2026-08-{d:02d}T10", "sku_id": s, "fc": "F1",
+             "category": "VEG", "date": f"2026-08-{d:02d}", "hour_of_day": 10,
+             "starting_inventory": 3, "units_sold": 1, "total_discount": 0.30}
+            for s in skus for d in days]
+    h = pd.DataFrame(rows, columns=list(HISTORY_COLS))
+    if sku_dtype:
+        h["sku_id"] = h["sku_id"].astype(sku_dtype)
+    return h
+
+
+def shelf_row(**over):
+    """One row of the hourly feed for the Lane B tests: `source_row` on
+    the August shelf those tests price (a VEG SKU at F1, the day as text,
+    the discount a PERCENT); keywords override, `episode_id` is the
+    caller's."""
+    base = {"date": "2026-08-19", "hour": 18, "skuseq": 7, "fc": "F1", "inventory": 2.0,
+            "discount": 15.0, "units_sold": None, "normal_asp": 10000.0, "final_price": None,
+            "cogs_wo_vat": 4000.0, "ending_inventory": None, "flc_window": 3.0,
+            "category": "VEG", "subcategory": "LEAFY"}
+    return source_row(**{**base, **over})
+
+
 # ------------------------------------------------ rows in the SOURCE schema
 
 def source_row(**over):

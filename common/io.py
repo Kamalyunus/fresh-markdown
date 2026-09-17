@@ -80,3 +80,15 @@ def read_rows(path, rename=None):
     frame = frame.rename(columns=rename)
     frame = frame.astype(object).where(frame.notna(), None)
     return frame.to_dict("records")
+
+
+def write_frame(df, path):
+    """A DataFrame to `path` by extension -- .parquet, .csv, else JSONL --
+    the one writer the hourly scripts share for the files engineering
+    reads back (a response, the rows with their ids)."""
+    if path.endswith(".parquet"):
+        df.to_parquet(path, index=False)
+    elif path.endswith(".csv"):
+        df.to_csv(path, index=False)
+    else:
+        df.to_json(path, orient="records", lines=True)

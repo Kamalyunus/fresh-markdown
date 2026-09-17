@@ -898,7 +898,9 @@ the store does not know falls back to a fresh forecast and is counted
 (`non_entry_requests_without_stored_path`). **Both event ids are the
 shelf-hour**, built over the one key (`hour_key`) in the one place:
 `outcome_id = feed-<sku>|<fc>|<date>T<hh>` (`events.pairs.outcome_id_of`)
-and `decision_id = dec-<sku>|<fc>|<date>T<hh>` (`decision_id_of`), so
+and `decision_id = dec-<sku>|<fc>|<date>T<hh>` (`decision_id_of`; all three
+prefixes over the one `shelf_hour_tag`, and the producers' new-window id is
+that tag bare), so
 engineering can name either before it exists, a re-ingest dedups, a pair
 differs only in its prefix, and two decisions that claimed one hour match
 neither (`decisions_colliding_on_hour`; completeness falls by both). The

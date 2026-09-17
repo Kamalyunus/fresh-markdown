@@ -123,8 +123,8 @@ And the standing prohibitions:
     its context — `batch_context`; per-decision seeding —
     `common.parallel.keyed_rng` (the pool — `EpisodePool`); the hour key and every
     event id — `events.pairs.hour_key`, `outcome_id_of`, `decision_id_of`,
-    `rejection_id_of` (prefixes over the key; the episode is never in one); id spelling —
-    `ident`; two claims on one key — `colliding_keys`; one decision per hour and
+    `rejection_id_of` (over `shelf_hour_tag`; the episode is never in one); id spelling —
+    `ident`, `hour_int`, `as_number`; two claims on one key — `colliding_keys`; one decision per hour and
     one outcome per decision — the STORE (`priced_hours`, `completeness_counts`);
     the event field lists — `events.contract`; the bundle — `fit.artifacts.load_bundle`
   - scrap, IL, margin at episode grain — `common.metrics.episode_economics`

@@ -34,7 +34,6 @@ Run: python3 -m ops.price_hour --snapshot <top-of-hour rows> \\
 """
 
 import argparse
-import math
 import os
 import shutil
 import tempfile
@@ -42,12 +41,12 @@ import tempfile
 import pandas as pd
 
 from common.config import load_config
-from common.io import read_rows, write_json, write_jsonl
+from common.io import read_rows, write_frame, write_json
 from common.windows import hours_between, planning_horizon
 from ops.assign_episode_ids import continues as rule_continues
 from engine.state import load_history
 from events.contract import rejection_event
-from events.pairs import ident, iso_day
+from events.pairs import as_number as _num, hour_key, iso_day
 from events.store import EventStore
 from fit.prepare_data import SOURCE_TO_CANONICAL
 from ops import price_batch
@@ -68,7 +67,7 @@ RESPONSE_COLS = ("skuseq", "fc", "date", "hour", "episode_id", "decision_id",
 def read_snapshot(path):
     """The snapshot file's rows (parquet, CSV or JSONL in the feed's
     names) through `snapshot_rows`."""
-    return snapshot_rows(read_rows(path, rename=SOURCE_TO_CANONICAL))
+    return snapshot_rows(read_rows(path))
 
 
 def snapshot_rows(records):
@@ -80,12 +79,10 @@ def snapshot_rows(records):
     rows = []
     for r in records:
         d = {SOURCE_TO_CANONICAL.get(k, k): v for k, v in dict(r).items()}
-        disc = d.get("total_discount")
-        d["total_discount"] = (None if disc is None or not _finite(disc)
-                               else float(disc) / 100.0)
+        disc = _num(d.get("total_discount"))
+        d["total_discount"] = None if disc is None else disc / 100.0
         try:
-            d["key"] = (ident(d["sku_id"]), ident(d["fc"]), iso_day(d["date"]),
-                        int(float(d["hour_of_day"])))
+            d["key"] = hour_key(d["sku_id"], d["fc"], d["date"], d["hour_of_day"])
         except (KeyError, TypeError, ValueError):
             d["key"] = None
         rows.append(d)
@@ -93,14 +90,7 @@ def snapshot_rows(records):
 
 
 def _finite(v):
-    try:
-        return math.isfinite(float(v))
-    except (TypeError, ValueError):
-        return False
-
-
-def _num(v):
-    return float(v) if _finite(v) else None
+    return _num(v) is not None
 
 
 def split_hours(rows, hour=None):
@@ -310,36 +300,36 @@ def _run(cfg, snapshot_rows, hour, features, history, workers, seed, store, dry_
                  "q_remaining": _num(r.get("starting_inventory"))}, why)
             if refused is not None and store.emit_rejection(refused):
                 counts["rejections_recorded_before_the_request"] += 1
-            response.append({"skuseq": r.get("sku_id"), "fc": r.get("fc"),
-                             "date": r.get("date"), "hour": r.get("hour_of_day"),
-                             "episode_id": None, "decision_id": None,
-                             "apply_discount_pct": None, "apply_price": None,
-                             "is_exploration": None, "rejected": why})
+            response.append(_response(r.get("sku_id"), r.get("fc"), r.get("date"),
+                                      r.get("hour_of_day"), None, None, why))
             continue
         a = next(answered)
-        disc = a["applied_discount"]
-        response.append({
-            "skuseq": req["sku_id"], "fc": req["fc"], "date": req["date"],
-            "hour": req["hour_of_day"], "episode_id": req["episode_id"],
-            "decision_id": a["decision_id"],
-            "apply_discount_pct": None if disc is None else round(float(disc) * 100.0, 4),
-            "apply_price": a["applied_price"], "is_exploration": a["is_exploration"],
-            "rejected": a["rejected"]})
+        response.append(_response(req["sku_id"], req["fc"], req["date"], req["hour_of_day"],
+                                  req["episode_id"], a, a["rejected"]))
     report = {"hour": f"{when[0]}T{when[1]:02d}" if when else None,
               "shelves": len(openings), "closed_rows_seen": len(closed),
               **counts, "dry_run": bool(dry_run), "live_rule": LIVE_RULE, **rep}
     return response, events, report
 
 
+def _response(skuseq, fc, date, hour, episode_id, answer, rejected):
+    """One response row (RESPONSE_COLS) in the feed's units: the shelf-hour
+    echoed, the producer's id, and the price to apply as a percent and as
+    a price -- or the reason there is none."""
+    disc = answer["applied_discount"] if answer else None
+    return {"skuseq": skuseq, "fc": fc, "date": date, "hour": hour,
+            "episode_id": episode_id,
+            "decision_id": answer["decision_id"] if answer else None,
+            "apply_discount_pct": None if disc is None else round(float(disc) * 100.0, 4),
+            "apply_price": answer["applied_price"] if answer else None,
+            "is_exploration": answer["is_exploration"] if answer else None,
+            "rejected": rejected}
+
+
 def write_response(rows, path):
     """The response in the feed's units, by extension: .csv, .parquet or
-    .jsonl (RESPONSE_COLS)."""
-    if path.endswith(".csv"):
-        pd.DataFrame(rows, columns=list(RESPONSE_COLS)).to_csv(path, index=False)
-    elif path.endswith(".parquet"):
-        pd.DataFrame(rows, columns=list(RESPONSE_COLS)).to_parquet(path, index=False)
-    else:
-        write_jsonl(path, rows, fields=RESPONSE_COLS)
+    .jsonl (RESPONSE_COLS, common.io.write_frame)."""
+    write_frame(pd.DataFrame(rows, columns=list(RESPONSE_COLS)), path)
 
 
 def main(argv=None):

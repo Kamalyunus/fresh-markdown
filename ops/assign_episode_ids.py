@@ -27,8 +27,9 @@ import argparse
 
 import pandas as pd
 
+from common.io import read_rows, write_frame
 from common.windows import hours_between
-from events.pairs import ident, iso_day
+from events.pairs import as_number, hour_int, hour_key, iso_day, shelf_hour_tag
 
 RULE = ("continue last hour's episode on the shelf when last hour's row is one "
         "hour earlier, did not end at the write-off zero, and the counter "
@@ -37,31 +38,23 @@ RULE = ("continue last hour's episode on the shelf when last hour's row is one "
         "skuseq|fc|<date>T<hour>")
 
 
-def _num(v):
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
-        return None
-    return f if f == f else None
-
-
 def continues(prev, row):
     """RULE, for one shelf: `prev` is last hour's row (feed names, with
     `episode_id`), `row` this hour's; either may be None."""
     if prev is None or row is None:
         return False
     try:
-        one = hours_between(iso_day(prev["date"]), int(float(prev["hour"])),
-                            iso_day(row["date"]), int(float(row["hour"]))) == 1
+        one = hours_between(iso_day(prev["date"]), hour_int(prev["hour"]),
+                            iso_day(row["date"]), hour_int(row["hour"])) == 1
     except (KeyError, TypeError, ValueError):
         return False
     if not one:
         return False
-    ending, start, sold = (_num(prev.get("ending_inventory")), _num(prev.get("inventory")),
-                           _num(prev.get("units_sold")))
+    ending, start, sold = (as_number(prev.get("ending_inventory")), as_number(prev.get("inventory")),
+                           as_number(prev.get("units_sold")))
     if ending is not None and ending == 0:
         return False                                       # the write-off zero closed it
-    c_prev, c_now = _num(prev.get("flc_window")), _num(row.get("flc_window"))
+    c_prev, c_now = as_number(prev.get("flc_window")), as_number(row.get("flc_window"))
     if c_prev is None or c_now is None:
         return False
     # the raw counter step, exactly as common.windows.window_signals diffs it
@@ -76,7 +69,9 @@ def continues(prev, row):
 
 
 def new_id(row):
-    return f"{ident(row['skuseq'])}|{ident(row['fc'])}|{iso_day(row['date'])}T{int(float(row['hour'])):02d}"
+    """The id a new window opens with: the shelf-hour's tag, spelt as every
+    event id spells it (events.pairs.shelf_hour_tag over hour_key)."""
+    return shelf_hour_tag(hour_key(row["skuseq"], row["fc"], row["date"], row["hour"]))
 
 
 def assign(rows, previous=None):
@@ -86,14 +81,14 @@ def assign(rows, previous=None):
     last = {}
     for p in previous or []:
         try:
-            last[(ident(p["skuseq"]), ident(p["fc"]))] = p
+            last[hour_key(p["skuseq"], p["fc"], p["date"], p["hour"])[:2]] = p
         except (KeyError, TypeError, ValueError):
             continue
     out, counts = [], {"continued": 0, "new": 0, "unkeyable": 0}
     for r in rows:
         r = dict(r)
         try:
-            key = (ident(r["skuseq"]), ident(r["fc"]))
+            key = hour_key(r["skuseq"], r["fc"], r["date"], r["hour"])[:2]
             eid = new_id(r)
         except (KeyError, TypeError, ValueError):
             r["episode_id"] = None
@@ -111,33 +106,18 @@ def assign(rows, previous=None):
     return out, counts
 
 
-def _read(path):
-    if path.endswith(".parquet"):
-        return pd.read_parquet(path)
-    if path.endswith(".csv"):
-        return pd.read_csv(path)
-    return pd.read_json(path, lines=True)
-
-
-def _write(df, path):
-    if path.endswith(".parquet"):
-        df.to_parquet(path, index=False)
-    elif path.endswith(".csv"):
-        df.to_csv(path, index=False)
-    else:
-        df.to_json(path, orient="records", lines=True)
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="ops.assign_episode_ids", description=RULE)
     ap.add_argument("--hour", required=True, help="this hour's rows (feed schema)")
     ap.add_argument("--previous", default=None, help="last hour's rows, with episode_id")
     ap.add_argument("--out", required=True, help="this hour's rows with episode_id")
     args = ap.parse_args(argv)
-    rows = _read(args.hour).to_dict("records")
-    prev = _read(args.previous).to_dict("records") if args.previous else None
+    # common.io.read_rows: a null cell is None, never a NaN that reads as a
+    # truthy id one row later
+    rows = read_rows(args.hour)
+    prev = read_rows(args.previous) if args.previous else None
     out, counts = assign(rows, prev)
-    _write(pd.DataFrame(out), args.out)
+    write_frame(pd.DataFrame(out), args.out)
     print(f"{len(out)} rows: {counts['continued']} continued, {counts['new']} new"
           + (f", {counts['unkeyable']} without a shelf-hour" if counts["unkeyable"] else "")
           + f" -> {args.out}")

@@ -11,36 +11,21 @@ import tempfile
 import pandas as pd
 import pytest
 
-from conftest import _Applier, load_config
+from conftest import R_LOOKUP, _Applier, load_config, ref_rate_history, shelf_row
 from engine.posterior import PosteriorStore
 from engine.state import ref_rate_table
 from events.store import EventStore
 from ops import assign_episode_ids, price_hour
 
-R_LOOKUP = {"fallback_order": ["subcategory", "category", "global"],
-            "subcategory": {}, "category": {}, "global": 0.9}
-
 
 def _snap(**over):
-    """One shelf at the top of the hour, in the feed's own names (the
-    discount a PERCENT) with the producer's `episode_id` -- by default the
-    id a first hour gets, sku|fc|<date>T<hour>; keywords override."""
-    r = {"date": "2026-08-19", "hour": 18, "skuseq": 7, "fc": "F1", "inventory": 2.0,
-         "discount": 15.0, "units_sold": None, "normal_asp": 10000.0, "final_price": None,
-         "cogs_wo_vat": 4000.0, "ending_inventory": None, "flc_window": 3.0,
-         "category": "VEG", "subcategory": "LEAFY"}
-    r.update(over)
+    """One shelf at the top of the hour (conftest.shelf_row) with the
+    producer's `episode_id` -- by default the id a first hour gets,
+    sku|fc|<date>T<hour>; keywords override."""
+    r = shelf_row(**over)
     if "episode_id" not in over:
         r["episode_id"] = (assign_episode_ids.new_id(r) if r["skuseq"] is not None else None)
     return r
-
-
-def _history(skus=(7,), days=range(1, 19)):
-    return pd.DataFrame([
-        {"episode_id": f"{s}|F1|2026-08-{d:02d}T10", "sku_id": s, "fc": "F1",
-         "category": "VEG", "date": f"2026-08-{d:02d}", "hour_of_day": 10,
-         "starting_inventory": 3, "units_sold": 1, "total_discount": 0.30}
-        for s in skus for d in days])
 
 
 def _world(tmp_path):
@@ -52,7 +37,7 @@ def _world(tmp_path):
     store = EventStore(cfg)
     model = _Applier(cfg, base_mu=0.8, anchor={"VEG": 1.0})
     model.calibration_grain = "category"
-    table = ref_rate_table(_history(skus=(7, 8)), "2026-08-19", cfg)
+    table = ref_rate_table(ref_rate_history(skus=(7, 8)), "2026-08-19", cfg)
     return cfg, store, posterior, model, table
 
 
@@ -136,7 +121,6 @@ def test_the_producers_ids_are_read_as_given_and_only_checked_against_the_rule(t
         [_snap(skuseq=7, hour=18, inventory=5.0, flc_window=2.0),
          _snap(skuseq=8, hour=18, inventory=6.0, flc_window=5.0),
          _snap(skuseq=9, hour=18, inventory=2.0, flc_window=5.0)], closed)
-    assert counts == {"continued": 1, "new": 2, "unkeyable": 0}
     rows = price_hour.read_snapshot(_write(tmp_path, closed + now, "n.csv"))
     response, _, rep = _price(cfg, rows, store, posterior, model, table)
     assert rep["closed_rows_seen"] == 3 and rep["shelves"] == 3
@@ -206,10 +190,10 @@ def test_a_refused_hour_is_recorded_so_the_shelf_is_still_checkable_next_hour(tm
 
 
 def test_a_gap_is_unknown_to_the_rule_never_a_disagreement(tmp_path):
-    """An hour we refused to price stores no decision, so next hour the
-    store's latest decision is two hours back and the rule has nothing to
-    step from. That is unknown, not "a new window": counting it would
-    report every shelf held through a rejection as a disagreement. The
+    """An hour that never reached us -- a missed cron hour, nothing
+    recorded -- leaves the rule two hours back with nothing to step from.
+    That is a GAP, counted as such, never "a new window": read as one it
+    reported a shelf held through a missing hour as a disagreement. The
     closed rows, when they ride along, answer it properly."""
     cfg, store, posterior, model, table = _world(tmp_path)
     first = price_hour.read_snapshot(_write(tmp_path, [_snap(hour=17, inventory=3.0, flc_window=4.0)]))

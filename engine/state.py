@@ -49,6 +49,9 @@ _NUMBER = (int, float, np.integer, np.floating)
 
 
 def _null(v):
+    """None or a non-finite float: the request's "no value" (a numeric
+    STRING is not null here -- validate_request refuses it as not a number,
+    which as_number's lenient reading would have let through)."""
     return v is None or (isinstance(v, (float, np.floating)) and not math.isfinite(v))
 
 

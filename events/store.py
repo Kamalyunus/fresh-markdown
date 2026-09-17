@@ -64,6 +64,19 @@ def _decision_key(evt):
         return None
 
 
+def _upsert_shelf(index, key, evt, **extra):
+    """(sku, fc) -> the latest hour's record in `index`: the later hour
+    wins (a tie keeps the later write). The one upsert both shelf indexes
+    share; `extra` is what distinguishes them."""
+    shelf, when = key[:2], (key[2], key[3])
+    held = index.get(shelf)
+    if held is None or (held["date"], held["hour_of_day"]) <= when:
+        index[shelf] = {"episode_id": evt.get("episode_id"), "date": key[2],
+                        "hour_of_day": key[3],
+                        "hours_remaining": evt.get("hours_remaining"),
+                        "q_remaining": evt.get("q_remaining"), **extra}
+
+
 def _episode_path(evt):
     """What a later request of this episode is priced on: the decision's
     hour and its stored forecast from that hour (design 5.10)."""
@@ -254,16 +267,8 @@ class EventStore:
         from it, so an hour we declined to price is no longer a gap -- and a
         gap that remains is an hour engineering did not send."""
         key = _decision_key(evt)
-        if key is None:
-            return None
-        shelf, when = key[:2], (key[2], key[3])
-        seen = self.last_seen_by_shelf.get(shelf)
-        if seen is None or (seen["date"], seen["hour_of_day"]) <= when:
-            self.last_seen_by_shelf[shelf] = {
-                "episode_id": evt.get("episode_id"), "date": key[2],
-                "hour_of_day": key[3],
-                "hours_remaining": evt.get("hours_remaining"),
-                "q_remaining": evt.get("q_remaining"), "priced": priced}
+        if key is not None:
+            _upsert_shelf(self.last_seen_by_shelf, key, evt, priced=priced)
         return key
 
     def _register_decision(self, evt):
@@ -274,15 +279,8 @@ class EventStore:
             if key in self._hour_keys:
                 self.completeness_counts["decisions_on_priced_hour"] += 1
             self._hour_keys.add(key)
-            shelf, when = key[:2], (key[2], key[3])
-            last = self.latest_by_shelf.get(shelf)
-            if last is None or (last["date"], last["hour_of_day"]) <= when:
-                self.latest_by_shelf[shelf] = {
-                    "episode_id": evt.get("episode_id"), "date": key[2],
-                    "hour_of_day": key[3],
-                    "hours_remaining": evt.get("hours_remaining"),
-                    "applied_discount": evt.get("applied_discount"),
-                    "q_remaining": evt.get("q_remaining")}
+            _upsert_shelf(self.latest_by_shelf, key, evt,
+                          applied_discount=evt.get("applied_discount"))
         path = _episode_path(evt)
         if path is not None:
             # the hour the episode OPENED survives every later decision: a

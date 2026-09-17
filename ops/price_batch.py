@@ -31,18 +31,16 @@ import argparse
 from collections import Counter
 
 import pandas as pd
-import pyarrow.parquet as pq
 
 from common.config import load_config
 from common.io import read_rows, write_json, write_jsonl
 from common.parallel import map_episodes
-from engine.state import (HISTORY_COLS, REQUEST_FIELDS, batch_context, build_states,   # noqa: F401
+from engine.state import (REQUEST_FIELDS, batch_context, build_states,       # noqa: F401
                           load_history, table_as_of,
                           canonical_request, price_one, validate_request)
 from events.contract import rejection_event
 from events.pairs import colliding_keys, hour_key, ident_series
 from events.store import EventStore
-from fit import prepare_data
 from fit.artifacts import load_bundle
 
 # what a caller gets back per request: the hour, the id the outcome will
@@ -178,14 +176,10 @@ def run(cfg, requests, history=None, workers=None, seed=0, store=None, model=Non
         base = {f: canon.get(i, r).get(f)
                 for f in ("episode_id", "sku_id", "fc", "date", "hour_of_day")}
         evt = priced.get(i)
-        rows.append({**base, "decision_id": evt["decision_id"],
-                     "applied_discount": evt["applied_discount"],
-                     "applied_price": evt["applied_price"],
-                     "is_exploration": evt["is_exploration"], "rejected": None}
-                    if evt else
-                    {**base, "decision_id": None, "applied_discount": None,
-                     "applied_price": None, "is_exploration": None,
-                     "rejected": rejected[i]})
+        rows.append({**base, **{f: (evt[f] if evt else None) for f in
+                                ("decision_id", "applied_discount", "applied_price",
+                                 "is_exploration")},
+                     "rejected": None if evt else rejected[i]})
     events = list(priced.values())
     report = {
         "requests": len(requests),

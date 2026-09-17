@@ -2,16 +2,15 @@
 it: one hour's rows against last hour's, nothing else."""
 import pandas as pd
 
+from conftest import shelf_row
 from ops import assign_episode_ids as aid
 
 
 def _row(hour, **over):
-    r = {"date": "2026-08-19", "hour": hour, "skuseq": 7, "fc": "F1", "inventory": 3.0,
-         "discount": 15.0, "units_sold": 1, "normal_asp": 10000.0, "final_price": 8500.0,
-         "cogs_wo_vat": 4000.0, "ending_inventory": 2.0, "flc_window": 3.0,
-         "category": "VEG", "subcategory": "LEAFY", "episode_id": "7|F1|2026-08-19T17"}
-    r.update(over)
-    return r
+    """A closed hour on the shared shelf (conftest.shelf_row), carrying the
+    id its window opened with; keywords override."""
+    return shelf_row(**{"hour": hour, "inventory": 3.0, "units_sold": 1, "final_price": 8500.0,
+                        "ending_inventory": 2.0, "episode_id": "7|F1|2026-08-19T17", **over})
 
 
 def test_the_rule_one_case_at_a_time():
@@ -97,3 +96,16 @@ def test_only_the_write_off_zero_closes_a_shelf():
     negative ending is a defect the chain carries, not a close."""
     assert aid.continues(_row(17, ending_inventory=-1.0), _row(18, flc_window=2.0))
     assert not aid.continues(_row(17, ending_inventory=0.0), _row(18, flc_window=2.0))
+
+
+def test_the_cli_reads_parquet_and_a_null_id_never_continues_as_nan(tmp_path):
+    """Read through common.io.read_rows, a null cell is None. Read as a
+    frame it was NaN, which is truthy, so a continued row inherited NaN
+    as its id."""
+    prev, this = tmp_path / "17.parquet", tmp_path / "18.parquet"
+    out = tmp_path / "18_ids.parquet"
+    pd.DataFrame([_row(17, episode_id=None)]).to_parquet(prev, index=False)
+    pd.DataFrame([_row(18, flc_window=2.0)]).drop(columns=["episode_id"]).to_parquet(this, index=False)
+    assert aid.main(["--hour", str(this), "--previous", str(prev), "--out", str(out)]) == 0
+    got = pd.read_parquet(out)
+    assert got.episode_id.iloc[0] == "7|F1|2026-08-19T18"      # a fresh id, not NaN carried
