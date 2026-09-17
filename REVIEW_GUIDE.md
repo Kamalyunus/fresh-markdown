@@ -47,7 +47,9 @@ as code, one function per phase in `PLAN`; its `plan()` is pure and unit-tested 
 one report-staleness judgement `status` and `advance` share) run before launch,
 produce frozen artifacts, and sit behind human gate readings plus the test
 suite. `daily/monitor.py`, `assurance.py`, `ingest_outcomes.py` and
-`export_events.py` run in production but write reports, never prices. A defect in
+`export_events.py` (which also writes the shelf-hour in the feed's own spelling and
+types, so a night's decisions append to the hourly feed with no cast) run in
+production but write reports, never prices. A defect in
 those cannot touch a shelf without first passing a gate whose inputs a human reads.
 
 **The exception, and the one part of `ops/` worth reading closely:** Lane B's

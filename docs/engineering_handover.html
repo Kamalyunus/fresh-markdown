@@ -934,7 +934,9 @@
       outcome back from the hourly feed.
     </p>
     <p>
-      Both streams are append-only JSONL with durable writes and duplicate detection. Nothing is
+      The streams are append-only JSONL with durable writes and duplicate detection: decisions,
+      outcomes, and a third for the shelf-hours that reached the agent and were NOT priced, with
+      the reason the response carried. Nothing is
       ever silently dropped — an event that fails validation is written to a quarantine file with
       the reason attached, and the quarantine count is a monitored number.
     </p>
