@@ -616,7 +616,7 @@
       <thead><tr><th>Table</th><th>When</th><th>Rows</th><th>Columns</th></tr></thead>
       <tbody>
         <tr><td><b>Snapshot</b><br><code>snapshots/&lt;date&gt;T&lt;hh&gt;.parquet</code></td><td>Every hour, at the top of the hour</td><td>One row per shelf (SKU × FC) on clearance right now, with this hour's opening stock; plus, when you can, the rows of the hour that just closed (sales and ending stock known)</td><td><code>date, hour, skuseq, fc, inventory, discount, normal_asp, cogs_wo_vat, flc_window, category, subcategory, episode_id</code>; for the closed hour also <code>units_sold, ending_inventory, final_price</code>. <code>discount</code> is the price in force on the shelf, in percent. <code>flc_window</code> is the hours still to come after this one. <code>episode_id</code> is the clearance window the row belongs to, assigned by you (0.2a); a row without one is not priced.</td></tr>
-        <tr><td><b>Feed</b><br><code>feed/&lt;date&gt;.parquet</code></td><td>Every morning, yesterday's day</td><td>Every shelf-hour of the day, zero-sale hours included, the write-off zero in <code>ending_inventory</code> on a window's last row</td><td>The full feed schema, exactly as today</td></tr>
+        <tr><td><b>Feed</b><br><code>feed/&lt;date&gt;.parquet</code></td><td>Every morning, yesterday's day</td><td>Every shelf-hour of the day, zero-sale hours included, the write-off zero in <code>ending_inventory</code> on a window's last row</td><td>The full feed schema, exactly as today, plus <code>episode_id</code>: the same value you already assigned that shelf-hour in the snapshot, carried through (see 0.2a)</td></tr>
         <tr><td><b>Failed pushes</b><br><code>failures/&lt;date&gt;.csv</code></td><td>Every morning, with the feed; omitted on a day with none</td><td>One row per hour whose returned price did not reach the shelf</td><td><code>skuseq, fc, date, hour, reason</code></td></tr>
       </tbody>
     </table>
@@ -640,12 +640,14 @@
     <tr><td>Then</td><td>If you port it, run both on the same two hours and diff the ids; send us the diff (empty) and the counts.</td></tr>
   </tbody></table></div>
 
+<p class="prose">Carry the same id into the nightly feed as well, on every row. You have already computed it for the snapshot, so it costs one column. It earns two things. A clearance window becomes a plain group-by for everyone downstream, rather than something each reader re-derives from counter steps. And it lets <code>ops.check_inputs --feed</code> read a whole day of your ids against the rule at once, which is a far stronger check than the hour-by-hour count the pricing script can do. The check compares the window <em>boundaries</em>, never the id's spelling: your scheme is yours, and two ids agree when they group the same rows.</p>
+
   <h3>0.3 · Check the three tables</h3>
   <div class="tscroll"><table><tbody>
     <tr><td>You do</td><td>Produce one sample of each table from your real systems: one hour's snapshot, one full day's feed, one failed-push file (even an empty one with the header).</td></tr>
     <tr><td>Command</td><td><code>python3 -m ops.check_inputs --snapshot snapshots/&lt;hour&gt;.parquet --feed feed/&lt;date&gt;.parquet --failures failures/&lt;date&gt;.csv --report checks.json</code></td></tr>
     <tr><td>Produces</td><td>One line per check: PASS, WARN or FAIL, the count behind it, and what to fix. The feed is run through the real preparation chain and every stage's drop is listed. Exit 1 on any FAIL.</td></tr>
-    <tr><td>Check</td><td>Zero FAIL. Read every WARN; a large drop at a waterfall stage is a producer defect, not a filter working.</td></tr>
+    <tr><td>Check</td><td>Zero FAIL. Read every WARN; a large drop at a waterfall stage is a producer defect, not a filter working. If the feed carries <code>episode_id</code>, the line "the producers' ids group the same windows EPISODE_RULE derives" is the one to get to zero before launch.</td></tr>
     <tr><td>Then</td><td>Fix what a FAIL line names, re-run until clean, send us <code>checks.json</code>.</td></tr>
   </tbody></table></div>
 

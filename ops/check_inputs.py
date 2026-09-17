@@ -19,7 +19,8 @@ import pandas as pd
 
 from common.config import load_config
 from common.io import read_rows, write_json
-from common.windows import counter_step_detail, planning_horizon, window_signals
+from common.windows import (counter_step_detail, planning_horizon, window_signals,
+                            window_starts)
 from daily.ingest_outcomes import load_failures
 from fit import prepare_data
 from fit.prepare_data import SOURCE_TO_CANONICAL
@@ -158,9 +159,34 @@ def check_feed(path, cfg):
                "listings stitched under one counter, or a missing hour", warn=True)
         c.add("restocks that extended a window", "PASS", detail.get("restock_continued", 0))
         c.add("a close followed by a resumed listing", "PASS", detail.get("closed_then_resumed", 0))
+        _check_feed_episode_ids(canon, c)
     except Exception as e:                                   # noqa: BLE001
         c.add("counter signals", "WARN", 0, f"not read: {type(e).__name__}: {e}")
     return c
+
+
+def _check_feed_episode_ids(canon, c):
+    """The producers' ids in the nightly feed, read against EPISODE_RULE over
+    the WHOLE day -- the strong form of the hourly disagreement count. The
+    comparison is on the window BOUNDARIES, never the spelling: their id
+    scheme is theirs, and two ids agree when they group the same rows."""
+    if "episode_id" not in canon.columns:
+        c.add("episode_id carried in the feed", "WARN", len(canon),
+              "the nightly feed does not carry the episode id the snapshot does; "
+              "carrying it makes a window a plain group-by for everyone and lets "
+              "this check read a whole day at once instead of an hour at a time")
+        return
+    ids = canon.episode_id
+    c.gate("episode_id never null (the feed's copy of the producers' id)",
+           int(ids.isna().sum()),
+           "a feed row with no episode id: the id step did not run for that hour")
+    theirs = ids.astype(str)
+    opens_theirs = theirs.ne(theirs.groupby([canon.sku_id, canon.fc]).shift())
+    c.gate("the producers' ids group the same windows EPISODE_RULE derives",
+           int((opens_theirs != window_starts(canon)).sum()),
+           "rows where their id opens a window and the rule does not, or the "
+           "reverse: the live ids and the history's derived ids would disagree. "
+           "Run ops.assign_episode_ids over the same day and diff")
 
 
 def check_failures(path, cfg):

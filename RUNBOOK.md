@@ -179,7 +179,11 @@ contract:
   `ops.price_batch` (the caller beneath it: requests in, a price per
   request out) — then applying the `apply_price` column it returns.
   `ops.check_inputs` checks their three tables (snapshot, feed, failed
-  pushes) before launch, the id column included. The posterior is
+  pushes) before launch, the id column included. The nightly feed carries
+  the same `episode_id` too, so a window is one group-by for every reader
+  and the checker can read a whole day of their ids against `EPISODE_RULE`
+  at once — on the window BOUNDARIES, never the id's spelling, since the
+  scheme is theirs. The posterior is
   read once per batch; every decision is in the store before its price
   returns; an hour already priced is refused (`already_priced`). Every request is read in one spelling (ids as the
   hour key spells them, the day as `YYYY-MM-DD`), so a parquet timestamp

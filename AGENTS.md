@@ -205,17 +205,18 @@ python3 -m ops.advance --plan    # phase table + next steps, touches nothing
 python3 -m ops.advance           # runs to the next HUMAN decision and stops
 ```
 
-**Two readers, one command.** The OWNER tells their agent: read this file,
-then run `ops.advance` until `reports/launch_readiness.md` says it is
-waiting on `data.launch_date`; the agent pulls the extract per the config's
-split and hold-out dates (`REDSHIFT_*` in `~/.env`), derives every MEASURED
-value, and stops at each owner decision with the evidence. ENGINEERING
+**Two readers, one command.** The OWNER tells their agent: read this file, then
+run `ops.advance` until `reports/launch_readiness.md` says it is waiting on
+`data.launch_date`; the agent pulls the extract per the config's split and
+hold-out dates (`REDSHIFT_*` in `~/.env`), derives every MEASURED value, and
+stops at each owner decision with the evidence. ENGINEERING
 builds Lane B against `docs/engineering_handover.html`, their page
-(`ops.price_hour`: the feed's rows in with the episode id THEY assign —
-`assign_episode_ids` is the rule as their script; ids read as given,
-disagreements counted — a price per shelf out; `price_batch` beneath it;
-`check_inputs` gates their tables; `tools.e2e_cycle` rehearses; they apply
-the price, report failed pushes, cron the daily lane `advance --feed`).
+(`ops.price_hour`: the feed's rows in with the episode id THEY assign in
+snapshot AND nightly feed — `assign_episode_ids` is the rule as their script,
+ids read as given and disagreements counted — a price per shelf out;
+`check_inputs` gates their tables, a whole day of ids against `EPISODE_RULE` on
+boundaries not spelling; `price_batch` sits beneath; `tools.e2e_cycle`
+rehearses; they apply the price, report failed pushes, cron `advance --feed`).
 
 It owns the order and recomputes state from disk every run. Phase by
 phase — what runs, which config keys move, and who moves them:
@@ -349,44 +350,43 @@ fixture re-derives fixture values — read them, never commit them
   records, `common/` defines, `fit/` builds the frozen artifacts,
   `evaluate/` grades them (backtest, shadow, thresholds), `daily/` is the
   production lane in run order, `ops/` drives and gates (`advance`,
-  `bootstrap_loop`, `tune`, `status`, `init_posterior`, `seal`; `price_hour`
-  and `price_batch` are Lane B's callers, `check_inputs` its gate,
-  `assign_episode_ids` the producers' id rule), `tools/` is out of review
-  scope. A new module goes where its reader is; run `python3 -m package.module` from the root.
+  `bootstrap_loop`, `tune`, `status`, `init_posterior`, `seal`; `price_hour` and
+  `price_batch` are Lane B's callers, `check_inputs` its gate, `assign_episode_ids`
+  the producers' id rule), `tools/` is out of review scope. A new module goes where
+  its reader is; run `python3 -m package.module` from the root.
 - `--workers N` (`0` = all cores but one) parallelises backtest, shadow,
   `pilot_sim` and `price_batch` (each hour's batch); reports are
-  byte-identical serial or parallel — results return in submission order,
-  only the parent touches the event store, each decision draws its own RNG
-  (`common.parallel.keyed_rng`). Quote the sampling caveat with any
-  sampled-run count — a sample's zero is not the window's.
+  byte-identical serial or parallel — results return in submission order, only
+  the parent touches the event store, each decision draws its own RNG
+  (`common.parallel.keyed_rng`). Quote the sampling caveat with any sampled-run
+  count — a sample's zero is not the window's.
 - Tests: shared builders live in `tests/conftest.py` (`cfg`,
   `decision_event`/`outcome_event`, `episode_frame`, `_reports`,
   `reports_dir`, `synth_flc` — the synthetic extract, generated once per
   session when `data/` is empty, so a fresh clone's `pytest` passes) —
-  extend those, never add a per-file copy. Test a behaviour by calling the
-  function; an `inspect.getsource` assertion is reserved for an architecture
-  ban (no second copy of X, no shared worker state) no behavioural test can express.
+  extend those, never add a per-file copy. Test a behaviour by calling the function;
+  an `inspect.getsource` assertion is reserved for an architecture ban (no second
+  copy of X, no shared worker state) no behavioural test can express.
 - Synthetic fixtures: `tools/make_dummy_flc.py` (`--policy randomized` =
   recoverable elasticity, `--policy legacy` = the production confound). It
   must keep emitting both source inventory conventions — regenerate the
   fixture after any change to them, and read the two printed counts.
 - Leadership deck: `python3 -m tools.scenario_deck --workers 0` writes
-  `reports/scenarios.html` (the real solver, this machine's config; every
-  figure is solved in Python, the page only reads). Regenerate after any
-  change to `engine/dp.py`, `engine/explore.py`, the tier/entry/δ_min
-  config or the prior; rule 19 applies to every number on it.
+  `reports/scenarios.html` (the real solver, this machine's config; the page only
+  reads). Regenerate after any change to `engine/dp.py`, `engine/explore.py`, the
+  tier/entry/δ_min config or the prior; rule 19 applies to every number on it.
 
 ## Maintaining the documents
 
 The doc surface is small on purpose: `docs/design.md` (the spec),
 `docs/learnings.md` (superseded designs), `docs/engineering_handover.html`
 (engineering's one page: the process, then the contract as appendices),
-this file, `README.md`, `RUNBOOK.md`, `REVIEW_GUIDE.md`. Two are test-guarded: `design.md` (every waterfall stage,
-gate, flag and population must appear, no retired rule may read as live —
-`test_docs_match_the_code.py`) and the handover's contract appendices (checked against
-`events/store.py` both ways; its quoted thresholds are NOT guarded — re-read
-them when `monitoring.*` moves; the worked episode is real solver output,
-regenerate it rather than hand-patch numbers).
+this file, `README.md`, `RUNBOOK.md`, `REVIEW_GUIDE.md`. Two are test-guarded:
+`design.md` (every waterfall stage, gate, flag and population must appear, no
+retired rule may read as live — `test_docs_match_the_code.py`) and the handover's
+contract appendices (checked against `events/store.py` both ways; its quoted
+thresholds are NOT guarded, so re-read them when `monitoring.*` moves; the worked
+episode is real solver output, regenerate rather than hand-patch its numbers).
 
 **A code change ships with its doc change in the same commit**: this
 file's one-home list and paste table, the RUNBOOK step it touches, the

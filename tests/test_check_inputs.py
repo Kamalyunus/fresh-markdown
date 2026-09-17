@@ -58,6 +58,36 @@ def test_a_feed_runs_through_the_chain_and_its_waterfall_is_read(cfg, tmp_path):
     assert _verdicts(check_inputs.check_feed(str(feed2), cfg).rows)["zero-sale hours are present"] == "FAIL"
 
 
+def _feed_with_ids(tmp_path, rows, ids, name):
+    """The feed's own rows plus the producers' `episode_id` column (the
+    source schema has no such field, so it is appended here as the
+    producers would append it)."""
+    path = tmp_path / name
+    pd.DataFrame([dict(r, episode_id=e) for r, e in zip(rows, ids)]).to_parquet(path, index=False)
+    return str(path)
+
+
+def test_the_feeds_episode_ids_are_read_against_the_rule_over_the_whole_day(cfg, tmp_path):
+    """Asked of the producers so a window is one group-by for everyone: the
+    check is on the window BOUNDARIES, never the id's spelling, because the
+    scheme is theirs. Absent, it is a WARN and the feed still passes."""
+    rows = _idle(source_window(1, 10, 5, day="2026-03-02"), 1)
+    check = "the producers' ids group the same windows EPISODE_RULE derives"
+    absent = _verdicts(check_inputs.check_feed(str(write_extract(tmp_path, rows)), cfg).rows)
+    assert absent["episode_id carried in the feed"] == "WARN" and check not in absent
+    # one window, one id -- any spelling of it, since the scheme is theirs
+    ok = _feed_with_ids(tmp_path, rows, ["THEIR-WINDOW-7"] * len(rows), "ids_ok.parquet")
+    v = _verdicts(check_inputs.check_feed(ok, cfg).rows)
+    assert v[check] == "PASS" and v["episode_id never null (the feed's copy of the producers' id)"] == "PASS"
+    # the same rows split in two mid-window: their id opens where the rule does not
+    split = ["A", "A", "B", "B", "B"][:len(rows)]
+    v = _verdicts(check_inputs.check_feed(_feed_with_ids(tmp_path, rows, split, "ids_bad.parquet"), cfg).rows)
+    assert v[check] == "FAIL"
+    nulls = [None] * len(rows)
+    v = _verdicts(check_inputs.check_feed(_feed_with_ids(tmp_path, rows, nulls, "ids_null.parquet"), cfg).rows)
+    assert v["episode_id never null (the feed's copy of the producers' id)"] == "FAIL"
+
+
 def test_a_failures_table_must_name_shelf_hours(cfg, tmp_path):
     f = tmp_path / "fail.csv"
     pd.DataFrame([{"skuseq": 1, "fc": "F1", "date": "2026-03-02", "hour": 10, "reason": "timeout"},

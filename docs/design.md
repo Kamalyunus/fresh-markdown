@@ -813,7 +813,12 @@ never to override one; a response per shelf out in the feed's units
 (`apply_discount_pct`, `apply_price`, or `rejected` — a row without an
 id is rejected, never guessed). `ops.check_inputs` checks engineering's
 three tables against what the chain needs, the feed through the real
-waterfall. Beneath it, **`ops.price_batch`** — one hour's
+waterfall. The nightly feed carries the producers' `episode_id` as well,
+which makes a window a plain group-by downstream and lets the checker read
+a whole day of their ids against `EPISODE_RULE` — compared on the window
+BOUNDARIES, never the id's spelling, because the scheme is theirs and two
+ids agree when they group the same rows (the strong form of the hourly
+`episode_ids_disagreeing_with_the_rule` count). Beneath it, **`ops.price_batch`** — one hour's
 12-field requests in (JSONL, parquet or CSV), one response row per request
 out, in request order: the price to apply and the `decision_id`, or
 `rejected` with the reason. It resolves what the engine needs beyond the request by
