@@ -878,12 +878,22 @@ same `EPISODE_RULE` the history's derived ids do, so the two spellings
 meet; the features still come from what the store recorded at the
 opening, never a fresh history pass). A later request
 the store does not know falls back to a fresh forecast and is counted
-(`non_entry_requests_without_stored_path`). Outcomes are named from the feed row, not the decision:
-`outcome_id = feed-<sku>|<fc>|<date>T<hh>` (`events.pairs.outcome_id_of`
-over the one key, `hour_key`), so engineering can name the outcome an
-hour will produce, a re-ingest dedups, and two decisions that claimed one
-hour match neither (`decisions_colliding_on_hour`; completeness falls by
-both). `tools.e2e_cycle` runs one whole cycle — requests, decisions, the
+(`non_entry_requests_without_stored_path`). **Both event ids are the
+shelf-hour**, built over the one key (`hour_key`) in the one place:
+`outcome_id = feed-<sku>|<fc>|<date>T<hh>` (`events.pairs.outcome_id_of`)
+and `decision_id = dec-<sku>|<fc>|<date>T<hh>` (`decision_id_of`), so
+engineering can name either before it exists, a re-ingest dedups, a pair
+differs only in its prefix, and two decisions that claimed one hour match
+neither (`decisions_colliding_on_hour`; completeness falls by both). The
+decision id was a UUID until the natural key replaced it: one decision per
+shelf-hour is then what the id SAYS, so a re-priced hour collides with its
+own earlier copy instead of landing a second price on one feed row, and a
+harness re-run over a store it already filled is caught rather than
+silently doubled (`EventStore(reset=True)`, which shadow passes and the
+production store refuses). The episode is deliberately NOT in either id:
+`episode_id` is the producers' and can be relabelled, and an audit
+record's identity may not move when an upstream label does. Ingest still
+matches on the four key fields, never on the string. `tools.e2e_cycle` runs one whole cycle — requests, decisions, the
 shop's feed, ingest, exports — in a workspace under `sim/e2e`, before any
 of engineering's code exists: it drives the pilot simulator's own shop
 (`evaluate.pilot_shop.PilotSim`, §11.3: `run_hours`, `write_feed`) hour by

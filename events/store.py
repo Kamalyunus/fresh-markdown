@@ -73,12 +73,14 @@ def _episode_path(evt):
 
 
 class EventStore:
-    def __init__(self, cfg, root=None):
+    def __init__(self, cfg, root=None, reset=False):
         self.cfg = cfg
         self.root = root or cfg["events"]["store_dir"]
         os.makedirs(self.root, exist_ok=True)
         self.paths = {k: os.path.join(self.root, f"{k}.jsonl")
                       for k in ("decisions", "outcomes", "quarantine")}
+        if reset:
+            self._reset()
         # duplicates seen by THIS store: on emit, and -- because a foreign
         # producer may write the JSONL directly -- while loading. Either way
         # the same id twice is what the duplicate gate exists to catch.
@@ -189,6 +191,30 @@ class EventStore:
         """The hour keys the store holds a decision for (read-only)."""
         return self._hour_keys
 
+    def _reset(self):
+        """Empty THIS store's own three streams, for a HARNESS whose run is a
+        fresh evaluation: shadow re-run over the store an earlier run left
+        re-prices the same shelf-hours, and since the decision id IS the
+        shelf-hour (events.pairs.decision_id_of) every one of them collides
+        with its own earlier copy. Before the ids were natural the re-run
+        appended a second copy of everything instead, unnoticed -- the
+        per-run counters (`quarantined_this_run`) were built to work around
+        exactly that.
+
+        Only the three files this class writes are removed, never the
+        directory; and never the PRODUCTION store, which is append-only for
+        the life of the pilot and is the one record `daily.update` learns
+        from."""
+        if os.path.abspath(self.root) == os.path.abspath(self.cfg["events"]["store_dir"]):
+            raise ValueError(
+                "refusing to reset the production event store "
+                f"({self.root}): it is the append-only record the daily lane "
+                "learns from. Only a harness store (shadow, a workspace copy) "
+                "may be reset.")
+        for path in self.paths.values():
+            if os.path.exists(path):
+                os.remove(path)
+
     @staticmethod
     def _lines(path):
         """(line_no, parsed or None, raw) per non-empty line."""
@@ -254,13 +280,19 @@ class EventStore:
         if problems:
             self._quarantine(evt, problems)
             return False
-        if evt["decision_id"] in self._ids["decision"]:
-            self.duplicate_counts["decision"] += 1
-            return False
+        # the hour gate runs FIRST and stays the reported signal. The
+        # decision id is the shelf-hour (events.pairs.decision_id_of), so a
+        # re-priced hour now trips both gates; read as a duplicate id it
+        # would move the number the reports and the handover name
         if key in self._hour_keys:
             # the hour is already priced: a second decision would put two
             # prices on one feed row, and ingest would match neither
             self.completeness_counts["decisions_on_priced_hour"] += 1
+            return False
+        if evt["decision_id"] in self._ids["decision"]:
+            # the backstop: an id already held whose hour this store does
+            # not index (a foreign line replayed in, a hand-built event)
+            self.duplicate_counts["decision"] += 1
             return False
         # append FIRST: an id registered before a failed write (disk full)
         # would refuse the retry as a duplicate of an event never written

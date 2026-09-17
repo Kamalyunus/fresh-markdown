@@ -1,6 +1,7 @@
 """events.store: what the append-only log admits, refuses, and survives."""
 
 import json
+import os
 
 import numpy as np
 import pytest
@@ -75,9 +76,40 @@ def test_a_failed_append_leaves_no_id_behind_so_the_retry_is_not_a_duplicate(cfg
     assert store.emit_decision(decision_event()) and store.emit_outcome(_outcome())
     assert store.duplicate_counts == {"decision": 0, "outcome": 0}
     assert len(store.load_decisions()) == 1 and len(store.load_outcomes()) == 1
-    # and a real second emit is still the duplicate it always was
+    # and a real second emit is still refused: the decision id IS the
+    # shelf-hour, so it trips the hour gate, which is the reported signal
     assert not store.emit_decision(decision_event())
+    assert store.completeness_counts["decisions_on_priced_hour"] == 1
+    assert store.duplicate_counts["decision"] == 0
+    # the id gate is the backstop beneath it: an id this store already holds
+    # on an hour it does not index (a foreign line, a hand-built event)
+    twin = dict(decision_event(), hour_of_day=19)
+    assert not store.emit_decision(twin)
     assert store.duplicate_counts["decision"] == 1
+
+
+def test_a_harness_store_resets_and_the_production_store_refuses_to(cfg, tmp_path):
+    """A harness run (shadow) is a fresh evaluation and starts from an empty
+    store: the decision id IS the shelf-hour, so a re-run over what the last
+    run left collides with its own earlier copy. Only this store's own three
+    streams go, never the directory -- and never the production store, the
+    append-only record daily.update learns from."""
+    root = str(tmp_path / "events")
+    store = _store(cfg, tmp_path)
+    assert store.emit_decision(decision_event()) and store.emit_outcome(_outcome())
+    stray = os.path.join(root, "notes.txt")
+    with open(stray, "w") as f:
+        f.write("not the store's to delete")
+
+    fresh = EventStore(cfg, root=root, reset=True)
+    assert fresh.load_decisions() == [] and fresh.load_outcomes() == []
+    assert os.path.exists(stray)                       # only the three streams went
+    assert fresh.emit_decision(decision_event())       # the same hour prices again
+
+    cfg2 = {**cfg, "events": {**cfg["events"], "store_dir": root}}
+    with pytest.raises(ValueError, match="production event store"):
+        EventStore(cfg2, root=root, reset=True)
+    assert len(EventStore(cfg2, root=root).load_decisions()) == 1   # untouched
 
 
 # ------------------------------------------------ one decision per hour

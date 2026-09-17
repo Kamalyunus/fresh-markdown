@@ -460,7 +460,12 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
         raise RuntimeError("no DP-eligible episodes in this window")
     bundle = load_bundle(cfg)
     model, posterior, r_lookup = bundle.model, bundle.posterior, bundle.r_lookup
-    store = EventStore(cfg, root=events_root or cfg["events"]["shadow_store_dir"])
+    # a shadow run is a fresh evaluation: it starts from an EMPTY store, so
+    # the report's counts are this run's and a re-run is reproducible rather
+    # than a collision with what the last run left (EventStore._reset; the
+    # production store refuses to be reset at all)
+    store = EventStore(cfg, root=events_root or cfg["events"]["shadow_store_dir"],
+                       reset=True)
     rng = np.random.default_rng(seed)
 
     if max_episodes is None:

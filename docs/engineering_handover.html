@@ -1111,7 +1111,7 @@
 
 <span class="c">// its response row: put applied_price on the shelf; decision_id is the handle</span>
 {"episode_id": "EP-88213-4471", "sku_id": "SKU-88213", "fc": "FC-04", "date": "2026-08-19",
- "hour_of_day": 17, "decision_id": "d7557c60-5fad-4336-84ac-06775172f3e5",
+ "hour_of_day": 17, "decision_id": "dec-SKU-88213|FC-04|2026-08-19T17",
  "applied_discount": 0.3, "applied_price": 7000.0, "is_exploration": false, "rejected": null}
 
 <span class="c">// a refused one: no price, the reason -- the rest of the batch priced</span>
@@ -1204,7 +1204,7 @@
       </thead>
       <tbody>
         <tr class="grouphead"><td colspan="3">Identity — 4</td></tr>
-        <tr><td class="f">decision_id</td><td class="ex">"d7557c60-5fad-…"</td><td>Immutable UUID, minted by the agent; the ingester matches the feed row back to it.</td></tr>
+        <tr><td class="f">decision_id</td><td class="ex">"dec-SKU-88213|FC-04|2026-08-19T17"</td><td>The hour's key — <code>dec-&lt;sku_id&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code> — the outcome id's twin over the same key, so you can name the decision for an hour before it exists and join the two by prefix alone. One decision per shelf-hour is what the id SAYS: a re-priced hour collides with itself rather than putting a second price on one feed row. The ingester still matches the feed row on <code>sku_id, fc, date, hour_of_day</code>, never on this string. The episode is deliberately NOT in it, so relabelling a window never moves a decision's identity.</td></tr>
         <tr><td class="f">episode_id</td><td class="ex">"EP-88213-4471"</td><td>As supplied.</td></tr>
         <tr><td class="f">is_entry</td><td class="ex">true</td><td>True on the episode's first decision.</td></tr>
         <tr><td class="f">timestamp</td><td class="ex">"2026-08-19T02:25:12+00:00"</td><td>UTC with offset.</td></tr>
@@ -1286,7 +1286,7 @@
       </thead>
       <tbody>
         <tr><td class="f">outcome_id</td><td><span class="tag">derived</span></td><td class="t">string</td><td class="ex">"feed-SKU-88213|FC-04|2026-08-19T18"</td><td>The hour's key — <code>feed-&lt;sku_id&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code> — so you can name the outcome a feed row will produce before it exists, and re-ingesting the same feed dedups instead of double-counting. Two decisions priced for one hour (a retried batch) match neither: counted as <code>decisions_colliding_on_hour</code>, and completeness falls by both. The store holds ONE outcome per decision: a second one naming a decision already answered (an id scheme that moved, a re-ingest under another key) is refused and counted (<code>outcomes_per_decision_over_one</code>); the first one stands.</td></tr>
-        <tr><td class="f">decision_id</td><td><span class="tag">derived</span></td><td class="t">string</td><td class="ex">"faf79b6c-fde0-…"</td><td>The decision the feed row matched on (SKU, FC, date, hour).</td></tr>
+        <tr><td class="f">decision_id</td><td><span class="tag">derived</span></td><td class="t">string</td><td class="ex">"dec-SKU-88213|FC-04|2026-08-19T18"</td><td>The decision the feed row matched on (SKU, FC, date, hour). Matching is on those four fields, never on the string; the string is the same four, so this row's outcome id and decision id differ only in their prefix.</td></tr>
         <tr><td class="f">units_sold</td><td><span class="tag you">feed</span></td><td class="t">int ≥ 0</td><td class="ex">0</td><td><strong>Zero-sale hours count.</strong> They are roughly three quarters of all hours and they are evidence, not noise — the feed carries them already.</td></tr>
         <tr><td class="f">starting_inventory</td><td><span class="tag you">feed</span></td><td class="t">int ≥ 0</td><td class="ex">2</td><td>The feed's inventory at the top of the hour. Should equal the decision's <code>q_remaining</code>.</td></tr>
         <tr><td class="f">ending_inventory</td><td><span class="tag you">feed</span></td><td class="t">int ≥ 0</td><td class="ex">2</td><td>The feed's close-of-hour count. When it does not equal <code>starting − sold</code>, the ingester derives <code>adjustment_reason</code> from the break.</td></tr>
@@ -1368,7 +1368,7 @@
     <div class="hd"><b>decisions.jsonl</b><span>17:00 — the episode's first price</span></div>
 <pre class="json">{
   "event": "decision",
-  "decision_id": "d7557c60-5fad-4336-84ac-06775172f3e5",
+  "decision_id": "dec-SKU-88213|FC-04|2026-08-19T17",
   "episode_id": "EP-88213-4471",
   "is_entry": <mark>true</mark>,
   "sku_id": "SKU-88213",
@@ -1442,7 +1442,7 @@
   <div class="payload">
     <div class="hd"><b>decisions.jsonl</b><span>18:00 and 20:00 — abbreviated</span></div>
 <pre class="json">{
-  "decision_id": "faf79b6c-fde0-4f0f-8e19-9c274a0d4d43",
+  "decision_id": "dec-SKU-88213|FC-04|2026-08-19T18",
   "is_entry": false,
   "hour_of_day": 18,
   "hours_remaining": 3,
@@ -1463,7 +1463,7 @@
 }
 
 {
-  "decision_id": "d4ab8f32-9533-4896-afe4-976d63d0e68b",
+  "decision_id": "dec-SKU-88213|FC-04|2026-08-19T20",
   "is_entry": false,
   "hour_of_day": 20,
   "hours_remaining": 1,
@@ -1513,8 +1513,11 @@
   <div class="payload">
     <div class="hd"><b>decisions.jsonl</b><span>a decision with nothing left to explore</span></div>
 <pre class="json">{
-  "decision_id": "30540c38-2b9c-4316-9ed5-92f8604e3cb9",
+  "decision_id": "dec-SKU-90114|FC-04|2026-08-19T21",
   "episode_id": "EP-90114-2280",
+  "sku_id": "SKU-90114",
+  "fc": "FC-04",
+  "date": "2026-08-19",
   "hour_of_day": 21,
   "hours_remaining": 1,
   "q_remaining": 1,
@@ -1547,7 +1550,7 @@
 {
   "event": "outcome",
   "outcome_id": "feed-SKU-88213|FC-04|2026-08-19T17",
-  "decision_id": "d7557c60-5fad-4336-84ac-06775172f3e5",
+  "decision_id": "dec-SKU-88213|FC-04|2026-08-19T17",
   "units_sold": 1,
   "starting_inventory": 3,
   "ending_inventory": 2,
@@ -1563,7 +1566,7 @@
 {
   "event": "outcome",
   "outcome_id": "feed-SKU-88213|FC-04|2026-08-19T18",
-  "decision_id": "faf79b6c-fde0-4f0f-8e19-9c274a0d4d43",
+  "decision_id": "dec-SKU-88213|FC-04|2026-08-19T18",
   "units_sold": <mark>0</mark>,
   "starting_inventory": 2,
   "ending_inventory": 2,
@@ -1579,7 +1582,7 @@
 {
   "event": "outcome",
   "outcome_id": "feed-SKU-88213|FC-04|2026-08-19T20",
-  "decision_id": "d4ab8f32-9533-4896-afe4-976d63d0e68b",
+  "decision_id": "dec-SKU-88213|FC-04|2026-08-19T20",
   "units_sold": 1,
   "starting_inventory": 2,
   "ending_inventory": <mark>0</mark>,

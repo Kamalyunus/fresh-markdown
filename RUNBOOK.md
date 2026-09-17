@@ -238,9 +238,10 @@ contract:
 Outcomes are NOT engineering's to produce: `daily.ingest_outcomes`
 builds them from the hourly FLC feed, matched to decisions by (SKU, FC,
 date, hour), deriving `adjustment_reason`, `is_stockout` and the offered
-price itself. The outcome id is the hour's key —
-`feed-<sku>|<fc>|<date>T<hh>` — so engineering can name it from the feed
-row; two decisions priced for one hour (a retried batch) match neither and
+price itself. Both event ids are the hour's key —
+`feed-<sku>|<fc>|<date>T<hh>` and `dec-<sku>|<fc>|<date>T<hh>` — so
+engineering can name either from the feed row and a pair differs only in
+its prefix; two decisions priced for one hour (a retried batch) match neither and
 are counted (`decisions_colliding_on_hour`); the store itself refuses a
 second decision for a priced hour and a second outcome for a decision
 (`outcomes_per_decision_over_one`), and an outcome without `is_stockout`

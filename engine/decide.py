@@ -6,7 +6,6 @@ exploit or explore -> price -> decision event.
 """
 
 import math
-import uuid
 
 import numpy as np
 import pandas as pd
@@ -16,6 +15,7 @@ from common.provenance import config_fingerprint
 from engine import dp as dp_mod
 from engine import explore
 from engine.demand import mu_at, expected_min_demand_inventory
+from events.pairs import decision_id_of, hour_key
 
 
 def _feature_or_none(features, k):
@@ -202,7 +202,13 @@ def decide(state, posterior_store, event_store, cfg, rng, tau_current,
 
     event = {
         "event": "decision",
-        "decision_id": str(uuid.uuid4()),
+        # the shelf-hour itself (events.pairs.decision_id_of), the outcome
+        # id's twin: one decision per shelf-hour is what the id SAYS, so a
+        # re-priced hour collides with itself rather than landing a second
+        # price on one feed row, and engineering can name the decision for
+        # an hour before it exists
+        "decision_id": decision_id_of(hour_key(s["sku_id"], s["fc"],
+                                               s["date"], s["hour_of_day"])),
         "episode_id": s["episode_id"],
         "is_entry": entry,
         "sku_id": s["sku_id"], "fc": s["fc"],

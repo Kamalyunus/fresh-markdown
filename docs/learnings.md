@@ -938,6 +938,21 @@ now. Dates are owner sign-off.
   given, refuses a row without one, and evaluates the rule only to count
   disagreements. What we own is the check, never the assignment.
 
+- **A surrogate id hid a defect the natural key exposed** (owner, 09-17).
+  `decision_id` was a UUID while `outcome_id` had already become the
+  shelf-hour. Making the decision id its twin (`dec-<sku>|<fc>|<date>T<hh>`)
+  cost one line and turned the store's one-decision-per-hour invariant into
+  something the id SAYS rather than something a side index enforces. It also
+  broke the serial-versus-parallel report test on the first run, and the
+  break was real: a shadow re-run had always appended a second copy of every
+  decision and outcome into the shadow store, and random ids meant nothing
+  ever collided to reveal it. The per-run counters (`quarantined_this_run`)
+  were a workaround for that accumulation. A harness run now starts from an
+  empty store (`EventStore(reset=True)`, which removes only its own three
+  streams and refuses the production store outright). The episode stayed out
+  of both ids on purpose: it is the producers' and can be relabelled, and an
+  audit record's identity may not move when an upstream label does.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,

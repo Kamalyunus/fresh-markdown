@@ -108,6 +108,22 @@ def outcome_id_of(key):
     return f"feed-{sku}|{fc}|{day}T{hour:02d}"
 
 
+def decision_id_of(key):
+    """The decision id for the hour keyed `key`: "dec-<sku>|<fc>|<date>T<hh>",
+    the outcome id's twin over the ONE key (hour_key), so a decision and the
+    outcome its hour produces are two prefixes of one string and engineering
+    can name both before either exists. Natural, not a surrogate: a decision
+    happens once per shelf-hour, so the id says the store's invariant out
+    loud and a re-priced hour collides with ITSELF instead of landing a
+    second price on one feed row.
+
+    The episode is deliberately NOT in it. The episode id is the producers'
+    and can be relabelled (a corrected relist, a drifted port); an audit
+    record's identity may not move when an upstream label does."""
+    sku, fc, day, hour = key
+    return f"dec-{sku}|{fc}|{day}T{hour:02d}"
+
+
 def is_learnable(o):
     return o.get("execution_status") in LEARNABLE_STATUSES
 

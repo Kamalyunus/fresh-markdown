@@ -155,6 +155,38 @@ def test_the_decision_event_names_the_config_it_was_priced_with(tmp_path):
     assert store.load_decisions()[0]["config_digest"] == evt["config_digest"]
 
 
+def test_the_decision_id_a_priced_hour_carries_is_the_shelf_hour(tmp_path):
+    """Not a surrogate: one decision per shelf-hour is what the id SAYS, so a
+    re-priced hour collides with its own earlier copy instead of putting a
+    second price on one feed row, and engineering can name the decision for
+    an hour before it exists. The EPISODE is deliberately not in it -- that
+    id is the producers' and can be relabelled, and an audit record's
+    identity may not move when an upstream label does."""
+    from engine.decide import decide
+    from engine.posterior import PosteriorStore
+    from events.pairs import decision_id_of, hour_key, outcome_id_of
+    from events.store import EventStore
+
+    posterior = PosteriorStore.initialise(
+        CFG, {"MEAT": {"mean": -1.0, "std": 0.6}}, {"MEAT": 10**6},
+        path=str(tmp_path / "posterior.json"))
+
+    def priced(root, **over):
+        store = EventStore(CFG, root=str(tmp_path / root))
+        return decide(_state(**over), posterior, store, CFG,
+                      np.random.default_rng(0), 100.0, "v")
+
+    key = hour_key(1, "F", "2026-08-01", 12)
+    evt = priced("a")
+    assert evt["decision_id"] == decision_id_of(key) == "dec-1|F|2026-08-01T12"
+    assert evt["decision_id"][4:] == outcome_id_of(key)[5:]   # the pair, one key
+    # relabel the episode: the same shelf-hour keeps the same decision id
+    relabelled = priced("b", episode_id="RELISTED-9")
+    assert relabelled["decision_id"] == evt["decision_id"]
+    # a different hour of the same shelf is a different decision
+    assert priced("c", hour_of_day=13)["decision_id"] == "dec-1|F|2026-08-01T13"
+
+
 def test_the_finiteness_test_has_one_home():
     """events.store quarantines a non-finite applied_price and engine.decide
     rejects a non-finite state by the SAME predicate -- a second copy is

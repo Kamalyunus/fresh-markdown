@@ -97,7 +97,8 @@ def test_the_quarantine_count_is_a_property_of_the_run_not_the_file(cfg, tmp_pat
     for run in range(3):
         store = EventStore(cfg, root=root)
         assert store.quarantined_this_run == 0, "a fresh store starts at zero"
-        # a NEW id each run, exactly as uuid4 gives the real path
+        # a NEW id each run: a foreign writer's, since the real path's ids
+        # are the shelf-hour and would collide with their own earlier copy
         assert not store.emit_outcome(dict(bad, outcome_id=f"o{run}",
                                            decision_id=f"d{run}"))
         assert store.quarantined_this_run == 1, \

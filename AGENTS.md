@@ -121,12 +121,12 @@ And the standing prohibitions:
     `EventStore.episode_paths`); the day's feature table — `ref_rate_table`
     (`daily.features` writes, the batch joins); the worker body — `engine.state.price_one`,
     its context — `batch_context`; per-decision seeding —
-    `common.parallel.keyed_rng` (the pool — `EpisodePool`); the hour key
-    and the outcome id — `events.pairs.hour_key`, `outcome_id_of`; id
-    spelling — `ident`; two claims on one key — `colliding_keys`; one
-    decision per hour and one outcome per decision — the STORE
-    (`priced_hours`, `completeness_counts`); the event field lists —
-    `events.contract`; the loaded bundle — `fit.artifacts.load_bundle`
+    `common.parallel.keyed_rng` (the pool — `EpisodePool`); the hour key and
+    BOTH event ids — `events.pairs.hour_key`, `outcome_id_of`, `decision_id_of`
+    (two prefixes over the key; the episode is never in either); id spelling —
+    `ident`; two claims on one key — `colliding_keys`; one decision per hour and
+    one outcome per decision — the STORE (`priced_hours`, `completeness_counts`);
+    the event field lists — `events.contract`; the bundle — `fit.artifacts.load_bundle`
   - scrap, IL, margin at episode grain — `common.metrics.episode_economics`
     (+ `settled`, `daily_rates`, `summary` — the IL/scrap/sell-through
     block every reader rounds for itself; `scrap_rate` is scrap over
