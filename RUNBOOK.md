@@ -246,7 +246,12 @@ their prefix. A rejection holds no price, never enters `priced_hours` (a
 corrected hour stays free to price) and never reaches the evidence; it is
 there so a refused hour is distinguishable from an hour that was never
 sent, which is what makes `episode_ids_the_rule_could_not_check` mean a
-missing hour. Two decisions priced for one hour (a retried batch) match neither and
+missing hour. The exported tables (`daily.export_events`) carry the
+shelf-hour in the FEED'S own spelling and types beside the event's fields
+— `skuseq`, `fc`, `date` as a date, `hour` — so appending a night's
+decisions to the hourly feed is a four-column join with no rename and no
+cast; a SKU id that is not an integer is null in `skuseq` and counted.
+Two decisions priced for one hour (a retried batch) match neither and
 are counted (`decisions_colliding_on_hour`); the store itself refuses a
 second decision for a priced hour and a second outcome for a decision
 (`outcomes_per_decision_over_one`), and an outcome without `is_stockout`

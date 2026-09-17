@@ -845,7 +845,7 @@ def ingest_and_pair(store, feed_path, out_dir):
     counts: `decisions`, `ingest`, `exports`, `pairs`, `price_mismatches`,
     `outcome_ids_follow_the_formula`, `paired_sample` (PAIR_COLS)."""
     decisions, rep = ingest_feed(store, pd.read_parquet(feed_path))
-    written, _ = export_events.export(store, os.path.join(out_dir, "exports"))
+    written, _, _ = export_events.export(store, os.path.join(out_dir, "exports"))
 
     pairs = match_pairs(decisions, store.load_outcomes())
     table = []

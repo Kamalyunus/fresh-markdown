@@ -34,7 +34,7 @@ def test_export_events_writes_warehouse_safe_tables(tmp_path):
             "baseline_model_version": "b", "posterior_version": 0,
             "config_version": "1.0.0", "config_digest": "0123456789abcdef",
             "timestamp": f"{day}T17:00:00+00:00"})
-    written, _ = export(store, str(tmp_path / "exports"))
+    written, _, _ = export(store, str(tmp_path / "exports"))
     path, n = written["decisions"]
     assert n == 2
     df = pd.read_parquet(path)
@@ -81,7 +81,7 @@ def test_since_cuts_both_tables_on_the_trading_day(tmp_path):
         "cost must not exceed original_price"))
 
     def rows(since):
-        out, _ = export(store, str(tmp_path / "exports"), since=since)
+        out, _, _ = export(store, str(tmp_path / "exports"), since=since)
         got = {}
         for name, (path, _) in out.items():
             df = pd.read_parquet(path)
@@ -116,7 +116,47 @@ def test_an_orphan_outcome_with_no_finalized_at_is_skipped_and_counted(tmp_path)
               "starting_inventory": 1, "ending_inventory": 1, "applied_price": 1.0}
     kept_d, kept_o, undated = since_filter(decisions, outcomes + [orphan], "2026-08-01")
     assert [o["outcome_id"] for o in kept_o] == ["O1"] and undated == 1
-    written, skipped = export(store, str(tmp_path / "exports"), since="2026-08-01")
+    written, skipped, _ = export(store, str(tmp_path / "exports"), since="2026-08-01")
     assert written["outcomes"][1] == 1 and skipped == 0
-    written, skipped = export(store, str(tmp_path / "exports"))
+    written, skipped, _ = export(store, str(tmp_path / "exports"))
     assert written["outcomes"][1] == 1 and skipped == 0
+
+
+def test_the_shelf_hour_is_also_in_the_feeds_own_spelling_and_types(tmp_path):
+    """So appending a night's decisions to the hourly FLC feed is a join on
+    four columns with no rename and no cast: the chain's text `sku_id`
+    normalisation is what the feed's integer `skuseq` has to be recovered
+    from, and the event's text day has to become the feed's date."""
+    from conftest import decision_event, load_config, source_row
+    from events.contract import rejection_event
+    from events.store import EventStore
+    from daily.export_events import FEED_COLUMNS, export
+
+    store = EventStore(load_config(), root=str(tmp_path / "events"))
+    assert store.emit_decision(decision_event(
+        decision_id="D1", sku_id="7", fc="F1", date="2026-03-02", hour_of_day=10))
+    assert store.emit_rejection(rejection_event(
+        {"sku_id": 8, "fc": "F1", "date": "2026-03-02", "hour_of_day": 10,
+         "episode_id": "E8", "hours_remaining": 3, "q_remaining": 2},
+        "empty shelf: nothing to price"))
+    written, _, unspellable = export(store, str(tmp_path / "exports"))
+    assert unspellable == 0
+
+    feed = pd.DataFrame([source_row(skuseq=s, fc="F1", hour=10) for s in (7, 8, 9)])
+    for name, want in (("decisions", ["D1"]), ("rejections", ["rej-8|F1|2026-03-02T10"])):
+        got = pd.read_parquet(written[name][0])
+        assert set(FEED_COLUMNS) <= set(got.columns)
+        assert "sku_id" in got.columns and "hour_of_day" in got.columns   # untouched
+        joined = feed.merge(got, on=list(FEED_COLUMNS), how="inner")      # no cast
+        assert sorted(joined[f"{name[:-1]}_id"]) == want
+
+    # an id the feed's integer column cannot hold is null there and counted,
+    # never a column whose type changed between days
+    assert store.emit_decision(decision_event(
+        decision_id="D2", sku_id="SKU-88213", date="2026-03-03", hour_of_day=11))
+    _, _, unspellable = export(store, str(tmp_path / "exports"))
+    assert unspellable == 1
+    got = pd.read_parquet(written["decisions"][0])
+    assert str(got.skuseq.dtype) == "Int64"
+    assert got.loc[got.decision_id == "D2", "skuseq"].isna().all()
+    assert got.loc[got.decision_id == "D2", "sku_id"].iloc[0] == "SKU-88213"

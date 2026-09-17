@@ -902,7 +902,14 @@ before even when we declined to price it, and the unknown count
 (`episode_ids_the_rule_could_not_check`) now means a MISSING hour rather
 than one of our own refusals. `latest_by_shelf` stays decisions-only: it is
 where the anchor and the continued test come from. The episode is
-deliberately NOT in any of the three ids:
+deliberately NOT in any of the three ids (which is also what makes the
+warehouse tables joinable: `daily.export_events` writes the shelf-hour in
+the FEED'S own spelling and types beside the event's own fields
+(`add_feed_columns`: `skuseq` as the feed's integer, `hour`, the day as a
+real date), so appending a night's decisions to the hourly feed is a
+four-column join with no rename and no cast. The chain normalises every id
+to one text spelling, so a SKU id that is not an integer is null in
+`skuseq` and counted, never a column whose type changes between days):
 `episode_id` is the producers' and can be relabelled, and an audit
 record's identity may not move when an upstream label does. Ingest still
 matches on the four key fields, never on the string. `tools.e2e_cycle` runs one whole cycle — requests, decisions, the

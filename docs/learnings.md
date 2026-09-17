@@ -968,6 +968,20 @@ now. Dates are owner sign-off.
   continued test must come from a real price. The check that was noise is
   now a signal: an unknown is an hour engineering did not send.
 
+- **The export's friction was types, not names** (owner, 09-17). Asked to
+  ship the warehouse tables in the feed's own spelling, the obvious read
+  was a rename: `sku_id` to `skuseq`, `hour_of_day` to `hour`. Looking
+  properly, the names were the smaller half. The chain normalises every id
+  to ONE TEXT spelling (`events.pairs.ident`) precisely so a value read
+  back as `7.0` still meets one stored as `7`, and it writes the day as
+  text; the feed's columns are an integer and a date. A rename alone would
+  have left a join that silently matched nothing. `add_feed_columns` now
+  writes the shelf-hour in the feed's types beside the event's own fields,
+  so the export stays a faithful dump and the join needs no cast. An id
+  that is not an integer is null in `skuseq` and counted, because a column
+  whose type changes between days is worse for a warehouse than a null a
+  load can see.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,
