@@ -66,11 +66,16 @@ def build(cfg, feed_path=None, as_of=None, out=None):
     episodes opening on `as_of` (today) written to `out`
     (features/<as_of>.parquet). Returns the morning's report."""
     fc = cfg["features"]
-    # today in UTC, the clock ops.advance names yesterday by -- never the
-    # host's local date, which a cron just after midnight UTC would read as
-    # yesterday and write a table one day short
-    as_of = iso_day(as_of or dt.datetime.now(dt.timezone.utc).date())
     raw = rolling_history(cfg, feed_path)
+    if as_of is None:
+        # the table is for the day AFTER the feed being ingested -- the
+        # feed's own trading day plus one, never the host's clock: a cron
+        # running after midnight in one zone and before it in another read
+        # "today" one day off and wrote a table the batches counted stale
+        as_of = (str((pd.Timestamp(raw.date.max()) + pd.Timedelta(days=1)).date())
+                 if feed_path and len(raw)
+                 else dt.datetime.now(dt.timezone.utc).date())
+    as_of = iso_day(as_of)
     hist = load_history(fc["history_path"], cfg)
     table = ref_rate_table(hist, as_of, cfg)
     out = out or os.path.join(fc["table_dir"], f"{as_of}.parquet")

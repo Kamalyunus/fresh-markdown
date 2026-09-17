@@ -7,6 +7,20 @@ artifacts/
 events_store*/
 .env
 .env.*
+!.env.example
 .venv/
 venv/
 sim/
+
+# what the handover tells engineering to write at the repo root, and the
+# loose check files of Phase 0
+exports/
+features/
+snapshots/
+decisions/
+feed/
+failures/
+logs/
+checks.json
+dry.csv
+dry.json

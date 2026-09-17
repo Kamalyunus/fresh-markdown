@@ -1,3 +1,7 @@
+# The floors the code is written against. The exact versions the sealed
+# bundle was verified with are requirements.lock -- install THAT on the
+# pricing host (ops.seal records library versions; a moved library is a
+# red `artifact bundle` row in ops.status until a deliberate re-seal).
 numpy>=1.26
 pandas>=2.1
 pyarrow>=14.0
@@ -5,13 +9,9 @@ scipy>=1.11
 PyYAML>=6.0
 lightgbm>=4.0
 pytest>=7.4
-matplotlib>=3.8
 
-# tools.export_backtest only. Writes the episode/hourly workbook; nothing in
-# the pipeline itself reads or writes xlsx.
-xlsxwriter>=3.1
-
-# fit.download_flc only (step 0). Every other step reads the parquet it
-# writes, so the pipeline runs without these.
+# fit.download_flc only (step 0, and the weekly extract refresh on the cron
+# host). Every other step reads the parquet it writes, so the pipeline runs
+# without these; a host that never pulls from Redshift can leave them out.
 psycopg2-binary>=2.9
 python-dotenv>=1.0

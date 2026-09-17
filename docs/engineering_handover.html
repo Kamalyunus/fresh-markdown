@@ -596,11 +596,11 @@
 <section id="phase-0-setup">
   <h2><span class="num">02</span>Phase 0 · Setup, once, before launch</h2>
 
-<p class="prose">Seven tasks. Each ends with something to send us, so we can confirm from the file rather than a call.</p>
+<p class="prose">Eight tasks. Each ends with something to send us, so we can confirm from the file rather than a call.</p>
 
   <h3>0.1 · Provision the pricing host</h3>
   <div class="tscroll"><table><tbody>
-    <tr><td>You do</td><td>A Linux host with Python 3.11+. Clone the repository at the tag the owner names; <code>pip install -r requirements.txt</code>. Put the Redshift credentials in <code>~/.env</code> as <code>REDSHIFT_*</code> (the weekly refresh pulls the extract with them). The owner runs the pre-launch chain on this host (it pulls its own extract), or copies <code>artifacts/</code>, <code>data/</code> and <code>config.yaml</code> onto it.</td></tr>
+    <tr><td>You do</td><td>A Linux host with Python 3.11. Clone the repository at the commit the owner names; <code>pip install -r requirements.lock</code> — the exact library versions the sealed bundle was verified with (the seal records them, and a moved library is a red status row until the owner re-seals). <code>.env.example</code> lists the credential names. Put the Redshift credentials in <code>~/.env</code> as <code>REDSHIFT_*</code> (the weekly refresh pulls the extract with them). The owner runs the pre-launch chain on this host (it pulls its own extract), or copies <code>artifacts/</code>, <code>data/</code> and <code>config.yaml</code> onto it.</td></tr>
     <tr><td>Command</td><td><code>python3 -m ops.status</code></td></tr>
     <tr><td>Produces</td><td>The status table on stdout.</td></tr>
     <tr><td>Check</td><td>It runs. Before launch the launch rows read red (<code>data.launch_date</code> is null); every other row green.</td></tr>
@@ -675,6 +675,38 @@
     <tr><td>Check</td><td>Replay <code>dry.csv</code> through the applier in a non-live mode; every priced row maps to one shelf.</td></tr>
     <tr><td>Then</td><td>Tell us the two cron times.</td></tr>
   </tbody></table></div>
+
+  <h3>0.7 · Operate it on your host</h3>
+
+<p class="prose">Everything between "clone" and "cron", in one place. Nothing here is optional.</p>
+
+  <div class="tscroll">
+    <table>
+      <thead><tr><th>What</th><th>The rule</th></tr></thead>
+      <tbody>
+        <tr><td>What must be on the host before the first hour</td><td>The repository at the named commit; <code>config.yaml</code> with the owner's readings (it is in git); <code>artifacts/</code> whole, including <code>artifacts/history/</code>; <code>data/prepared.parquet</code> and <code>data/feed_history.parquet</code>; <code>reports/</code> from the owner's pre-launch run (<code>ops.status</code> reads them, and without them its rows read "not run"); <code>~/.env</code> with the five <code>REDSHIFT_*</code> values on the host that runs the weekly refresh. <code>events_store/</code> starts empty. Run <code>python3 -m ops.status</code> and send us the output before the first cron fires.</td></tr>
+        <tr><td>Working directory</td><td>Every command runs from the repository root. Run from anywhere else and a module reads the wrong <code>config.yaml</code> and the wrong <code>artifacts/</code>, silently. Both cron lines below <code>cd</code> first.</td></tr>
+        <tr><td>The two cron lines</td><td><pre class="json"># hourly, a few minutes past the hour, once the snapshot is written
+5 * * * *  cd /opt/markdown &amp;&amp; TZ=Asia/Seoul flock -n /opt/markdown/.hourly.lock \
+  python3 -m ops.price_hour --snapshot snapshots/$(date +\%Y-\%m-\%dT\%H).parquet \
+    --features features/$(date +\%Y-\%m-\%d).parquet --workers 0 \
+    --out decisions/$(date +\%Y-\%m-\%dT\%H).csv --report reports/hours/$(date +\%Y-\%m-\%dT\%H).json \
+    &gt;&gt; logs/hourly.log 2&gt;&amp;1
+
+# every morning, after yesterday's feed and failures have landed
+30 6 * * *  cd /opt/markdown &amp;&amp; TZ=Asia/Seoul flock -n /opt/markdown/.morning.lock \
+  python3 -m ops.advance --feed feed/$(date -d yesterday +\%Y-\%m-\%d).parquet \
+    --failures failures/$(date -d yesterday +\%Y-\%m-\%d).csv \
+    &gt;&gt; logs/morning.log 2&gt;&amp;1</pre>Replace the path and the zone with yours. <code>flock -n</code> skips a run that would overlap the previous one instead of stacking it; the event store also locks itself on every write, so an overlap that does slip through is refused rather than double-priced.</td></tr>
+        <tr><td>Time zone and daylight saving</td><td><code>date</code> and <code>hour</code> mean the feed's own wall clock, whatever zone your feed is written in. Run both crons with <code>TZ</code> set to that zone, so the file names line up with the feed's day. The morning lane takes the trading day from the feed file it is given, never from the host clock, and the feature table is dated the day after that feed. At a daylight-saving change the feed's clock repeats or skips an hour: a repeated hour is two rows for one shelf-hour and both are refused (the outcome matches neither); a skipped hour reads as a missing snapshot hour for that shelf. Tell us the dates in advance.</td></tr>
+        <tr><td><code>--workers 0</code></td><td>All cores but one, for the hour's batch. On a shared host set a number instead. Serial and parallel give byte-identical results.</td></tr>
+        <tr><td>Logs</td><td>Both scripts write to stdout only. The cron lines above collect it under <code>logs/</code>; that is what "send us the console output" means in Phase 5. The hour's report JSON and the morning's <code>reports/launch_readiness.md</code> are the structured record.</td></tr>
+        <tr><td>Exit codes</td><td><code>ops.price_hour</code> exits 0 whenever it ran, even if every shelf came back <code>rejected</code>: alert on the report's <code>rejected</code> count, not on the exit code. It exits non-zero only when it could not run at all (the host, the config or the bundle moved; the console output says which). <code>ops.check_inputs</code> exits 1 on any FAIL line. <code>ops.advance</code> exits 1 at every stop, including a red status, and writes <code>reports/launch_readiness.md</code> naming the row. <code>ops.status</code> exits 1 on any FAIL row.</td></tr>
+        <tr><td>Growth and backup</td><td><code>events_store/</code> grows by one decision and one outcome per priced shelf-hour and one rejection per refused shelf-hour, and is read whole at the start of every hourly and every morning run; nothing rotates it in the pilot. Back up <code>events_store/</code>, <code>artifacts/posterior.json</code> and <code>data/feed_history.parquet</code> daily, after the morning run: together they are the pilot's entire state. Compaction is a follow-up we own if the hourly start-up time becomes visible.</td></tr>
+        <tr><td>Examples</td><td><code>examples/</code> holds one file of each of the four tables, written by the rehearsal against the synthetic shop: the shape, the names and the units, nothing about production.</td></tr>
+      </tbody>
+    </table>
+  </div>
 </section>
 
 <section id="phase-1-launch">
@@ -1828,7 +1860,7 @@
 
 <p class="prose">The one outcome fact only you know. One row per failed hour, as a table (parquet or CSV) or JSONL:</p>
 
-<pre class="json">sku_id, fc, date, hour_of_day, reason</pre>
+<pre class="json">skuseq, fc, date, hour, reason      # or sku_id, fc, date, hour_of_day, reason: either spelling is read</pre>
 
 <p class="prose">No row means the push succeeded. Keys are normalised on read the same way requests are. A reported failure is counted apart (<code>push_failures_applied</code> in the ingest report) and excluded from learning; an unreported one is caught by the mismatch gate as if it were your bug.</p>
 
@@ -1849,8 +1881,8 @@
 
 <footer>
   <p>
-    Field lists are read directly from the running system — <code>events/store.py</code>
-    (<code>DECISION_REQUIRED</code>, <code>OUTCOME_REQUIRED</code>),
+    Field lists are read directly from the running system — <code>events/contract.py</code>
+    (<code>DECISION_REQUIRED</code>, <code>OUTCOME_REQUIRED</code>, <code>REJECTION_REQUIRED</code>; <code>events/store.py</code> enforces them),
     <code>engine/decide.py</code> for what the agent emits,
     <code>daily/ingest_outcomes.py</code> for how outcomes are built from the feed, and
     <code>config.yaml</code> for every threshold quoted in Appendix G.

@@ -1029,6 +1029,46 @@ now. Dates are owner sign-off.
   `common.windows` and the scalar one in the script are two homes with a
   parity test between them rather than one home with two callers.
 
+- **The layer between "clone" and "cron" did not exist** (owner, 09-17,
+  the review's third pass). The code and the contract were specified to
+  the field; how to run them on a host was implied. Task 0.7 of the
+  handover page is that layer: the ship list (what must be on the host
+  before the first hour, `reports/` included, since `status` reads it),
+  the two cron lines with the working directory, the zone and `flock`,
+  the time-zone and daylight-saving rule, the exit codes (the hourly
+  script exits 0 when every shelf is refused -- alert on the report),
+  the store's growth and the backup rule. With it: `requirements.lock`
+  (the seal records library versions, so an unpinned install could fail
+  status on day one), `.env.example`, `examples/` with one file of each
+  table from the synthetic rehearsal, a CI workflow that runs the suite,
+  and `.gitignore` entries for every directory the page tells
+  engineering to write. One code change rode along: the feature table's
+  day is the ingested feed's plus one, never the host clock -- the
+  first fix had moved it from local to UTC, which is still a clock. Four
+  doc contradictions closed: `config.yaml` is in git, the field lists
+  live in `events/contract.py`, the CI claim is now true, and the
+  failed-pushes columns are read in either spelling.
+
+- **The layer between "clone" and "cron" did not exist** (owner, 09-17,
+  the review's third pass). The code and the contract were specified to
+  the field; how to run them on a host was implied. Task 0.7 of the
+  handover page is that layer: the ship list (what must be on the host
+  before the first hour, `reports/` included, since `status` reads it),
+  the two cron lines with the working directory, the zone and `flock`,
+  the time-zone and daylight-saving rule, the exit codes (the hourly
+  script exits 0 when every shelf is refused -- alert on the report),
+  the store's growth and the backup rule. With it: `requirements.lock`
+  (the seal records library versions, so an unpinned install could fail
+  status on day one), `.env.example`, `examples/` with one file of each
+  table from the synthetic rehearsal, a CI workflow that runs the suite,
+  and `.gitignore` entries for every directory the page tells
+  engineering to write. One code change rode along: the feature table's
+  day is the ingested feed's plus one, never the host clock -- the
+  first fix had moved it from local to UTC, which is still a clock. Four
+  doc contradictions closed: `config.yaml` is in git, the field lists
+  live in `events/contract.py`, the CI claim is now true, and the
+  failed-pushes columns are read in either spelling.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,

@@ -96,5 +96,7 @@ caller in a workspace) and `docs/` pages. The test suite is the
 reviewers' asset, not their burden: every non-obvious rule named above has a
 test whose docstring states it in prose.
 
-CI runs `python3 -m pytest tests/` (a couple of minutes) and `python3 -m ops.status`
-on deploy (exit code 1 on any FAIL).
+CI (`.github/workflows/ci.yml`) runs `python3 -m pytest tests/` on every push
+(a couple of minutes; a fresh clone generates its own synthetic extract).
+`python3 -m ops.status` runs on the pricing host at deploy, where the frozen
+artifacts and the reports are (exit code 1 on any FAIL).

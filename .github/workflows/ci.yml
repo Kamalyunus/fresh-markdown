@@ -1,0 +1,16 @@
+# The suite on every push: a fresh clone generates its own synthetic
+# extract (tests/conftest.py, `synth_flc`), so no data ships with the repo.
+# ops.status is NOT run here -- it reads the frozen artifacts and the
+# reports, which exist on the pricing host, not in a clone.
+name: tests
+on: [push, pull_request]
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.lock
+      - run: python3 -m pytest tests/ -q -p no:cacheprovider

@@ -133,8 +133,11 @@ runtime knobs from `config.yaml` itself, and cells plus tau from
 it: the artifact hashes, the config (digest and snapshot) and the library
 versions — `status`'s `artifact bundle` row is red when any of them moved,
 and every decision event carries `config_digest`, so an hour maps to one
-`artifacts/history/<bundle>/<sealed_at>/` snapshot. `artifacts/` and `config.yaml` are not in git: production runs
-from the directory `advance` ran in, or ships the latest snapshot whole.
+`artifacts/history/<bundle>/<sealed_at>/` snapshot. `artifacts/` is not in
+git (`config.yaml` IS: it ships the owner's production readings): production
+runs from the directory `advance` ran in, or ships the latest snapshot whole.
+The handover page's task 0.7 is the ship list, the two cron lines, the time
+zone rule, the exit codes and the backup rule.
 
 **The daily `--apply` gate.** One human approves at most one posterior step
 per cell per day; each cell triggers on its own batch. Before approving:

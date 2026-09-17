@@ -850,6 +850,10 @@ the one home for each — `engine.state.build_states` (the frozen model's
 TABLE, `r` from the lookup), one `PosteriorStore` read per batch, one
 config digest. The feature table (`engine.state.ref_rate_table`,
 `features/<date>.parquet`) is written once each morning by
+`daily.features` for the day AFTER the feed it ingests -- the feed's own
+trading day plus one, never the host's clock, which read "today" one day
+off across a midnight in another zone and wrote a table the batches
+counted stale --
 `daily.features` from the rolling hourly feed (`features.history_path`,
 the last `features.history_days` days, seeded from the raw extract): one
 row per SKU × FC plus a pooled row per SKU (`fc = "*"`, the fallback a

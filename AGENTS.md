@@ -338,7 +338,7 @@ fixture re-derives fixture values — read them, never commit them
 | the weeks after launch, before launch (`evaluate.pilot_sim` drives `pilot_shop` + `pilot_grade`: real engine + daily lane vs a simulated shop; settings in `pilot_sim.yaml`, key table in §11.3) | §11.3 |
 | posterior, update, operator gate | §5.9, §5.11 |
 | monitoring, guardrails, stop conditions, the pilot read | §5.12, §11, §12 |
-| events, integration, quarantine | `docs/engineering_handover.html`; `events/store.py` |
+| events, integration, quarantine | `docs/engineering_handover.html`; `events/contract.py`, `events/store.py` |
 | provenance, seal, freshness, the audit trail (`common/history.py`; `artifacts/history/<bundle>/<sealed_at>/`) | §5.14a; rule 18 |
 | operating the chain end to end, phase order | `ops/advance.py` (`--plan`); rule 1b |
 | operator runbook, review tiers | `RUNBOOK.md`, `REVIEW_GUIDE.md` |
@@ -384,7 +384,7 @@ The doc surface is small on purpose: `docs/design.md` (the spec),
 this file, `README.md`, `RUNBOOK.md`, `REVIEW_GUIDE.md`. Two are test-guarded:
 `design.md` (every waterfall stage, gate, flag and population must appear, no
 retired rule may read as live — `test_docs_match_the_code.py`) and the handover's
-contract appendices (checked against `events/store.py` both ways; its quoted
+contract appendices (checked against `events/contract.py` both ways; its quoted
 thresholds are NOT guarded, so re-read them when `monitoring.*` moves; the worked
 episode is real solver output, regenerate rather than hand-patch its numbers).
 

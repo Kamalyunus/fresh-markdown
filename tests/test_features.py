@@ -59,6 +59,9 @@ def test_the_days_table_equals_the_per_batch_computation(cfg, tmp_path, monkeypa
     rep = features.build(c, feed_path=str(feed), as_of="2026-03-09")
     table = pd.read_parquet(rep["out"])
     assert rep["as_of"] == "2026-03-09" and rep["pooled_rows"] == 2
+    # with no --as-of the day is the FEED's plus one, never the host clock:
+    # a cron across a midnight in another zone read "today" one day off
+    assert features.build(c, feed_path=str(feed))["as_of"] == "2026-03-09"
     assert set(zip(table.sku_id, table.fc)) == {("1", "F1"), ("2", "F1"), ("2", "F2"),
                                                 ("1", POOLED_FC), ("2", POOLED_FC)}
     hist = load_history(c["features"]["history_path"], c)
