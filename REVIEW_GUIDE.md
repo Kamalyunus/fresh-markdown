@@ -1,8 +1,10 @@
 # Review guide — what to review, how deeply, and why
 
-The part of the repo that can touch a live price is ~2,100 lines. This
-guide scopes a code review to risk, so the whole exercise is about two
-sittings.
+The part of the repo that can touch a live price is ~2,700 lines: the
+~2,100 of Tiers 1 and 2, plus Lane B's two hourly callers in `ops/`
+(`price_hour.py`, `price_batch.py`), carved out of Tier 3 at the end of
+this guide. This guide scopes a code review to risk, so the whole
+exercise is about two sittings.
 
 ## Tier 1 — review line by line (~1,200 lines; prices real money, hourly)
 
@@ -42,15 +44,29 @@ the exactly-once tests in `test_end_to_end.py` are the pinned answers.
 — they call the reviewed engine and lane, never price a shelf) and `ops/` (`advance.py` is the phase order
 as code, one function per phase in `PLAN`; its `plan()` is pure and unit-tested per stop;
 `config_keys.py` is the one table of what each config key is to the chain and the
-one report-staleness judgement `status` and `advance` share; `price_batch.py` is
-Lane B's reference caller — the contract's requests in, a price per request
-out, through the reviewed engine and `engine/state.py`, the one request →
-state) run before launch,
+one report-staleness judgement `status` and `advance` share) run before launch,
 produce frozen artifacts, and sit behind human gate readings plus the test
 suite. `daily/monitor.py`, `assurance.py`, `ingest_outcomes.py` and
-`export_events.py` run in production but write reports, never prices. A defect here cannot touch a
-shelf without first passing a gate whose inputs a human reads. Skim for
-structure; audit only if a gate behaves surprisingly. The one file worth a
+`export_events.py` run in production but write reports, never prices. A defect in
+those cannot touch a shelf without first passing a gate whose inputs a human reads.
+
+**The exception, and the one part of `ops/` worth reading closely:** Lane B's
+callers run every hour in production and their output goes on a shelf.
+`price_hour.py` takes the feed's own rows (carrying the `episode_id` the data
+producers assign — `assign_episode_ids.py` is that rule as the producers' own
+script, `check_inputs.py` gates the three tables they deliver) and builds the
+requests; `price_batch.py` takes requests in and returns a price per request
+through the reviewed engine and `engine/state.py`, the one request → state.
+Tier 1's structural guarantees still hold whatever these do: no price below
+cost, none above the anchor the engine is given, and a state that fails
+validation is rejected rather than best-effort priced. What they can still get
+wrong is what they HAND the engine — an anchor, a horizon, or an entry-vs-continuation
+reading. A new `episode_id` where the window continued is the case to check
+first: it is a valid entry decision with a null anchor, so the price may rise
+on shoppers mid-window, which is the one move the system otherwise guarantees
+never happens. The ids are the producers' and are read as given, never
+overridden, so the defence is the count, `episode_ids_disagreeing_with_the_rule`.
+Skim the rest for structure; audit only if a gate behaves surprisingly. The one file worth a
 real read is `fit/prepare_data.py`'s waterfall — it defines the
 population every other number is measured on, and its rules are
 cross-checked against the docs by `test_docs_match_the_code.py`.

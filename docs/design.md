@@ -862,8 +862,10 @@ the hour the episode opened), **sliced** to the hour — serving equals the
 entry forecast, assurance re-solves it, and no history pass runs for it.
 Only a restock that grew `hours_remaining` extends the path, by prediction
 on the features as of the episode's OPENING (never the request's day: a
-mid-episode recompute was the rule-12 skew, and the request's
-`episode_id` never met the history's derived ids anyway). A later request
+mid-episode recompute was the rule-12 skew. The producers' ids follow the
+same `EPISODE_RULE` the history's derived ids do, so the two spellings
+meet; the features still come from what the store recorded at the
+opening, never a fresh history pass). A later request
 the store does not know falls back to a fresh forecast and is counted
 (`non_entry_requests_without_stored_path`). Outcomes are named from the feed row, not the decision:
 `outcome_id = feed-<sku>|<fc>|<date>T<hh>` (`events.pairs.outcome_id_of`

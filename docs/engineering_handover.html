@@ -1667,7 +1667,8 @@
       <span class="sev hard">hard</span>
       <b>Is <code>episode_id</code> stable across midnight?</b>
       <p>
-        The full assignment rule is in the box under §03. Thirty-six-hour windows are common;
+        You assign the id, by the rule in task 0.2a (<code>ops.assign_episode_ids</code> applies it;
+        the same rule in words is the box under §03). Thirty-six-hour windows are common;
         a date-derived key splits one window into two, resets the price anchor mid-window
         (the price can then rise — the one guarantee the system treats as structural), and
         makes every horizon in the second half wrong.
