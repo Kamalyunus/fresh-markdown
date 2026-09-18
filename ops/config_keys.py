@@ -49,8 +49,13 @@ KEYS = {
         {"anchor": "  delta_min_log_bias:", "measured": True, "rerun": "shadow"},
     ("dispersion", "rho"):
         {"anchor": "  rho:", "measured": True, "rerun": "none"},
+    # W is the OWNER's: the backtest's rolling-origin sweep recommends one
+    # (tune reports it as an owner decision) and never pastes it. Pasted, a
+    # W move turned the calibration loop, re-ran the backtest, re-scored
+    # the sweep and re-ran shadow -- the heaviest re-run class short of a
+    # retrain, and one the sweep's own near-ties could cycle
     ("baseline_model", "calibration_fit_trailing_weeks"):
-        {"anchor": "  calibration_fit_trailing_weeks:", "measured": True,
+        {"anchor": "  calibration_fit_trailing_weeks:", "measured": False,
          "rerun": "calibration"},
     ("monitoring", "stop_conditions", "scrap_deterioration_pct"):
         {"anchor": "    scrap_deterioration_pct:", "measured": False,
@@ -73,7 +78,6 @@ DERIVED_IN = {
     "exploration.tau_initial": "reports/shadow.json -> tau_initial_derivation",
     "exploration.delta_min_log_bias": "reports/backtest.json -> fidelity (level error at W)",
     "dispersion.rho": "artifacts/rho.json (fit_dispersion)",
-    "baseline_model.calibration_fit_trailing_weeks": "reports/backtest.json -> fidelity.calibration_window_sweep",
     "baseline_model.calibration_gate_band": "reports/backtest.json -> fidelity.calibration_window_sweep",
 }
 

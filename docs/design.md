@@ -1422,8 +1422,12 @@ Rules, in order:
 1. **`calib ≥ 2 × calibration_fit_trailing_weeks`.** The first W calib
    weeks carry factors fit partly on train rows (biased low); only the back
    half is wholly out-of-train.
-2. **W from the rolling-origin sweep** (`calibration_window_sweep`). If the
-   sweep wants a W that violates rule 1, revisit the split, not the band.
+2. **W is the owner's; the rolling-origin sweep advises** (`calibration_window_sweep`).
+   The sweep recommends a W with its evidence and `tune` reports it as an
+   owner decision, never a paste: pasted, a W move was the "calibration"
+   re-run class (the loop turns, the backtest re-runs and re-scores the
+   sweep, shadow re-runs), and a near-tie could cycle it. If the sweep
+   wants a W that violates rule 1, revisit the split, not the band.
    Every row — `uncalibrated` included — is scored on **one common set of
    evaluation weeks** (the longest candidate's burn-in, and every one
    after `split.train_end`, so no week the baseline was fit on is scored;

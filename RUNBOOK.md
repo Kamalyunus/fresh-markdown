@@ -115,6 +115,13 @@ each decision.
    the 3σ trailing floor `thresholds.json` stamps; they come to you only
    on `TOO TIGHT`, `BLOCKED`, `LIKELY INERT` or `insufficient history`,
    and the answer there is the basis or the metric, never a number.
+   `baseline_model.calibration_fit_trailing_weeks` (W, the level factors'
+   trailing fit window) is yours too: the backtest's rolling-origin sweep
+   RECOMMENDS a W with its evidence, `tune` reports it as an owner
+   decision, and nothing pastes it -- a pasted W turned the calibration
+   loop, re-ran the backtest, re-scored the sweep and re-ran shadow, the
+   heaviest re-run short of a retrain, and a near-tie could cycle it.
+   Move it only on a material win; the change still turns the loop once.
    `posterior.cold_start_shift_std` (0.5) is how aggressive the day-one
    belief is: launch |ε| = prior |ε| + k·std per cell. Read
    `backtest.policy_deltas`: `intra_episode_deepening` (prior vs launch

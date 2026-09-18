@@ -275,9 +275,10 @@ def test_a_measured_value_that_disagrees_with_its_report_fails(cfg, tmp_path):
     assert "learning.information_increment" in r["detail"]
     assert "999.0" in r["detail"]
 
-    # a recommendation tune DOWNGRADED to OWNER is not a stale paste: the
-    # remedy is the split, not this key, so it warns rather than holding the
-    # row red on a decision the owner has already taken
+    # W is the OWNER's outright: however far the sweep's recommendation sits
+    # from the value in force (here: infeasible under calib >= 2W as well),
+    # the row stays green -- an owner decision is never a stale paste, and a
+    # red row on a legitimate disagreement would be permanent
     infeasible = _copy.deepcopy(cfg)
     # align every OTHER measured value with the fixture reports, so the only
     # thing left disagreeing is the one downgraded to OWNER
@@ -295,13 +296,14 @@ def test_a_measured_value_that_disagrees_with_its_report_fails(cfg, tmp_path):
         trailing_8w={"mean_abs_log_error": 0.0001, "share_weeks_in_band": 1.0})
     (tmp_path / "backtest.json").write_text(json.dumps(bt))
     r = row(infeasible)
-    assert r["verdict"] == status.WARN
-    assert "not a paste" in r["detail"]
+    assert r["verdict"] == status.PASS
+    assert "trailing_weeks" not in (r["detail"] or "")
 
     # every key the check guards is one nobody CHOOSES -- owner preferences
     # (max_mean_step, max_std_shrink) must never appear here or the row
     # would be permanently red on a legitimate disagreement
-    owner = {("learning", "max_mean_step"), ("learning", "max_std_shrink")}
+    owner = {("learning", "max_mean_step"), ("learning", "max_std_shrink"),
+             ("baseline_model", "calibration_fit_trailing_weeks")}
     assert not (tune.MEASURED_KEYS & owner)
 
 

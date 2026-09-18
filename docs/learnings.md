@@ -1049,6 +1049,20 @@ now. Dates are owner sign-off.
   live in `events/contract.py`, the CI claim is now true, and the
   failed-pushes columns are read in either spelling.
 
+- **The trailing fit window is the owner's, not the sweep's** (owner,
+  09-18). W was MEASURED: the backtest's rolling-origin sweep recommended
+  it and `tune` pasted it. A pasted W is the "calibration" re-run class,
+  the heaviest short of a retrain -- the loop turns, the backtest re-runs
+  and re-scores the very sweep that chose W, shadow re-runs -- and a
+  near-tie between two windows could cycle it; the near-tie hold was the
+  first defence. The owner's reading: a smoothing window is a judgement,
+  stable across retrains, and the sweep's evidence is what the judgement
+  reads. W is SET BY OWNER now, the sweep's recommendation an owner
+  decision `tune` reports with the evidence, and a change still turns the
+  loop once, deliberately. What this does NOT remove: the exploration bias
+  is measured by the backtest and read by shadow, so shadow still re-runs
+  once after the first paste -- the ordering fix is the remaining piece.
+
 - **The layer between "clone" and "cron" did not exist** (owner, 09-17,
   the review's third pass). The code and the contract were specified to
   the field; how to run them on a host was implied. Task 0.7 of the
@@ -1068,6 +1082,20 @@ now. Dates are owner sign-off.
   doc contradictions closed: `config.yaml` is in git, the field lists
   live in `events/contract.py`, the CI claim is now true, and the
   failed-pushes columns are read in either spelling.
+
+- **The trailing fit window is the owner's, not the sweep's** (owner,
+  09-18). W was MEASURED: the backtest's rolling-origin sweep recommended
+  it and `tune` pasted it. A pasted W is the "calibration" re-run class,
+  the heaviest short of a retrain -- the loop turns, the backtest re-runs
+  and re-scores the very sweep that chose W, shadow re-runs -- and a
+  near-tie between two windows could cycle it; the near-tie hold was the
+  first defence. The owner's reading: a smoothing window is a judgement,
+  stable across retrains, and the sweep's evidence is what the judgement
+  reads. W is SET BY OWNER now, the sweep's recommendation an owner
+  decision `tune` reports with the evidence, and a change still turns the
+  loop once, deliberately. What this does NOT remove: the exploration bias
+  is measured by the backtest and read by shadow, so shadow still re-runs
+  once after the first paste -- the ordering fix is the remaining piece.
 
 ## The lesson under all of it
 

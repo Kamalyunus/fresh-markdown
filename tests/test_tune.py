@@ -46,7 +46,10 @@ def test_a_measurable_value_is_pasted_not_left_to_a_human(cfg, tmp_path, reports
     rep = tune.collect(c, str(reports_dir))
     pasted = {f["key"] for f in rep["to_paste"]}
     assert "monitoring.stop_conditions.scrap_deterioration_pct" in pasted
-    assert "baseline_model.calibration_fit_trailing_weeks" in pasted
+    # W is the owner's: the sweep recommends, tune reports, nothing pastes it
+    assert "baseline_model.calibration_fit_trailing_weeks" not in pasted
+    w = [f for f in rep["findings"] if f["key"] == "baseline_model.calibration_fit_trailing_weeks"]
+    assert w and w[0]["class"] == tune.OWNER
 
 
 def test_the_rail_paste_is_gated_on_the_price_consequence(cfg, tmp_path, reports_dir):

@@ -425,20 +425,23 @@ def _fit_window(cfg, rep):
                        >= cur_e.get("share_weeks_in_band", 1)
                        + float(g["w_switch_band_gain"]))
         held = not (better_mae or better_band)
+    # W is the owner's (config_keys.KEYS): the sweep RECOMMENDS, with the
+    # evidence, and the owner sets it. Never a paste -- a pasted W turned
+    # the calibration loop, re-ran the backtest, re-scored the sweep and
+    # re-ran shadow, and a near-tie could cycle that
     return [_finding(
-        ("baseline_model", "calibration_fit_trailing_weeks"),
-        PASTE if feasible else OWNER,
+        ("baseline_model", "calibration_fit_trailing_weeks"), OWNER,
         OK if (want == cur or held) else ACT, cur,
         cur if held else want,
         (f"the sweep prefers {rec} but within noise of the current "
          f"{cur}w (mae {want_e.get('mean_abs_log_error')} vs "
          f"{cur_e.get('mean_abs_log_error')}, in-band "
          f"{want_e.get('share_weeks_in_band')} vs "
-         f"{cur_e.get('share_weeks_in_band')}) -- HELD. A W change turns "
-         "the calibration loop and re-scores the sweep, so near-ties "
-         "oscillate; it switches only on a material win"
+         f"{cur_e.get('share_weeks_in_band')}) -- HELD; it is yours to move "
+         "on a material win only, since a W change turns the calibration loop"
          if held else
-         f"the rolling-origin sweep prefers {rec}"
+         f"the rolling-origin sweep prefers {rec} -- yours to set; a change "
+         "turns the calibration loop (--check-only, no retrain) and re-runs shadow"
          + (f"; calib is {calib_weeks:.1f}w so calib >= 2W holds"
             if feasible else
             f", but calib is {calib_weeks:.1f}w and the rule is calib >= "
