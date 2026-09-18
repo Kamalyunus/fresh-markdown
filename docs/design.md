@@ -1691,21 +1691,23 @@ MEASURED value; `--apply` writes it), **OWNER** (never auto-applied;
 reported with evidence), **READ** (no config key), **BLOCK** (an invariant
 that must hold first: reports from one model, a settled loop,
 `calib ≥ 2W`, no graded window across the exclusion gap — a BLOCK
-suppresses everything and `--apply` refuses). *A value the data can decide
-does not wait on a human*: the guardrail stops (3σ floors), the fit window
-W (the sweep, subject to `calib ≥ 2W`, **with hysteresis** — W is the one
-paste that turns the calibration loop, and re-settling re-scores the
-sweep, so a strict argmin oscillates near-tied windows and loops an agent
-on apply → check-only; it switches only on a material win: the
-candidate's `mean_abs_log_error` below `tuning.w_switch_mae_ratio` times
-the window in force's, or its `share_weeks_in_band` ahead by at least
-`tuning.w_switch_band_gain` — config keys, because they decide whether a
-MEASURED value is pasted and the snapshot must record which margin a
-paste stood on), and
-`max_mean_step` (the consistent-rails value) PASTE — `max_mean_step` behind a gate on its
-measured price consequence (`tuning.max_price_share_changed_for_auto_rail`,
+suppresses everything and `--apply` refuses). A MISSING report is not a
+BLOCK: each check names the report(s) it reads (`tune.READS`) and is asked
+once they exist, so what the backtest and thresholds measured — the
+exploration bias, the level band, the increment, the floors — is pasted
+BEFORE the first shadow, which then prices on the final values and stands;
+only shadow's own `tau_initial` (re-run class `none`) follows it. *A value
+the data can decide does not wait on a human*: the guardrail stops (3σ
+floors) and `max_mean_step` (the consistent-rails value) PASTE —
+`max_mean_step` behind a gate on its measured price consequence
+(`tuning.max_price_share_changed_for_auto_rail`,
 `max_il_delta_pct_for_auto_rail`), downgrading to OWNER with the reason
-when exceeded.
+when exceeded. The fit window W is the owner's (rule 2 above): the sweep
+recommends **with hysteresis** — it names a switch only on a material win,
+the candidate's `mean_abs_log_error` below `tuning.w_switch_mae_ratio`
+times the window in force's, or its `share_weeks_in_band` ahead by at
+least `tuning.w_switch_band_gain` — and `tune` reports it as OWNER; nothing
+pastes it.
 
 **What remains OWNER** — *a number that encodes what you are willing to
 lose, wait for, or risk*: `budget_share_of_il` (risk appetite — the forced
@@ -1716,15 +1718,19 @@ posture — `tune` computes both numbers, decides neither); and `data.split`
 market judgment).
 
 **`--apply` names the MINIMUM sufficient re-run**: `none` for values read
-at runtime or mirroring an artifact; `calibration` for
-`calibration_fit_trailing_weeks` (the loop turns — `ops.bootstrap_loop
---check-only`, **no retrain**); `retrain` only for a training input
-(`data.split` and the model's own keys), which are SET / OWNER, so `--apply`
-never writes one. It backs up the config and appends
+at runtime or mirroring an artifact; `shadow` for the exploration bias
+(inert when shadow has not run yet, which is the order `advance` keeps);
+`calibration` for `calibration_fit_trailing_weeks` (the loop turns —
+`ops.bootstrap_loop --check-only`, **no retrain**) and `retrain` for a
+training input (`data.split` and the model's own keys) — both SET BY
+OWNER, so `--apply` never writes one. It backs up the config and appends
 what was written, its source field, and outstanding owner decisions to
 `artifacts/config_decisions.json`. Edits are targeted line replacements —
 the comment beside each value is the reasoning and a YAML round-trip drops
-them. Iterate until `tune` reports no PASTE and no BLOCK.
+them — so every mapping ships in one-line `{...}` form, and a paste onto a
+block-style mapping (a re-dumped config) is refused rather than leaving the
+children behind an overwritten first line. Iterate until `tune` reports no
+PASTE and no BLOCK.
 
 **Triage when the level diagnostic is out of band:**
 

@@ -132,7 +132,7 @@ def _config_vs_reports(cfg, root, reports=None, artifacts=None):
     if blocks:
         # NAME them: a missing report is not-run; every other BLOCK is an
         # invariant violated, never green
-        missing_only = all(f["key"] == "reports present" for f in blocks)
+        missing_only = all(f["key"] == tune.MISSING_KEY for f in blocks)
         detail = "; ".join(f"{f['key']}: {f['current']} -- needs "
                            f"{f['recommended']}" for f in blocks)
         return _row("config mirrors reports",

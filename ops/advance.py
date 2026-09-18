@@ -250,8 +250,10 @@ def _plan_tune(st):
     """3. tune: paste what the reports measured, settle, repeat; 3b. re-seal
     a moved environment once nothing is left to paste."""
     shadow_ghost = _shadow_ghost(st)
+    # a missing report is never a stop here: the findings that read it wait
+    # for it (tune.READS) and the rest are pasted now, so shadow runs once
     ignore = {"reports agree on one model", "reports match the artifacts",
-              "reports present"} if shadow_ghost else {"reports present"}
+              tune.MISSING_KEY} if shadow_ghost else {tune.MISSING_KEY}
     rep = st["tune"]
     blocks = [f for f in rep["findings"]
               if f["class"] == tune.BLOCK and f["key"] not in ignore]

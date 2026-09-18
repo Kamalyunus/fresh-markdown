@@ -9,10 +9,37 @@ from conftest import ROOT, _cfg_with, _reports
 from ops import tune
 
 
-def test_a_missing_report_blocks_tuning_rather_than_tuning_on_nothing(cfg, tmp_path):
+def test_a_missing_report_withholds_only_the_findings_that_read_it(cfg, tmp_path):
+    """No report at all: nothing report-sourced is pasted, and every check
+    that reads one waits (named, with the report it needs). Backtest and
+    thresholds present, shadow not: what THEY measured -- the exploration
+    bias, the level band, the increment, the floors -- is pasted now, so
+    the first shadow prices on the final values; tau, shadow's own value,
+    waits. Holding every paste for all three re-ran shadow once for
+    nothing."""
     c = _cfg_with(cfg, tmp_path)
     rep = tune.collect(c, str(tmp_path / "empty"))
-    assert rep["blocked"] and not rep["to_paste"]
+    assert not rep["blocked"]                 # no invariant is violated
+    assert rep["missing"] == ["backtest", "shadow", "thresholds"]
+    assert rep["findings"][0]["key"] == tune.MISSING_KEY
+    assert {f["key"] for f in rep["to_paste"]} <= {"dispersion.rho"}   # artifact-sourced only
+    assert {w["check"] for w in rep["waiting"]} == \
+        {c_.__name__.lstrip("_") for c_, r in tune.READS.items() if r}
+
+    root = tmp_path / "two"
+    root.mkdir()
+    _reports(root)
+    (root / "shadow.json").unlink()
+    c["exploration"] = dict(c["exploration"], delta_min_log_bias=None,
+                            tau_initial=None)
+    rep = tune.collect(c, str(root))
+    assert not rep["blocked"] and rep["missing"] == ["shadow"]
+    pasted = {f["key"] for f in rep["to_paste"]}
+    assert "exploration.delta_min_log_bias" in pasted
+    assert "exploration.tau_initial" not in pasted
+    assert {w["check"] for w in rep["waiting"]} == \
+        {"paste_tau_initial", "info_calibration_cadence", "info_learning_bottleneck"}
+    assert all(w["reports"] == ["shadow"] for w in rep["waiting"])
 
 
 def test_reports_from_two_different_models_block(cfg, tmp_path, reports_dir):
@@ -118,6 +145,24 @@ def test_an_ambiguous_anchor_refuses_rather_than_guessing():
     text = "  rho: 1\nother:\n  rho: 2\n"
     with pytest.raises(RuntimeError, match="refusing to guess"):
         tune.set_scalar(text, ("dispersion", "rho"), 3)
+
+
+def test_a_block_mapping_is_refused_not_corrupted():
+    """A config re-serialised by a YAML dump carries the per-category map
+    as a block mapping. Replacing its first line alone left the children
+    behind and the file unparseable at the next load -- the paste refuses
+    and names the fix. The shipped one-line form pastes as before."""
+    block = "exploration:\n  delta_min_log_bias:\n    MEAT: 0.1\n    _default: 0.1\n"
+    with pytest.raises(RuntimeError, match="block mapping"):
+        tune.set_scalar(block, ("exploration", "delta_min_log_bias"), {"_default": 0.2})
+    flow = 'exploration:\n  delta_min_log_bias: {"MEAT": 0.1}  # MEASURED\n  x: 1\n'
+    out = tune.set_scalar(flow, ("exploration", "delta_min_log_bias"), {"_default": 0.2})
+    assert out == 'exploration:\n  delta_min_log_bias: {"_default": 0.2}  # MEASURED\n  x: 1\n'
+    assert yaml.safe_load(out)["exploration"]["delta_min_log_bias"] == {"_default": 0.2}
+    # a null value with a comment is a scalar line, never a block
+    nul = "exploration:\n  delta_min_log_bias: null  # no floor\n  x: 1\n"
+    assert '{"_default": 0.2}' in tune.set_scalar(
+        nul, ("exploration", "delta_min_log_bias"), {"_default": 0.2})
 
 
 def test_the_calendar_vs_evidence_bottleneck_is_named(cfg, tmp_path, reports_dir):

@@ -15,7 +15,10 @@ Each check names the report field it reads; the class decides who may act:
          own sizing rule.
 
 BLOCKs are checked first and suppress the rest: tuning against a report that
-graded a different model is worse than not tuning at all (hard rule 1).
+graded a different model is worse than not tuning at all (hard rule 1). A
+MISSING report is narrower: it withholds only the findings that read it
+(`READS`), so what the backtest and thresholds measured is pasted BEFORE
+shadow runs and shadow prices on the final values once.
 
 One function per finding below, grouped by the class it emits (a PASTE
 that a failing gate downgrades to OWNER sits with the pastes and says so);
@@ -596,12 +599,42 @@ FINDINGS = (_paste_information_increment, _paste_rho, _paste_tau_initial,
             _info_calibration_cadence, _info_learning_bottleneck, _fit_window,
             _info_uncalibrated_wins)
 
+# the report(s) each check reads. A check is asked once its reports exist,
+# no sooner and no later: a value the backtest measured (the exploration
+# bias, the level band) is pasted before shadow ever prices on it, so the
+# first shadow run stands. Waiting for all three pasted the bias AFTER the
+# first shadow and re-ran it for nothing. Empty: reads an artifact only.
+READS = {
+    _paste_information_increment: ("thresholds",),
+    _paste_rho: (),
+    _paste_tau_initial: ("shadow", "backtest"),   # its provenance reads both
+    _paste_delta_min_bias: ("backtest",),
+    _rail_max_mean_step: ("thresholds", "backtest"),
+    _guardrail_stops: ("thresholds",),
+    _paste_gate_band: ("backtest",),
+    _owner_max_std_shrink: ("thresholds",),
+    _owner_cold_start: ("backtest",),
+    _info_calibration_cadence: ("shadow",),
+    _info_learning_bottleneck: ("shadow",),
+    _fit_window: ("backtest",),
+    _info_uncalibrated_wins: ("backtest",),
+}
+assert set(READS) == set(FINDINGS), "every check names the reports it reads"
+
+MISSING_KEY = "reports present"
+
 
 def collect(cfg, root="reports", reports=None, artifacts=None):
     """`reports` lets a caller that already read the JSON (status, advance)
     hand it over instead of reading the same files a third time;
     `artifacts` (ops.status.read_artifacts) the calibration and rho
-    artifacts likewise."""
+    artifacts likewise.
+
+    `blocked` is an INVARIANT violated (BLOCKS): nothing is read past it.
+    A missing report is listed under `reports present` and withholds only
+    the checks that read it (READS); `waiting` names those, so a caller
+    can tell a value that waits on its report from one a report ran and
+    could not measure."""
     reports = reports or {}
     artifacts = artifacts or {}
     backtest = reports.get("backtest") or read_json(os.path.join(root, "backtest.json"))
@@ -616,18 +649,26 @@ def collect(cfg, root="reports", reports=None, artifacts=None):
                               ("thresholds", thresholds))
                if r is None]
     blocks = [f for check in BLOCKS for f in check(cfg, rep)]
-    if missing:
-        blocks.insert(0, _finding(
-            "reports present", BLOCK, ACT, f"missing: {', '.join(missing)}",
-            "all three", "run the pipeline before tuning: a missing report is "
-            "not a passing check", "reports/"))
-
     findings = list(blocks)
+    waiting = []
+    if missing:
+        findings.insert(0, _finding(
+            MISSING_KEY, BLOCK, ACT, f"missing: {', '.join(missing)}",
+            "all three", "a missing report is not a passing check: the "
+            "findings that read it wait for it; the rest are read now",
+            "reports/"))
     if not blocks:
         for check in FINDINGS:
+            absent = [n for n in READS[check] if n in missing]
+            if absent:
+                waiting.append({"check": check.__name__.lstrip("_"),
+                                "reports": absent})
+                continue
             findings += check(cfg, rep)
     return {"findings": findings,
             "blocked": bool(blocks),
+            "missing": missing,
+            "waiting": waiting,
             "to_paste": [f for f in findings
                          if f["class"] == PASTE and f["status"] == ACT],
             "owner_decisions": [f for f in findings
@@ -710,6 +751,9 @@ def render(report):
         lines.append("")
         lines.append(f"{n_p} measured value(s) to paste (--apply writes them), "
                      f"{n_o} owner decision(s) outstanding.")
+        for w in report.get("waiting") or []:
+            lines.append(f"  waiting  {w['check']} -- needs "
+                         f"{', '.join(w['reports'])}")
     return "\n".join(lines)
 
 

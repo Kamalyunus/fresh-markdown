@@ -89,6 +89,26 @@ def test_a_tune_block_stops_the_driver_but_missing_reports_do_not():
     assert steps[0]["args"] == ["ops.init_posterior"]
 
 
+def test_what_the_backtest_measured_is_pasted_before_the_first_shadow():
+    """The exploration bias (rerun class `shadow`) is the backtest's. Pasted
+    after the first shadow it made that shadow stale and re-ran it; pasted
+    before, with only `reports present` naming shadow as missing, the first
+    shadow prices on the final value and stands."""
+    missing = {"key": tune.MISSING_KEY, "class": tune.BLOCK, "status": tune.ACT,
+               "current": "missing: shadow", "recommended": "all three"}
+    bias = {"key": "exploration.delta_min_log_bias", "class": tune.PASTE,
+            "status": tune.ACT, "current": None, "recommended": {"_default": 0.02},
+            "evidence": "floor", "source": "backtest.fidelity"}
+    steps = advance.plan(_state(
+        have={"backtest", "thresholds"},
+        tune={"findings": [missing, bias], "blocked": False, "missing": ["shadow"],
+              "waiting": [{"check": "paste_tau_initial", "reports": ["shadow"]}],
+              "to_paste": [bias], "owner_decisions": []}))
+    assert steps[0]["kind"] == "paste" and steps[0]["phase"] == "tune"
+    assert steps[0]["keys"] == ["exploration.delta_min_log_bias"]
+    assert not any(s.get("args", [""])[0] == "evaluate.shadow" for s in steps)
+
+
 def test_shadow_runs_on_the_holdout_with_every_episode_and_then_gates():
     steps = advance.plan(_state(have={"backtest", "thresholds"}))
     assert steps[0]["args"][:2] == ["evaluate.shadow", "--input"]

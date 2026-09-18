@@ -1059,43 +1059,21 @@ now. Dates are owner sign-off.
   stable across retrains, and the sweep's evidence is what the judgement
   reads. W is SET BY OWNER now, the sweep's recommendation an owner
   decision `tune` reports with the evidence, and a change still turns the
-  loop once, deliberately. What this does NOT remove: the exploration bias
-  is measured by the backtest and read by shadow, so shadow still re-runs
-  once after the first paste -- the ordering fix is the remaining piece.
+  loop once, deliberately.
 
-- **The layer between "clone" and "cron" did not exist** (owner, 09-17,
-  the review's third pass). The code and the contract were specified to
-  the field; how to run them on a host was implied. Task 0.7 of the
-  handover page is that layer: the ship list (what must be on the host
-  before the first hour, `reports/` included, since `status` reads it),
-  the two cron lines with the working directory, the zone and `flock`,
-  the time-zone and daylight-saving rule, the exit codes (the hourly
-  script exits 0 when every shelf is refused -- alert on the report),
-  the store's growth and the backup rule. With it: `requirements.lock`
-  (the seal records library versions, so an unpinned install could fail
-  status on day one), `.env.example`, `examples/` with one file of each
-  table from the synthetic rehearsal, a CI workflow that runs the suite,
-  and `.gitignore` entries for every directory the page tells
-  engineering to write. One code change rode along: the feature table's
-  day is the ingested feed's plus one, never the host clock -- the
-  first fix had moved it from local to UTC, which is still a clock. Four
-  doc contradictions closed: `config.yaml` is in git, the field lists
-  live in `events/contract.py`, the CI claim is now true, and the
-  failed-pushes columns are read in either spelling.
-
-- **The trailing fit window is the owner's, not the sweep's** (owner,
-  09-18). W was MEASURED: the backtest's rolling-origin sweep recommended
-  it and `tune` pasted it. A pasted W is the "calibration" re-run class,
-  the heaviest short of a retrain -- the loop turns, the backtest re-runs
-  and re-scores the very sweep that chose W, shadow re-runs -- and a
-  near-tie between two windows could cycle it; the near-tie hold was the
-  first defence. The owner's reading: a smoothing window is a judgement,
-  stable across retrains, and the sweep's evidence is what the judgement
-  reads. W is SET BY OWNER now, the sweep's recommendation an owner
-  decision `tune` reports with the evidence, and a change still turns the
-  loop once, deliberately. What this does NOT remove: the exploration bias
-  is measured by the backtest and read by shadow, so shadow still re-runs
-  once after the first paste -- the ordering fix is the remaining piece.
+- **A paste waited for a report it did not read** (owner, 09-18). With
+  W the owner's, shadow still ran twice on a clean chain, and the reason
+  was `tune`'s own gate: no finding until all three reports existed. The
+  exploration bias is the backtest's number and shadow's input; held
+  until shadow had run, it was pasted after the first shadow and made it
+  stale. The fix is a table, `READS`: each check names the report(s) it
+  reads and is asked once they exist. A missing report now withholds
+  only the findings that read it, listed as `waiting`; `blocked` is an
+  invariant violated, nothing else. Bootstrap -> paste what the backtest
+  and thresholds measured -> posterior -> shadow once -> paste tau (re-run
+  class `none`) -> re-seal. The same shape as the fit-window lesson: a
+  loop turned because a value sat in the wrong phase, not because the
+  chain needed it.
 
 ## The lesson under all of it
 

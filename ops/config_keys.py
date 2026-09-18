@@ -246,6 +246,17 @@ def set_scalar(text, path, value):
     i = hits[0]
     line = lines[i]
     head, _, tail = line.partition(":")
+    # the anchor must OWN its value on the one line: a block mapping
+    # (`key:` with indented children below) replaced line by line leaves
+    # the children behind and the file unparseable. Refuse; the config
+    # ships every mapping in one-line flow form for this reason
+    indent = len(line) - len(line.lstrip(" "))
+    nxt = lines[i + 1] if i + 1 < len(lines) else ""
+    if not tail.split("#")[0].strip() and nxt.strip() \
+            and len(nxt) - len(nxt.lstrip(" ")) > indent:
+        raise RuntimeError(
+            f"{'.'.join(path)} is a block mapping in config.yaml -- refusing "
+            "to paste over it; write it as a one-line {...} mapping first")
     comment = ""
     if "#" in tail:
         comment = "  " + tail[tail.index("#"):].rstrip("\n")
