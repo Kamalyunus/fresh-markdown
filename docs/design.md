@@ -626,6 +626,70 @@ posterior mean at the decision, `k = delta_min_bias_multiple` (1). Fisher
 information ∝ n·L² is conserved at a fixed budget; the case for large
 moves is bias, not variance.
 
+**Why the level error must not be absorbed into ε.** The tempting reading
+is that it would be harmless: ε is a fitted parameter, not a constant, the
+LightGBM level keeps improving, the posterior keeps moving, and a demand
+model that lands closer to reality at the prices we use is all the DP asks
+for. The frame is right; the arithmetic says the error is not absorbed but
+*tilted*. With the truth `log μ = log μ_ref + β + ε·Λ` (β the surviving
+log level error, Λ the log move from the reference, negative when deeper)
+and only ε free to explain a forced outcome at Λ_f, the learner settles on
+`ε̂ = ε + β/Λ_f`. Substituting back, the model's error at any other move is
+
+```
+log μ_model − log μ_true  =  β · (Λ/Λ_f − 1)
+```
+
+a straight line in Λ: zero at the one forced price, the full `−β` at the
+reference whatever Λ_f is (the slope term vanishes there), and growing
+without bound beyond the forced point with slope `β/Λ_f`. Illustration at
+β = 0.15 from a 10% reference, model demand over true demand:
+
+| forced move lands at | at 10% | at 20% | at 40% | at 60% |
+| --- | --- | --- | --- | --- |
+| 14% (below the floor) | 0.86× | 1.22× | 2.82× | 9.21× |
+| 22% (the floor at ε = −1) | 0.86× | 0.97× | 1.30× | 1.94× |
+| 40% | 0.86× | 0.90× | 1.00× | 1.16× |
+
+The reference column never improves, and the damage at depth is set
+entirely by how short the forced move was. Four consequences:
+
+1. *It lands where the decision lives.* The action set runs from the
+   reference to the cost floor and under an anchor only deepens, so the
+   end-of-life markdowns sit at the right of that table. A short move buys
+   a model exactly right at a price rarely chosen and multiples wrong
+   where stock is actually cleared.
+2. *The direction is the bad one.* An under-forecast level (β > 0) shows
+   the learner more units than expected at the forced discount, and the
+   only channel it has is price sensitivity, so it overstates |ε|. The DP
+   then believes clearance is cheaper to buy than it is, marks down too
+   lightly, and scraps — a demand-model "win" that lands as a markdown
+   loss. An over-forecast level does the mirror.
+3. *It converts the benign error into the harmful one.* The DP never uses
+   μ at one price; it compares Q across tiers, and that comparison is the
+   shape of the response. A level error mostly shifts urgency; a slope
+   error is the comparison itself.
+4. *The self-correction is slower than it looks.* Short-move evidence is
+   still evidence, so the posterior std shrinks and the Gaussian prior
+   term in the grid update resists the walk-back; `max_mean_step` and
+   `max_std_shrink` bound it by design; and every retrain re-injects a
+   new β into a posterior still carrying the old one — the target moves
+   and the belief cannot see it move. The level already has two free
+   correctors (the weekly factors, the retrain); ε costs markdown, since
+   every forced price is deliberately suboptimal. Spending that budget to
+   fix a level error pays the expensive instrument to do the free one's
+   job and buys a tilt for the money.
+
+δ_min is therefore not a purity rule but a bound on the tilt: it caps
+`β/Λ_f` at `k·|ε|`. Contamination is never zero, and the floor has a real
+cost — it excludes cheap evidence and can starve an inelastic cell (11.3).
+The owner's lever is `k = delta_min_bias_multiple`: a larger gap forces
+fewer decisions per IL budget but each one teaches more and tilts less,
+and `information_rel` in shadow's `exploration_budget_sweep` (below, and
+§9) prices that trade before a value is set. The owner's stated posture
+(09-18): a fixed IL budget, so prefer the larger gap and the lower forced
+rate over cheap moves that buy confidence in a tilted ε.
+
 `admissible` is a subset of the DP's action set, which under an anchor
 holds only tiers at or deeper than the price in force — so a forced move
 is always a deeper discount, whatever δ_min or τ say; monotonicity is
@@ -1177,7 +1241,8 @@ the budget bisects to, the forced rate, spend, mean log move and
 the in-force pair (the NB Fisher information is quadratic in the move, so
 this is the count-and-depth trade in one number; a proxy). Lower the share
 to force less at the same depth; raise the multiple to force less but
-deeper — the latter can *raise* total information at the same budget. The
+deeper — the latter can *raise* total information at the same budget, and
+every step deeper lowers the tilt a level error puts on ε (§5.8). The
 ledger records only tiers admissible at the floor in force, so multiples
 below it are reported as unrecoverable, and with `delta_min_log_bias` null
 every multiple reads the same. The owner picks from the table; only the
@@ -1991,6 +2056,7 @@ re-derived on the next `advance`; `status` names any drift.
 | `deterioration_smoothing_days` | scrap 7, margin 7 | owner | one week for both series |
 | `posterior.cold_start_shift_std` | 0.5 | owner | launch belief = prior mean − 0.5·std |
 | `exploration.budget_share_of_il` | 0.01 | owner | the forced rate is its consequence (§5.13 sweep) |
+| `exploration.delta_min_bias_multiple` | 1.0 | owner | the forced-move gap; raise it to force fewer, deeper decisions per budget — a short move tilts the level error into ε (§5.8); pick from the same sweep |
 | `data.launch_date` | null | owner | set on launch day |
 
 `evaluate.derive_thresholds` produces the evidence for the SET BY OWNER

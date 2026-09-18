@@ -104,7 +104,12 @@ each decision.
    `delta_min_bias_multiple`) with forced rate, spend, mean move and
    `information_rel` — and set the pair, then re-run shadow once. A
    smaller share forces less at the same depth; a larger multiple forces
-   less but deeper.
+   less but deeper — and deeper is what keeps a level error from tilting
+   into ε (design 5.8: a short forced move leaves the model right at one
+   price and multiples wrong at the deep markdowns). With a fixed IL
+   budget the owner's posture is the larger gap and the lower forced
+   rate; `delta_min_bias_multiple` is that lever, yours to set from the
+   sweep.
 4. **The owner keys** (`advance` stops here; the values in force are the
    table in design §12 — shrink 0.10, step 0.796, both guardrail series
    smoothed 7 days, k 0.5, set 2026-09-06): `max_std_shrink` first

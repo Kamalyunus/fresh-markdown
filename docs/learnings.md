@@ -1075,6 +1075,29 @@ now. Dates are owner sign-off.
   loop turned because a value sat in the wrong phase, not because the
   chain needed it.
 
+- **The level error is not absorbed into ε, it is tilted** (owner,
+  09-18). The case against the floor was a good one: ε is fitted, not
+  physical; the model keeps improving and the posterior keeps moving; a
+  demand curve closer to reality at the prices we use is what the DP
+  wants. The arithmetic answered it. With only ε free to explain a forced
+  outcome, the learner settles on `ε + β/Λ_f`, and the model's remaining
+  error is `β·(Λ/Λ_f − 1)`: zero at the one forced price, the full level
+  error at the reference regardless, and growing with slope `β/Λ_f`
+  beyond. A short forced move makes the model exactly right where it
+  rarely prices and multiples wrong at the deep markdowns it exists to
+  get right; an under-forecast level becomes an overstated |ε|, the DP
+  marks down too lightly and scraps; the benign error (level, which
+  shifts urgency) becomes the harmful one (slope, which IS the tier
+  comparison); and the walk-back is slow because cheap evidence still
+  narrows the posterior, the rails bound the step, and every retrain
+  moves β under a belief that cannot see it move. δ_min caps the tilt at
+  `k·|ε|`; it does not remove it. The owner's reading: the IL budget is
+  fixed, so take the larger gap and the lower forced rate — fewer forced
+  decisions that each teach something over many that buy confidence in a
+  tilted ε. `delta_min_bias_multiple` is that lever and shadow's
+  `exploration_budget_sweep` prices it; the value is the owner's to set
+  from that table, never a paste. Design 5.8 carries the derivation.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,
