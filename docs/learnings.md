@@ -1336,6 +1336,13 @@ now. Dates are owner sign-off.
   table, and `feed/` was the earlier design's drop point for the same
   rows as daily files, read by nothing since the pull. Gone. One place
   per thing, or the layout lies about what the code does.
+  The handover page gained the folder's contract as its own section
+  (10): the layout with direction per directory, the snapshot row with
+  the two fields that replaced the store, the hour-to-hour chain, the
+  response, the report keys, the folder's own refusal reasons, the
+  morning as a pull and a table, the cron lines, and what stays with
+  the owner -- and a line at the top saying that section wins where the
+  repository-mode phases differ.
 
 ## The lesson under all of it
 

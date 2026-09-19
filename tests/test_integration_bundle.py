@@ -264,3 +264,27 @@ def test_the_folder_carries_the_handoff():
         m = json.load(f)
     assert m["commands"] == ["price_hour.py", "download_flc.py", "build_features.py"]
     assert m["code"] == bi.CODE
+
+
+def test_the_handover_section_on_the_folder_names_only_keys_and_reasons_the_code_writes():
+    """Section 10 of the handover is the folder's contract: every report
+    key its table names is a key the hourly command writes, and every
+    refusal reason it quotes is a string the command emits."""
+    with open(os.path.join(ROOT, "docs", "engineering_handover.html")) as f:
+        html = f.read()
+    section = html[html.index('<section id="pricing-folder">'):html.index('<section id="appendices">')]
+    source = ""
+    for mod in ("pricing.hour", "pricing.state"):
+        with open(bi._module_path(FOLDER, mod)) as f:
+            source += f.read()
+    report_table = section[section.index("<h3>The hour's report</h3>"):section.index("<h3>Why a row")]
+    for first_cell in re.findall(r"<tr><td>(.*?)</td>", report_table):     # the Key column only
+        for key in re.findall(r"<code>([a-z_]+)</code>", first_cell):
+            assert f'"{key}"' in source, f"section 10 names report key {key}, which the command does not write"
+    reasons = section[section.index("<h3>Why a row"):section.index("<h3>The morning")]
+    for reason in re.findall(r"<code>([^<…]+?)(?: …)?</code>", reasons):
+        head = reason.strip(" …").lstrip("… ")
+        if head.startswith("rejected") or head == "anything else":
+            continue
+        assert head in source, f"section 10 quotes refusal reason {head!r}, which the command does not emit"
+

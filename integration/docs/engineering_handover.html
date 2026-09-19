@@ -460,7 +460,7 @@
     is written down and shipped as a script you can run as-is or port (0.2). The phases below are in the order they happen; every
     task says what you do, the command, what it produces, what to check, and what to send or do
     next. The contract that used to be a separate page is the appendix, for reading a decision
-    when you need to.
+    when you need to. <b>For the integration phase you run the pricing folder, whose stateless contract is section 10; where it differs from the phases above, section 10 wins.</b>
   </p>
   <div class="ataglance">
     <div><b>3</b><span>tables you deliver, all in your feed's own schema</span></div>
@@ -877,8 +877,103 @@
 
 </section>
 
+<section id="pricing-folder">
+  <h2><span class="num">10</span>The pricing folder — the stateless contract, for the integration phase</h2>
+
+<p class="prose">For the integration phase you run the <b>pricing folder</b> (<code>integration/</code>), not the repository: three commands, the artifacts and the config the owner copies in, and the directories below, nothing else. Its hourly service is <b>stateless</b>. Every row is priced from the row itself, the model files and the feature table of the row's episode's opening day; nothing is looked up from an earlier hour, no store is read, and a re-sent hour gets the identical answer. Everything the repository's hour took from its store, your row now carries. The phases above still describe the loop; this section is the contract where the folder differs, and it wins where the two disagree.</p>
+
+  <h3>The layout</h3>
+  <div class="tscroll"><table>
+    <thead><tr><th>Directory</th><th>Direction</th><th>What lands there, and who writes it</th></tr></thead>
+    <tbody>
+      <tr><td><code>artifacts/</code></td><td>in</td><td>The five model files the hour opens: <code>baseline_model.txt</code>, <code>feature_schema.json</code>, <code>calibration.json</code>, <code>r_lookup.json</code>, <code>posterior.json</code>. The owner puts them there, by sync or by hand after a retrain; <code>synced.json</code> says what arrived and when. You never copy one.</td></tr>
+      <tr><td><code>snapshots/</code></td><td>in</td><td><code>&lt;date&gt;T&lt;hh&gt;.parquet</code> (or <code>.csv</code>, <code>.jsonl</code>): the shelf at the top of the hour, written by you before the hourly cron. The row contract is below.</td></tr>
+      <tr><td><code>data/</code></td><td>internal</td><td><code>flc.parquet</code>, the day's extract: the trailing 45 days of the hourly table pulled from the warehouse by <code>download_flc.py</code> every morning and overwritten. This is the feed, pulled rather than delivered; nothing is dropped here by you.</td></tr>
+      <tr><td><code>features/</code></td><td>internal</td><td><code>&lt;date&gt;.parquet</code>, the day's feature table, written by <code>build_features.py</code>. The hour reads the table of each episode's <b>opening</b> day, so keep at least the last week.</td></tr>
+      <tr><td><code>decisions/</code></td><td>out</td><td><code>&lt;date&gt;T&lt;hh&gt;.csv</code>, the response: what you push to the shelf.</td></tr>
+      <tr><td><code>reports/hours/</code></td><td>out</td><td><code>&lt;date&gt;T&lt;hh&gt;.json</code>, the hour's counts: what you alert on.</td></tr>
+      <tr><td><code>events_store/</code></td><td>out</td><td><code>decisions.jsonl</code>, <code>rejections.jsonl</code>: the append-only log, one JSON line per priced and per refused shelf-hour. Never read by the folder; the owner's learning lane collects it. Back it up daily.</td></tr>
+      <tr><td><code>logs/</code></td><td>out</td><td>The cron lines' console output.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>The snapshot row</h3>
+<p class="prose">Same schema as the hourly table (0.2): <code>skuseq, fc, date, hour, episode_id, inventory, discount, normal_asp, cogs_wo_vat, flc_window, category, subcategory</code>. The outcome columns are absent or null. Two of these fields carry what the repository's hour took from its store, and both are yours:</p>
+  <div class="tscroll"><table>
+    <thead><tr><th>Field</th><th>Contract</th><th>If not</th></tr></thead>
+    <tbody>
+      <tr><td><code>episode_id</code></td><td>The <b>opening tag</b> of the row's episode, <code>&lt;skuseq&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code>: the shelf-hour the episode began, exactly as 0.2a spells a new window's id. A row whose tag names its own shelf-hour is the episode's first hour — an <b>entry</b>, priced freely from the entry grid. Every later row of the episode carries the same tag and is a <b>later hour</b>: its price may only step deeper than the price in force.</td><td>An id that is not a tag, names another shelf, or opens after the row's hour is refused with the reason and counted in <code>episode_ids_that_place_no_hour</code>. Nothing in the folder assigns or repairs an id.</td></tr>
+      <tr><td><code>discount</code></td><td>The <b>price in force</b>, in percent. <b>Null on an entry row.</b> On every later row of the episode, the <code>apply_discount_pct</code> this service returned for the same shelf last hour — you pipe it back. It is the anchor the hour steps from.</td><td>A later row without it is refused (<code>later_hours_without_the_price_in_force</code>), never priced as an entry: pricing it as an entry could raise the price mid-episode. A value on an entry row is ignored and counted (<code>entries_with_a_price_in_force</code>).</td></tr>
+      <tr><td><code>flc_window</code></td><td>The hours still to come after this one; the horizon is this hour plus those. At most the configured cap.</td><td>Missing, negative, fractional or over the cap: refused with the reason.</td></tr>
+      <tr><td><code>inventory</code></td><td>The opening stock. Zero is an empty shelf: counted, not priced, not an error.</td><td>Missing or negative: refused.</td></tr>
+    </tbody>
+  </table></div>
+
+<p class="prose">Hour to hour, the chain is: snapshot for hour <i>h</i> in → decision out → you push <code>apply_price</code> → the feed row for hour <i>h</i> closes with what sold → the snapshot for hour <i>h</i>+1 is built from it: <code>inventory</code> is the feed's <code>ending_inventory</code>, <code>flc_window</code> stepped down, <code>episode_id</code> the same tag unless the episode closed, <code>discount</code> the <code>apply_discount_pct</code> of hour <i>h</i>. Re-running an hour is safe: the same rows give the same decisions and the same ids; the log gains a duplicate line the owner's reader ignores.</p>
+
+  <h3>The response file</h3>
+<p class="prose">As in section 04: <code>skuseq, fc, date, hour, episode_id, decision_id, apply_discount_pct, apply_price, is_exploration, rejected</code>. <code>is_exploration</code> is false on every row: the folder prices exploit-only, the optimal price is the applied price, and nothing is drawn. <code>decision_id</code> is <code>dec-</code> plus the shelf-hour tag; the episode's first decision therefore has <code>decision_id</code> equal to <code>dec-</code> plus its <code>episode_id</code>.</p>
+
+  <h3>The hour's report</h3>
+  <div class="tscroll"><table>
+    <thead><tr><th>Key</th><th>Expected</th><th>If not</th></tr></thead>
+    <tbody>
+      <tr><td><code>shelves</code>, <code>decisions</code>, <code>rejected</code>, <code>shelves_empty</code></td><td>decisions + rejected + empty = shelves</td><td>—</td></tr>
+      <tr><td><code>entries</code>, <code>later_hours</code></td><td>Mostly later hours after the first hour; entries when listings open</td><td>Every shelf an entry every hour: your ids are not the opening tag, or change every hour</td></tr>
+      <tr><td><code>episode_ids_that_place_no_hour</code></td><td>Zero</td><td>Ids that are not tags, name another shelf, or open after the hour. Fix the id step; the rows were not priced</td></tr>
+      <tr><td><code>later_hours_without_the_price_in_force</code></td><td>Zero</td><td>The pipe-back of last hour's <code>apply_discount_pct</code> into <code>discount</code> did not run; the rows were not priced</td></tr>
+      <tr><td><code>entries_with_a_price_in_force</code></td><td>Zero</td><td>Entry rows arrived with a discount; it was ignored. Your entry rows should carry null</td></tr>
+      <tr><td><code>other_hours_rows_ignored</code></td><td>Zero</td><td>Rows of another hour rode along and were not priced; only the batch hour is</td></tr>
+      <tr><td><code>feature_tables</code>, <code>opening_days_on_the_batch_day_table</code>, <code>opening_days_without_a_table</code></td><td>One table per opening day; the other two empty</td><td>A fallback: that opening day's table is missing (the morning cron did not run that day); without a table at all, the rows were refused</td></tr>
+      <tr><td><code>requests_with_unknown_features</code></td><td>A few new SKUs</td><td>Every entry unknown: the snapshot's ids are spelt differently from the feed's</td></tr>
+      <tr><td><code>rejected_by_the_engine</code></td><td>Empty, or a few rows with a reason from Appendix I</td><td>A whole hour rejected for one reason: a column changed meaning upstream; stop and send the report</td></tr>
+      <tr><td><code>decisions_logged</code>, <code>rejections_logged</code></td><td>Equal to decisions and rejected; both zero on a dry run</td><td>—</td></tr>
+      <tr><td><code>exploration_mode</code></td><td><code>exploit</code></td><td>—</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Why a row was not priced, before the engine</h3>
+  <div class="tscroll"><table>
+    <thead><tr><th><code>rejected</code> reads</th><th>Meaning</th><th>Whose</th></tr></thead>
+    <tbody>
+      <tr><td><code>row names no shelf-hour</code></td><td>One of skuseq, fc, date, hour is missing or unreadable</td><td>you</td></tr>
+      <tr><td><code>empty shelf: nothing to price</code></td><td>Opening stock is zero; counted, not an error</td><td>—</td></tr>
+      <tr><td><code>episode_id is not an opening tag …</code>, <code>… names another shelf …</code>, <code>… opens after this hour …</code></td><td>The id cannot place the row in an episode</td><td>you</td></tr>
+      <tr><td><code>later hour of the episode without the price in force …</code></td><td>A later row with null <code>discount</code></td><td>you</td></tr>
+      <tr><td><code>duplicate_request: two requests for one hour</code></td><td>Two rows for one shelf-hour in the snapshot; neither is priced</td><td>you</td></tr>
+      <tr><td><code>no feature table for the episode's opening day …</code></td><td>Neither that day's table nor today's exists; run the morning commands</td><td>you (the cron)</td></tr>
+      <tr><td>anything else</td><td>A state the engine refused; Appendix I</td><td>see there</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>The morning: a pull and a table</h3>
+  <div class="tscroll"><table><tbody>
+    <tr><td>You do</td><td>Nothing by hand. Two commands run in sequence from one cron line, once yesterday's rows are in the warehouse.</td></tr>
+    <tr><td>Command</td><td><code>python3 download_flc.py &amp;&amp; python3 build_features.py</code></td></tr>
+    <tr><td>The pull</td><td>One SELECT over the trailing 45 days of the hourly table, the source columns under the feed's names, <b>your <code>episode_id</code> in the column list</b> (the table must carry it). <code>REDSHIFT_*</code> come from <code>~/.env</code> on the host and nowhere else; a missing variable is named in the error. The host needs <code>psycopg2-binary</code> and <code>python-dotenv</code>.</td></tr>
+    <tr><td>The table</td><td>Built from that extract alone, your ids as given: a row is kept when it carries its key, its id and its counts; the earlier copy of a re-fed hour is dropped; a discount outside 0..100, a negative count, a null category or a base price that is not positive drops the row. The output is the trailing 30-day anchor-hour sales rate and the previous episode's rate per SKU × FC, plus a pooled row per SKU, as of today. Nothing rolls over from yesterday.</td></tr>
+    <tr><td>Check</td><td>Exit code 0 and <code>features/&lt;today&gt;.parquet</code> exists. If the morning did not run, the hour prices entries on the newest table it finds and lists them under <code>opening_days_on_the_batch_day_table</code>.</td></tr>
+  </tbody></table></div>
+
+  <h3>The cron lines</h3>
+<pre># hourly, a few minutes past the hour, once the snapshot is written
+5 * * * *  TZ=&lt;the feed's zone&gt; flock -n /opt/pricing/.hourly.lock \
+  python3 /opt/pricing/price_hour.py --snapshot snapshots/$(date +\%Y-\%m-\%dT\%H).parquet \
+    --workers 0 --out decisions/$(date +\%Y-\%m-\%dT\%H).csv \
+    --report reports/hours/$(date +\%Y-\%m-\%dT\%H).json &gt;&gt; /opt/pricing/logs/hourly.log 2&gt;&amp;1
+
+# every morning, once yesterday's rows are in the warehouse: the pull, then the table
+30 6 * * *  TZ=&lt;the feed's zone&gt; flock -n /opt/pricing/.morning.lock \
+  sh -c 'python3 /opt/pricing/download_flc.py &amp;&amp; python3 /opt/pricing/build_features.py' \
+    &gt;&gt; /opt/pricing/logs/morning.log 2&gt;&amp;1</pre>
+<p class="prose">Each command sets the folder as its working directory, so no <code>cd</code>. <code>--dry-run</code> on the hourly command writes the response and the report and appends nothing to the log. Before the first cron fires, send the owner one dry-run hour's snapshot, response and report, and the first morning's console output.</p>
+
+  <h3>What stays with the owner</h3>
+<p class="prose">The checks on the files you send (0.3, and the response against its snapshot), the learning lane that pairs the log's decisions with the feed's outcomes by shelf-hour, the model retrains and the sync of new artifacts into <code>artifacts/</code>. The failed-pushes table (section 04, step 4) still goes to the owner's repository, where the morning lane reads it.</p>
+</section>
+
 <section id="appendices">
-  <h2><span class="num">10</span>Appendices — the contract, for reading a decision</h2>
+  <h2><span class="num">11</span>Appendices — the contract, for reading a decision</h2>
 <p class="prose">What follows is the integration contract, unchanged: the words (A), the shape (B), the request our script builds from your snapshot (C), the decision the engine logs (D), the outcome it builds from your feed (E), one episode end to end in captured payloads (F), the gates the events feed (G), the parts that have caused the most trouble (H), and every rejection reason (I). References to §01 to §08 inside the appendices are to these letters.</p>
 </section>
 
