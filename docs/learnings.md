@@ -1190,6 +1190,40 @@ now. Dates are owner sign-off.
   branches still referenced were kept or restored by reading the code,
   not the trace. The folder: two commands, 21 modules, 4,660 lines.
 
+- **A minimal folder is written, not trimmed** (owner, 09-19, the fifth
+  cut). Four rounds of pruning the repository's modules into the folder
+  still left 4,660 lines across 21 files, because a copy keeps the shape
+  of its source: the store's four streams where two are written, the
+  batch caller's readers, a config loader that knows every SET BY OWNER
+  key, a demand module that is the trainer's file. The owner's answer:
+  "it by no means has to mimic the parent -- write from scratch if you
+  need to." So `integration/pricing/` is a second implementation of the
+  exploit-only hour and the morning table, fourteen modules, 1,992
+  lines, each the size of what it does. What holds it to the first: the
+  decision event is the contract (the learning lane in the repository
+  reads the folder's store), so the rewrite had to produce the SAME
+  events, rejection records, responses, hour reports and feature table
+  as the repository for the same inputs -- not similar, equal. Two
+  proofs. While writing: a black-box reference flow (four consecutive
+  hours with an empty shelf, a row without an id, an unkeyable row, the
+  pool, a re-priced hour, a dry run; a first and a later morning) run on
+  the trimmed folder and on the rewrite, every stream compared, zero
+  differences apart from wall-clock timings. In the suite, forever: the
+  end-to-end test prices one hour through `ops.price_hour` and through
+  the folder's command and compares every field of every decision and
+  rejection, twice -- exploration on, where the drawn fields are the one
+  allowed difference, and exploration suspended on a copy of the
+  posterior, where only the clock and the config digest may differ. The
+  lesson under it: two implementations of one rule are the thing this
+  repository forbids, and the parity test is the only reason the folder
+  may be one -- an engine fix is ported to `pricing/` by hand, and the
+  test, not the manifest, says whether the port is complete. The
+  first parity run was itself a finding: `expected_il` and
+  `expected_denominator` are the APPLIED action's expectations, so on an
+  explored decision they differ from the optimal's and belong with the
+  drawn fields, which the handover's field table already says and the
+  first draft of the comparison had not read.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,

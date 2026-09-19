@@ -94,11 +94,13 @@ replay's one forward simulation — and `e2e_cycle.py`, a thin driver of
 the reviewed simulator's shop (`evaluate.pilot_shop`) through the reviewed
 caller in a workspace) and `docs/` pages. `ops/integration.py` (the folder's
 check and the sync `seal` and `advance` call) is a file copier, read it once.
-`integration/` is the hourly path copied one file per module: the verbatim
-copies are pinned to their sources by its test, so review the sources above;
-the curated few its `MANIFEST.json` lists (a re-export dropped, the applier
-split from the trainer, the loader's one gate, exploit-only fixed on) are the
-only lines in it worth a diff against the source. The test suite is the
+`integration/pricing/` is the hourly path and the morning table rewritten
+from scratch for the folder (fourteen modules, about two thousand lines):
+review it as a second implementation of the rules above, held to the first
+by `test_end_to_end`'s parity step — the same hour through `ops.price_hour`
+and the folder's command, every decision and rejection field equal — so a
+rule the parity hour does not exercise (a continuation, the restock
+extension, the quarantine) is where to read both side by side. The test suite is the
 reviewers' asset, not their burden: every non-obvious rule named above has a
 test whose docstring states it in prose.
 

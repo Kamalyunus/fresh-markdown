@@ -352,7 +352,7 @@ fixture re-derives fixture values — read them, never commit them
   production lane in run order, `ops/` drives and gates (`advance`,
   `bootstrap_loop`, `tune`, `status`, `init_posterior`, `seal`; `price_hour` and
   `price_batch` are Lane B's callers, `check_inputs` its gate, `assign_episode_ids`
-  the producers' id rule), `tools/` is out of review scope; `integration/` is the pricing host's standalone folder, maintained IN PLACE: two commands, `price_hour.py` and `build_features.py`, over `src/` (one file per repository module, each TRIMMED to the functions the two commands call — traced — its MANIFEST saying what went), a config pruned to what they read, and the five artifacts plus the extract seed that `seal` and `advance` sync in — nothing in it fits, seals or checks; a fix to a copied module is ported there or `ops.integration --check` fails. A new module goes where
+  the producers' id rule), `tools/` is out of review scope; `integration/` is the pricing host's standalone folder, maintained IN PLACE: two commands, `price_hour.py` and `build_features.py`, over `pricing/`, the folder's OWN code (fourteen modules written for the exploit-only hour and the morning table, not copies of the repository's), a config pruned to what they read, and the five artifacts plus the extract seed that `seal` and `advance` sync in — nothing in it fits, seals or checks; an engine fix is ported to `pricing/` by hand, and `test_end_to_end` prices the same hour through both and refuses a differing decision field. A new module goes where
   its reader is; run `python3 -m package.module` from the root.
 - `--workers N` (`0` = all cores but one) parallelises backtest, shadow,
   `pilot_sim` and `price_batch` (each hour's batch); reports are

@@ -1368,7 +1368,12 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     re-dated to the day after, the ids assigned upstream as the producers
     would) through the whole engine with the parallel pool, exploit only.
     Then the owner checks the response against its snapshot with the
-    repository's checker. A dry run: the folder's store stays empty."""
+    repository's checker. A dry run: the folder's store stays empty.
+    Last, PARITY: the folder's code is its own, so the same hour is priced
+    for real by the repository's `ops.price_hour` and by the folder, and
+    every field of every decision and rejection must agree (the drawn
+    fields excepted while the repository explores; nothing but the clock
+    and the config digest once its exploration is suspended)."""
     os.chdir(_ORIGINAL_CWD)
     from ops.assign_episode_ids import assign
     from engine.posterior import PosteriorStore
@@ -1453,3 +1458,71 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     out = owner("ops.check_inputs", "--response", os.path.join(folder, "decisions", "hour.csv"),
                 "--snapshot", os.path.join(folder, "snapshots", "hour.csv"))
     assert "0 FAIL" in out, out
+
+    # PARITY: the folder's code is its own, not a copy, so the same hour
+    # goes through the repository's hourly command too, for real (every
+    # store fresh), and every field of every decision and rejection must
+    # agree. Twice: with the repository's exploration on, where the drawn
+    # fields (tau, the budget, the applied price and its expectations) are
+    # the one allowed difference; and with exploration suspended on a copy
+    # of the posterior, where nothing but the wall clock and the config
+    # digest (whole config vs pruned) may differ.
+    r = subprocess.run([sys.executable, os.path.join(folder, "price_hour.py"),
+                        "--snapshot", "snapshots/hour.csv",
+                        "--features", f"features/{as_of}.parquet", "--workers", "0",
+                        "--out", "decisions/hour_live.csv",
+                        "--report", "reports/hours/hour_live.json"],
+                       cwd=elsewhere, env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    suspended = str(workspace / "artifacts" / "posterior_parity.json")
+    shutil.copyfile(workspace / "artifacts" / "posterior.json", suspended)
+    PosteriorStore(cfg, path=suspended).suspend_exploration(["parity"], as_of)
+
+    def repo_hour(tag, posterior_path):
+        pc = dict(cfg)
+        pc["events"] = {**cfg["events"], "store_dir": f"events_store_{tag}"}
+        pc["posterior"] = {**cfg["posterior"], "path": posterior_path}
+        with open(workspace / f"config_{tag}.yaml", "w") as f:
+            yaml.safe_dump(pc, f, sort_keys=False)
+        r = subprocess.run([sys.executable, "-m", "ops.price_hour",
+                            "--snapshot", os.path.join(folder, "snapshots", "hour.csv"),
+                            "--features", os.path.join(folder, "features", f"{as_of}.parquet"),
+                            "--out", str(workspace / f"response_{tag}.csv"), "--workers", "0",
+                            "--config", f"config_{tag}.yaml"],
+                           cwd=workspace, env=owner_env, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout + r.stderr
+        return str(workspace / f"events_store_{tag}")
+
+    def stream(store_dir, name):
+        if not os.path.exists(os.path.join(store_dir, name)):
+            return []                                # an hour with nothing refused
+        with open(os.path.join(store_dir, name)) as f:
+            return [json.loads(line) for line in f if line.strip()]
+
+    folder_store = os.path.join(folder, "events_store")
+    clock = {"timestamp", "solver_latency_s", "config_digest"}
+    drawn = {"applied_price", "applied_discount", "is_exploration", "exploration_cost",
+             "affordable_set_size", "tau_current", "expected_il", "expected_denominator"}
+    ours = {e["decision_id"]: e for e in stream(folder_store, "decisions.jsonl")}
+    assert len(ours) == rep["decisions"] >= 1
+    for b in ours.values():
+        assert b["is_exploration"] is False and b["tau_current"] is None
+        assert b["applied_price"] == b["optimal_price"] and b["exploration_cost"] == 0
+    for tag, allowed in (("exploring", clock | drawn), ("suspended", clock)):
+        store_dir = repo_hour(tag, str(workspace / "artifacts" / "posterior.json")
+                              if tag == "exploring" else suspended)
+        theirs = {e["decision_id"]: e for e in stream(store_dir, "decisions.jsonl")}
+        assert set(theirs) == set(ours), (tag, set(theirs) ^ set(ours))
+        for did, a in theirs.items():
+            b = ours[did]
+            assert set(a) == set(b), (tag, did, set(a) ^ set(b))
+            for k in set(a) - allowed:
+                assert a[k] == b[k], (tag, did, k, a[k], b[k])
+        if tag == "suspended":
+            assert all(a["is_exploration"] is False for a in theirs.values())
+        refused = {e["rejection_id"]: e for e in stream(store_dir, "rejections.jsonl")}
+        mine = {e["rejection_id"]: e for e in stream(folder_store, "rejections.jsonl")}
+        assert set(refused) == set(mine) and len(mine) == rep["rejected"]
+        for rid, a in refused.items():
+            assert {k: v for k, v in a.items() if k != "timestamp"} == \
+                {k: v for k, v in mine[rid].items() if k != "timestamp"}, (tag, rid)

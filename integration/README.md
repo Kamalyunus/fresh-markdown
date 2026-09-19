@@ -50,7 +50,12 @@ reaches you without one, ask the owner for a sync.
 | `events_store/` | the record of every priced and every refused shelf-hour. Back it up daily | the hourly command |
 | `logs/` | stdout, collected by the cron lines | cron |
 | `examples/`, `docs/` | the four example tables (the shape, the names and the units, nothing about production) and the handover page | the owner |
-| `src/` | the code behind the two commands, one file per repository module, each trimmed to the functions the commands run. `MANIFEST.json` names every file's source and what was trimmed | the owner |
+| `pricing/` | the code behind the two commands, written for this folder: fourteen small modules, the map at the top of `pricing/__init__.py` | the owner |
+
+The code is this folder's own, not a copy of the repository's: it is the
+hourly path and the morning table and nothing else, and the owner's suite
+prices the same hour through both and refuses a difference in any field
+of the decision.
 
 The failed-pushes table is yours to deliver as before; it goes to the
 owner's repository, where the morning lane reads it, not here. The owner
@@ -60,13 +65,12 @@ snapshot and response for that.
 
 ## This phase: exploit only
 
-This folder prices exploit-only, by construction (`EXPLOIT_ONLY` in
-`src/ops/price_batch.py`). Every decision is the engine's optimal price
-for the shelf; nothing is drawn, no budget is read, `is_exploration` is
-false on every row and the hourly line ends in `EXPLOIT ONLY`. That is
-deliberate for the integration phase: the loop is being tested, not the
-learner. Turning the draw on is the owner's change to this folder, not a
-setting of yours.
+This folder prices exploit-only, by construction: `pricing/decide.py`
+records the engine's optimal price as the applied price, nothing is
+drawn, no budget is read, `is_exploration` is false on every row and the
+hourly line ends in `EXPLOIT ONLY`. That is deliberate for the
+integration phase: the loop is being tested, not the learner. Turning the
+draw on is the owner's change to this folder, not a setting of yours.
 
 ## The episode id is yours
 
@@ -120,6 +124,7 @@ first cron fires, one `--dry-run` hour's snapshot, response and report.
 
 ---
 
-*The owner maintains this folder: `MANIFEST.json` names every file's
-source, and the owner's suite refuses a copy that fell behind it. Do not
-edit a file here; tell the owner what is wrong.*
+*The owner maintains this folder: `MANIFEST.json` lists every file, the
+owner's suite refuses a copy that fell behind its source and a decision
+that differs from the repository's. Do not edit a file here; tell the
+owner what is wrong.*

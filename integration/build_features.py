@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-"""build_features.py -- every morning, after yesterday's feed lands: the day's feature table.
+"""build_features.py -- every morning: yesterday's feed in, the day's feature table out.
 
-Part of this folder; the code is src/daily/features.py. Runs from this
-folder whatever the caller's working directory, so a relative path in an
-argument is relative to the folder.
-
-    python3 build_features.py --help
+Runs from this folder whatever the caller's working directory, so a
+relative path in an argument is relative to the folder. The code is
+pricing/. `python3 build_features.py --help` lists the flags.
 """
 import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.chdir(HERE)
-sys.path.insert(0, os.path.join(HERE, "src"))
+sys.path.insert(0, HERE)
 
-from daily.features import main                                        # noqa: E402
+from pricing.features import main                                          # noqa: E402
 
 if __name__ == "__main__":
     sys.exit(main())

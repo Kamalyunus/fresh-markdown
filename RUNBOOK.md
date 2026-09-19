@@ -38,7 +38,8 @@ All commands run from the repo root. `data/`, `reports/`, `artifacts/`,
   gates and stops fire when they should.
 - **Engineering** — build Lane B (below) against the event contract
   from `integration/`, the standalone folder maintained in place (its
-  MANIFEST names every file's source and what was trimmed; two commands,
+  code, `pricing/`, is the folder's own, held equal to the repository's
+  hour by the parity test; two commands,
   the hourly price (exploit only) and the morning table; its `README.md`
   is the handoff; every seal and every `advance` run syncs the five
   artifacts, the extract seed and the pruned config into it; the checks

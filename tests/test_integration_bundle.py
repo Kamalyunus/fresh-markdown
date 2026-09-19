@@ -1,16 +1,20 @@
 """integration/ -- the standalone pricing folder engineering runs: the
 hourly command, the morning table it joins on, and what the two need.
 
-Maintained in place, never generated wholesale. Pinned here: every
-`verbatim` copy still equals its repository source, the generated config
-equals a fresh prune, and every file on disk is in the manifest (a fix to
-the engine reaches the folder or fails here); every repo-local import
-inside src/ resolves inside src/ and every module there is reached by
-the one command (standalone AND minimal); the command runs from anywhere
-with the repository off the path, exploit-only; and the sync carries the
-five artifacts, the feature tables and the pruned config. The hour that
-prices from the folder against real artifacts, synced by a real seal,
-is in test_end_to_end.py where the trained workspace already exists."""
+Maintained in place; its code (`pricing/`) is the folder's own, written
+for it, not a copy of the repository's modules. Pinned here: every
+verbatim copy (the handover page, the examples, the requirements) still
+equals its repository source, the generated config equals a fresh prune,
+and every file on disk is in the manifest; every import inside the
+package resolves inside the package and every module there is reached
+by one of the two commands (standalone AND minimal); the package carries
+nothing of the learning lane; the commands run from anywhere with the
+repository off the path, exploit-only; and the sync carries the five
+artifacts, the extract seed and the pruned config. The proof that the
+folder's code prices as the repository does -- the same hour through
+both, every field of the decision equal -- is in test_end_to_end.py,
+where the trained workspace already exists."""
+import ast
 import json
 import os
 import shutil
@@ -33,47 +37,52 @@ def _isolated(cwd, *args):
 
 
 def test_every_copy_matches_its_source_and_the_manifest_is_the_disk():
-    """A repository module changed and not ported, the config pruned from a
-    config that moved, a file added to the folder and not listed, a
-    manifested file gone, a module nothing reaches: each is named."""
+    """A handover page or example changed and not recopied, the config
+    pruned from a config that moved, a file added to the folder and not
+    listed, a manifested file gone, a module nothing reaches: each is
+    named. The package's files are the folder's own and listed as such."""
     r = bi.check(ROOT, FOLDER)
     assert r["drift"] == [], f"folder copies behind their source: {r['drift']}"
     assert r["missing"] == [] and r["unlisted"] == [], r
-    assert r["unreached"] == [], f"modules the hourly command never imports: {r['unreached']}"
-    assert set(r["curated"]) >= {"src/fit/model.py", "src/ops/price_batch.py",
-                                 "src/engine/explore.py", "src/common/config.py",
-                                 "src/engine/posterior.py", "src/events/store.py"}
+    assert r["dangling"] == [], f"imports that leave the package: {r['dangling']}"
+    assert r["unreached"] == [], f"modules neither command imports: {r['unreached']}"
+    assert set(r["own"]) >= {"pricing/hour.py", "pricing/features.py", "pricing/decide.py",
+                             "pricing/dp.py", "pricing/store.py", "price_hour.py",
+                             "build_features.py", "README.md"}
     assert bi.current(ROOT, FOLDER)
 
 
-def test_the_closure_is_closed_and_is_the_two_commands_alone():
-    """Standalone: nothing under src/ imports a repository module the
-    folder does not carry. Minimal: no trainer, fitter, harness, checker
-    or learning-lane module rides along, and inside the files that do,
-    nothing the two commands never call (the learning lane's posterior
-    update, the outcome side of the store, the pairing, the seal, the
-    training-time split, the tau walk). The id rule rides along because
-    the hourly job counts disagreements with it."""
-    src = os.path.join(FOLDER, bi.SRC)
-    assert bi.unresolved(src) == []
-    mods = set(bi.modules(src))
-    assert {"ops.assign_episode_ids", "ops.price_hour", "daily.features"} <= mods
-    for absent in ("fit.train_baseline", "fit.calibrate", "fit.fit_dispersion",
-                   "engine.budget", "engine.spread_ledger", "engine.learn",
-                   "daily.update", "daily.ingest_outcomes", "daily.failures",
-                   "ops.check_inputs", "common.history", "common.clustering",
-                   "ops.advance", "ops.tune"):
-        assert absent not in mods, absent
-    import ast
-    def names(mod):
-        with open(bi._module_path(src, mod)) as f:
-            return {n.name for n in ast.walk(ast.parse(f.read())) if isinstance(n, ast.FunctionDef)}
-    assert not names("engine.posterior") & {"commit_update", "initialise", "suspend_exploration", "commit_tau"}
-    assert not names("events.store") & {"emit_outcome", "load_decisions", "_reset"}
-    assert not names("events.pairs") & {"match_pairs", "quality_rates", "outcome_id_of"}
-    assert not names("common.provenance") & {"verify", "environment", "load_seal"}
-    assert not names("fit.prepare_data") & {"split_frames", "main"}
-    assert names("events.store") >= {"_quarantine", "emit_decision", "emit_rejection"}
+def test_the_package_is_closed_and_carries_nothing_of_the_learning_lane():
+    """Standalone: nothing under pricing/ imports a repository package.
+    Minimal: no module and no function of the posterior update, the
+    exploration draw, the budget, the outcome side of the store, the
+    pairing, the seal, the fitter or the checker rides along; the id rule
+    is there only to count disagreements."""
+    assert bi.unresolved(FOLDER) == []
+    mods = set(bi.modules(FOLDER))
+    assert {"pricing.hour", "pricing.features", "pricing.decide", "pricing.dp",
+            "pricing.store", "pricing.state", "pricing.model", "pricing.rule"} <= mods
+    assert not {m for m in mods if any(w in m for w in
+                                       ("posterior", "explore", "budget", "learn", "outcome",
+                                        "pairs", "seal", "train", "calibrate", "check"))}
+    names = set()
+    for mod in mods:
+        with open(bi._module_path(FOLDER, mod)) as f:
+            names |= {n.name for n in ast.walk(ast.parse(f.read()))
+                      if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+    assert not names & {"commit_update", "initialise", "suspend_exploration", "commit_tau",
+                        "emit_outcome", "load_decisions", "match_pairs", "quality_rates",
+                        "draw", "spread_table", "budget_today", "train", "verify", "seal",
+                        "split_frames"}, names
+    for repo_pkg in ("common", "engine", "events", "fit", "daily", "ops", "evaluate"):
+        for mod in mods:
+            with open(bi._module_path(FOLDER, mod)) as f:
+                tree = ast.parse(f.read())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    assert all(a.name.split(".")[0] != repo_pkg for a in node.names), (mod, repo_pkg)
+                elif isinstance(node, ast.ImportFrom):
+                    assert (node.module or "").split(".")[0] != repo_pkg, (mod, repo_pkg)
 
 
 def test_the_pruned_config_carries_only_what_the_hour_reads(cfg):
@@ -99,31 +108,44 @@ def test_the_pruned_config_carries_only_what_the_hour_reads(cfg):
 
 def test_the_command_runs_from_anywhere_with_the_repository_off_the_path(tmp_path):
     """Copied elsewhere and called from a third directory: the command
-    chdirs into the folder, imports from the copy alone, and is exploit
-    only by construction."""
-    folder = str(tmp_path / "pricing")
+    chdirs into the folder, imports from the copy alone, is exploit only
+    by construction (nothing drawn: the applied price IS the optimal
+    price, tau and the budget absent from the event), and its loader's
+    one gate is the launch date."""
+    folder = str(tmp_path / "pricing_folder")
     shutil.copytree(FOLDER, folder, ignore=shutil.ignore_patterns("__pycache__"))
     elsewhere = str(tmp_path / "elsewhere")
     os.makedirs(elsewhere)
-    r = _isolated(os.path.join(folder, bi.SRC), "-c", (
+    r = _isolated(folder, "-c", (
         "import os, sys\n"
-        "import ops.price_hour\n"
+        "import pricing.hour, pricing.features\n"
         "here = os.getcwd()\n"
         "bad = [m.__name__ for m in list(sys.modules.values())\n"
         "       if getattr(m, '__file__', None) and m.__name__.split('.')[0] in %r\n"
         "       and not os.path.abspath(m.__file__).startswith(here)]\n"
         "assert not bad, bad\n"
-        "from ops.price_batch import EXPLOIT_ONLY\n"
-        "assert EXPLOIT_ONLY is True\n"
-        "from common.config import RUNTIME_REQUIRED\n"
-        "assert RUNTIME_REQUIRED == [('data', 'launch_date')]\n") % (bi.PACKAGES,))
+        "import inspect\n"
+        "from pricing import decide\n"
+        "src = inspect.getsource(decide.decide)\n"
+        "assert '\"is_exploration\": False' in src and '\"tau_current\": None' in src, src\n"
+        "from pricing.config import load_config, ConfigError\n"
+        "import yaml\n"
+        "with open('config.yaml') as f: cfg = yaml.safe_load(f)\n"
+        "cfg['data']['launch_date'] = None\n"
+        "with open('c.yaml', 'w') as f: yaml.safe_dump(cfg, f)\n"
+        "try:\n"
+        "    load_config('c.yaml', strict=True)\n"
+        "except ConfigError as e:\n"
+        "    assert 'data.launch_date' in str(e), e\n"
+        "else:\n"
+        "    raise AssertionError('a null launch date priced')\n") % (bi.PACKAGES,))
     assert r.returncode == 0, r.stdout + r.stderr
     r = _isolated(elsewhere, os.path.join(folder, "price_hour.py"), "--help")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "--snapshot" in r.stdout and "--features" in r.stdout
+    assert "--snapshot" in r.stdout and "--features" in r.stdout and "--dry-run" in r.stdout
     r = _isolated(elsewhere, os.path.join(folder, "build_features.py"), "--help")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "--feed" in r.stdout
+    assert "--feed" in r.stdout and "--as-of" in r.stdout
 
 
 def test_the_sync_carries_the_five_artifacts_the_seed_and_the_pruned_config(
@@ -132,7 +154,7 @@ def test_the_sync_carries_the_five_artifacts_the_seed_and_the_pruned_config(
     the five artifacts the hour opens, the extract the first morning
     seeds from, and the config pruned to what the two commands read; one
     not on disk yet is listed, never an error; no folder means no sync."""
-    folder = str(tmp_path / "pricing")
+    folder = str(tmp_path / "pricing_folder")
     assert bi.sync(cfg, out=folder) is None
     shutil.copytree(FOLDER, folder, ignore=shutil.ignore_patterns("__pycache__"))
     c = scratch_paths(cfg, tmp_path)
@@ -161,10 +183,10 @@ def test_the_sync_carries_the_five_artifacts_the_seed_and_the_pruned_config(
 def test_the_folder_carries_the_handoff():
     for rel in ("README.md", "MANIFEST.json", "config.yaml", "requirements.lock",
                 "examples/README.md", "docs/engineering_handover.html",
-                "price_hour.py", "build_features.py"):
+                "price_hour.py", "build_features.py", "pricing/__init__.py"):
         assert os.path.exists(os.path.join(FOLDER, rel)), rel
-    for gone in ("check_inputs.py", "src/ops/check_inputs.py", "src/daily/failures.py"):
+    for gone in ("src", "check_inputs.py", "assign_episode_ids.py"):
         assert not os.path.exists(os.path.join(FOLDER, gone)), gone
     with open(os.path.join(FOLDER, "MANIFEST.json")) as f:
         m = json.load(f)
-    assert m["commands"] == ["price_hour.py", "build_features.py"]
+    assert m["commands"] == ["price_hour.py", "build_features.py"] and m["code"] == bi.CODE
