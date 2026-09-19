@@ -728,7 +728,7 @@
     <table>
       <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
       <tbody>
-        <tr><td><code>skuseq, fc, date, hour</code></td><td>The shelf-hour, echoed from your snapshot</td></tr>
+        <tr><td><code>skuseq, fc, date, hour</code></td><td>The shelf-hour, echoed from your snapshot. The pricing folder's response (section 10) echoes it in the request's names, <code>sku_id, fc, date, hour_of_day</code></td></tr>
         <tr><td><code>episode_id</code></td><td>Your id, echoed; null on a row that was not priced</td></tr>
         <tr><td><code>decision_id</code></td><td>The handle of the decision in the event store; null when rejected</td></tr>
         <tr><td><code>apply_discount_pct</code></td><td>The discount to put on the shelf, in percent, on the same grid the engine plans on</td></tr>
@@ -894,7 +894,20 @@
 <p class="prose">Hour to hour, the chain is: snapshot for hour <i>h</i> in → decision out → you push <code>apply_price</code> → the feed row for hour <i>h</i> closes with what sold → the snapshot for hour <i>h</i>+1 is built from it: <code>inventory</code> is the feed's <code>ending_inventory</code>, <code>flc_window</code> stepped down, <code>episode_id</code> the same tag unless the episode closed, <code>discount</code> the <code>apply_discount_pct</code> of hour <i>h</i>. Re-running an hour is safe: the same rows give the same decisions and the same ids; the log gains a duplicate line the owner's reader ignores.</p>
 
   <h3>The response file</h3>
-<p class="prose">One row per snapshot row, in the request's names: <code>sku_id, fc, date, hour_of_day, episode_id</code> echoed, then <code>decision_id, apply_discount_pct, apply_price, is_exploration, rejected</code> as in section 04. Put <code>apply_price</code> on the shelf; <code>apply_discount_pct / 100</code> is next hour's <code>current_discount</code> for the same shelf. <code>is_exploration</code> is false on every row: the folder prices exploit-only, the optimal price is the applied price, and nothing is drawn. <code>decision_id</code> is <code>dec-</code> plus the shelf-hour tag; the episode's first decision therefore has <code>decision_id</code> equal to <code>dec-</code> plus its <code>episode_id</code>.</p>
+<p class="prose">One row per snapshot row, in the request's names. Put <code>apply_price</code> on the shelf; <code>apply_discount_pct / 100</code> is next hour's <code>current_discount</code> for the same shelf.</p>
+  <div class="tscroll"><table>
+    <thead><tr><th>Column</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><code>sku_id, fc, date, hour_of_day</code></td><td>The shelf-hour, echoed from your snapshot row</td></tr>
+      <tr><td><code>episode_id</code></td><td>Your id, echoed</td></tr>
+      <tr><td><code>decision_id</code></td><td><code>dec-</code> plus the shelf-hour tag, the handle of the decision in the log; null when rejected</td></tr>
+      <tr><td><code>apply_discount_pct</code></td><td>The discount to put on the shelf, in percent, on the grid the engine plans on; divided by 100, next hour's <code>current_discount</code></td></tr>
+      <tr><td><code>apply_price</code></td><td>The same decision as a price; put exactly this number on the shelf</td></tr>
+      <tr><td><code>is_exploration</code></td><td>Always false here: the folder prices exploit-only</td></tr>
+      <tr><td><code>rejected</code></td><td>Null when priced; otherwise the reason this row was not priced (the table below, then Appendix I). Hold the shelf</td></tr>
+    </tbody>
+  </table></div>
+<p class="prose"><code>is_exploration</code> is false on every row: the folder prices exploit-only, the optimal price is the applied price, and nothing is drawn. <code>decision_id</code> is <code>dec-</code> plus the shelf-hour tag; the episode's first decision therefore has <code>decision_id</code> equal to <code>dec-</code> plus its <code>episode_id</code>.</p>
 
   <h3>The hour's report</h3>
   <div class="tscroll"><table>
