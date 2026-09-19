@@ -70,10 +70,8 @@ never happens. The ids are the producers' and are read as given, never
 overridden, so the defence is the count, `episode_ids_disagreeing_with_the_rule` — and
 read `rule_says_continues` for what it will NOT say: from the store alone only a
 counter reset is decisive, so a false disagreement from that path is a defect.
-Skim the rest for structure; audit only if a gate behaves surprisingly. `fit/model.py` is
-the frozen model applied (the encoding, the booster at d_ref, the level factors) and the
-only `fit/` file a priced hour imports; the trainer and the fitters never run in
-production. The one file worth a real read is `fit/prepare_data.py`'s waterfall — it defines the
+Skim the rest for structure; audit only if a gate behaves surprisingly. The one file worth a
+real read is `fit/prepare_data.py`'s waterfall — it defines the
 population every other number is measured on, and its rules are
 cross-checked against the docs by `test_docs_match_the_code.py`.
 
@@ -94,12 +92,13 @@ calls the reviewed solver — its exploration table too is `engine.explore`'s,
 embedded, never re-derived in the page, and its paths walk the reviewed
 replay's one forward simulation — and `e2e_cycle.py`, a thin driver of
 the reviewed simulator's shop (`evaluate.pilot_shop`) through the reviewed
-caller in a workspace) and `docs/` pages. `ops/integration.py` (the
-builder and the sync `seal` and `advance` call) is a file copier, read it
-once. `integration/` itself is verbatim copies
-of reviewed files — the hourly path's import closure, each file's digest in
-its `MANIFEST.json` — so review the sources above, never the copies; its
-test refuses a copy that differs from its source. The test suite is the
+caller in a workspace) and `docs/` pages. `ops/integration.py` (the folder's
+check and the sync `seal` and `advance` call) is a file copier, read it once.
+`integration/` is the hourly path copied one file per module: the verbatim
+copies are pinned to their sources by its test, so review the sources above;
+the curated few its `MANIFEST.json` lists (a re-export dropped, the applier
+split from the trainer, one function lifted, exploit-only fixed on) are the
+only lines in it worth a diff against the source. The test suite is the
 reviewers' asset, not their burden: every non-obvious rule named above has a
 test whose docstring states it in prose.
 

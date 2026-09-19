@@ -20,10 +20,10 @@ from common import windows
 from fit.prepare_data import population, scope
 from fit.fit_dispersion import lookup_r_vec
 # the schedule readers stay beside the applier that reads them (the one-home
-# anchor is `fit.model.schedule_reaches`); named here too so a
+# anchor is `fit.train_baseline.schedule_reaches`); named here too so a
 # caller of the fit finds them where the schedule is written
-from fit.model import (BaselineModel, GRAIN, schedule_reaches,            # noqa: F401
-                       weeks_held_at_anchor)
+from fit.train_baseline import (BaselineModel, GRAIN, schedule_reaches,   # noqa: F401
+                                weeks_held_at_anchor)
 from engine.demand import expected_min_demand_inventory_vec
 
 

@@ -246,3 +246,17 @@ def verify(cfg, sealed=None):
 
 def load_seal(cfg):
     return read_json(config_get(cfg, ("artifacts", "bundle_path")))
+
+
+# the audit trail moved to common.history; the names stay for callers.
+# Resolved on first use rather than imported above: history reads this
+# module's artifact walk, so an eager import here would be a cycle.
+_MOVED_TO_HISTORY = ("archive", "_snapshots", "latest_snapshot",
+                     "archive_reports", "history_index")
+
+
+def __getattr__(name):
+    if name in _MOVED_TO_HISTORY:
+        from common import history
+        return getattr(history, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

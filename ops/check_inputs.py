@@ -28,7 +28,7 @@ from common.config import load_config
 from common.io import read_rows, write_json
 from common.windows import (counter_step_detail, planning_horizon, window_signals,
                             window_starts)
-from daily.failures import load_failures
+from daily.ingest_outcomes import load_failures
 from fit import prepare_data
 from fit.prepare_data import SOURCE_TO_CANONICAL
 

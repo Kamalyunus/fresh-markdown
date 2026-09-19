@@ -10,7 +10,7 @@ hour_of_day). Every outcome field is derived from the feed row:
 re-runs dedup), `finalized_at` as the hour's close in UTC. The one fact
 only engineering knows -- did the price push succeed -- arrives as an
 optional failures input (parquet/CSV/JSONL, one row per failed push:
-sku_id, fc, date, hour_of_day, reason; daily.failures reads it). Two decisions for one hour match
+sku_id, fc, date, hour_of_day, reason). Two decisions for one hour match
 neither (two prices claimed one feed row: a retried batch), counted as
 `decisions_colliding_on_hour`. Runs as a DAILY batch over the previous
 day's rows.
@@ -26,10 +26,35 @@ import pandas as pd
 from common.cli import make_parser
 from common.config import load_config
 from common.episodes import adjustment_reason, is_censored_hour
-from daily.failures import load_failures                                       # noqa: F401
+from common.io import read_rows
 from fit.prepare_data import SOURCE_TO_CANONICAL
 from events.pairs import colliding_keys, decision_day, hour_key, outcome_id_of
 from events.store import EventStore
+
+
+def load_failures(path):
+    """{key: reason} from the failures input -- a parquet/CSV table or
+    JSONL (common.io.read_rows), in the contract's names or the feed's
+    (skuseq, hour) -- or {} when no file is given. One unkeyable row (a
+    NaN id, a blank line, a line that is not an object) costs that row,
+    never the batch: it is counted in `push_failures_unkeyable` on the
+    returned dict's `.unkeyable`."""
+    out = _Failures()
+    if not path:
+        return out
+    for r in read_rows(path, rename=SOURCE_TO_CANONICAL):
+        try:
+            k = hour_key(r["sku_id"], r["fc"], r["date"], r["hour_of_day"])
+        except (KeyError, TypeError, ValueError):
+            out.unkeyable += 1
+            continue
+        out[k] = r.get("reason") or "unspecified"
+    return out
+
+
+class _Failures(dict):
+    """{key: reason} plus the rows that named no hour."""
+    unkeyable = 0
 
 
 def build_outcomes(decisions, feed, failures=None):

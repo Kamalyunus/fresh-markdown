@@ -345,31 +345,3 @@ def test_a_batch_on_the_days_table_reads_no_history_and_counts_a_stale_one(tmp_p
     with pytest.raises(ValueError):
         run(cfg, [_req(episode_id="E8", sku_id=8)], store=store, model=_Model(),
             posterior=posterior, r_lookup=R_LOOKUP)
-
-
-def test_exploit_mode_prices_at_p_star_and_reads_no_tau(tmp_path):
-    """`exploration.mode: exploit` (the integration phase: the hourly loop
-    alone) draws nothing and reads no tau -- every decision is exploitation
-    and records tau_current None the way a suspended day does, so the
-    learning lane holds those days; the report names the mode. `explore`
-    is the default when the key is absent; anything else is a config
-    defect, named."""
-    import copy
-    from common.config import ConfigError
-    from ops.price_batch import exploration_mode
-    cfg, store, posterior = _world(tmp_path)
-    cfg = copy.deepcopy(cfg)
-    cfg["exploration"]["mode"] = "exploit"
-    rows, events, rep = run(cfg, [_req(), _req(episode_id="E2", sku_id=8)],
-                            ref_rate_history(skus=(7, 8)), store=store,
-                            model=_Model(), posterior=posterior, r_lookup=R_LOOKUP)
-    assert rep["decisions"] == 2 and rep["exploration_mode"] == "exploit"
-    assert rep["tau_in_force"] is None and rep["explored"] == 0
-    assert all(not e["is_exploration"] and e["tau_current"] is None for e in events)
-    absent = copy.deepcopy(cfg)
-    del absent["exploration"]["mode"]
-    assert exploration_mode(absent) == "explore"
-    cfg["exploration"]["mode"] = "sometimes"
-    with pytest.raises(ConfigError, match="exploration.mode"):
-        run(cfg, [_req()], ref_rate_history(skus=(7,)), store=store,
-            model=_Model(), posterior=posterior, r_lookup=R_LOOKUP)

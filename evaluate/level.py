@@ -20,7 +20,7 @@ import pandas as pd
 from common import episodes
 from fit.fit_dispersion import lookup_r_vec
 from fit.prepare_data import population
-from fit.calibrate import _solve_level_factors
+from fit.train_baseline import _solve_level_factors
 
 # the per-hour columns extend_to_window regenerates on its synthetic tail;
 # everything else is episode-constant and carried

@@ -60,6 +60,9 @@ def test_every_seal_leaves_an_audit_snapshot_and_stops_add_the_reports(cfg, tmp_
     assert dst == os.path.join(snap3, "reports")
     assert {"shadow.json", "launch_readiness.md"} <= set(os.listdir(dst))
     assert history.archive_reports(cfg, str(reports), "no-such-bundle") is None
+    # the callers that read the trail through provenance still reach it
+    assert provenance.archive is history.archive
+    assert provenance.history_index(cfg) == history.history_index(cfg)
 
 
 def test_the_history_is_ordered_by_seal_time_not_by_folder_name(cfg, tmp_path):

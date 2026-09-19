@@ -11,9 +11,9 @@ import yaml
 
 from common import episodes
 from conftest import _Applier, _frame, _harness_cfg, _hours, load_config
-from engine import budget as budget_mod
+from engine import explore as explore_mod
 from engine import state as state_mod
-from engine.spread_ledger import SpreadLedger
+from engine.explore import SpreadLedger
 from engine.posterior import PosteriorStore
 
 WINDOW_START, WINDOW_END = "2026-08-10", "2026-08-28"     # config's hold-out
@@ -282,7 +282,7 @@ def test_the_budget_base_is_the_trailing_realised_il(cfg):
     """The IL base for a day's budget is the mean of REALISED daily IL over
     the trailing budget_il_window_days, ending YESTERDAY -- never the same
     day's own IL."""
-    from engine.budget import trailing_daily_il
+    from engine.explore import trailing_daily_il
 
     window = int(cfg["exploration"]["budget_il_window_days"])
     days = [str((pd.Timestamp("2026-08-01") + pd.Timedelta(days=i)).date())
@@ -452,7 +452,7 @@ def _shadow_frame():
 def _run_shadow(cfg, frame, model, monkeypatch, refit=None, **kw):
     """evaluate.shadow.main's wiring, on `frame`, with the applier (the
     bundle's model -- fit.artifacts.load_bundle -- is the applier)."""
-    from fit import model as tb
+    from fit import train_baseline as tb
     from evaluate import shadow
     monkeypatch.setattr(tb, "BaselineModel", lambda c: model)
     monkeypatch.setattr(shadow, "weekly_refit_schedule",
@@ -583,8 +583,8 @@ def test_the_aggregate_budget_is_the_mean_over_the_windows_decision_days(
     seed = {f"2026-08-0{d}": 700.0 for d in range(3, 10)}     # 7 seed days
     decision_days = ["2026-08-10", "2026-08-11"]
     il = dict(seed, **{"2026-08-10": 900.0})
-    want = np.mean([budget_mod.budget_today(
-        budget_mod.trailing_daily_il(il, day, cfg), 1.0, cfg)
+    want = np.mean([explore_mod.budget_today(
+        explore_mod.trailing_daily_il(il, day, cfg), 1.0, cfg)
         for day in decision_days])
     assert _mean_daily_budget(decision_days, il, 1.0, cfg) == pytest.approx(want)
     # the bug, reproduced: the seed days drag the mean down -- they are HELD
@@ -655,8 +655,8 @@ def test_the_pre_window_seed_is_scaled_to_the_sample(cfg, tmp_path, monkeypatch)
     day1 = b["tau_controller_trace"]["by_day"][0]
     scaled = {k: v / 3 for k, v in seed.items()}
     std = PosteriorStore(cfg).widest_std()
-    assert day1["budget"] == pytest.approx(budget_mod.budget_today(
-        budget_mod.trailing_daily_il(scaled, day1["day"], cfg), std, cfg), abs=0.1)
+    assert day1["budget"] == pytest.approx(explore_mod.budget_today(
+        explore_mod.trailing_daily_il(scaled, day1["day"], cfg), std, cfg), abs=0.1)
     # a full run is unaffected: scale is exactly 1
     full = _run_shadow(cfg, frame, _Applier(cfg), monkeypatch)
     assert full["exploration_budget_would_be"]["trailing_basis_seed_scale"] == 1.0

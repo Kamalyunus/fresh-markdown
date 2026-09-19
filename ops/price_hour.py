@@ -365,7 +365,6 @@ def main(argv=None):
           f"{report['rejected']} rejected, {report['shelves_empty']} empty"
           + (f", {report['episode_ids_disagreeing_with_the_rule']} ids disagree with the rule"
              if report["episode_ids_disagreeing_with_the_rule"] else "")
-          + (" -- EXPLOIT ONLY (exploration.mode)" if report.get("exploration_mode") == "exploit" else "")
           + (" -- DRY RUN, nothing committed" if args.dry_run else ""))
     for why, n in sorted(report["rejected_by_the_engine"].items()):
         print(f"  {n:,}  {why}")

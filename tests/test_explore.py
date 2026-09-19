@@ -7,9 +7,7 @@ import pytest
 from conftest import CFG
 from engine import dp as dp_mod
 from engine import explore
-from engine import budget
-from engine.budget import tau_next
-from engine.spread_ledger import SpreadLedger
+from engine.explore import SpreadLedger, tau_next
 
 
 def test_solve_tau_lands_just_under_budget():
@@ -86,8 +84,8 @@ def test_entry_only_collection_understates_the_funded_tau():
 
 
 def test_budget_scales_down_as_posterior_narrows():
-    wide = budget.budget_today(1e6, CFG["exploration"]["budget_scale_ref_std"], CFG)
-    narrow = budget.budget_today(1e6, 0.0, CFG)
+    wide = explore.budget_today(1e6, CFG["exploration"]["budget_scale_ref_std"], CFG)
+    narrow = explore.budget_today(1e6, 0.0, CFG)
     assert wide == pytest.approx(CFG["exploration"]["budget_share_of_il"] * 1e6)
     assert narrow == pytest.approx(wide * CFG["exploration"]["budget_scale_floor"])
 
@@ -96,14 +94,14 @@ def test_tau_next_clipped():
     """(tau_after, clipped): the flag is the step's own verdict, so a
     reader never infers the bound from rounded taus."""
     lo, hi = CFG["exploration"]["tau_adjust_clip"]
-    assert budget.tau_next(100.0, 1e9, 1.0, CFG) == (pytest.approx(100.0 * hi), True)
-    assert budget.tau_next(100.0, 0.0, 1e9, CFG) == (pytest.approx(100.0 * lo), True)
+    assert explore.tau_next(100.0, 1e9, 1.0, CFG) == (pytest.approx(100.0 * hi), True)
+    assert explore.tau_next(100.0, 0.0, 1e9, CFG) == (pytest.approx(100.0 * lo), True)
     inside = (lo + hi) / 2
-    assert budget.tau_next(100.0, inside * 500.0, 500.0, CFG) == \
+    assert explore.tau_next(100.0, inside * 500.0, 500.0, CFG) == \
         (pytest.approx(100.0 * inside), False)
     # and the walk carries it per row
     base = {"2026-07-26": 1e9}                 # a full window behind the day
-    _, rows = budget.walk_tau(100.0, ["2026-08-02"], lambda d, t: 1.0,
+    _, rows = explore.walk_tau(100.0, ["2026-08-02"], lambda d, t: 1.0,
                                base, 1.0, CFG)
     assert rows[0]["clipped"] is True and rows[0]["tau_after"] == pytest.approx(100.0 * hi)
 
@@ -288,7 +286,7 @@ def test_the_sweep_refuses_a_zero_share_multiple_or_decision_count():
     """A zero in-force share or multiple divides the grid; a zero decision
     count divides the forced rate. Each is a note, never a ZeroDivisionError
     or an inf in the report."""
-    led = SpreadLedger()
+    led = explore.SpreadLedger()
     led.add("2026-08-19", [10.0, 20.0], [0.1, 0.2], 0.05)
     good = led.sweep(100.0, 1, 2, 0.01, 1.0, [0.01], [1.0])
     assert "rows" in good
@@ -335,7 +333,7 @@ def test_the_controller_holds_tau_until_the_il_base_spans_its_window(cfg):
     rehearsal the overspend stop fired on day three. Until the base reaches
     back a whole budget_il_window_days the day is held (an absence of
     signal, like a zero budget), and the row says why."""
-    from engine.budget import budget_base_ready, walk_tau
+    from engine.explore import budget_base_ready, walk_tau
 
     cfg["exploration"]["budget_il_window_days"] = 3
     il = {"2026-09-01": 1000.0, "2026-09-02": 1000.0, "2026-09-03": 1000.0,
@@ -345,7 +343,7 @@ def test_the_controller_holds_tau_until_the_il_base_spans_its_window(cfg):
     assert budget_base_ready(il, "2026-09-04", cfg)           # 3 days back
     # a hole INSIDE a full window is a zero-IL day, not a shorter base:
     # ready, and the mean divides by the whole window
-    from engine.budget import trailing_daily_il
+    from engine.explore import trailing_daily_il
     holed = {"2026-09-01": 900.0, "2026-09-03": 300.0}
     assert budget_base_ready(holed, "2026-09-04", cfg)
     assert trailing_daily_il(holed, "2026-09-04", cfg) == pytest.approx(400.0)
@@ -370,9 +368,9 @@ def test_the_controller_holds_tau_until_the_il_base_spans_its_window(cfg):
 def test_a_suspended_day_is_held_and_the_resume_does_not_overspend_for_it(cfg):
     """Seven suspended mornings once multiplied tau by the clip each: the
     walk read the suspension's zero spend as under-spend. A suspended day
-    is a held day (`engine.budget.SUSPENDED`), so the tau in force on the resume
+    is a held day (`explore.SUSPENDED`), so the tau in force on the resume
     is the one the last graded day left."""
-    from engine.budget import SUSPENDED, budget_held, walk_tau
+    from engine.explore import SUSPENDED, budget_held, walk_tau
 
     cfg["exploration"]["budget_il_window_days"] = 1
     il = {f"2026-09-{d:02d}": 1000.0 for d in range(1, 12)}

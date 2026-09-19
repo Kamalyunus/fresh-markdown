@@ -11,7 +11,7 @@ import pytest
 from common import windows
 from conftest import _Applier, _calib_frame, _harness_cfg, _prepared, load_config
 from fit import calibrate as cal
-from fit import model as fm
+from fit import train_baseline as tb
 
 
 
@@ -106,7 +106,7 @@ def test_a_level_shift_does_not_leak_into_its_own_weeks_factor(tmp_path, cfg):
 
     import pandas as pd
 
-    from fit.model import BaselineModel
+    from fit.train_baseline import BaselineModel
 
     quiet, jumped, fallback = 1.00, 1.80, 1.33
     artifact = {
@@ -160,7 +160,7 @@ def test_running_past_the_calibration_schedule_is_reported_not_silent():
     to be counted and named."""
     import pandas as pd
 
-    from fit.model import BaselineModel
+    from fit.train_baseline import BaselineModel
 
     model = BaselineModel.__new__(BaselineModel)
     model.cfg = load_config()
@@ -243,7 +243,7 @@ def test_a_partial_trailing_window_is_counted_not_passed_off_as_full(scratch_cfg
 
 def test_the_gate_freezes_calibration_even_though_the_schedule_runs_past_it(scratch_cfg, monkeypatch):
     """Two questions, one artifact, and they must not be confused."""
-    cfg, BaselineModel = scratch_cfg, fm.BaselineModel
+    cfg, BaselineModel = scratch_cfg, tb.BaselineModel
     art, _ = _schedule_artifact(cfg, monkeypatch, lambda day: {"A": ("C", 2)})
     sched = art["schedule"]
     gate_start = pd.Timestamp(cfg["data"]["split"]["test_start"])

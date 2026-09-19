@@ -1,34 +1,32 @@
-"""ops.integration -- the standalone pricing folder engineering runs, and
-the artifact sync that keeps it current.
+"""ops.integration -- keep the standalone pricing folder engineering runs
+honest and current: the artifact sync, and the check that its copies
+still match their sources.
 
 `integration/` is what the pricing host needs and nothing else:
 
     integration/
-      README.md            the handoff (docs/integration_README.md, verbatim)
+      README.md            the handoff
       price_hour.py        every clock hour: the snapshot in, a price per shelf out
       build_features.py    every morning: the day's feature table from the feed
       check_inputs.py      their three tables, and the hour's response, checked
-      config.yaml          the owner's readings
+      config.yaml          the owner's readings (synced from the repository's)
       requirements.lock    the pinned libraries
       artifacts/  data/    SYNCED from the owner's chain (below); never in git
       snapshots/ feed/ failures/ features/ decisions/ reports/hours/ logs/ events_store/
       examples/  docs/     the four example tables, the handover page
-      src/                 the engine: the exact import closure of the three
-                           commands, copied verbatim with the package layout kept
-      MANIFEST.json        every generated file with its digest
+      src/                 the hourly path, one file per repository module
+      MANIFEST.json        every file: its source, verbatim or curated (and why)
 
-The three commands are thin wrappers: each sets the working directory to
-the folder and `src/` on the path, then runs the module it names, so no
-import is rewritten and a command run from anywhere still reads THIS
-folder's config and artifacts. The episode id is the producers': the
-rule module rides along inside src/ because the hourly job counts the
-ids that disagree with it, but nothing here assigns one. The learning
-lane is deliberately absent: this folder prices.
-
-GENERATED, never edited. `build()` writes it; `tests/test_integration_bundle.py`
-pins the committed folder to a fresh build byte for byte, proves the
-closure is closed, and runs the commands from a copy with the
-repository off the path.
+The folder is maintained IN PLACE, never generated: the owner asked for a
+minimal standalone folder without refactoring the repository, so `src/`
+carries the hourly path's modules copied file by file, and the handful
+that had to differ from their source -- a re-export dropped, the model
+applier split from the trainer, one function lifted into a small module,
+exploit-only fixed on -- are listed in MANIFEST.json as `curated` with
+the reason. Every other file is `verbatim` and `check()` refuses a copy
+that no longer equals its repository source, so a fix to the engine is
+either ported to the folder or fails the suite. A curated file is ported
+by hand when its source moves; the manifest is the list to walk.
 
 `sync(cfg)` copies the artifacts the config names (the sealed bundle, the
 posterior, the prior), the extract and the rolling feed history, and the
@@ -37,9 +35,9 @@ config itself into the folder. `ops.seal` calls it after every seal and
 posterior re-init reaches the folder without a hand step. It targets
 `integration/` under the CURRENT working directory -- the repo root when
 the owner runs the chain, a workspace's own folder in a rehearsal -- and
-does nothing where no built folder exists.
+does nothing where no folder exists.
 
-Run: python3 -m ops.integration [--out integration] [--check | --sync]
+Run: python3 -m ops.integration --check | --sync [--out integration]
 """
 
 import argparse
@@ -50,7 +48,6 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 
 from common.config import config_get, load_config
 from common.paths import RAW
@@ -61,26 +58,9 @@ SRC = "src"
 PACKAGES = ("common", "engine", "events", "fit", "daily", "ops")
 MANIFEST = "MANIFEST.json"
 SYNCED = os.path.join("artifacts", "synced.json")
+COMMANDS = ("price_hour.py", "build_features.py", "check_inputs.py")
 
-# the commands, in the README's order: wrapper name -> (module, one line)
-COMMANDS = (
-    ("price_hour.py", "ops.price_hour",
-     "every clock hour: the top-of-hour snapshot in, a price per shelf out"),
-    ("build_features.py", "daily.features",
-     "every morning, after yesterday's feed lands: the day's feature table"),
-    ("check_inputs.py", "ops.check_inputs",
-     "the snapshot, the feed, the failed pushes and the hour's response, checked"),
-)
-ENTRIES = tuple(mod for _, mod, _ in COMMANDS)
-
-# copied as they are, beside the commands
-FILES = ("config.yaml", "requirements.txt", "requirements.lock",
-         "docs/engineering_handover.html")
-DIRS = ("examples",)
-README_SRC = os.path.join("docs", "integration_README.md")
-
-# the working directories the cron lines name; created empty (git ignores
-# their contents) so the first run finds them
+# the working directories the cron lines name; the runtime state, ignored by git
 RUNTIME_DIRS = ("snapshots", "feed", "failures", "features", "decisions",
                 "reports/hours", "logs", "events_store", "artifacts", "data")
 
@@ -95,30 +75,25 @@ ARTIFACT_KEYS = (("artifacts", "bundle_path"),
                  ("posterior", "prior", "path"),
                  ("posterior", "path"))
 
-WRAPPER = '''#!/usr/bin/env python3
-"""{name} -- {line}.
 
-GENERATED by ops.integration; the code is src/{path}. Runs from this
-folder whatever the caller's working directory, so a relative path in an
-argument is relative to the folder.
+def _digest(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
-    python3 {name} --help
-"""
-import os
-import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-os.chdir(HERE)
-sys.path.insert(0, os.path.join(HERE, "{src}"))
-
-from {module} import main                                        # noqa: E402
-
-if __name__ == "__main__":
-    sys.exit(main())
-'''
+def _copy(src, out, rel):
+    dst = os.path.join(out, rel)
+    os.makedirs(os.path.dirname(dst) or out, exist_ok=True)
+    shutil.copyfile(src, dst)
+    return rel
 
 
 # ---------------------------------------------------------------- closure
+# read against the folder's src/: every repo-local import a module makes
+# must resolve inside src/, or the folder is not standalone
 
 def _module_path(root, mod):
     p = os.path.join(root, *mod.split("."))
@@ -148,117 +123,70 @@ def local_imports(root, path):
     return out
 
 
-def closure(root, entries=ENTRIES):
-    """Every repo-local module reachable from `entries`, sorted."""
-    seen, todo = set(), list(entries)
-    while todo:
-        mod = todo.pop()
-        if mod in seen:
+def modules(src):
+    """Every module under `src`, dotted."""
+    out = []
+    for dp, _, fs in os.walk(src):
+        if "__pycache__" in dp:
             continue
-        path = _module_path(root, mod)
-        if path is None:
-            raise SystemExit(f"cannot resolve {mod} under {root}")
-        seen.add(mod)
-        todo.extend(local_imports(root, path) - seen)
-    return sorted(seen)
+        for f in fs:
+            if f.endswith(".py"):
+                rel = os.path.relpath(os.path.join(dp, f), src)[:-3]
+                out.append(rel.replace(os.sep, ".").removesuffix(".__init__"))
+    return sorted(out)
 
 
-def module_files(root, mods):
-    """The files that carry `mods`: each module and every package
-    __init__ above it, relative to `root`."""
-    files = set()
-    for mod in mods:
-        files.add(os.path.relpath(_module_path(root, mod), root))
-        parts = mod.split(".")
-        for i in range(1, len(parts)):
-            init = os.path.join(*parts[:i], "__init__.py")
-            if os.path.isfile(os.path.join(root, init)):
-                files.add(init)
-    return sorted(files)
+def unresolved(src):
+    """(module, import) pairs whose import is not inside src/: [] when the
+    folder is standalone."""
+    out = []
+    for mod in modules(src):
+        for dep in local_imports(src, _module_path(src, mod)):
+            if _module_path(src, dep) is None:
+                out.append((mod, dep))
+    return out
 
 
-# ------------------------------------------------------------------ build
+# ------------------------------------------------------------------ check
 
-def _digest(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 16), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _copy(src, out, rel):
-    dst = os.path.join(out, rel)
-    os.makedirs(os.path.dirname(dst) or out, exist_ok=True)
-    shutil.copyfile(src, dst)
-    return rel
-
-
-def build(root=ROOT, out=None):
-    """Write the folder at `out` (default <root>/integration). Returns the
-    manifest. Refuses to replace a directory that is neither a previous
-    build (no MANIFEST.json) nor empty; the runtime directories and what
-    sync put there are kept."""
+def check(root=ROOT, out=None):
+    """The folder against its manifest and the repository: `drift` names a
+    verbatim file that no longer equals its source (or is gone), `unlisted`
+    a file on disk the manifest does not carry, `missing` a manifested file
+    not on disk, `dangling` an import that leaves src/. All four empty
+    means the folder is current and standalone."""
     out = out or os.path.join(root, OUT)
-    if os.path.isdir(out) and os.listdir(out) \
-            and not os.path.exists(os.path.join(out, MANIFEST)):
-        raise SystemExit(f"{out} exists and is not a previous build -- refusing to replace it")
-    keep = {d.split("/")[0] for d in RUNTIME_DIRS}
-    if os.path.isdir(out):
-        for name in os.listdir(out):
-            if name in keep:
-                continue
-            p = os.path.join(out, name)
-            shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
-    os.makedirs(out, exist_ok=True)
-
-    mods = closure(root)
-    copied = [_copy(os.path.join(root, rel), out, os.path.join(SRC, rel))
-              for rel in module_files(root, mods)]
-    for name, mod, line in COMMANDS:
-        with open(os.path.join(out, name), "w") as f:
-            f.write(WRAPPER.format(name=name, line=line, module=mod, src=SRC,
-                                   path=mod.replace(".", "/") + ".py"))
-        os.chmod(os.path.join(out, name), 0o755)
-        copied.append(name)
-    for rel in FILES:
-        copied.append(_copy(os.path.join(root, rel), out, rel))
-    for d in DIRS:
-        for name in sorted(os.listdir(os.path.join(root, d))):
-            copied.append(_copy(os.path.join(root, d, name), out, os.path.join(d, name)))
-    copied.append(_copy(os.path.join(root, README_SRC), out, "README.md"))
-    for d in RUNTIME_DIRS:
-        os.makedirs(os.path.join(out, d), exist_ok=True)
-
-    manifest = {
-        "what": "the standalone pricing folder; GENERATED by ops.integration, never edited",
-        "commands": [name for name, _, _ in COMMANDS],
-        "modules": mods,
-        "files": {rel: _digest(os.path.join(out, rel)) for rel in sorted(copied)},
-    }
-    with open(os.path.join(out, MANIFEST), "w") as f:
-        json.dump(manifest, f, indent=1, sort_keys=True)
-        f.write("\n")
-    return manifest
+    with open(os.path.join(out, MANIFEST)) as f:
+        manifest = json.load(f)
+    files = manifest["files"]
+    drift, missing = [], []
+    for rel, entry in files.items():
+        here = os.path.join(out, rel)
+        if not os.path.exists(here):
+            missing.append(rel)
+            continue
+        if entry.get("verbatim"):
+            src = os.path.join(root, entry["from"])
+            if not os.path.exists(src) or _digest(src) != _digest(here):
+                drift.append(rel)
+    skip = {d.split("/")[0] for d in RUNTIME_DIRS}
+    on_disk = set()
+    for dp, dns, fs in os.walk(out):
+        dns[:] = [d for d in dns if d != "__pycache__"
+                  and not (dp == out and d in skip)]
+        for f in fs:
+            rel = os.path.relpath(os.path.join(dp, f), out)
+            if rel != MANIFEST:
+                on_disk.add(rel)
+    return {"drift": sorted(drift), "missing": sorted(missing),
+            "unlisted": sorted(on_disk - set(files)),
+            "dangling": unresolved(os.path.join(out, SRC)),
+            "curated": {rel: e["curated"] for rel, e in files.items() if e.get("curated")}}
 
 
-def stale(root=ROOT, out=None):
-    """The files that differ between `out` and a fresh build: [] when the
-    committed folder is current."""
-    out = out or os.path.join(root, OUT)
-    with tempfile.TemporaryDirectory() as tmp:
-        want = build(root, os.path.join(tmp, "fresh"))["files"]
-    have = {}
-    if os.path.exists(os.path.join(out, MANIFEST)):
-        with open(os.path.join(out, MANIFEST)) as f:
-            have = json.load(f).get("files") or {}
-
-    def on_disk(rel):
-        p = os.path.join(out, rel)
-        return _digest(p) if os.path.exists(p) else None
-
-    return sorted(rel for rel in set(want) | set(have)
-                  if want.get(rel) is None or on_disk(rel) != want[rel])
+def current(root=ROOT, out=None):
+    r = check(root, out)
+    return not (r["drift"] or r["missing"] or r["unlisted"] or r["dangling"])
 
 
 # ------------------------------------------------------------------- sync
@@ -267,8 +195,8 @@ def sync(cfg, out=OUT, config_path="config.yaml"):
     """Copy the artifacts `cfg` names, the extract and the rolling feed
     history, and the config into the folder at `out` (relative to the
     working directory). Returns {"copied", "absent", "bundle"} or None
-    where no built folder exists. An artifact not on disk yet is listed,
-    never an error: the chain syncs after every seal, and the first seal
+    where no folder exists. An artifact not on disk yet is listed, never
+    an error: the chain syncs after every seal, and the first seal
     predates the posterior."""
     if not os.path.exists(os.path.join(out, MANIFEST)):
         return None
@@ -289,10 +217,11 @@ def sync(cfg, out=OUT, config_path="config.yaml"):
     if bp and os.path.exists(bp):
         with open(bp) as f:
             bundle = (json.load(f) or {}).get("bundle")
+    for d in RUNTIME_DIRS:
+        os.makedirs(os.path.join(out, d), exist_ok=True)
     record = {"at": dt.datetime.now(dt.timezone.utc).isoformat(),
               "bundle": bundle, "copied": copied, "absent": absent,
               "sha256": {rel: _digest(os.path.join(out, rel)) for rel in copied}}
-    os.makedirs(os.path.join(out, "artifacts"), exist_ok=True)
     with open(os.path.join(out, SYNCED), "w") as f:
         json.dump(record, f, indent=1)
         f.write("\n")
@@ -313,29 +242,28 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="ops.integration")
     ap.add_argument("--out", default=None, help=f"default {OUT}/")
     ap.add_argument("--check", action="store_true",
-                    help="compare the folder to a fresh build; exit 1 if it is stale")
+                    help="verbatim copies against their sources, the manifest against "
+                         "the disk, every import inside src/; exit 1 on any finding")
     ap.add_argument("--sync", action="store_true",
                     help="copy the artifacts, the data and the config into the folder")
     ap.add_argument("--config", default="config.yaml")
     args = ap.parse_args(argv)
     if args.check:
-        diff = stale(ROOT, args.out)
-        if diff:
-            print(f"{OUT}/ is STALE -- rebuild with python3 -m ops.integration:")
-            for rel in diff:
-                print(f"  {rel}")
-            return 1
-        print(f"{OUT}/ is current")
-        return 0
+        r = check(ROOT, args.out)
+        for what in ("drift", "missing", "unlisted", "dangling"):
+            for item in r[what]:
+                print(f"  {what:<9} {item}")
+        ok = not (r["drift"] or r["missing"] or r["unlisted"] or r["dangling"])
+        print(f"{OUT}/ is {'current' if ok else 'NOT current'}: "
+              f"{len(r['curated'])} curated file(s), the rest verbatim")
+        return 0 if ok else 1
     if args.sync:
         rec = sync_and_print(load_config(args.config), args.out or OUT, args.config)
         if rec is None:
-            print(f"no built folder at {args.out or OUT}/ -- build it first")
+            print(f"no folder at {args.out or OUT}/")
             return 1
         return 0
-    m = build(ROOT, args.out)
-    print(f"{len(m['modules'])} modules, {len(m['files'])} files -> {args.out or OUT}/")
-    return 0
+    ap.error("pass --check or --sync")
 
 
 if __name__ == "__main__":

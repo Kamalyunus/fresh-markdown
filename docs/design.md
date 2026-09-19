@@ -690,14 +690,6 @@ and `information_rel` in shadow's `exploration_budget_sweep` (below, and
 (09-18): a fixed IL budget, so prefer the larger gap and the lower forced
 rate over cheap moves that buy confidence in a tilted ε.
 
-**`exploration.mode`** (SET BY OWNER; `ops.price_batch` reads it) is the
-lane's one switch. `exploit` prices every request at p*: nothing is drawn,
-tau is not read, and each decision records `tau_current` null the way a
-suspended day does, so the learning lane holds those days. It is the
-integration phase — the hourly loop alone, before any learning. `explore`
-is the draw below. Shadow and the pilot rehearsal grade the full policy
-and always explore, whatever the mode says (`pilot_shop.sim_config`).
-
 `admissible` is a subset of the DP's action set, which under an anchor
 holds only tiers at or deeper than the price in force — so a forced move
 is always a deeper discount, whatever δ_min or τ say; monotonicity is
@@ -1090,7 +1082,7 @@ takes moments.
   week being priced (a missed weekly re-fit silently reverts production to
   stale factors; this gate refuses `--apply` only — the τ walk moves on
   spend and needs no factors, §5.8). "Reaches" is
-  `fit.model.schedule_reaches`, shared
+  `train_baseline.schedule_reaches`, shared
   with `advance`'s re-fit trigger: a week the re-fit judged too thin and
   holds at the frozen anchor (`weeks_unfitted_held_at_anchor`; an
   artifact sealed under the former name `weeks_unfitted_held_at_1` is
@@ -1646,7 +1638,7 @@ lives in `calibration.json → schedule.by_week` (subcategory tables) with
 `factors_category` are the fallback for weeks before the first trailing
 window closes, and an unfitted week holds the fallback rather than
 borrowing a later week's (`weeks_unfitted_held_at_anchor`; the week the
-schedule COVERS is `fit.model.schedule_reaches`, §5.11). Every cell
+schedule COVERS is `train_baseline.schedule_reaches`, §5.11). Every cell
 of a window's population gets a factor: a subcategory with no anchor row
 in the window takes its category's factor outright (`keys_held_at_parent`,
 per week `keys_held_at_parent_by_week`; `held_at_parent` in its detail)

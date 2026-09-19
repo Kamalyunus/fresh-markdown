@@ -2,7 +2,7 @@
 
 The backtest's `derive_tau_initial` (design 5.14, the exploit-only
 cross-check) and shadow's `derive_tau0` (5.13, the launch paste) fill the
-same `engine.spread_ledger.SpreadLedger` from a mapped episode function, on an
+same `engine.explore.SpreadLedger` from a mapped episode function, on an
 episode sample drawn the same way, and report the solve in a block whose
 shared keys `ops.config_keys.tau_provenance_error` reads. Those three
 pieces live here once: `sample_ids`, `fill_ledger`, `tau_derivation_block`.

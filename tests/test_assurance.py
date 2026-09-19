@@ -270,7 +270,7 @@ def test_correlation_catches_drift_that_would_rescale_every_update(cfg):
 
 def test_deff_is_judged_at_the_learners_forced_hours_per_episode(cfg):
     """`m` is what the learner deflates by: forced outcomes per episode
-    (common.clustering.deff_from_episodes over the forced ids), never every
+    (common.config.deff_from_episodes over the forced ids), never every
     learnable hour. Six priced hours with ONE forced per episode read m=1
     -- deff is 1 on both sides whatever rho did, because nothing is
     deflated -- and the same rho error at six forced hours is the drift
@@ -412,7 +412,7 @@ def test_a_stale_rho_still_fails_weighted_by_todays_clustering(cfg):
     """What remains frozen is rho, and the verdict prices its staleness at
     the clustering in force -- the same absolute rho error matters more when
     episodes contribute more correlated hours."""
-    from common.clustering import design_effect
+    from common.config import design_effect
 
     # a fixed rho, not the shipped paste: the claim is about how the
     # verdict scales with clustering, not about the owner's extract
@@ -443,7 +443,7 @@ def test_icc_survives_a_nan_residual():
     """One NaN must not poison every sum into 0.0 -- 'no clustering', deff 1,
     every posterior step over-weighted."""
     import numpy as np
-    from common.clustering import intraclass_correlation
+    from common.config import intraclass_correlation
     rng = np.random.default_rng(0)
     groups = np.repeat(np.arange(40), 6)
     shared = rng.normal(size=40)[groups]

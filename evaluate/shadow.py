@@ -13,8 +13,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from common.clustering import deff_from_episodes
-from common.config import load_config, ConfigError
+from common.config import load_config, deff_from_episodes, ConfigError
 from common import episodes
 from common import metrics
 from common.io import read_json, write_json
@@ -26,8 +25,7 @@ from fit.artifacts import load_bundle
 from fit.prepare_data import population
 from events.store import EventStore
 from engine import dp as dp_mod
-from engine import budget as budget_mod
-from engine import spread_ledger
+from engine import explore
 from engine.demand import expected_min_demand_inventory_vec
 from engine.state import assemble_state, batch_context, price_one
 from ops.config_keys import tau_provenance_error
@@ -138,16 +136,16 @@ def _mean_daily_budget(days, il_by_day, widest_std, cfg):
     """Mean of production's per-day budget over `days` -- the window's
     DECISION days, never the pre-window seed days (the first of those has
     no trailing history and would read as a zero budget) -- and only the
-    days the controller reads (budget_mod.budget_held is None); a held day
+    days the controller reads (explore.budget_held is None); a held day
     has no budget in force. None when every day is held: NO BUDGET BASE,
     which run_shadow reports as its verdict (a window whose trailing IL
     seed never spans budget_il_window_days -- a thin extract, a short
     explicit range) rather than grading spend against nothing."""
     live = []
     for day in days:
-        budget = budget_mod.budget_today(
-            budget_mod.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
-        if budget_mod.budget_held(il_by_day, day, budget, cfg) is None:
+        budget = explore.budget_today(
+            explore.trailing_daily_il(il_by_day, day, cfg), widest_std, cfg)
+        if explore.budget_held(il_by_day, day, budget, cfg) is None:
             live.append(budget)
     return float(np.mean(live)) if live else None
 
@@ -182,11 +180,11 @@ def derive_tau0(d_full, cfg, start, model, posterior, r_lookup, il_history,
 
     # day-one budget: production's own quantity on the seeded trailing base
     widest_std = posterior.widest_std()
-    budget = budget_mod.budget_today(
-        budget_mod.trailing_daily_il(il_history, start_ts.strftime("%Y-%m-%d"),
+    budget = explore.budget_today(
+        explore.trailing_daily_il(il_history, start_ts.strftime("%Y-%m-%d"),
                                   cfg), widest_std, cfg)
     block["day_one_budget"] = round(budget, 1)
-    held = budget_mod.budget_held(il_history, start_ts.strftime("%Y-%m-%d"),
+    held = explore.budget_held(il_history, start_ts.strftime("%Y-%m-%d"),
                                budget, cfg)
     if held:
         block["note"] = (f"day one is held ({held}): production's controller "
@@ -211,7 +209,7 @@ def derive_tau0(d_full, cfg, start, model, posterior, r_lookup, il_history,
     # tau None: nothing explores, and the ledger does not care -- spreads are
     # recorded before the draw, independent of the tau in force
     ctx = _ctx(cfg, None, model, posterior, seed, pre.category.unique())
-    ledger = spread_ledger.SpreadLedger()
+    ledger = explore.SpreadLedger()
     for _ in fill_ledger(_shadow_one, items, ctx, workers, ledger, _spreads):
         pass
 
@@ -247,9 +245,9 @@ def _controller_trace(ledger, il_by_day, tau0, widest_std, cfg, window_days=None
     days = ledger.days
     order = sorted(range(len(days)), key=lambda i: days[i])[:max_days]
     index = {days[i]: i for i in order}
-    # the SAME walk production runs (engine.budget.walk_tau); spend here is
+    # the SAME walk production runs (explore.walk_tau); spend here is
     # EXPECTED spend at the tau in force
-    tau, walked = budget_mod.walk_tau(
+    tau, walked = explore.walk_tau(
         float(tau0), [days[i] for i in order],
         lambda day, t: ledger.spend_by_day(t)[index[day]],
         il_by_day, widest_std, cfg)
@@ -531,7 +529,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     forced_episode_ids = []
     # Q-spreads for every decision on THIS path, so tau is re-derived on the
     # population that will actually run (not the replay's entry-only one)
-    ledger = spread_ledger.SpreadLedger()
+    ledger = explore.SpreadLedger()
     # every observed hour, so markdown IL is measured on the SAME episodes
     # and window as the spend (metrics.episode_economics, the one home)
     hours = []
@@ -636,7 +634,7 @@ def run_shadow(d, cfg, events_root=None, seed=0, max_episodes=None,
     # trace, so the two cannot disagree
     daily_budget = (_mean_daily_budget(ledger.days, il_by_day, widest_std, cfg)
                     if ledger.days else
-                    budget_mod.budget_today(markdown_il / max(n_days, 1),
+                    explore.budget_today(markdown_il / max(n_days, 1),
                                          widest_std, cfg))
     trace = _controller_trace(
         ledger, il_by_day, tau, widest_std, cfg, window_days=n_days,
@@ -676,7 +674,7 @@ def _budget_check(cfg, ledger, trace, n_days, would_be_cost, daily_budget,
     on this path (a cross-check, not a correction), the controller trace,
     and what a smaller share or a deeper floor would buy. `markdown_il`
     is (total, discount, scrap). Returns (block, sweep)."""
-    # None: every decision day is HELD (engine.budget.budget_held) -- no budget
+    # None: every decision day is HELD (explore.budget_held) -- no budget
     # base, so nothing below is graded against one; the trace still walks
     # (tau holds every day, as production's would)
     no_base = daily_budget is None
@@ -704,7 +702,7 @@ def _budget_check(cfg, ledger, trace, n_days, would_be_cost, daily_budget,
         "budget_basis": (f"mean over the window's decision days of the "
                          f"per-day budget on the trailing "
                          f"{ec['budget_il_window_days']}-day realised-IL base "
-                         "(engine.budget.trailing_daily_il) -- the budget production "
+                         "(explore.trailing_daily_il) -- the budget production "
                          "would apply, not a whole-window average"),
         "spend_over_budget": round(over, 2) if over is not None else None,
         "stop_condition_multiple": stop_at,
@@ -712,7 +710,7 @@ def _budget_check(cfg, ledger, trace, n_days, would_be_cost, daily_budget,
         "markdown_il_discount": round(il_discount, 1),
         "markdown_il_scrap": round(il_scrap, 1),
         "budget_share_of_il": share,
-        "budget_scale_applied": round(budget_mod.budget_scale(widest_std, cfg), 4),
+        "budget_scale_applied": round(explore.budget_scale(widest_std, cfg), 4),
         "tau": tau,
         "tau_source": tau_source,
         "tau_recommended": round(tau_rec, 2) if tau_rec else None,
@@ -726,7 +724,7 @@ def _budget_check(cfg, ledger, trace, n_days, would_be_cost, daily_budget,
             if n_ep else None,
         "q_spread_distribution": ledger.distribution(),
         "verdict": (
-            "NO BUDGET BASE -- every decision day is held (engine.budget.budget_held: "
+            "NO BUDGET BASE -- every decision day is held (explore.budget_held: "
             "the trailing IL base never spans budget_il_window_days); "
             "production's controller would read no budget on these days either, "
             "so spend is not graded against one -- give the run a longer "

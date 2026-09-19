@@ -28,13 +28,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
 
-from common import episodes, history, provenance
+from common import episodes, provenance
 from common.config import reference_discount
 from common.io import read_json, write_json
 from common.parallel import EpisodePool, resolve_workers
 from daily import assurance, export_events, monitor
 from daily import ingest_outcomes as ingest
-from daily.failures import load_failures
 from daily import update
 from engine import dp as dp_mod
 from engine.posterior import PosteriorStore
@@ -47,8 +46,7 @@ from evaluate.pilot_grade import GRADING_KEYS, economics, grade, learning, level
 from evaluate.pilot_world import FEED_SCHEMA, World
 from fit import prepare_data
 from fit.artifacts import load_bundle
-from fit.calibrate import fit_level_calibration
-from fit.model import schedule_reaches
+from fit.train_baseline import fit_level_calibration, schedule_reaches
 from ops import price_hour
 from ops import seal as seal_mod
 from ops import status
@@ -68,10 +66,6 @@ def sim_config(cfg, sim_dir, launch_date):
     (read-only from here)."""
     c = copy.deepcopy(cfg)
     c["data"]["launch_date"] = str(launch_date)
-    # the rehearsal grades the FULL policy (the draw, the budget, the
-    # learner); an exploit-only production phase is the same lane with
-    # the draw off, so the shop always explores whatever the config says
-    c["exploration"] = dict(c["exploration"], mode="explore")
     c["data"]["split_manifest_path"] = os.path.join(sim_dir, "split_manifest.json")
     c["artifacts"]["bundle_path"] = os.path.join(sim_dir, "bundle.json")
     c["artifacts"]["history_dir"] = os.path.join(sim_dir, "history")
@@ -117,7 +111,7 @@ def build_workspace(cfg, sim_dir, launch_date):
 def _seal(cfg, config_path, reason):
     payload = seal_mod.seal(cfg)
     write_json(cfg["artifacts"]["bundle_path"], payload)
-    history.archive(cfg, payload, config_path=config_path, reason=reason)
+    provenance.archive(cfg, payload, config_path=config_path, reason=reason)
     return payload["bundle"]
 
 
@@ -140,7 +134,7 @@ def ingest_feed(store, feed, failures=None):
     ingester's report with `emitted` added) -- the same step the
     simulator's morning and the integration cycle run."""
     decisions = store.load_decisions()
-    outcomes, rep = ingest.build_outcomes(decisions, feed, load_failures(failures))
+    outcomes, rep = ingest.build_outcomes(decisions, feed, ingest.load_failures(failures))
     rep["emitted"] = int(sum(store.emit_outcome(o) for o in outcomes))
     return decisions, rep
 

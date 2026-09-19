@@ -1125,28 +1125,27 @@ now. Dates are owner sign-off.
   `advance --feed` runs -- had never been executed. Fixed with the test
   that runs the command.
 
-- **A folder that copies the closure shows the closure's shape** (owner,
-  09-19). The first pricing folder carried 36 modules and 8,400 lines,
-  and the owner asked why a minimal folder was not minimal. It was
-  copied verbatim, which is right; the closure was wrong. Five modules
-  were there for re-export shims -- "moved to X; the names stay here for
-  callers" -- in `explore`, `config`, `provenance` and `train_baseline`,
-  pulling the budget walk, the spread ledger, the audit trail, the
-  clustering maths and the whole level-factor fit into a folder that
-  prices. Two more were there for one function each (`lookup_r`,
-  `load_failures`). And the trainer was the applier's file, so
-  `--fit-calibration`'s import inside `main()` dragged the fitter along.
-  Every shim is gone and its callers import the real home; the reader of
-  the r table lives with the loader that loads it (`fit.artifacts`); the
-  failed-pushes table has its own small module (`daily.failures`); and
-  the applier is `fit.model`, the trainer `fit.train_baseline` -- the
-  hour imports the first and never the second. The folder rebuilt to 26
-  modules and 6,460 lines with no behaviour change anywhere, and the
-  lesson is the general one: a compatibility re-export is a dependency
-  edge nobody meant, and the first tool that walks the graph will find it.
-  Beside it, `exploration.mode` (SET BY OWNER): `exploit` prices at p*
-  only for the integration phase -- the hourly loop tested alone, no
-  draw, no learning -- and the rehearsal always explores.
+- **The pricing folder is maintained in place; the repository is not
+  refactored for it** (owner, 09-19). The first folder was the verbatim
+  import closure, 36 modules, and the owner asked why a minimal folder
+  was not minimal. The closure was fat for reasons in the repository:
+  five re-export shims ("moved to X; the names stay here for callers")
+  pulling the budget walk, the ledger, the audit trail, the clustering
+  maths and the level-factor fit into a folder that prices; two modules
+  there for one function; and the trainer being the applier's file. I
+  removed all of it across sixty files, and the owner's answer was to
+  confine the change to the folder and leave the codebase alone. So the
+  refactor is reverted, and the folder is a hand-maintained copy: one
+  file per repository module, most verbatim and pinned to their sources
+  by `ops.integration --check` (a fix to the engine is ported or the
+  suite fails), and a listed few curated with the reason -- the shims
+  dropped in the copies, `fit/model.py` the applier without `train()`,
+  `daily/failures.py` the one loader, `EXPLOIT_ONLY` fixed on in the
+  batch caller. 26 modules, 6,459 lines. The trade is explicit: the
+  curated files are ported by hand when their source moves, and the
+  manifest is the list to walk. Exploit-only lives in the folder's copy,
+  not in config.yaml, so the synced config needs no key and the
+  rehearsal, shadow and the repository's lane are untouched.
 
 ## The lesson under all of it
 

@@ -53,7 +53,7 @@ def _store(cfg, tmp_path, n, cost_each, date="2026-08-19", history_days=3,
     trailing base and the controller correctly holds tau still."""
     # these fixtures carry a few days of history: the base must reach back
     # a whole budget_il_window_days before the controller reads it
-    # (engine.budget.budget_base_ready), so the window here is one day
+    # (explore.budget_base_ready), so the window here is one day
     cfg["exploration"]["budget_il_window_days"] = 1
     store = EventStore(cfg, root=str(tmp_path / "events"))
     i = 0
@@ -342,7 +342,8 @@ def test_a_weekly_batch_is_walked_day_by_day_never_graded_as_one_day(cfg, tmp_pa
     """With a weekly --apply (learning.update_cadence_days) seven closed days
     arrive at once. Grading only the latest one skipped six corrections;
     the walk takes one clipped step per day, the same walk shadow's trace
-    runs (engine.budget.walk_tau)."""
+    runs (explore.walk_tau)."""
+    from engine import explore
     store = _store(cfg, tmp_path, 20, cost_each=5000.0, history_days=3,
                    history_cost=5000.0)                # four overspending days
     posterior = _posterior(cfg, tmp_path, calibrated_through=None)
@@ -355,7 +356,7 @@ def test_a_weekly_batch_is_walked_day_by_day_never_graded_as_one_day(cfg, tmp_pa
     assert block["days_walked"] == 4 and len(walked) == 3, block["by_day"]
     assert block["tau_after"] == pytest.approx(block["tau_before"] * lo ** 3, rel=1e-3)
     # and the walk is the shared one, step for step
-    tau_end, rows = budget_mod.walk_tau(
+    tau_end, rows = explore.walk_tau(
         block["tau_before"], [r["day"] for r in block["by_day"]],
         lambda day, t: {r["day"]: r["spend"] for r in block["by_day"]}[day],
         {}, posterior.widest_std(), cfg)

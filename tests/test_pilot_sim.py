@@ -127,11 +127,7 @@ def test_the_sim_config_moves_only_the_state_paths(cfg):
     for key in ("model_path", "feature_schema_path"):
         assert c["baseline_model"][key] == cfg["baseline_model"][key]
     assert c["dispersion"] == cfg["dispersion"]
-    # ... except the one switch: the rehearsal grades the FULL policy, so
-    # it explores whatever phase production is in (exploration.mode)
-    assert c["exploration"]["mode"] == "explore"
-    assert {k: v for k, v in c["exploration"].items() if k != "mode"} == \
-        {k: v for k, v in cfg["exploration"].items() if k != "mode"}
+    assert c["exploration"] == cfg["exploration"]
     assert cfg["data"]["launch_date"] is None                 # untouched
 
 
@@ -466,7 +462,7 @@ def test_the_schedule_reaches_a_week_it_deliberately_held():
     the applier; the --apply gate and advance's re-fit trigger read it as
     covered, not as a missed cron (the pilot simulator found the gate
     refusing every --apply of such a week)."""
-    from fit.model import schedule_reaches
+    from fit.train_baseline import schedule_reaches
 
     assert schedule_reaches({}) is None
     assert schedule_reaches({"by_week": {"2026-08-17": {}, "2026-08-24": {}},

@@ -31,7 +31,7 @@ from common.provenance import config_fingerprint
 from engine.decide import StateRejected, count_failures, decide
 from common.windows import hours_between                      # noqa: F401  (its home; callers keep the name)
 from events.pairs import ident, ident_series, iso_day
-from fit.artifacts import lookup_r
+from fit.fit_dispersion import lookup_r
 from fit import prepare_data
 from fit.prepare_data import add_ref_rate_features
 

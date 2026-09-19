@@ -32,7 +32,7 @@ from collections import Counter
 
 import pandas as pd
 
-from common.config import ConfigError, load_config
+from common.config import load_config
 from common.io import read_rows, write_json, write_jsonl
 from common.parallel import map_episodes
 from engine.state import (REQUEST_FIELDS, batch_context, build_states,       # noqa: F401
@@ -97,19 +97,6 @@ def plan(requests, priced_keys, cfg):
 
 # ------------------------------------------------------------------ batch
 
-EXPLORATION_MODES = ("explore", "exploit")
-
-
-def exploration_mode(cfg):
-    """`exploration.mode`: `explore` (the budgeted draw; the default when the
-    key is absent) or `exploit` (p* only). Anything else is a config
-    defect, named."""
-    mode = str(cfg["exploration"].get("mode") or "explore").strip().lower()
-    if mode not in EXPLORATION_MODES:
-        raise ConfigError(f"exploration.mode must be one of {EXPLORATION_MODES}, not {mode!r}")
-    return mode
-
-
 def run(cfg, requests, history=None, workers=None, seed=0, store=None, model=None,
         posterior=None, r_lookup=None, features=None):
     """Price `requests` (dicts in REQUEST_FIELDS) against the day's feature
@@ -151,13 +138,6 @@ def run(cfg, requests, history=None, workers=None, seed=0, store=None, model=Non
     # cells in category order, so the report's posterior_versions read so
     cats = sorted({r["category"] for r in canon.values()})
     ctx = batch_context(cfg, posterior, model, cats, seed)
-    # exploration.mode: `exploit` prices at p* only -- no draw, tau not
-    # read, so every decision records tau_current None the way a
-    # suspended day does and the learning lane holds those days. Lane B
-    # alone reads it: shadow and the rehearsal grade the full policy
-    mode = exploration_mode(cfg)
-    if mode == "exploit":
-        ctx["tau"] = None
     results = map_episodes(price_one, [(s, k) for s, (_, _, k) in zip(states, to_price)],
                            ctx, workers=workers)
 
@@ -221,7 +201,6 @@ def run(cfg, requests, history=None, workers=None, seed=0, store=None, model=Non
         "entry_requests_on_stale_features": int(stale),
         "tau_in_force": None if ctx["suspended"] else ctx["tau"],
         "exploration_suspended": ctx["suspended"],
-        "exploration_mode": mode,
         "model_version": ctx["model_version"],
         "config_digest": ctx["digest"],
         "posterior_versions": {c: int(v["version"]) for c, v in ctx["cells"].items()},
@@ -280,8 +259,7 @@ def main(argv=None):
              if report["requests_with_unknown_features"] else "")
           + (f" [{report['entry_requests_on_stale_features']} on a table from "
              f"{report['features_as_of']}]" if report["entry_requests_on_stale_features"] else "")
-          + (" -- exploration SUSPENDED" if report["exploration_suspended"] else "")
-          + (" -- EXPLOIT ONLY (exploration.mode)" if report["exploration_mode"] == "exploit" else ""))
+          + (" -- exploration SUSPENDED" if report["exploration_suspended"] else ""))
     for why, n in sorted(report["rejected_by_the_engine"].items()):
         print(f"  {n:,}  {why}")
     print(f"-> {args.out}")

@@ -291,7 +291,7 @@ def test_backtest_blocks_reported_separately(workspace):
 def test_decision_loop_and_exactly_once_update(workspace):
     _chdir(workspace)
     from common.config import load_config
-    from fit.model import BaselineModel
+    from fit.train_baseline import BaselineModel
     from evaluate.backtest import _attach_predictions
     from engine.posterior import PosteriorStore
     from events.store import EventStore, DECISION_REQUIRED
@@ -483,7 +483,7 @@ def test_fit_calibration_cli(workspace):
     assert all(0.0 <= w <= 1.0 for w in weights)
     # the trained model must still be loadable with factors applied
     from common.config import load_config
-    from fit.model import BaselineModel
+    from fit.train_baseline import BaselineModel
     cfg = load_config("config.yaml")
     d = pd.read_parquet("data/prepared.parquet").head(50)
     mu = BaselineModel(cfg).predict_mu_ref(d)
@@ -1134,7 +1134,7 @@ def test_a_set_launch_date_schedules_factors_past_the_gate(workspace, tmp_path):
     week being priced, or calibration_current refuses every --apply. Moving
     split.test_end instead rescopes every sealed fit."""
     from fit.calibrate import fit_level_calibration
-    from fit.model import schedule_reaches
+    from fit.train_baseline import schedule_reaches
     from common import windows
     from common.config import load_config
 
@@ -1368,11 +1368,11 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     with the parallel pool, and the checker passes the response against
     its snapshot. A dry run: the folder's store stays empty."""
     os.chdir(_ORIGINAL_CWD)
-    from ops import integration
     from ops.assign_episode_ids import assign
     from engine.posterior import PosteriorStore
     folder = str(workspace / "integration")
-    integration.build(ROOT, folder)
+    shutil.copytree(os.path.join(ROOT, "integration"), folder,
+                    ignore=shutil.ignore_patterns("__pycache__"))
 
     raw = pd.read_parquet(workspace / "data" / "flc.parquet")
     as_of = str((pd.Timestamp(raw.date.max()) + pd.Timedelta(days=1)).date())
@@ -1426,12 +1426,16 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     out = run_in("price_hour.py", "--snapshot", "snapshots/hour.csv",
                  "--features", f"features/{as_of}.parquet", "--workers", "0", "--dry-run",
                  "--out", "decisions/hour.csv", "--report", "reports/hours/hour.json")
-    assert "DRY RUN" in out
+    assert "DRY RUN" in out and "EXPLOIT ONLY" in out
     with open(os.path.join(folder, "reports", "hours", "hour.json")) as f:
         rep = json.load(f)
     assert rep["shelves"] == len(snap) and rep["decisions"] >= 1, rep
+    assert rep["exploration_mode"] == "exploit" and rep["explored"] == 0
     assert rep["decisions"] + rep["rejected"] + rep["shelves_empty"] == rep["shelves"]
     out = run_in("check_inputs.py", "--response", "decisions/hour.csv",
                  "--snapshot", "snapshots/hour.csv")
     assert "0 FAIL" in out, out
+    response = pd.read_csv(os.path.join(folder, "decisions", "hour.csv"))
+    assert len(response) == len(snap)
+    assert not response.is_exploration.fillna(False).astype(bool).any()
     assert not os.listdir(os.path.join(folder, "events_store"))

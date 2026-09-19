@@ -10,8 +10,7 @@ import json
 import pandas as pd
 import pytest
 
-from daily.failures import load_failures
-from daily.ingest_outcomes import build_outcomes
+from daily.ingest_outcomes import build_outcomes, load_failures
 
 
 def _dec(i, sku="7", fc="F1", date="2026-08-19", hour=17):

@@ -32,7 +32,7 @@ from collections import Counter
 
 import pandas as pd
 
-from common.config import ConfigError, load_config
+from common.config import load_config
 from common.io import read_rows, write_json, write_jsonl
 from common.parallel import map_episodes
 from engine.state import (REQUEST_FIELDS, batch_context, build_states,       # noqa: F401
@@ -97,17 +97,12 @@ def plan(requests, priced_keys, cfg):
 
 # ------------------------------------------------------------------ batch
 
-EXPLORATION_MODES = ("explore", "exploit")
-
-
-def exploration_mode(cfg):
-    """`exploration.mode`: `explore` (the budgeted draw; the default when the
-    key is absent) or `exploit` (p* only). Anything else is a config
-    defect, named."""
-    mode = str(cfg["exploration"].get("mode") or "explore").strip().lower()
-    if mode not in EXPLORATION_MODES:
-        raise ConfigError(f"exploration.mode must be one of {EXPLORATION_MODES}, not {mode!r}")
-    return mode
+# THIS FOLDER'S PHASE: exploit only. Every request is priced at p*; nothing
+# is drawn and tau is not read, so each decision records tau_current null
+# the way a suspended day does and the learning lane holds those days.
+# The budgeted draw is the repository's; this copy is the integration
+# phase -- the hourly loop tested alone, before any learning.
+EXPLOIT_ONLY = True
 
 
 def run(cfg, requests, history=None, workers=None, seed=0, store=None, model=None,
@@ -151,13 +146,9 @@ def run(cfg, requests, history=None, workers=None, seed=0, store=None, model=Non
     # cells in category order, so the report's posterior_versions read so
     cats = sorted({r["category"] for r in canon.values()})
     ctx = batch_context(cfg, posterior, model, cats, seed)
-    # exploration.mode: `exploit` prices at p* only -- no draw, tau not
-    # read, so every decision records tau_current None the way a
-    # suspended day does and the learning lane holds those days. Lane B
-    # alone reads it: shadow and the rehearsal grade the full policy
-    mode = exploration_mode(cfg)
-    if mode == "exploit":
-        ctx["tau"] = None
+    mode = "exploit" if EXPLOIT_ONLY else "explore"
+    if EXPLOIT_ONLY:
+        ctx["tau"] = None                    # no draw: p* for every request
     results = map_episodes(price_one, [(s, k) for s, (_, _, k) in zip(states, to_price)],
                            ctx, workers=workers)
 

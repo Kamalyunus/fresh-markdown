@@ -10,7 +10,6 @@ import pytest
 
 from conftest import _Applier, _calib_frame
 from fit import fit_dispersion as fd
-from fit.artifacts import lookup_r
 
 
 def test_an_r_at_a_search_bound_is_recognised_by_the_configured_tolerance(cfg):
@@ -71,14 +70,14 @@ def test_a_pinned_r_is_flagged_and_kept_out_of_the_clamp_percentile(
 def test_lookup_r_walks_the_fallback_chain_and_treats_zero_as_a_value():
     r = {"subcategory": {"S": 0.0}, "category": {"C": 2.0}, "global": 9.0,
          "fallback_order": ["subcategory", "category", "global"]}
-    assert lookup_r(r, "S", "C") == 0.0          # 0.0 is a value, not a miss
-    assert lookup_r(r, "X", "C") == 2.0
-    assert lookup_r(r, "X", "Y") == 9.0
+    assert fd.lookup_r(r, "S", "C") == 0.0          # 0.0 is a value, not a miss
+    assert fd.lookup_r(r, "X", "C") == 2.0
+    assert fd.lookup_r(r, "X", "Y") == 9.0
     # the vectorised form is the row rule, row for row
     sub = pd.Series(["S", "X", "X", "S"], index=[7, 3, 9, 1])
     cat = pd.Series(["C", "C", "Y", "Y"], index=[7, 3, 9, 1])
     got = fd.lookup_r_vec(r, sub, cat)
-    assert list(got) == [lookup_r(r, s, c) for s, c in zip(sub, cat)]
+    assert list(got) == [fd.lookup_r(r, s, c) for s, c in zip(sub, cat)]
     assert got.dtype == float
 
 

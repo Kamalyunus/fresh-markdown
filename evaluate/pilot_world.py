@@ -29,7 +29,7 @@ from common.config import reference_discount
 # (ops.price_batch) and the simulator share
 from engine.state import mu_ref_paths
 from fit.artifacts import load_bundle
-from fit.artifacts import lookup_r
+from fit.fit_dispersion import lookup_r
 from tools.make_dummy_flc import SCHEMA as FEED_SCHEMA
 
 # every fault the simulator can inject, its argument, and where it lands
