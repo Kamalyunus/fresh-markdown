@@ -11,10 +11,6 @@ import os
 
 import yaml
 
-# moved to common.clustering; the names stay for callers
-from common.clustering import (intraclass_correlation, design_effect,   # noqa: F401
-                               deff_from_episodes)
-
 
 class ConfigError(RuntimeError):
     pass

@@ -291,7 +291,7 @@ def test_backtest_blocks_reported_separately(workspace):
 def test_decision_loop_and_exactly_once_update(workspace):
     _chdir(workspace)
     from common.config import load_config
-    from fit.train_baseline import BaselineModel
+    from fit.model import BaselineModel
     from evaluate.backtest import _attach_predictions
     from engine.posterior import PosteriorStore
     from events.store import EventStore, DECISION_REQUIRED
@@ -483,7 +483,7 @@ def test_fit_calibration_cli(workspace):
     assert all(0.0 <= w <= 1.0 for w in weights)
     # the trained model must still be loadable with factors applied
     from common.config import load_config
-    from fit.train_baseline import BaselineModel
+    from fit.model import BaselineModel
     cfg = load_config("config.yaml")
     d = pd.read_parquet("data/prepared.parquet").head(50)
     mu = BaselineModel(cfg).predict_mu_ref(d)
@@ -1134,7 +1134,7 @@ def test_a_set_launch_date_schedules_factors_past_the_gate(workspace, tmp_path):
     week being priced, or calibration_current refuses every --apply. Moving
     split.test_end instead rescopes every sealed fit."""
     from fit.calibrate import fit_level_calibration
-    from fit.train_baseline import schedule_reaches
+    from fit.model import schedule_reaches
     from common import windows
     from common.config import load_config
 

@@ -1125,6 +1125,29 @@ now. Dates are owner sign-off.
   `advance --feed` runs -- had never been executed. Fixed with the test
   that runs the command.
 
+- **A folder that copies the closure shows the closure's shape** (owner,
+  09-19). The first pricing folder carried 36 modules and 8,400 lines,
+  and the owner asked why a minimal folder was not minimal. It was
+  copied verbatim, which is right; the closure was wrong. Five modules
+  were there for re-export shims -- "moved to X; the names stay here for
+  callers" -- in `explore`, `config`, `provenance` and `train_baseline`,
+  pulling the budget walk, the spread ledger, the audit trail, the
+  clustering maths and the whole level-factor fit into a folder that
+  prices. Two more were there for one function each (`lookup_r`,
+  `load_failures`). And the trainer was the applier's file, so
+  `--fit-calibration`'s import inside `main()` dragged the fitter along.
+  Every shim is gone and its callers import the real home; the reader of
+  the r table lives with the loader that loads it (`fit.artifacts`); the
+  failed-pushes table has its own small module (`daily.failures`); and
+  the applier is `fit.model`, the trainer `fit.train_baseline` -- the
+  hour imports the first and never the second. The folder rebuilt to 26
+  modules and 6,460 lines with no behaviour change anywhere, and the
+  lesson is the general one: a compatibility re-export is a dependency
+  edge nobody meant, and the first tool that walks the graph will find it.
+  Beside it, `exploration.mode` (SET BY OWNER): `exploit` prices at p*
+  only for the integration phase -- the hourly loop tested alone, no
+  draw, no learning -- and the rehearsal always explores.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,

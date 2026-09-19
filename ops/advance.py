@@ -36,7 +36,7 @@ from common.io import read_json, write_json
 from common.paths import (BACKTEST_REPORT, DECISIONS, JOURNAL, RAW, READINESS,   # noqa: F401
                           SHADOW_REPORT)
 from fit.artifacts import load_bundle
-from fit.train_baseline import schedule_reaches
+from fit.model import schedule_reaches
 from ops import status, tune
 from ops.config_keys import report_staleness
 # moved to ops.readiness; the names stay here for callers

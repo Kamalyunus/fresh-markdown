@@ -204,7 +204,11 @@ contract:
   `ops.price_batch` (the caller beneath it: requests in, a price per
   request out) — then applying the `apply_price` column it returns.
   `ops.check_inputs` checks their three tables (snapshot, feed, failed
-  pushes) before launch, the id column included. The nightly feed carries
+  pushes) before launch, the id column included, and the hour's response
+  (`--response`) the other way. `exploration.mode` (SET BY OWNER) is the
+  lane's one switch: `exploit` prices at p* only — nothing drawn, tau not
+  read, every decision exploitation, the integration phase — and
+  `explore` is the budgeted draw; shadow and the rehearsal always explore. The nightly feed carries
   the same `episode_id` too, so a window is one group-by for every reader
   and the checker can read a whole day of their ids against `EPISODE_RULE`
   at once — on the window BOUNDARIES, never the id's spelling, since the

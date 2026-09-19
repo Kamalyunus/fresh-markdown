@@ -155,7 +155,7 @@ def test_information_is_in_nb_units_not_poisson(cfg):
     overstated evidence by ~1.6-1.9x at production mu and r -- on top of
     what deff corrects -- so `information_increment` fired earlier than its
     face value. Design 5.11."""
-    from common.config import deff_from_episodes
+    from common.clustering import deff_from_episodes
 
     cell = {"mean": -1.0, "std": 0.6}
     dec = _decision(0, 1, 9)

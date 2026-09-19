@@ -18,7 +18,7 @@ from common import windows
 from common.io import write_json
 from common.provenance import stamp
 from fit.prepare_data import scope
-from fit.train_baseline import BaselineModel
+from fit.model import BaselineModel
 from fit import prior_density
 
 

@@ -43,8 +43,3 @@ def test_the_design_effect_floors_at_one_and_reads_m_per_batch():
     assert deff_from_episodes(0.5, ["e1", "e1", "e2", None]) == \
         pytest.approx(design_effect(0.5, 1.5))
 
-
-def test_the_old_home_still_resolves_the_one_function():
-    from common import config
-    assert config.intraclass_correlation is intraclass_correlation
-    assert config.deff_from_episodes is deff_from_episodes

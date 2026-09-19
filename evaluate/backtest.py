@@ -12,8 +12,8 @@ from common.config import load_config
 from common.io import write_json
 from common.provenance import config_fingerprint
 from fit.artifacts import load_bundle
-from fit.train_baseline import (BaselineModel, _solve_level_factors,
-                                category_factors)
+from fit.calibrate import _solve_level_factors, category_factors
+from fit.model import BaselineModel
 import numpy as np
 import pandas as pd
 from scipy.stats import binomtest
@@ -21,7 +21,8 @@ from scipy.stats import binomtest
 from fit.prepare_data import population, pre_launch, split_frames
 from common import episodes
 from engine import dp as dp_mod
-from engine import explore
+from engine import budget as budget_mod
+from engine import explore, spread_ledger
 from engine.posterior import launch_belief
 from engine.demand import (mu_at, expected_min_demand_inventory,
                             expected_min_demand_inventory_vec)
@@ -116,7 +117,7 @@ def calibration_window_sweep(d, cfg, r_lookup=None):
     the CALENDAR weeks [t-W, t), applied to week t. When the level trends,
     longer windows are MORE stale, not more accurate.
 
-    Each candidate window is fit by `fit.train_baseline._solve_level_factors`
+    Each candidate window is fit by `fit.calibrate._solve_level_factors`
     -- the estimator production runs (subcategory grain, shrinkage toward
     the parent, the censored basis when `r_lookup` is given, the
     `calibration_min_anchor_rows` floor) -- and applied through the same
@@ -785,7 +786,7 @@ def policy_replay(d_pred, cfg, max_episodes=None, seed=0, workers=None):
 
     # results return in submission order, so each pairs with its frame;
     # every decision's Q-spreads go to the ledger as they arrive
-    rows, ledger, replayed = [], explore.SpreadLedger(), []
+    rows, ledger, replayed = [], spread_ledger.SpreadLedger(), []
     results = fill_ledger(_replay_one, frames, cfg, workers, ledger,
                           lambda out: out[1] if out is not None else ())
     for e, out in zip(frames, results):
@@ -885,7 +886,7 @@ def derive_tau_initial(ledger, ep, cfg, launch_std):
     ep = pd.DataFrame(ep)
     n_days = int(episodes.calendar_days(episodes.opening_dates(ep)))
     # production's own budget rule at the launch posterior width
-    budget_per_day = float(explore.budget_today(
+    budget_per_day = float(budget_mod.budget_today(
         ep.actual_il.sum() / n_days, launch_std, cfg))
     # the block shadow's derivation shares (evaluate.tau); solved on
     # policy_replay's SAMPLE (--policy-episodes), not the window: the daily

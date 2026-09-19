@@ -23,7 +23,7 @@ Run: python3 -m ops.seal [--reason bootstrap|retrain|check-only|weekly-refit|con
 from common.cli import make_parser
 from common.config import load_config
 from common.io import write_json
-from common import provenance
+from common import history, provenance
 
 # what each re-seal reason allows to have moved since the previous seal:
 # a reason not listed here (a fit, or none given) allows everything
@@ -96,7 +96,7 @@ def main():
     payload = seal(cfg, reason=args.reason)
     path = cfg["artifacts"]["bundle_path"]
     write_json(path, payload)
-    snap = provenance.archive(cfg, payload, config_path=args.config,
+    snap = history.archive(cfg, payload, config_path=args.config,
                               reason=args.reason)
     print(f"sealed bundle {payload['bundle']}  ->  audit copy {snap}")
     for name, digest in payload["sha256"].items():

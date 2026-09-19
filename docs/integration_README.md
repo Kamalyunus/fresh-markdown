@@ -56,6 +56,15 @@ says which of the host, the config or the artifacts moved.
    against a scratch copy of the store and commits nothing. Then run the
    response check on what it wrote, with the snapshot it read.
 
+## This phase: exploit only
+
+`config.yaml` ships `exploration.mode: exploit`. Every decision is the
+engine's optimal price for the shelf; nothing is drawn, no budget is
+read, `is_exploration` is false on every row and the hourly line ends in
+`EXPLOIT ONLY`. That is deliberate for the integration phase: the loop is
+being tested, not the learner. The owner switches the mode; you never
+edit the config.
+
 ## The episode id is yours
 
 Every snapshot row carries `episode_id`, the name of the listing the row

@@ -24,7 +24,7 @@ from common import episodes
 from common.io import write_json
 from common.provenance import stamp
 from fit.prepare_data import scope
-from fit.train_baseline import BaselineModel
+from fit.model import BaselineModel
 
 
 def _censored_nll(r, k, mu, censored):
@@ -379,22 +379,10 @@ def drift_by_window(d, cfg, freq="W", model=None):
     }
 
 
-def lookup_r(r_lookup, subcategory, category):
-    """r for one row, down `fallback_order` (explicit None tests: 0.0 is a
-    value, not a miss)."""
-    keys = {"subcategory": str(subcategory), "category": str(category)}
-    for level in r_lookup["fallback_order"]:
-        if level == "global":
-            return r_lookup["global"]
-        r = r_lookup[level].get(keys[level])
-        if r is not None:
-            return r
-    return r_lookup["global"]
-
-
 def lookup_r_vec(r_lookup, subcategory, category):
-    """`lookup_r` over two aligned Series, as a float array -- the same
-    fallback chain, one map per level instead of a Python call per row."""
+    """`fit.artifacts.lookup_r` over two aligned Series, as a float array --
+    the same fallback chain, one map per level instead of a Python call
+    per row."""
     keys = {"subcategory": pd.Series(subcategory).astype(str),
             "category": pd.Series(category).astype(str)}
     out = pd.Series(np.nan, index=keys["subcategory"].index, dtype=float)

@@ -14,8 +14,8 @@ import pandas as pd
 import pytest
 
 from conftest import _Applier, _harness_cfg, _hours, episode_frame
-from engine import explore as explore_mod
-from engine.explore import SpreadLedger
+from engine import budget as budget_mod
+from engine.spread_ledger import SpreadLedger
 from evaluate.backtest import calibration_window_sweep
 
 
@@ -47,7 +47,7 @@ def test_the_sweep_fits_each_window_with_the_production_solver(cfg, monkeypatch)
     `_solve_level_factors` (its own category-grain ratio ranked a different
     estimator) on exactly the calendar weeks behind the eval week."""
     from evaluate import backtest as bt
-    from fit import train_baseline as tb
+    from fit import calibrate as tb
     calls = []
     real = tb._solve_level_factors
 
@@ -329,7 +329,7 @@ def test_the_tau_cross_check_uses_one_day_count_on_both_sides(cfg):
     out = derive_tau_initial(led, ep, cfg, launch_std=1.0)
     n = episodes.calendar_days(episodes.opening_dates(ep))
     assert out["days"] == n == 10
-    budget = explore_mod.budget_today(ep.actual_il.sum() / n, 1.0, cfg)
+    budget = budget_mod.budget_today(ep.actual_il.sum() / n, 1.0, cfg)
     assert out["daily_budget"] == pytest.approx(budget, abs=0.1)
     # the bisection lands just under the budget it was given -- on the SAME
     # day count (tau is reported to 2dp and spend steps at every cost, so
@@ -340,7 +340,7 @@ def test_the_tau_cross_check_uses_one_day_count_on_both_sides(cfg):
         led.implied_daily_spend(tau, n), rel=0.05)
     # the same ledger solved per trading day lands on the same tau: the
     # day count divides both sides and cancels
-    per_trading_day = explore_mod.budget_today(ep.actual_il.sum() / 3, 1.0, cfg)
+    per_trading_day = budget_mod.budget_today(ep.actual_il.sum() / 3, 1.0, cfg)
     assert led.solve_tau(per_trading_day, n_days=3) == pytest.approx(tau, rel=0.01)
 
 
@@ -453,7 +453,7 @@ def test_the_backtest_slices_to_pre_launch_before_anything_reads_the_frame(
                 "calibration_gate": "PASS"}, d
 
     # the bundle's model (fit.artifacts.load_bundle) is the applier
-    from fit import train_baseline as tb
+    from fit import model as tb
     monkeypatch.setattr(tb, "BaselineModel", lambda c: _Applier(c))
     monkeypatch.setattr(bt, "fidelity", fake_fidelity)
 

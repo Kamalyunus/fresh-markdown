@@ -13,7 +13,7 @@ import os
 from common.cli import make_parser
 from common.config import (OWN_DATA_WEIGHT, RUNTIME_REQUIRED,
                            artifact_mirror_drift, config_get, load_config)
-from common import provenance
+from common import history, provenance
 from common.guardrail import verdict_is_blocking, verdict_is_insufficient
 from common.io import read_json
 from ops import tune
@@ -92,7 +92,7 @@ def _bundle(cfg, state):
         detail += " · unsealed"
     if state["missing"]:
         detail += " · absent: " + ", ".join(state["missing"])
-    snaps = provenance.history_index(cfg)
+    snaps = history.history_index(cfg)
     detail += (f" · {len(snaps)} audit snapshot{'s' if len(snaps) != 1 else ''}"
                f" (latest {snaps[-1][1][:10]}, {snaps[-1][2] or 'no reason'})"
                if snaps else " · no audit snapshot yet")

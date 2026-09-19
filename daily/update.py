@@ -28,7 +28,7 @@ from events.frame import settled_episodes, il_by_close_day
 from engine import budget
 from engine.learn import grid_update
 from engine.posterior import PosteriorStore, bounded_step
-from fit.train_baseline import schedule_reaches, weeks_held_at_anchor
+from fit.model import schedule_reaches, weeks_held_at_anchor
 # moved to engine.learn; the name stays here for callers
 from engine.learn import row_information                                 # noqa: F401
 

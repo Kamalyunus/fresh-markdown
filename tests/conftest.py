@@ -14,7 +14,7 @@ import pytest
 from common.config import config_get, load_config as _load_config
 from common.provenance import stamp
 from engine.posterior import PosteriorStore
-from fit.train_baseline import BaselineModel
+from fit.model import BaselineModel
 
 # By path, not by CWD: the end-to-end tests chdir into a temp workspace, and
 # a bare load_config() there would read whichever config ran last.

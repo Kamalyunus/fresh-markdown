@@ -11,7 +11,7 @@ import os
 
 import pandas as pd
 
-from common import provenance
+from common import history, provenance
 from common.config import load_config
 from common.io import read_json
 from common.paths import DECISIONS, JOURNAL, READINESS
@@ -106,5 +106,5 @@ def write_readiness(config_path, root):
     open(os.path.join(root, READINESS), "w").write(text)
     # the audit trail: the bundle's snapshot carries how it graded
     seal = provenance.load_seal(cfg) or {}
-    provenance.archive_reports(cfg, root, seal.get("bundle"))
+    history.archive_reports(cfg, root, seal.get("bundle"))
     return text

@@ -19,10 +19,11 @@ exploration probability schedule or base rate; delta_min is a floor on the
 MOVE from the reference (derived per cell in `delta_min`, never a second
 knob), and the budget's std scaling has its own floor (`budget_scale`).
 
-This module is the chooser. The budget and the controller that walks tau
-are engine.budget; the Q-spread ledger the harnesses price tau against is
-engine.spread_ledger; the tau paste's provenance gate is ops.config_keys.
-Every name keeps resolving here for its callers.
+This module is the chooser and nothing else. The budget and the
+controller that walks tau are engine.budget; the Q-spread ledger the
+harnesses price tau against is engine.spread_ledger; the tau paste's
+provenance gate is ops.config_keys. Nothing is re-exported here: the
+hourly path imports the chooser alone.
 """
 
 import math
@@ -159,12 +160,3 @@ def select(dp_result, tau, rng, explorable=True, delta_min=0.0, costs=None):
                       exploration_cost=float(costs[j]))
     return choice
 
-
-# moved to engine.spread_ledger and engine.budget; the names stay here for
-# callers (`from engine import explore; explore.walk_tau`). The tau paste
-# gate is ops.config_keys.tau_provenance_error: a driver's check, not the
-# engine's
-from engine.spread_ledger import SpreadLedger                                  # noqa: E402,F401
-from engine.budget import (SUSPENDED, budget_base_ready, budget_held,          # noqa: E402,F401
-                           budget_scale, budget_today, tau_next,
-                           trailing_daily_il, walk_tau, _base_span)

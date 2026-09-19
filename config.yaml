@@ -115,6 +115,7 @@ pricing:
   demand_floor: 0.01                   # SET
 
 exploration:
+  mode: exploit                        # SET BY OWNER  exploit = price at p* only: nothing is drawn, tau is not read, every decision is exploitation (the integration phase: the hourly loop alone, no learning). explore = the budgeted draw below. Lane B (ops.price_batch) reads it; shadow and the pilot rehearsal grade the full policy and always explore
   budget_share_of_il: 0.01             # SET BY OWNER  exploration spend, share of markdown IL
   tau_initial: 348.93                  # MEASURED  shadow derives the launch tau (owner, 2026-09-06)
   tau_paste_tolerance_rel: 0.05        # SET  tau_initial paste vs its derivation. A PROVENANCE check, not precision: tau_initial seeds day one only and tau_next moves tau up to 25%/day, so a few percent is absorbed. Wrong-run pastes are off by tens of percent

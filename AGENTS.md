@@ -155,7 +155,7 @@ And the standing prohibitions:
     the NB pmf table — `engine.demand.nb_pmf_table`; the censored
     expectation, exact at every q — `expected_min_demand_inventory_vec`;
     the table width — `dp.table_width`; the week the factor schedule
-    reaches (a held week counts) — `fit.train_baseline.schedule_reaches`
+    reaches (a held week counts) — `fit.model.schedule_reaches`
     (the `--apply` gate and `advance`'s re-fit trigger); the level
     estimator — `fit.calibrate.solve_level_factors` (anchor fit, schedule,
     shadow's re-fit, the backtest's W sweep) on `attach_fit_basis`; the
@@ -347,7 +347,7 @@ fixture re-derives fixture values — read them, never commit them
 ## Repo conventions
 
 - One package per responsibility: `engine/` prices and learns, `events/`
-  records, `common/` defines, `fit/` builds the frozen artifacts,
+  records, `common/` defines, `fit/` builds the frozen artifacts (`fit.model` APPLIES them: the one half a priced hour imports),
   `evaluate/` grades them (backtest, shadow, thresholds), `daily/` is the
   production lane in run order, `ops/` drives and gates (`advance`,
   `bootstrap_loop`, `tune`, `status`, `init_posterior`, `seal`; `price_hour` and

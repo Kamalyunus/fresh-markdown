@@ -384,7 +384,7 @@ def test_the_affordable_set_empty_rate_reads_budgeted_decisions_only(cfg, tmp_pa
 
 def test_the_overspend_stop_takes_no_reading_while_the_il_base_is_short(cfg):
     """The stop compares the same budget the controller prices from, by the
-    same rule (explore.budget_base_ready): a base shorter than its window
+    same rule (budget.budget_base_ready): a base shorter than its window
     is no reading, so a launch's first over-budget mornings cannot fire it
     -- the owner's rehearsal lost the whole pilot to that on day three."""
     from common.guardrail import evaluate_guardrail

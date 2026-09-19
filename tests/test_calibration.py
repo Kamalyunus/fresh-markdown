@@ -12,6 +12,7 @@ import pytest
 from common import windows
 from conftest import _Applier, _prepared
 from fit import calibrate as cal
+from fit import model as fm
 from fit import train_baseline as tb
 
 
@@ -115,7 +116,8 @@ def test_a_pinned_global_factor_is_flagged_not_discarded(cfg):
 def test_the_vectorised_r_lookup_is_used_for_the_censored_basis(cfg):
     """One Python `lookup_r` call per row per schedule window was the cost;
     the vectorised chain gives the same r per row."""
-    from fit.fit_dispersion import lookup_r, lookup_r_vec
+    from fit.artifacts import lookup_r
+    from fit.fit_dispersion import lookup_r_vec
     r = {"subcategory": {"HOT": 3.0}, "category": {"C": 1.5}, "global": 5.0,
          "fallback_order": ["subcategory", "category", "global"]}
     calib = _anchor_frame({"HOT": ("C", 3, 6), "COLD": ("C", 3, 1),
@@ -175,11 +177,11 @@ def test_the_convergence_method_label_says_whether_the_resolve_was_kept(
 def test_training_and_inference_share_one_feature_encoder(cfg):
     levels = {"category": ["A", "B"]}
     d = pd.DataFrame({"category": ["B", "A", "Z"], "x": ["1", "2.5", "3"]})
-    X = tb.encode_features(d, ["category", "x"], ["category"], levels)
+    X = fm.encode_features(d, ["category", "x"], ["category"], levels)
     assert list(X.category) == [1, 0, -1]           # unseen level -> -1
     assert list(X.x) == [1.0, 2.5, 3.0]
     assert list(X.columns) == ["category", "x"]
-    for fn in (tb.train, tb.BaselineModel._matrix):
+    for fn in (tb.train, fm.BaselineModel._matrix):
         assert "encode_features(" in inspect.getsource(fn), fn.__qualname__
         assert "pd.Categorical(" not in inspect.getsource(fn), fn.__qualname__
 
@@ -191,7 +193,7 @@ def test_the_vectorised_factor_vector_matches_the_row_by_row_rule(cfg):
     anchor = {"A": 1.5, "B": 0.8}
     schedule = {"2026-07-06": {"A": 1.1},               # B missing -> 1.0
                 "2026-07-20": {"A": 1.3, "B": 0.9}}
-    m = tb.BaselineModel.__new__(tb.BaselineModel)
+    m = fm.BaselineModel.__new__(fm.BaselineModel)
     m.calibration, m.calibration_grain = anchor, "category"
     m.calibration_schedule = schedule
     m._reset_calibration_counters()
@@ -222,7 +224,7 @@ def test_the_vectorised_factor_vector_matches_the_row_by_row_rule(cfg):
         == (n_frozen, n_fallback, n_sched)
     assert n_frozen and n_fallback and n_sched, "every branch must be hit"
     # no per-row Python loop over the frame
-    src = inspect.getsource(tb.BaselineModel.level_factors)
+    src = inspect.getsource(fm.BaselineModel.level_factors)
     assert "enumerate(zip(" not in src
     # the pre-rename name survives only as an alias for the harness applier
 
@@ -402,7 +404,7 @@ def test_the_applier_waterfalls_a_cell_the_window_never_saw_to_its_category(cfg)
     """A subcategory absent from the fit window entirely (new assortment)
     prices at its CATEGORY's factor, then 1.0 -- in the anchor table and in
     every schedule week -- never at raw mu beside a category at 1.4."""
-    m = tb.BaselineModel.__new__(tb.BaselineModel)
+    m = fm.BaselineModel.__new__(fm.BaselineModel)
     m.cfg, m.calibration_grain = cfg, "subcategory"
     m.calibration = {"PORK": 1.5}
     m.calibration_category = {"MEAT": 1.4}
@@ -426,7 +428,7 @@ def test_factors_apply_by_the_week_the_episode_opened_not_the_rows_week(cfg):
     sat inside week w's fit window AND took week w's table -- a self-fit at
     every seam. An episode takes the table of the week it opened in; a
     frame without episode_id (the live forecast rows) reads the row date."""
-    m = tb.BaselineModel.__new__(tb.BaselineModel)
+    m = fm.BaselineModel.__new__(fm.BaselineModel)
     m.cfg, m.calibration_grain = cfg, "category"
     m.calibration = {"A": 9.0}
     m.calibration_schedule = {"2026-08-03": {"A": 1.1}, "2026-08-10": {"A": 1.3}}
@@ -458,7 +460,7 @@ def test_the_artifact_carries_the_parent_tables_and_the_held_cells(
     off = _prepared({"OFF": ("C", 1), "FAR": ("Z", 1)}, days[-3:])
     off["total_discount"] = 0.45
     d = pd.concat([d, off], ignore_index=True)
-    model, Applier = _Applier(cfg, 1.0), tb.BaselineModel
+    model, Applier = _Applier(cfg, 1.0), fm.BaselineModel
     monkeypatch.setattr(cal, "BaselineModel", lambda c: model)
     cal.fit_level_calibration(d, cfg)
     art = json.load(open(cfg["baseline_model"]["calibration_factor_path"]))
@@ -472,9 +474,9 @@ def test_the_artifact_carries_the_parent_tables_and_the_held_cells(
         assert set(sched["by_week_category"][w]) >= {"C"}
     assert "weeks_unfitted_held_at_anchor" in sched
     assert "weeks_unfitted_held_at_1" not in sched      # the former name is read, never written
-    assert tb.schedule_reaches({"by_week": {}, "weeks_unfitted_held_at_anchor": ["2026-09-07"]}) \
+    assert fm.schedule_reaches({"by_week": {}, "weeks_unfitted_held_at_anchor": ["2026-09-07"]}) \
         == "2026-09-07"
-    assert tb.weeks_held_at_anchor({"weeks_unfitted_held_at_1": ["2026-09-07"]}) == ["2026-09-07"]
+    assert fm.weeks_held_at_anchor({"weeks_unfitted_held_at_1": ["2026-09-07"]}) == ["2026-09-07"]
     # the loaded applier reads the parent tables
     applier = Applier.__new__(Applier)
     applier.cfg = cfg

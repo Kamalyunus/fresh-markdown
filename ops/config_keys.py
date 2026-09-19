@@ -184,6 +184,7 @@ INERT_PREFIXES = ("meta.", "events.", "artifacts.", "tuning.", "assurance.",
                   "monitoring.stop_conditions.price_mismatch_rate",
                   "monitoring.stop_conditions.event_quality_window_days",
                   "exploration.tau_paste_tolerance_rel",
+                  "exploration.mode",           # Lane B reads it; shadow always explores
                   "dispersion.rho_paste_tolerance_rel",
                   "posterior.path", "posterior.prior.path",
                   "baseline_model.model_path", "baseline_model.feature_schema_path",
