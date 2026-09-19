@@ -1,0 +1,15 @@
+# Exact versions the test suite and the frozen-seed comparison were run
+# against (Python 3.11). Install on the pricing host with
+#     pip install -r requirements.lock
+# so the library versions the seal recorded are the ones in force.
+numpy==2.2.6
+pandas==2.3.3
+pyarrow==25.0.1
+scipy==1.17.1
+PyYAML==6.0.1
+lightgbm==4.7.0
+pytest==9.1.1
+# fit.download_flc only, not exercised by the suite: install alongside on
+# the host that pulls the extract, at the floors requirements.txt names
+# psycopg2-binary>=2.9
+# python-dotenv>=1.0

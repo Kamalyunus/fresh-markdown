@@ -92,7 +92,11 @@ calls the reviewed solver — its exploration table too is `engine.explore`'s,
 embedded, never re-derived in the page, and its paths walk the reviewed
 replay's one forward simulation — and `e2e_cycle.py`, a thin driver of
 the reviewed simulator's shop (`evaluate.pilot_shop`) through the reviewed
-caller in a workspace) and `docs/` pages. The test suite is the
+caller in a workspace, and `build_integration.py`, which assembles
+`integration/`) and `docs/` pages. `integration/` itself is verbatim copies
+of reviewed files — the hourly path's import closure, each file's digest in
+its `MANIFEST.json` — so review the sources above, never the copies; its
+test refuses a copy that differs from its source. The test suite is the
 reviewers' asset, not their burden: every non-obvious rule named above has a
 test whose docstring states it in prose.
 

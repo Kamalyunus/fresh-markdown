@@ -1,0 +1,353 @@
+"""engine.posterior -- posterior read/write and the bounded-step projection.
+
+One record per cell (design 5.9). The persisted posterior is a Normal
+summary, never a stored grid -- the grid exists only inside the update
+computation, which keeps storage trivial and makes the bounded step of
+design 5.11 well-defined.
+
+Cell assignment (design 5.9) happens once at launch from phase-0 volumes:
+categories at or above min_episodes_per_week_for_cell get their own cell,
+everything else reads and feeds the global cell. There is no fallback chain
+and no _default key -- the global cell always exists.
+
+The store file also carries processed_outcome_ids so that posterior revision
+and processed-ID commit are a single atomic write (tmp + os.replace), giving
+the exactly-once property of design 5.9. The same file carries the
+exploration-suspension record (design 5.12): a fired stop condition suspends
+forced exploration only, exploitation pricing continues, and only a human
+(`daily.update --resume-exploration`) clears it.
+"""
+
+import contextlib
+import fcntl
+import json
+import os
+import tempfile
+
+import pandas as pd
+
+GLOBAL_CELL = "GLOBAL"
+
+
+def bounded_step(mean_before, std_before, raw_mean, raw_std, cfg):
+    """Design 5.11: clip the mean step, floor the std shrink, and keep the
+    mean inside [epsilon_min, epsilon_max] -- the sign constraint (rule 2)
+    holds structurally, not only because the grid moments happen to. Returns
+    (new_mean, new_std, clipped)."""
+    lc, pc = cfg["learning"], cfg["posterior"]
+    step = lc["max_mean_step"]
+    new_mean = min(max(raw_mean, mean_before - step), mean_before + step)
+    new_mean = min(max(new_mean, pc["epsilon_min"]), pc["epsilon_max"])
+    new_std = max(raw_std,
+                  std_before * (1.0 - lc["max_std_shrink"]),
+                  pc["min_std"])
+    clipped = (new_mean != raw_mean) or (new_std != raw_std)
+    return new_mean, new_std, clipped
+
+
+def launch_belief(mean, std, cfg):
+    """The mean a cell LAUNCHES at: the prior mean pushed
+    `posterior.cold_start_shift_std` prior stds toward more elastic and
+    clipped to the epsilon range (design 5.9). The std is untouched, so the
+    push is largest where the prior is widest and evidence weighs the same;
+    the bounded step walks it back if outcomes disagree. 0 = the prior."""
+    pc = cfg["posterior"]
+    shifted = float(mean) - float(pc.get("cold_start_shift_std") or 0.0) * float(std)
+    return float(min(max(shifted, pc["epsilon_min"]), pc["epsilon_max"]))
+
+
+class PosteriorStore:
+    """The production learning state, read from posterior.json once at
+    construction. Two writers share the file -- `daily.update` (cells, tau)
+    and `daily.monitor` (the exploration suspension) -- so a long-lived
+    reader (the hourly pricing service holding one store) sees neither
+    until it calls `reload()`. The contract: the CALLER reloads once per
+    decision batch, before its first `decide()`; `decide()` itself never
+    re-reads the file (one read per hour, not one per SKU).
+
+    Every write goes through ONE path, `_commit`: take the file lock,
+    re-read the file, apply the mutation to what is on disk, write. A
+    writer never writes the state it loaded earlier, so a suspension the
+    monitor wrote between an `--apply`'s load and its write survives it,
+    and neither writer can empty the other's processed-id ledger."""
+
+    def __init__(self, cfg, path=None):
+        self.cfg = cfg
+        self.path = path or cfg["posterior"]["path"]
+        self.reload()
+
+    def reload(self):
+        """Re-read the file, dropping every cached view of the old state.
+        Returns self, so `store.reload().get(...)` chains; a fresh
+        `PosteriorStore(cfg)` has already read the file once."""
+        with open(self.path) as f:
+            self.state = json.load(f)
+        self._processed = None
+        return self
+
+    @contextlib.contextmanager
+    def _locked(self):
+        """Exclusive lock beside the file for the reload-mutate-write
+        window; the atomic replace keeps readers whole without it."""
+        fd = os.open(self.path + ".lock", os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def _commit(self, mutate):
+        """Load-modify-write: `mutate(state)` runs on the state re-read
+        from disk under the lock, its result (or the state) is written,
+        and `self.state` is that written state."""
+        with self._locked():
+            self.reload()
+            out = mutate(self.state)
+            self.state = self.state if out is None else out
+            self._atomic_write(self.path, self.state)
+        return self.state
+
+    @staticmethod
+    def launch_state(cfg, prior_by_category, episodes_per_week):
+        """The state initialise() writes: every cell at its launch belief,
+        categories routed by phase-0 weekly volume (assignment does not move
+        during the MVP window). Pure, so launch_stale() can recompute it."""
+        floor = cfg["posterior"]["min_episodes_per_week_for_cell"]
+        cell_of = {c: (c if episodes_per_week.get(c, 0) >= floor else GLOBAL_CELL)
+                   for c in prior_by_category}
+
+        def record(mean, std):
+            return {"mean": launch_belief(mean, std, cfg), "prior_mean": float(mean),
+                    "std": float(std), "n_obs": 0,
+                    "accumulated_information": 0.0,
+                    "version": 0,
+                    "updated_at": pd.Timestamp.now("UTC").isoformat()}
+
+        cells = {c: record(p["mean"], p["std"])
+                 for c, p in prior_by_category.items() if cell_of[c] == c}
+        # global cell: precision-weighted average is over-confident for a
+        # prior; use the simple mean of member means and the widest member std
+        members = [p for c, p in prior_by_category.items()
+                   if cell_of[c] == GLOBAL_CELL]
+        if not members:
+            members = list(prior_by_category.values())
+        cells[GLOBAL_CELL] = record(
+            sum(m["mean"] for m in members) / len(members),
+            max(m["std"] for m in members))
+        return {"cells": cells, "cell_of": cell_of,
+                "processed_outcome_ids": [],
+                "prior_source": "profile_density",
+                "cold_start_shift_std": float(
+                    cfg["posterior"].get("cold_start_shift_std") or 0.0)}
+
+    @classmethod
+    def initialise(cls, cfg, prior_by_category, episodes_per_week, path=None):
+        """Create posterior.json at launch (design 5.9)."""
+        path = path or cfg["posterior"]["path"]
+        state = cls.launch_state(cfg, prior_by_category, episodes_per_week)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        cls._atomic_write(path, state)
+        return cls(cfg, path)
+
+    @staticmethod
+    def _atomic_write(path, state):
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
+                                   prefix=".posterior-")
+        # fsync file AND directory: without them a power failure can lose the
+        # learning state and its exactly-once ledger
+        with os.fdopen(fd, "w") as f:
+            json.dump(state, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+    def launch_stale(self, prior_by_category, episodes_per_week):
+        """True while the store holds NO production state and its cells
+        differ from what initialise() would write now (the launch belief
+        moved, or the prior did). Once an outcome has been consumed, tau has
+        walked, or a stop condition has suspended exploration, the file is
+        production state and the process never re-initialises it -- a re-init
+        would silently lift a suspension and reset tau to the launch value."""
+        if self.state.get("processed_outcome_ids") \
+                or self.state.get("tau") is not None \
+                or self.state.get("exploration_suspended"):
+            return False
+        fresh = self.launch_state(self.cfg, prior_by_category, episodes_per_week)
+        mine = {c: (round(r["mean"], 9), round(r["std"], 9))
+                for c, r in self.state["cells"].items()}
+        want = {c: (round(r["mean"], 9), round(r["std"], 9))
+                for c, r in fresh["cells"].items()}
+        return mine != want or self.state["cell_of"] != fresh["cell_of"]
+
+    def cell_name(self, category):
+        return self.state["cell_of"].get(str(category), GLOBAL_CELL)
+
+    @staticmethod
+    def active_cells(cells, cell_of):
+        """The cells that can still learn: routed to by some category now, or
+        holding outcomes already (routing can move after a re-initialise).
+        An unrouted GLOBAL takes no outcome and never narrows, so every
+        per-cell reading -- the budget's widest std, the flat-std alert --
+        is taken over THIS set, never over every cell in the file."""
+        routed = set(cell_of.values())
+        return [c for c, r in cells.items()
+                if c in routed or r.get("n_obs", 0) > 0]
+
+    @staticmethod
+    def widest_active_std(cells, cell_of):
+        """Widest std among `active_cells` -- the cell with the most still to
+        learn, which the exploration budget is sized for (design 5.8)."""
+        active = [cells[c]["std"] for c in
+                  PosteriorStore.active_cells(cells, cell_of)]
+        return max(active) if active else max(r["std"] for r in cells.values())
+
+    def widest_std(self):
+        """The std the exploration budget is sized for: the routed cell with
+        the most still to learn."""
+        return self.widest_active_std(self.state["cells"],
+                                      self.state["cell_of"])
+
+    def get(self, category):
+        """The record priced with: the category's own cell or the global cell.
+        It always exists -- initialised from the prior at launch."""
+        return self.state["cells"][self.cell_name(category)]
+
+    def is_processed(self, outcome_id):
+        # cached: the ledger only grows, and rebuilding the set per lookup
+        # made the daily batch quadratic in its own history
+        if self._processed is None:
+            self._processed = set(self.state["processed_outcome_ids"])
+        return outcome_id in self._processed
+
+    def commit_update(self, cell, new_mean, new_std, n_new_obs,
+                      effective_information, outcome_ids, applied):
+        """Atomically persist a revision with the outcome IDs it consumed
+        (both commit or neither). An outcome is marked processed ONLY when a
+        revision consumes it -- a sub-threshold batch stays whole and is
+        re-read tomorrow (design 5.11).
+        """
+        if not applied:
+            return                       # nothing consumed, nothing persisted
+
+        def mutate(state):
+            rec = state["cells"][cell]
+            # no information_since_update counter -- the trigger reads the
+            # unconsumed batch, never a running total (design 5.11)
+            rec["mean"], rec["std"] = float(new_mean), float(new_std)
+            rec["version"] += 1
+            rec["accumulated_information"] += effective_information
+            rec["updated_at"] = pd.Timestamp.now("UTC").isoformat()
+            rec["n_obs"] += n_new_obs
+            state["processed_outcome_ids"].extend(outcome_ids)
+        self._commit(mutate)
+
+    # tau is production learning state: it lives here, not in hand-
+    # maintained config.yaml (design 5.8).
+
+    def tau(self):
+        """The exploration budget in force, in currency.
+
+        Falls back to `exploration.tau_initial` until the first calibration:
+        a launch that has spent nothing has nothing to calibrate from. Read
+        from the store's own config: the file and the config it was
+        initialised under are one state.
+        """
+        stored = self.state.get("tau")
+        return float(stored) if stored is not None \
+            else self.cfg["exploration"]["tau_initial"]
+
+    def tau_calibrated_through(self):
+        """The last date tau was calibrated for, or None."""
+        return self.state.get("tau_calibrated_through")
+
+    def tau_day_walked(self, day):
+        """Has the controller already graded `day`? Read off the walked-day
+        ledger (`tau_walked_days`); a day before the ledger began counts as
+        walked, and a file with no ledger yet reads the through-date alone.
+        A priced day the ledger does not hold is one whose outcomes arrived
+        AFTER a later day was walked -- graded on the next walk, never
+        skipped (each day's step is tau-independent, so order cannot
+        change where the walk lands)."""
+        day = str(day)
+        ledger = self.state.get("tau_walked_days")
+        if ledger is None:
+            done = self.tau_calibrated_through()
+            return done is not None and day <= str(done)
+        before = self.state.get("tau_walked_before")
+        return day in ledger or (before is not None and day <= str(before))
+
+    def commit_tau(self, tau, through_date, days=()):
+        """Persist a recalibrated tau, stamped with the latest date it
+        consumed and the days the walk graded -- the exactly-once-per-day
+        guard (`tau_day_walked`)."""
+        days = sorted({str(d) for d in days})
+
+        def mutate(state):
+            if days and "tau_walked_days" not in state:
+                # the ledger starts here: whatever was calibrated before it
+                # existed counts as walked, not as late outcomes
+                state["tau_walked_before"] = state.get("tau_calibrated_through")
+            if days:
+                state["tau_walked_days"] = sorted(
+                    set(state.get("tau_walked_days") or []) | set(days))
+            state["tau"] = float(tau)
+            state["tau_calibrated_through"] = max(
+                [str(through_date)] + [str(state.get("tau_calibrated_through") or "")])
+            state["tau_updated_at"] = pd.Timestamp.now("UTC").isoformat()
+        self._commit(mutate)
+
+    # exploration suspension (design 5.12): a fired stop condition stops
+    # FORCED exploration only -- decide() prices with no budget and records
+    # tau_current None -- while exploitation continues. Set by
+    # daily.monitor, cleared only by a human (update --resume-exploration).
+
+    def exploration_suspended(self):
+        """The suspension record {reasons, since, updated_at}, or None."""
+        return self.state.get("exploration_suspended")
+
+    @staticmethod
+    def suspension_line(record, remedy):
+        """The one printed sentence for a suspension in force -- since
+        when, why, that exploitation continues -- with the caller's remedy
+        (update names its own flag, the monitor names update's)."""
+        return (f"EXPLORATION SUSPENDED since {record['since']} "
+                f"({', '.join(record['reasons'])}); exploitation continues. "
+                + remedy)
+
+    def suspend_exploration(self, reasons, since):
+        """Suspend forced exploration for `reasons` (stop-condition names)
+        from `since` (the trading day that fired it). Idempotent: a second
+        call keeps the FIRST `since` and unions the reasons, so a stop that
+        keeps firing does not restart the clock. Same atomic write as the
+        cells. Returns the record."""
+        if not set(reasons):
+            raise ValueError("suspend_exploration needs at least one reason")
+
+        def mutate(state):
+            current = state.get("exploration_suspended")
+            merged = sorted(set(reasons) | set(current["reasons"] if current else ()))
+            record = {"reasons": merged,
+                      "since": current["since"] if current else str(since)}
+            if current and current["reasons"] == merged \
+                    and current["since"] == record["since"]:
+                return                         # nothing changed
+            record["updated_at"] = pd.Timestamp.now("UTC").isoformat()
+            state["exploration_suspended"] = record
+        self._commit(mutate)
+        return self.state["exploration_suspended"]
+
+    def resume_exploration(self):
+        """Clear the suspension (the human gate). Returns the record cleared,
+        or None when exploration was not suspended."""
+        cleared = {}
+
+        def mutate(state):
+            cleared["record"] = state.pop("exploration_suspended", None)
+        self._commit(mutate)
+        return cleared["record"]

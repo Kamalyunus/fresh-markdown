@@ -5,6 +5,7 @@ randomized-policy dataset."""
 import copy
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -1352,3 +1353,81 @@ def test_the_e2e_cycle_prices_ingests_and_pairs(workspace, tmp_path):
     assert not os.path.exists(cfg["posterior"]["path"])
     for sub in ("snapshots", "decisions", "feed", "features", "exports", "events_store"):
         assert os.listdir(os.path.join(out_dir, sub))
+
+
+def test_the_integration_folder_prices_an_hour_with_the_repository_off_the_path(
+        workspace, tmp_path):
+    """The standalone folder, set up as its README says -- the owner's
+    artifacts and extract dropped in, launch_date set -- runs the morning
+    feature job and then prices a top-of-hour snapshot through the whole
+    engine, in subprocesses whose only source is the folder itself. The
+    snapshot is the extract's last day at one hour, re-dated to the day
+    after it (the day the feature table is for), the closed-hour columns
+    nulled, the ids assigned by the folder's own rule script."""
+    os.chdir(_ORIGINAL_CWD)
+    from tools import build_integration as bi
+    from engine.posterior import PosteriorStore
+    folder = str(tmp_path / "pricing")
+    bi.build(ROOT, folder)
+
+    # the owner's artifacts and extract, as the README lists them
+    for name in os.listdir(workspace / "artifacts"):
+        src = workspace / "artifacts" / name
+        if src.is_file():
+            shutil.copyfile(src, os.path.join(folder, "artifacts", name))
+    shutil.copyfile(workspace / "data" / "flc.parquet",
+                    os.path.join(folder, "data", "flc_raw.parquet"))
+    raw = pd.read_parquet(workspace / "data" / "flc.parquet")
+    as_of = str((pd.Timestamp(raw.date.max()) + pd.Timedelta(days=1)).date())
+
+    # the config: the workspace's, launch_date set, rho mirroring the
+    # fitted artifact (the strict loader refuses a stale paste)
+    with open(workspace / "config.yaml") as f:
+        cfg = yaml.safe_load(f)
+    with open(workspace / "artifacts" / "rho.json") as f:
+        cfg["dispersion"]["rho"] = json.load(f)["rho"]
+    cfg["data"]["launch_date"] = as_of
+    with open(os.path.join(folder, "config.yaml"), "w") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False)
+    with open(os.path.join(folder, "artifacts", "prior.json")) as f:
+        prior = json.load(f)
+    PosteriorStore.initialise(cfg, prior["per_category"], prior["episodes_per_week"],
+                              path=os.path.join(folder, "artifacts", "posterior.json"))
+
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+
+    def run_in(*args):
+        r = subprocess.run([sys.executable, *args], cwd=folder, env=env,
+                           capture_output=True, text=True)
+        assert r.returncode == 0, " ".join(args) + "\n" + r.stdout + r.stderr
+        return r.stdout
+
+    # the morning: the feature table for as_of, seeded from the extract
+    run_in("-m", "daily.features", "--as-of", as_of)
+    features = os.path.join("features", f"{as_of}.parquet")
+    assert os.path.exists(os.path.join(folder, features))
+
+    # the hour: the last day's busiest open hour, re-dated to as_of
+    last = raw[raw.date == raw.date.max()]
+    open_rows = last[(last.inventory > 0) & (last.flc_window > 1)]
+    hour = int(open_rows.hour.value_counts().idxmax())
+    snap = open_rows[open_rows.hour == hour].copy()
+    snap["date"] = as_of
+    for col in ("units_sold", "ending_inventory", "final_price"):
+        snap[col] = None
+    snap.to_csv(os.path.join(folder, "snapshots", "hour.csv"), index=False)
+    run_in("-m", "ops.assign_episode_ids", "--hour", "snapshots/hour.csv",
+           "--out", "snapshots/hour_ids.csv")
+    out = run_in("-m", "ops.price_hour", "--snapshot", "snapshots/hour_ids.csv",
+                 "--features", features, "--workers", "1", "--dry-run",
+                 "--out", "decisions/hour.csv", "--report", "reports/hours/hour.json")
+    assert "DRY RUN" in out
+    with open(os.path.join(folder, "reports", "hours", "hour.json")) as f:
+        rep = json.load(f)
+    assert rep["shelves"] == len(snap)
+    assert rep["decisions"] >= 1, rep
+    assert rep["decisions"] + rep["rejected"] + rep["shelves_empty"] == rep["shelves"]
+    response = pd.read_csv(os.path.join(folder, "decisions", "hour.csv"))
+    assert len(response) == len(snap)
+    # a dry run commits nothing: the folder's store is still empty
+    assert not os.listdir(os.path.join(folder, "events_store"))

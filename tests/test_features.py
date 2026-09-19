@@ -82,3 +82,25 @@ def test_the_days_table_equals_the_per_batch_computation(cfg, tmp_path, monkeypa
     direct = ref_rate_table(hist, "2026-03-09", c)
     pd.testing.assert_frame_equal(direct.reset_index(drop=True), table.reset_index(drop=True),
                                   check_dtype=False)
+
+
+def test_the_morning_command_line_writes_the_table(cfg, tmp_path, monkeypatch):
+    """`python3 -m daily.features --feed ...` is the cron line (and what
+    ops.advance --feed runs). It once raised on its own `--out` -- the
+    parser never defined it -- because every test called build() and the
+    driver was never exercised as a command. Default path and --out both."""
+    import json
+    import yaml
+    monkeypatch.chdir(tmp_path)
+    c = _cfg(cfg, tmp_path)
+    with open("config.yaml", "w") as f:
+        yaml.safe_dump(c, f, sort_keys=False)
+    feed = write_extract(tmp_path, _days(1, "2026-03-01", 8), name="feed.parquet")
+    assert features.main(["--feed", str(feed), "--as-of", "2026-03-09",
+                          "--config", "config.yaml", "--report", "morning.json"]) == 0
+    rep = json.load(open("morning.json"))
+    assert rep["as_of"] == "2026-03-09" and os.path.exists(rep["out"])
+    assert rep["out"] == os.path.join(c["features"]["table_dir"], "2026-03-09.parquet")
+    assert features.main(["--feed", str(feed), "--as-of", "2026-03-09",
+                          "--config", "config.yaml", "--out", "custom.parquet"]) == 0
+    assert os.path.exists("custom.parquet")
