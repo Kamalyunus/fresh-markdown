@@ -61,8 +61,16 @@ missing or moved.
 
 Every row is priced from the row itself, the artifacts and the feature
 table of its episode's opening day. Nothing is looked up from an earlier
-hour, no store is read, and a re-sent hour gets the identical answer. Two
-things in the row make that possible, and both are yours to supply:
+hour, no store is read, and a re-sent hour gets the identical answer. The
+snapshot may come in either spelling, one per file: the hourly table's
+columns (`skuseq, fc, date, hour, episode_id, inventory, discount, normal_asp,
+cogs_wo_vat, flc_window, category, subcategory`) or the request's twelve
+fields from the handover's Appendix C (`episode_id, sku_id, fc, category,
+subcategory, date, hour_of_day, hours_remaining, q, original_price, cost,
+current_discount`, the counter this hour included and the discount a
+fraction). The hour reads both into one row, says which arrived in the
+report (`snapshot_schema`) and refuses a file that mixes them. Two things
+in the row make the statelessness possible, and both are yours to supply:
 
 - **`episode_id` is the opening tag** of the row's episode:
   `<skuseq>|<fc>|<day>T<hh>`, the shelf-hour the episode began. A row whose
@@ -71,11 +79,11 @@ things in the row make that possible, and both are yours to supply:
   and is a later hour (the price may only step deeper). An id that is not
   a tag, names another shelf, or opens after the row's hour is refused
   with the reason, and counted (`episode_ids_that_place_no_hour`).
-- **`discount` is the price in force.** Null on an entry row. On every
-  later row of the episode it is the discount this service applied last
-  hour, in percent, piped back by you — the anchor the hour steps from. A
-  later row without it is refused (`later_hours_without_the_price_in_force`),
-  never priced as an entry.
+- **`discount` (percent) or `current_discount` (fraction) is the price in
+  force.** Null on an entry row. On every later row of the episode it is
+  the discount this service applied last hour, piped back by you — the
+  anchor the hour steps from. A later row without it is refused
+  (`later_hours_without_the_price_in_force`), never priced as an entry.
 
 The forecast is re-made every hour over the remaining hours, on the two
 demand-rate features from `features/<opening day>.parquet`, so every hour

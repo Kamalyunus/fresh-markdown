@@ -3,12 +3,15 @@ shelf out. Stateless: every row is priced from the row, the artifacts and
 the feature table of its episode's opening day; nothing is looked up from
 an earlier hour, and the log this hour appends to is never read here.
 
-The row's `episode_id` is the opening tag of its episode
-(`<sku>|<fc>|<day>T<hh>`, the shelf-hour the episode began), so the row is
-an ENTRY when the tag names this shelf-hour and a later hour of the episode
-otherwise. `discount` is the price in force: null on an entry row, and on a
-later row the price this service applied last hour, piped back by the
-producers -- the anchor a later hour may only step deeper from.
+The snapshot comes in either spelling -- the hourly table's columns or the
+request's twelve fields (handover Appendix C) -- and is read into one. The
+row's `episode_id` is the opening tag of its episode (`<sku>|<fc>|<day>T<hh>`,
+the shelf-hour the episode began), so the row is an ENTRY when the tag names
+this shelf-hour and a later hour of the episode otherwise. The price in force
+(`discount`, a percent, or `current_discount`, a fraction) is null on an
+entry row, and on a later row the price this service applied last hour,
+piped back by the producers -- the anchor a later hour may only step deeper
+from.
 
 Run: python3 price_hour.py --snapshot <rows> [--features features/]
         --out <hour>.csv [--report <hour>.json] [--hour YYYY-MM-DDTHH]
@@ -237,7 +240,8 @@ def price_batch(cfg, requests, features, batch_day, model, posterior, r_lookup, 
 
 # ---------------------------------------------------------------- the hour
 
-def run(cfg, snapshot_rows, features=None, hour=None, workers=None, dry_run=False):
+def run(cfg, snapshot_rows, features=None, hour=None, workers=None, dry_run=False,
+        snapshot_schema="feed"):
     """One hour: the requests from the snapshot, priced, the response in the
     feed's units; the decisions and rejections appended to the log unless
     `dry_run`. Returns (response rows, decisions, report)."""
@@ -272,6 +276,7 @@ def run(cfg, snapshot_rows, features=None, hour=None, workers=None, dry_run=Fals
     logged = {"decisions_logged": log.append("decisions", decisions),
               "rejections_logged": log.append("rejections", rejections)}
     report = {"hour": f"{when[0]}T{when[1]:02d}" if when else None,
+              "snapshot_schema": snapshot_schema,
               "shelves": len(openings), "other_hours_rows_ignored": other_hours,
               **counts, "dry_run": bool(dry_run), "contract": CONTRACT, **rep, **logged}
     return response, decisions, report
@@ -291,8 +296,9 @@ def _response(skuseq, fc, date, hour, episode_id, answer, rejected):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="price_hour.py")
     ap.add_argument("--snapshot", required=True,
-                    help="the shelf at the top of the hour, in the feed's schema "
-                         "(parquet, CSV or JSONL); other hours' rows are ignored")
+                    help="the shelf at the top of the hour (parquet, CSV or JSONL), in the "
+                         "hourly table's columns or in the request's twelve fields -- one "
+                         "spelling per file; other hours' rows are ignored")
     ap.add_argument("--features", default=None,
                     help="the feature tables: a directory of <day>.parquet (default "
                          "features/), or one file used for every request")
@@ -305,8 +311,10 @@ def main(argv=None):
                     help="write the response and the report; append nothing to the log")
     args = ap.parse_args(argv)
     cfg = load_config(args.config)
-    response, decisions, report = run(cfg, read_snapshot(args.snapshot), features=args.features,
-                                      hour=args.hour, workers=args.workers, dry_run=args.dry_run)
+    rows, schema = read_snapshot(args.snapshot)
+    response, decisions, report = run(cfg, rows, features=args.features, hour=args.hour,
+                                      workers=args.workers, dry_run=args.dry_run,
+                                      snapshot_schema=schema)
     write_frame(pd.DataFrame(response, columns=list(RESPONSE_COLS)), args.out)
     report["response"] = args.out
     if args.report:

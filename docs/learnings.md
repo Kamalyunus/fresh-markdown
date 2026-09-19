@@ -1352,6 +1352,28 @@ now. Dates are owner sign-off.
   landing: the first draft's boxes were too narrow for their lines and
   one arrow ran through a box -- a diagram is checked by looking, not
   by parsing.
+  And the owner read Appendix C ("what you send to request a price"),
+  put it beside the hourly snapshot feed, and asked how the two
+  reconcile: the appendix was the engine's request -- twelve fields in
+  the engine's names, an example id from before the opening tag -- and
+  the snapshot is the feed's row in the feed's names; they are one
+  rename and two conversions apart (counter plus one, percent to
+  fraction), and the page never said so. Now the appendix opens with
+  "you never write these fields", the column-to-field mapping with its
+  conversions, the id example spelt as the opening tag everywhere, and
+  each converted field naming its source column. A contract written in
+  the engine's vocabulary is a contract the producers cannot check
+  against their own table.
+  Then the other way round: engineering had built the snapshot to
+  Appendix C, the twelve request fields, not to the table's columns. So
+  the reader takes either spelling -- a file is one or the other, told
+  apart by its columns, and a file carrying both is refused rather than
+  guessed row by row -- and converts the request's into the same
+  internal row (its counter already includes this hour, its discount is
+  already a fraction). The end-to-end test prices the same hour in both
+  spellings and holds the responses equal. A contract with two
+  spellings is fine as long as the code, not the reader's goodwill,
+  says which one a file is in.
 
 ## The lesson under all of it
 

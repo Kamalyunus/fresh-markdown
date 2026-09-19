@@ -880,14 +880,14 @@
   </table></div>
 
   <h3>The snapshot row</h3>
-<p class="prose">Same schema as the hourly table (0.2): <code>skuseq, fc, date, hour, episode_id, inventory, discount, normal_asp, cogs_wo_vat, flc_window, category, subcategory</code>. The outcome columns are absent or null. Two of these fields carry what the repository's hour took from its store, and both are yours:</p>
+<p class="prose">In either of two spellings, one per file: the hourly table's columns (0.2) — <code>skuseq, fc, date, hour, episode_id, inventory, discount, normal_asp, cogs_wo_vat, flc_window, category, subcategory</code> — or the request's twelve fields (Appendix C) — <code>episode_id, sku_id, fc, category, subcategory, date, hour_of_day, hours_remaining, q, original_price, cost, current_discount</code> — already converted: the counter this hour included, the discount a fraction. The hour reads both into one row (the mapping is Appendix C's first table), reports which arrived (<code>snapshot_schema</code>), and refuses a file that mixes the two. Two fields carry what the repository's hour took from its store, and both are yours:</p>
   <div class="tscroll"><table>
     <thead><tr><th>Field</th><th>Contract</th><th>If not</th></tr></thead>
     <tbody>
       <tr><td><code>episode_id</code></td><td>The <b>opening tag</b> of the row's episode, <code>&lt;skuseq&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code>: the shelf-hour the episode began, exactly as 0.2a spells a new window's id. A row whose tag names its own shelf-hour is the episode's first hour — an <b>entry</b>, priced freely from the entry grid. Every later row of the episode carries the same tag and is a <b>later hour</b>: its price may only step deeper than the price in force.</td><td>An id that is not a tag, names another shelf, or opens after the row's hour is refused with the reason and counted in <code>episode_ids_that_place_no_hour</code>. Nothing in the folder assigns or repairs an id.</td></tr>
-      <tr><td><code>discount</code></td><td>The <b>price in force</b>, in percent. <b>Null on an entry row.</b> On every later row of the episode, the <code>apply_discount_pct</code> this service returned for the same shelf last hour — you pipe it back. It is the anchor the hour steps from.</td><td>A later row without it is refused (<code>later_hours_without_the_price_in_force</code>), never priced as an entry: pricing it as an entry could raise the price mid-episode. A value on an entry row is ignored and counted (<code>entries_with_a_price_in_force</code>).</td></tr>
-      <tr><td><code>flc_window</code></td><td>The hours still to come after this one; the horizon is this hour plus those. At most the configured cap.</td><td>Missing, negative, fractional or over the cap: refused with the reason.</td></tr>
-      <tr><td><code>inventory</code></td><td>The opening stock. Zero is an empty shelf: counted, not priced, not an error.</td><td>Missing or negative: refused.</td></tr>
+      <tr><td><code>discount</code> / <code>current_discount</code></td><td>The <b>price in force</b>: <code>discount</code> in percent in the table's spelling, <code>current_discount</code> as a fraction in the request's. <b>Null on an entry row.</b> On every later row of the episode, the <code>apply_discount_pct</code> this service returned for the same shelf last hour (divided by 100 for <code>current_discount</code>) — you pipe it back. It is the anchor the hour steps from.</td><td>A later row without it is refused (<code>later_hours_without_the_price_in_force</code>), never priced as an entry: pricing it as an entry could raise the price mid-episode. A value on an entry row is ignored and counted (<code>entries_with_a_price_in_force</code>).</td></tr>
+      <tr><td><code>flc_window</code> / <code>hours_remaining</code></td><td><code>flc_window</code> is the hours still to come after this one, <code>hours_remaining</code> the same count this hour included; the horizon is the latter. At most the configured cap.</td><td>Missing, negative, fractional or over the cap: refused with the reason.</td></tr>
+      <tr><td><code>inventory</code> / <code>q</code></td><td>The opening stock. Zero is an empty shelf: counted, not priced, not an error.</td><td>Missing or negative: refused.</td></tr>
     </tbody>
   </table></div>
 
@@ -1132,13 +1132,38 @@
 </section>
 
 <section id="request">
-  <h2><span class="num">C·03</span>What you send to request a price</h2>
+  <h2><span class="num">C·03</span>The request — what the hour builds from your snapshot row</h2>
   <div class="prose">
     <p>
-      Twelve fields, once per SKU × FC per hour. The agent resolves everything else itself —
-      the demand forecast from the frozen model, the dispersion parameter from its lookup table,
-      the reference discount from config.
+      <strong>Two spellings, one request.</strong> Send the snapshot row either in the hourly
+      table's own columns (0.2), which the hourly command renames and converts by the mapping
+      below, or as these twelve fields directly, already converted — one spelling per file, the
+      command reports which (<code>snapshot_schema</code>) and refuses a mix. Either way this
+      table is the request as the engine reads it and as the decision event records it, one per
+      SKU × FC per hour; the mapping is exact and is all the "building" there is. The agent resolves
+      everything else itself — the demand forecast from the frozen model, the dispersion
+      parameter from its lookup table, the reference discount from config.
     </p>
+  </div>
+
+  <div class="tscroll">
+    <table>
+      <caption>Your snapshot column → the request field. Nothing else is read from the row.</caption>
+      <thead><tr><th>Your column</th><th>Request field</th><th>Conversion</th></tr></thead>
+      <tbody>
+        <tr><td><code>skuseq</code></td><td><code>sku_id</code></td><td>as text (an integer 88213, a float 88213.0 and a string "88213" name one SKU)</td></tr>
+        <tr><td><code>fc</code></td><td><code>fc</code></td><td>as text</td></tr>
+        <tr><td><code>date</code></td><td><code>date</code></td><td><code>YYYY-MM-DD</code>; a date or timestamp column is fine, it is spelt so</td></tr>
+        <tr><td><code>hour</code></td><td><code>hour_of_day</code></td><td>as an integer 0..23</td></tr>
+        <tr><td><code>episode_id</code></td><td><code>episode_id</code></td><td>as given: the opening tag <code>&lt;skuseq&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code> of the episode's first hour (0.2a, section 10)</td></tr>
+        <tr><td><code>inventory</code></td><td><code>q</code></td><td>as an integer; zero is an empty shelf, counted and not priced</td></tr>
+        <tr><td><code>flc_window</code></td><td><code>hours_remaining</code></td><td><b><code>flc_window + 1</code></b>: your counter is the hours still to come <em>after</em> this one, the request's horizon includes this one (the trap in §08)</td></tr>
+        <tr><td><code>discount</code></td><td><code>current_discount</code></td><td><b><code>discount / 100</code></b>: yours is a percent (15), the request's a fraction (0.15); null stays null and means an entry</td></tr>
+        <tr><td><code>normal_asp</code></td><td><code>original_price</code></td><td>as is</td></tr>
+        <tr><td><code>cogs_wo_vat</code></td><td><code>cost</code></td><td>as is</td></tr>
+        <tr><td><code>category</code>, <code>subcategory</code></td><td><code>category</code>, <code>subcategory</code></td><td>as text; a config key spells a space as <code>_</code> (SIDE DISH → SIDE_DISH)</td></tr>
+      </tbody>
+    </table>
   </div>
 
   <div class="tscroll">
@@ -1148,18 +1173,18 @@
         <tr><th>Field</th><th>Type</th><th>Example</th><th>What it is, and the trap in it</th></tr>
       </thead>
       <tbody>
-        <tr><td class="f">episode_id</td><td class="t">string</td><td class="ex">"EP-88213-4471"</td><td><strong>You assign this, and it is the one field with a construction rule</strong> — see the box below. One id per clearance window, stable across midnight.</td></tr>
+        <tr><td class="f">episode_id</td><td class="t">string</td><td class="ex">"SKU-88213|FC-04|2026-08-19T17"</td><td><strong>You assign this, and it is the one field with a construction rule</strong> — see the box below. One id per clearance window, stable across midnight, spelt as the <b>opening tag</b>: the shelf-hour the window began. That spelling is what lets a stateless hour tell an entry (the tag names this very hour) from a later hour (it names an earlier one) without remembering anything — section 10.</td></tr>
         <tr><td class="f">sku_id</td><td class="t">string</td><td class="ex">"SKU-88213"</td><td>—</td></tr>
         <tr><td class="f">fc</td><td class="t">string</td><td class="ex">"FC-04"</td><td>Fulfilment centre. Episodes are per SKU × FC, not per SKU.</td></tr>
         <tr><td class="f">category</td><td class="t">string</td><td class="ex">"vegetables"</td><td>Selects the reference discount and the learning cell.</td></tr>
         <tr><td class="f">subcategory</td><td class="t">string</td><td class="ex">"leafy_greens"</td><td>Selects the dispersion parameter and the level factor.</td></tr>
         <tr><td class="f">date</td><td class="t">string</td><td class="ex">"2026-08-19"</td><td>The pricing hour's calendar date, exactly <code>YYYY-MM-DD</code> — any other spelling quarantines the event. With <code>hour_of_day</code> it is the key the outcome ingester matches feed rows to decisions on, and the day every daily series (tau walk, guardrail, spend) buckets by.</td></tr>
         <tr><td class="f">hour_of_day</td><td class="t">int</td><td class="ex">17</td><td>—</td></tr>
-        <tr><td class="f">hours_remaining</td><td class="t">int ≥ 1</td><td class="ex">4</td><td>Hours left in the window, this one included. Drives the planning horizon; see the trap in §08.</td></tr>
-        <tr><td class="f">q</td><td class="t">int ≥ 0</td><td class="ex">3</td><td>Units on hand at the top of the hour.</td></tr>
-        <tr><td class="f">original_price</td><td class="t">float &gt; 0</td><td class="ex">10000.0</td><td>Undiscounted price. Must be present — a null or zero rejects the state.</td></tr>
-        <tr><td class="f">cost</td><td class="t">float</td><td class="ex">4000.0</td><td>Unit cost, within <code>[0, original_price]</code>. Sets the price floor; no tier below it is ever offered.</td></tr>
-        <tr><td class="f">current_discount</td><td class="t">float | null</td><td class="ex null">null</td><td><strong>The discount already in force.</strong> <code>null</code> on the episode's first decision, and a fraction (0.15, not 15) on every later one. It constrains the action set — prices never move back up within an episode.</td></tr>
+        <tr><td class="f">hours_remaining</td><td class="t">int ≥ 1</td><td class="ex">4</td><td>Hours left in the window, this one included: your <code>flc_window</code> plus one. Drives the planning horizon; see the trap in §08.</td></tr>
+        <tr><td class="f">q</td><td class="t">int ≥ 0</td><td class="ex">3</td><td>Units on hand at the top of the hour: your <code>inventory</code>.</td></tr>
+        <tr><td class="f">original_price</td><td class="t">float &gt; 0</td><td class="ex">10000.0</td><td>Undiscounted price, your <code>normal_asp</code>. Must be present — a null or zero rejects the state.</td></tr>
+        <tr><td class="f">cost</td><td class="t">float</td><td class="ex">4000.0</td><td>Unit cost, your <code>cogs_wo_vat</code>, within <code>[0, original_price]</code>. Sets the price floor; no tier below it is ever offered.</td></tr>
+        <tr><td class="f">current_discount</td><td class="t">float | null</td><td class="ex null">null</td><td><strong>The discount already in force</strong>: your <code>discount</code> divided by 100. <code>null</code> on the episode's first decision, and a fraction (0.15, not 15) on every later one — the discount the service returned for this shelf last hour, which you pipe back into the row. It constrains the action set — prices never move back up within an episode.</td></tr>
       </tbody>
     </table>
   </div>
@@ -1178,8 +1203,9 @@
       <li><b>Open a new id when a new window starts</b> — the first hour a SKU × FC comes on
           clearance, recognisable in the source by the window counter resetting upward (a new
           <code>flc_window</code> value larger than the previous hour's would decrement to).
-          Any scheme is fine as long as it is unique per window; ours is
-          <code>sku | fc | first hour of the window</code>.</li>
+          The id is the opening tag, <code>&lt;skuseq&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code> of that
+          first hour — not merely unique per window but the spelling the hour reads the
+          opening hour from (section 10).</li>
       <li><b>Keep that id for every subsequent hour of the window</b>, however many calendar
           days it spans. Windows of 36 hours are common; midnight is an ordinary hour.</li>
       <li><b>Never derive it from the calendar date.</b> A date-keyed id splits one window
@@ -1211,7 +1237,7 @@
   <div class="note">
     <h4>How to call it — the reference batch caller, and a whole cycle to watch first</h4>
     <p>
-      You do not build these requests: <code>ops.price_hour</code> builds them from your snapshot (Phase 2) and hands them to <code>ops.price_batch</code>, the caller beneath it — one hour's requests in, one response row per request out, in request order. Documented here so a request and a decision can be read. It resolves everything the engine needs
+      You do not build these requests. In the pricing folder, <code>price_hour.py</code> builds them from your snapshot row by the mapping above and prices them statelessly (section 10); what follows describes the repository's own hour, which keeps a store — its <code>already_priced</code> refusal and its stored forecast path do not apply to the folder. There, <code>ops.price_hour</code> builds them from your snapshot (Phase 2) and hands them to <code>ops.price_batch</code>, the caller beneath it — one hour's requests in, one response row per request out, in request order. Documented here so a request and a decision can be read. It resolves everything the engine needs
       beyond the request (the forecast path, the dispersion parameter, the reference discount), reads
       the posterior <em>once per batch</em>, commits every decision to the event store before
       returning its price, and refuses row by row, never the batch:
@@ -1220,17 +1246,17 @@
     --features features/2026-08-19.parquet --workers 0 --out decisions.jsonl [--report report.json]
 
 <span class="c">// one request line: the 17:00 entry decision of §06</span>
-{"episode_id": "EP-88213-4471", "sku_id": "SKU-88213", "fc": "FC-04", "category": "vegetables",
+{"episode_id": "SKU-88213|FC-04|2026-08-19T17", "sku_id": "SKU-88213", "fc": "FC-04", "category": "vegetables",
  "subcategory": "leafy_greens", "date": "2026-08-19", "hour_of_day": 17, "hours_remaining": 4,
  "q": 3, "original_price": 10000.0, "cost": 4000.0, "current_discount": null}
 
 <span class="c">// its response row: put applied_price on the shelf; decision_id is the handle</span>
-{"episode_id": "EP-88213-4471", "sku_id": "SKU-88213", "fc": "FC-04", "date": "2026-08-19",
+{"episode_id": "SKU-88213|FC-04|2026-08-19T17", "sku_id": "SKU-88213", "fc": "FC-04", "date": "2026-08-19",
  "hour_of_day": 17, "decision_id": "dec-SKU-88213|FC-04|2026-08-19T17",
  "applied_discount": 0.3, "applied_price": 7000.0, "is_exploration": false, "rejected": null}
 
 <span class="c">// a refused one: no price, the reason -- the rest of the batch priced</span>
-{"episode_id": "EP-88213-4472", "sku_id": "SKU-88214", "fc": "FC-04", "date": "2026-08-19",
+{"episode_id": "SKU-88214|FC-04|2026-08-19T17", "sku_id": "SKU-88214", "fc": "FC-04", "date": "2026-08-19",
  "hour_of_day": 17, "decision_id": null, "applied_discount": null, "applied_price": null,
  "is_exploration": null, "rejected": "cost must not exceed original_price"}</pre>
     <ul>
@@ -1320,7 +1346,7 @@
       <tbody>
         <tr class="grouphead"><td colspan="3">Identity — 4</td></tr>
         <tr><td class="f">decision_id</td><td class="ex">"dec-SKU-88213|FC-04|2026-08-19T17"</td><td>The hour's key — <code>dec-&lt;sku_id&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code> — the outcome id's twin over the same key, so you can name the decision for an hour before it exists and join the two by prefix alone. One decision per shelf-hour is what the id SAYS: a re-priced hour collides with itself rather than putting a second price on one feed row. The ingester still matches the feed row on <code>sku_id, fc, date, hour_of_day</code>, never on this string. The episode is deliberately NOT in it, so relabelling a window never moves a decision's identity.</td></tr>
-        <tr><td class="f">episode_id</td><td class="ex">"EP-88213-4471"</td><td>As supplied.</td></tr>
+        <tr><td class="f">episode_id</td><td class="ex">"SKU-88213|FC-04|2026-08-19T17"</td><td>As supplied.</td></tr>
         <tr><td class="f">is_entry</td><td class="ex">true</td><td>True on the episode's first decision.</td></tr>
         <tr><td class="f">timestamp</td><td class="ex">"2026-08-19T02:25:12+00:00"</td><td>UTC with offset.</td></tr>
 
@@ -1484,7 +1510,7 @@
 <pre class="json">{
   "event": "decision",
   "decision_id": "dec-SKU-88213|FC-04|2026-08-19T17",
-  "episode_id": "EP-88213-4471",
+  "episode_id": "SKU-88213|FC-04|2026-08-19T17",
   "is_entry": <mark>true</mark>,
   "sku_id": "SKU-88213",
   "fc": "FC-04",

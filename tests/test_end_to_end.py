@@ -1464,6 +1464,37 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     assert len(response) == len(snap)
     assert not response.is_exploration.fillna(False).astype(bool).any()
     assert os.listdir(os.path.join(folder, "events_store")) == ["README.md"]   # the placeholder only
+    # the same hour in the request's spelling (handover Appendix C: the
+    # twelve fields, the counter this hour included, the discount a
+    # fraction): the identical response; a file mixing the two spellings
+    # is refused whole, never guessed row by row
+    feed_rows = pd.DataFrame(rows)
+    request_rows = pd.DataFrame({
+        "episode_id": feed_rows.episode_id, "sku_id": feed_rows.skuseq, "fc": feed_rows.fc,
+        "category": feed_rows.category, "subcategory": feed_rows.subcategory,
+        "date": feed_rows.date, "hour_of_day": feed_rows.hour,
+        "hours_remaining": feed_rows.flc_window + 1, "q": feed_rows.inventory,
+        "original_price": feed_rows.normal_asp, "cost": feed_rows.cogs_wo_vat,
+        "current_discount": feed_rows.discount / 100.0})
+    request_rows.to_csv(os.path.join(folder, "snapshots", "hour_request.csv"), index=False)
+    r = subprocess.run([sys.executable, os.path.join(folder, "price_hour.py"),
+                        "--snapshot", "snapshots/hour_request.csv",
+                        "--features", f"features/{as_of}.parquet", "--workers", "0",
+                        "--dry-run", "--out", "decisions/hour_request.csv",
+                        "--report", "reports/hours/hour_request.json"],
+                       cwd=elsewhere, env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    with open(os.path.join(folder, "reports", "hours", "hour_request.json")) as f:
+        assert json.load(f)["snapshot_schema"] == "request"
+    same = pd.read_csv(os.path.join(folder, "decisions", "hour_request.csv"))
+    for col in ("skuseq", "fc", "episode_id", "decision_id", "apply_discount_pct", "apply_price", "rejected"):
+        assert same[col].fillna("-").astype(str).tolist() == response[col].fillna("-").astype(str).tolist(), col
+    mixed = pd.concat([feed_rows.head(1), request_rows.head(1)])
+    mixed.to_csv(os.path.join(folder, "snapshots", "mixed.csv"), index=False)
+    r = subprocess.run([sys.executable, os.path.join(folder, "price_hour.py"),
+                        "--snapshot", "snapshots/mixed.csv", "--dry-run", "--out", "decisions/mixed.csv"],
+                       cwd=elsewhere, env=env, capture_output=True, text=True)
+    assert r.returncode != 0 and "one spelling per file" in r.stdout + r.stderr, r.stdout + r.stderr
     # the owner's check, from the repository, on what the folder wrote
     out = owner("ops.check_inputs", "--response", os.path.join(folder, "decisions", "hour.csv"),
                 "--snapshot", os.path.join(folder, "snapshots", "hour.csv"))
