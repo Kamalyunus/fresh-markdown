@@ -880,14 +880,14 @@
   </table></div>
 
   <h3>The snapshot row</h3>
-<p class="prose">In either of two spellings, one per file: the hourly table's columns (0.2) — <code>skuseq, fc, date, hour, episode_id, inventory, discount, normal_asp, cogs_wo_vat, flc_window, category, subcategory</code> — or the request's twelve fields (Appendix C) — <code>episode_id, sku_id, fc, category, subcategory, date, hour_of_day, hours_remaining, q, original_price, cost, current_discount</code> — already converted: the counter this hour included, the discount a fraction. The hour reads both into one row (the mapping is Appendix C's first table), reports which arrived (<code>snapshot_schema</code>), and refuses a file that mixes the two. Two fields carry what the repository's hour took from its store, and both are yours:</p>
+<p class="prose">The twelve request fields of Appendix C, as they are: <code>episode_id, sku_id, fc, category, subcategory, date, hour_of_day, hours_remaining, q, original_price, cost, current_discount</code> — the counter this hour included, the discount a fraction. Nothing is renamed or converted on the way in; the appendix's first table says how each relates to the hourly table's column of the same quantity, which is what the morning pull reads. Two of these fields carry what the repository's hour took from its store, and both are yours:</p>
   <div class="tscroll"><table>
     <thead><tr><th>Field</th><th>Contract</th><th>If not</th></tr></thead>
     <tbody>
       <tr><td><code>episode_id</code></td><td>The <b>opening tag</b> of the row's episode, <code>&lt;skuseq&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code>: the shelf-hour the episode began, exactly as 0.2a spells a new window's id. A row whose tag names its own shelf-hour is the episode's first hour — an <b>entry</b>, priced freely from the entry grid. Every later row of the episode carries the same tag and is a <b>later hour</b>: its price may only step deeper than the price in force.</td><td>An id that is not a tag, names another shelf, or opens after the row's hour is refused with the reason and counted in <code>episode_ids_that_place_no_hour</code>. Nothing in the folder assigns or repairs an id.</td></tr>
-      <tr><td><code>discount</code> / <code>current_discount</code></td><td>The <b>price in force</b>: <code>discount</code> in percent in the table's spelling, <code>current_discount</code> as a fraction in the request's. <b>Null on an entry row.</b> On every later row of the episode, the <code>apply_discount_pct</code> this service returned for the same shelf last hour (divided by 100 for <code>current_discount</code>) — you pipe it back. It is the anchor the hour steps from.</td><td>A later row without it is refused (<code>later_hours_without_the_price_in_force</code>), never priced as an entry: pricing it as an entry could raise the price mid-episode. A value on an entry row is ignored and counted (<code>entries_with_a_price_in_force</code>).</td></tr>
-      <tr><td><code>flc_window</code> / <code>hours_remaining</code></td><td><code>flc_window</code> is the hours still to come after this one, <code>hours_remaining</code> the same count this hour included; the horizon is the latter. At most the configured cap.</td><td>Missing, negative, fractional or over the cap: refused with the reason.</td></tr>
-      <tr><td><code>inventory</code> / <code>q</code></td><td>The opening stock. Zero is an empty shelf: counted, not priced, not an error.</td><td>Missing or negative: refused.</td></tr>
+      <tr><td><code>current_discount</code></td><td>The <b>price in force</b>, a fraction (0.15, not 15). <b>Null on an entry row.</b> On every later row of the episode, the <code>apply_discount_pct</code> this service returned for the same shelf last hour, divided by 100 — you pipe it back. It is the anchor the hour steps from.</td><td>A later row without it is refused (<code>later_hours_without_the_price_in_force</code>), never priced as an entry: pricing it as an entry could raise the price mid-episode. A value on an entry row is ignored and counted (<code>entries_with_a_price_in_force</code>).</td></tr>
+      <tr><td><code>hours_remaining</code></td><td>Hours left in the window, this hour included (the table's <code>flc_window</code> plus one); the horizon. At most the configured cap.</td><td>Missing, negative, fractional or over the cap: refused with the reason.</td></tr>
+      <tr><td><code>q</code></td><td>The opening stock. Zero is an empty shelf: counted, not priced, not an error.</td><td>Missing or negative: refused.</td></tr>
     </tbody>
   </table></div>
 
@@ -1135,12 +1135,12 @@
   <h2><span class="num">C·03</span>The request — what the hour builds from your snapshot row</h2>
   <div class="prose">
     <p>
-      <strong>Two spellings, one request.</strong> Send the snapshot row either in the hourly
-      table's own columns (0.2), which the hourly command renames and converts by the mapping
-      below, or as these twelve fields directly, already converted — one spelling per file, the
-      command reports which (<code>snapshot_schema</code>) and refuses a mix. Either way this
-      table is the request as the engine reads it and as the decision event records it, one per
-      SKU × FC per hour; the mapping is exact and is all the "building" there is. The agent resolves
+      <strong>These twelve fields are the snapshot row you send</strong>, one per SKU × FC per
+      hour, exactly as the engine reads them and as the decision event records them. The first
+      table below says how each relates to the hourly table's column of the same quantity: the
+      morning pull reads the table (0.2), the snapshot does not — you convert on your side, and
+      the two conversions that matter are the counter (this hour included) and the discount (a
+      fraction). The agent resolves
       everything else itself — the demand forecast from the frozen model, the dispersion
       parameter from its lookup table, the reference discount from config.
     </p>
@@ -1148,8 +1148,8 @@
 
   <div class="tscroll">
     <table>
-      <caption>Your snapshot column → the request field. Nothing else is read from the row.</caption>
-      <thead><tr><th>Your column</th><th>Request field</th><th>Conversion</th></tr></thead>
+      <caption>The hourly table's column → the request field you send. Nothing else is read from the row.</caption>
+      <thead><tr><th>The table's column</th><th>Request field</th><th>Conversion, on your side</th></tr></thead>
       <tbody>
         <tr><td><code>skuseq</code></td><td><code>sku_id</code></td><td>as text (an integer 88213, a float 88213.0 and a string "88213" name one SKU)</td></tr>
         <tr><td><code>fc</code></td><td><code>fc</code></td><td>as text</td></tr>
@@ -1237,7 +1237,7 @@
   <div class="note">
     <h4>How to call it — the reference batch caller, and a whole cycle to watch first</h4>
     <p>
-      You do not build these requests. In the pricing folder, <code>price_hour.py</code> builds them from your snapshot row by the mapping above and prices them statelessly (section 10); what follows describes the repository's own hour, which keeps a store — its <code>already_priced</code> refusal and its stored forecast path do not apply to the folder. There, <code>ops.price_hour</code> builds them from your snapshot (Phase 2) and hands them to <code>ops.price_batch</code>, the caller beneath it — one hour's requests in, one response row per request out, in request order. Documented here so a request and a decision can be read. It resolves everything the engine needs
+      In the pricing folder, <code>price_hour.py</code> reads these fields as sent and prices them statelessly (section 10); what follows describes the repository's own hour, which keeps a store — its <code>already_priced</code> refusal and its stored forecast path do not apply to the folder. There, <code>ops.price_hour</code> builds them from your snapshot (Phase 2) and hands them to <code>ops.price_batch</code>, the caller beneath it — one hour's requests in, one response row per request out, in request order. Documented here so a request and a decision can be read. It resolves everything the engine needs
       beyond the request (the forecast path, the dispersion parameter, the reference discount), reads
       the posterior <em>once per batch</em>, commits every decision to the event store before
       returning its price, and refuses row by row, never the batch:

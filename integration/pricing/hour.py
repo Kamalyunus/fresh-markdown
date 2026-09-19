@@ -3,15 +3,14 @@ shelf out. Stateless: every row is priced from the row, the artifacts and
 the feature table of its episode's opening day; nothing is looked up from
 an earlier hour, and the log this hour appends to is never read here.
 
-The snapshot comes in either spelling -- the hourly table's columns or the
-request's twelve fields (handover Appendix C) -- and is read into one. The
-row's `episode_id` is the opening tag of its episode (`<sku>|<fc>|<day>T<hh>`,
+The snapshot is the twelve request fields (handover Appendix C), as sent.
+The row's `episode_id` is the opening tag of its episode (`<sku>|<fc>|<day>T<hh>`,
 the shelf-hour the episode began), so the row is an ENTRY when the tag names
-this shelf-hour and a later hour of the episode otherwise. The price in force
-(`discount`, a percent, or `current_discount`, a fraction) is null on an
-entry row, and on a later row the price this service applied last hour,
-piped back by the producers -- the anchor a later hour may only step deeper
-from.
+this shelf-hour and a later hour of the episode otherwise. `current_discount`
+is the price in force, a fraction: null on an entry row, and on a later row
+the discount this service applied last hour, piped back by the producers --
+the anchor a later hour may only step deeper from. `hours_remaining` counts
+this hour.
 
 Run: python3 price_hour.py --snapshot <rows> [--features features/]
         --out <hour>.csv [--report <hour>.json] [--hour YYYY-MM-DDTHH]
@@ -27,7 +26,7 @@ import pandas as pd
 from pricing.config import config_digest, load_config
 from pricing.decide import StateRejected, decide
 from pricing.feed import RESPONSE_COLS, read_snapshot, write_frame, write_json
-from pricing.keys import as_number as _num, hour_key, iso_day, planning_horizon
+from pricing.keys import as_number as _num, hour_key, iso_day
 from pricing.log import EventLog, rejection_event
 from pricing.model import DemandModel
 from pricing.pool import pmap
@@ -35,10 +34,11 @@ from pricing.state import (Posterior, build_states, canonical_request, episode_p
                            feature_index, validate_request)
 
 CONTRACT = ("Stateless. episode_id is the opening tag <sku>|<fc>|<day>T<hh>: an entry when "
-            "it names this shelf-hour, a later hour of the episode otherwise. discount is "
-            "the price in force: null on an entry, the price applied last hour on a later "
-            "row (the anchor). The features are the opening day's table. Nothing is "
-            "looked up from an earlier hour; the log is append-only and never read here.")
+            "it names this shelf-hour, a later hour of the episode otherwise. current_discount "
+            "is the price in force, a fraction: null on an entry, the discount applied last "
+            "hour on a later row (the anchor). hours_remaining counts this hour. The features "
+            "are the opening day's table. Nothing is looked up from an earlier hour; the log "
+            "is append-only and never read here.")
 
 
 # ----------------------------------------------------------- the snapshot
@@ -57,8 +57,10 @@ def split_hours(rows, hour=None):
     return when, openings, len(rows) - len(openings)
 
 
-def _finite(v):
-    return _num(v) is not None
+def _whole(v):
+    """A count as an int when it is one (a CSV reads 4 as 4.0); else as it came."""
+    n = _num(v)
+    return int(n) if n is not None and n == int(n) else v
 
 
 def build_requests(openings):
@@ -79,7 +81,7 @@ def build_requests(openings):
         if r["key"] is None:
             refuse("shelves_unkeyable", "row names no shelf-hour")
             continue
-        q = _num(r.get("starting_inventory"))
+        q = _num(r.get("q"))
         if q is not None and q <= 0:
             refuse("shelves_empty", "empty shelf: nothing to price")
             continue
@@ -87,27 +89,25 @@ def build_requests(openings):
         if opening is None:
             refuse("episode_ids_that_place_no_hour", position)
             continue
+        anchor = _num(r.get("current_discount"))
         if position == "entry":
             counts["entries"] += 1
-            anchor = None
-            if r.get("total_discount") is not None:
+            if anchor is not None:
                 counts["entries_with_a_price_in_force"] += 1     # ignored: an entry has no anchor
+            anchor = None
         else:
-            if r.get("total_discount") is None:
+            if anchor is None:
                 refuse("later_hours_without_the_price_in_force",
                        "later hour of the episode without the price in force: the producers "
-                       "pipe the price applied last hour")
+                       "pipe the discount applied last hour")
                 continue
             counts["later_hours"] += 1
-            anchor = r["total_discount"]
         sku, fc, day, hour = r["key"]
         requests.append({
             "episode_id": str(r["episode_id"]).strip(), "sku_id": sku, "fc": fc,
             "category": r.get("category"), "subcategory": r.get("subcategory"),
             "date": day, "hour_of_day": hour,
-            "hours_remaining": (planning_horizon(r["hours_remaining"])
-                                if _finite(r.get("hours_remaining")) else None),
-            "q": r.get("starting_inventory"),
+            "hours_remaining": _whole(r.get("hours_remaining")), "q": _whole(r.get("q")),
             "original_price": r.get("original_price"), "cost": r.get("cost"),
             "current_discount": anchor, "opening_day": opening[2]})
         refused.append(None)
@@ -240,8 +240,7 @@ def price_batch(cfg, requests, features, batch_day, model, posterior, r_lookup, 
 
 # ---------------------------------------------------------------- the hour
 
-def run(cfg, snapshot_rows, features=None, hour=None, workers=None, dry_run=False,
-        snapshot_schema="feed"):
+def run(cfg, snapshot_rows, features=None, hour=None, workers=None, dry_run=False):
     """One hour: the requests from the snapshot, priced, the response in the
     feed's units; the decisions and rejections appended to the log unless
     `dry_run`. Returns (response rows, decisions, report)."""
@@ -260,10 +259,8 @@ def run(cfg, snapshot_rows, features=None, hour=None, workers=None, dry_run=Fals
     response = []
     for r, req, why in zip(openings, requests, refused):
         if req is None:
-            evt = rejection_event(
-                {**r, "hours_remaining": (planning_horizon(r["hours_remaining"])
-                                          if _finite(r.get("hours_remaining")) else None),
-                 "q_remaining": _num(r.get("starting_inventory"))}, why)
+            evt = rejection_event({**r, "hours_remaining": _whole(r.get("hours_remaining")),
+                                   "q_remaining": _whole(r.get("q"))}, why)
             if evt is not None and evt["rejection_id"] not in recorded:
                 recorded.add(evt["rejection_id"])
                 rejections.append(evt)
@@ -276,7 +273,6 @@ def run(cfg, snapshot_rows, features=None, hour=None, workers=None, dry_run=Fals
     logged = {"decisions_logged": log.append("decisions", decisions),
               "rejections_logged": log.append("rejections", rejections)}
     report = {"hour": f"{when[0]}T{when[1]:02d}" if when else None,
-              "snapshot_schema": snapshot_schema,
               "shelves": len(openings), "other_hours_rows_ignored": other_hours,
               **counts, "dry_run": bool(dry_run), "contract": CONTRACT, **rep, **logged}
     return response, decisions, report
@@ -296,9 +292,8 @@ def _response(skuseq, fc, date, hour, episode_id, answer, rejected):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="price_hour.py")
     ap.add_argument("--snapshot", required=True,
-                    help="the shelf at the top of the hour (parquet, CSV or JSONL), in the "
-                         "hourly table's columns or in the request's twelve fields -- one "
-                         "spelling per file; other hours' rows are ignored")
+                    help="the shelf at the top of the hour: the twelve request fields "
+                         "(parquet, CSV or JSONL); other hours' rows are ignored")
     ap.add_argument("--features", default=None,
                     help="the feature tables: a directory of <day>.parquet (default "
                          "features/), or one file used for every request")
@@ -311,10 +306,8 @@ def main(argv=None):
                     help="write the response and the report; append nothing to the log")
     args = ap.parse_args(argv)
     cfg = load_config(args.config)
-    rows, schema = read_snapshot(args.snapshot)
-    response, decisions, report = run(cfg, rows, features=args.features, hour=args.hour,
-                                      workers=args.workers, dry_run=args.dry_run,
-                                      snapshot_schema=schema)
+    response, decisions, report = run(cfg, read_snapshot(args.snapshot), features=args.features,
+                                      hour=args.hour, workers=args.workers, dry_run=args.dry_run)
     write_frame(pd.DataFrame(response, columns=list(RESPONSE_COLS)), args.out)
     report["response"] = args.out
     if args.report:

@@ -1446,7 +1446,23 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     for col in ("units_sold", "ending_inventory", "final_price"):
         snap[col] = None
     rows, _ = assign(snap.to_dict("records"), None)          # the producers' step
-    pd.DataFrame(rows).to_csv(os.path.join(folder, "snapshots", "hour.csv"), index=False)
+    feed_rows = pd.DataFrame(rows)                            # the table's spelling: the repository's hour
+    feed_rows.to_csv(workspace / "hour_feed.csv", index=False)
+
+    def to_request(df):
+        """The folder's snapshot: the twelve request fields (handover Appendix C)
+        from the table's columns -- the counter this hour included, the discount
+        a fraction, null on an entry row."""
+        entry = [str(e).endswith(f"{d}T{int(h):02d}") for e, d, h in zip(df.episode_id, df.date, df.hour)]
+        return pd.DataFrame({
+            "episode_id": df.episode_id.to_numpy(), "sku_id": df.skuseq.to_numpy(), "fc": df.fc.to_numpy(),
+            "category": df.category.to_numpy(), "subcategory": df.subcategory.to_numpy(),
+            "date": df.date.to_numpy(), "hour_of_day": df.hour.to_numpy(),
+            "hours_remaining": (df.flc_window + 1).to_numpy(), "q": df.inventory.to_numpy(),
+            "original_price": df.normal_asp.to_numpy(), "cost": df.cogs_wo_vat.to_numpy(),
+            "current_discount": [None if e or pd.isna(d) else d / 100.0
+                                 for e, d in zip(entry, df.discount)]})
+    to_request(feed_rows).to_csv(os.path.join(folder, "snapshots", "hour.csv"), index=False)
     r = subprocess.run([sys.executable, os.path.join(folder, "price_hour.py"),
                         "--snapshot", "snapshots/hour.csv",
                         "--features", f"features/{as_of}.parquet", "--workers", "0",
@@ -1458,46 +1474,16 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     with open(os.path.join(folder, "reports", "hours", "hour.json")) as f:
         rep = json.load(f)
     assert rep["shelves"] == len(snap) and rep["decisions"] >= 1, rep
+    assert rep["entries_with_a_price_in_force"] == 0          # entry rows carry null, as the contract says
     assert rep["exploration_mode"] == "exploit" and "explored" not in rep
     assert rep["decisions"] + rep["rejected"] + rep["shelves_empty"] == rep["shelves"]
     response = pd.read_csv(os.path.join(folder, "decisions", "hour.csv"))
     assert len(response) == len(snap)
     assert not response.is_exploration.fillna(False).astype(bool).any()
     assert os.listdir(os.path.join(folder, "events_store")) == ["README.md"]   # the placeholder only
-    # the same hour in the request's spelling (handover Appendix C: the
-    # twelve fields, the counter this hour included, the discount a
-    # fraction): the identical response; a file mixing the two spellings
-    # is refused whole, never guessed row by row
-    feed_rows = pd.DataFrame(rows)
-    request_rows = pd.DataFrame({
-        "episode_id": feed_rows.episode_id, "sku_id": feed_rows.skuseq, "fc": feed_rows.fc,
-        "category": feed_rows.category, "subcategory": feed_rows.subcategory,
-        "date": feed_rows.date, "hour_of_day": feed_rows.hour,
-        "hours_remaining": feed_rows.flc_window + 1, "q": feed_rows.inventory,
-        "original_price": feed_rows.normal_asp, "cost": feed_rows.cogs_wo_vat,
-        "current_discount": feed_rows.discount / 100.0})
-    request_rows.to_csv(os.path.join(folder, "snapshots", "hour_request.csv"), index=False)
-    r = subprocess.run([sys.executable, os.path.join(folder, "price_hour.py"),
-                        "--snapshot", "snapshots/hour_request.csv",
-                        "--features", f"features/{as_of}.parquet", "--workers", "0",
-                        "--dry-run", "--out", "decisions/hour_request.csv",
-                        "--report", "reports/hours/hour_request.json"],
-                       cwd=elsewhere, env=env, capture_output=True, text=True)
-    assert r.returncode == 0, r.stdout + r.stderr
-    with open(os.path.join(folder, "reports", "hours", "hour_request.json")) as f:
-        assert json.load(f)["snapshot_schema"] == "request"
-    same = pd.read_csv(os.path.join(folder, "decisions", "hour_request.csv"))
-    for col in ("skuseq", "fc", "episode_id", "decision_id", "apply_discount_pct", "apply_price", "rejected"):
-        assert same[col].fillna("-").astype(str).tolist() == response[col].fillna("-").astype(str).tolist(), col
-    mixed = pd.concat([feed_rows.head(1), request_rows.head(1)])
-    mixed.to_csv(os.path.join(folder, "snapshots", "mixed.csv"), index=False)
-    r = subprocess.run([sys.executable, os.path.join(folder, "price_hour.py"),
-                        "--snapshot", "snapshots/mixed.csv", "--dry-run", "--out", "decisions/mixed.csv"],
-                       cwd=elsewhere, env=env, capture_output=True, text=True)
-    assert r.returncode != 0 and "one spelling per file" in r.stdout + r.stderr, r.stdout + r.stderr
     # the owner's check, from the repository, on what the folder wrote
     out = owner("ops.check_inputs", "--response", os.path.join(folder, "decisions", "hour.csv"),
-                "--snapshot", os.path.join(folder, "snapshots", "hour.csv"))
+                "--snapshot", str(workspace / "hour_feed.csv"))
     assert "0 FAIL" in out, out
 
     # PARITY: the folder's code is its own, not a copy, so the same hour
@@ -1526,7 +1512,7 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
         with open(workspace / f"config_{tag}.yaml", "w") as f:
             yaml.safe_dump(pc, f, sort_keys=False)
         r = subprocess.run([sys.executable, "-m", "ops.price_hour",
-                            "--snapshot", os.path.join(folder, "snapshots", "hour.csv"),
+                            "--snapshot", str(workspace / "hour_feed.csv"),
                             "--features", os.path.join(folder, "features", f"{as_of}.parquet"),
                             "--out", str(workspace / f"response_{tag}.csv"), "--workers", "0",
                             "--config", f"config_{tag}.yaml"],
@@ -1610,7 +1596,7 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
             discounts.append(fr.discount)
             expect.append("opens after this hour")
     faults["episode_id"], faults["discount"] = ids, discounts
-    pd.concat([snap2, faults]).to_csv(os.path.join(folder, "snapshots", "next.csv"), index=False)
+    to_request(pd.concat([snap2, faults])).to_csv(os.path.join(folder, "snapshots", "next.csv"), index=False)
     r = subprocess.run([sys.executable, os.path.join(folder, "price_hour.py"),
                         "--snapshot", "snapshots/next.csv", "--workers", "0",
                         "--out", "decisions/next.csv", "--report", "reports/hours/next.json"],

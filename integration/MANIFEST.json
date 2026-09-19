@@ -49,8 +49,8 @@
    "placeholder": "the folder's layout"
   },
   "examples/README.md": {
-   "from": "examples/README.md",
-   "verbatim": true
+   "from": null,
+   "own": true
   },
   "examples/decisions_2026-08-29T11.csv": {
    "from": "examples/decisions_2026-08-29T11.csv",
@@ -65,8 +65,9 @@
    "verbatim": true
   },
   "examples/snapshot_2026-08-29T11.csv": {
-   "from": "examples/snapshot_2026-08-29T11.csv",
-   "verbatim": true
+   "from": null,
+   "own": true,
+   "note": "the repository's example snapshot in the request's twelve fields"
   },
   "features/README.md": {
    "from": null,

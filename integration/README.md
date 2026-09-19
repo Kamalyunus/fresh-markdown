@@ -42,7 +42,7 @@ integration/
 
 | When | Command | In | Out |
 | --- | --- | --- | --- |
-| Every clock hour | `python3 price_hour.py --snapshot snapshots/<day>T<hh>.parquet --workers 0 --out decisions/<day>T<hh>.csv --report reports/hours/<day>T<hh>.json` | the shelf at the top of the hour in the feed's schema (below) | one row per snapshot row: the discount to apply as a percent and as a price, or `rejected` with the reason; the hour's counts |
+| Every clock hour | `python3 price_hour.py --snapshot snapshots/<day>T<hh>.parquet --workers 0 --out decisions/<day>T<hh>.csv --report reports/hours/<day>T<hh>.json` | the shelf at the top of the hour: the twelve request fields (below) | one row per snapshot row: the discount to apply as a percent and as a price, or `rejected` with the reason; the hour's counts |
 | Every morning, first | `python3 download_flc.py` | the warehouse: the trailing 45 days of the hourly table through yesterday, `episode_id` on every row, `REDSHIFT_*` from `~/.env` | `data/flc.parquet`, the day's extract |
 | Every morning, then | `python3 build_features.py` | the day's extract | `features/<today>.parquet`, the two demand-rate features every episode opening today reads |
 
@@ -62,15 +62,12 @@ missing or moved.
 Every row is priced from the row itself, the artifacts and the feature
 table of its episode's opening day. Nothing is looked up from an earlier
 hour, no store is read, and a re-sent hour gets the identical answer. The
-snapshot may come in either spelling, one per file: the hourly table's
-columns (`skuseq, fc, date, hour, episode_id, inventory, discount, normal_asp,
-cogs_wo_vat, flc_window, category, subcategory`) or the request's twelve
-fields from the handover's Appendix C (`episode_id, sku_id, fc, category,
-subcategory, date, hour_of_day, hours_remaining, q, original_price, cost,
-current_discount`, the counter this hour included and the discount a
-fraction). The hour reads both into one row, says which arrived in the
-report (`snapshot_schema`) and refuses a file that mixes them. Two things
-in the row make the statelessness possible, and both are yours to supply:
+snapshot is the twelve request fields of the handover's Appendix C, as you
+send them: `episode_id, sku_id, fc, category, subcategory, date, hour_of_day,
+hours_remaining` (this hour included), `q, original_price, cost,
+current_discount` (a fraction). Nothing is renamed or converted on the way
+in. Two things in the row make the statelessness possible, and both are
+yours to supply:
 
 - **`episode_id` is the opening tag** of the row's episode:
   `<skuseq>|<fc>|<day>T<hh>`, the shelf-hour the episode began. A row whose
@@ -79,11 +76,12 @@ in the row make the statelessness possible, and both are yours to supply:
   and is a later hour (the price may only step deeper). An id that is not
   a tag, names another shelf, or opens after the row's hour is refused
   with the reason, and counted (`episode_ids_that_place_no_hour`).
-- **`discount` (percent) or `current_discount` (fraction) is the price in
-  force.** Null on an entry row. On every later row of the episode it is
-  the discount this service applied last hour, piped back by you — the
-  anchor the hour steps from. A later row without it is refused
-  (`later_hours_without_the_price_in_force`), never priced as an entry.
+- **`current_discount` is the price in force**, a fraction. Null on an
+  entry row. On every later row of the episode it is the discount this
+  service applied last hour (the response's `apply_discount_pct` divided
+  by 100), piped back by you — the anchor the hour steps from. A later row
+  without it is refused (`later_hours_without_the_price_in_force`), never
+  priced as an entry.
 
 The forecast is re-made every hour over the remaining hours, on the two
 demand-rate features from `features/<opening day>.parquet`, so every hour
@@ -95,8 +93,7 @@ rows.
 ## The morning is a pull and a table
 
 `download_flc.py` runs one SELECT over the trailing days of the hourly
-table (the same columns as the snapshot, under the feed's names, with
-your `episode_id` on every row) and writes `data/flc.parquet`. It reads
+table (its own columns, with your `episode_id` on every row) and writes `data/flc.parquet`. It reads
 the `REDSHIFT_*` values from `~/.env` on the host; nothing in this folder
 holds a credential or a hostname, and a missing variable is named in the
 error. `pip install psycopg2-binary python-dotenv` on the host for it.

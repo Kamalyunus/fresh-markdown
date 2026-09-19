@@ -1,5 +1,5 @@
 """The one spelling of every key: an id, a day, an hour, the shelf-hour tag
-and the two event ids over it, the clock step and the planning horizon."""
+and the two event ids over it, the clock step."""
 import math
 
 import numpy as np
@@ -88,12 +88,6 @@ def hours_between(day_a, hour_a, day_b, hour_b):
     a = pd.Timestamp(day_a) + pd.Timedelta(hours=int(hour_a))
     b = pd.Timestamp(day_b) + pd.Timedelta(hours=int(hour_b))
     return int(round((b - a).total_seconds() / 3600.0))
-
-
-def planning_horizon(counter):
-    """The counter is the hours still to come after this one: the horizon
-    is this hour plus the counter."""
-    return int(counter) + 1
 
 
 def nan_pair(features):

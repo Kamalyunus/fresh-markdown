@@ -8,7 +8,7 @@ and stateless.
     dp.py         the monotone DP over the tier grid; demand.py its NB demand
     model.py      the frozen demand model, applied at the reference discount
     log.py        the append-only log of decisions and refusals, never read here
-    feed.py       the feed's schema and files; keys.py the one spelling of every key
+    feed.py       files and names: the extract's columns, the snapshot, the response; keys.py the one spelling of every key
     config.py     the pruned config, the launch gate, the category anchors
     pool.py       the worker pool for an hour's batch
 

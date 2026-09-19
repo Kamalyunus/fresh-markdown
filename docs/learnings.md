@@ -1374,6 +1374,15 @@ now. Dates are owner sign-off.
   spellings and holds the responses equal. A contract with two
   spellings is fine as long as the code, not the reader's goodwill,
   says which one a file is in.
+  Withdrawn the same day: "keep only one method; if engineering has
+  already done the work, why write the code?" The snapshot is the
+  twelve request fields, full stop -- no rename, no counter-plus-one,
+  no percent-to-fraction, no schema detection, and `planning_horizon`
+  goes with them (its job was the counter). The table's columns stay
+  only where the table is read: the morning pull. The folder's example
+  snapshot is regenerated in the request spelling with the bare
+  opening tag as its id, with the examples README as the folder's own.
+  Two ways to say one thing is backward compatibility by another name.
 
 ## The lesson under all of it
 
