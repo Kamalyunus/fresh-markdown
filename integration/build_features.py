@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""build_features.py -- every morning: yesterday's feed in, the day's feature table out.
+"""build_features.py -- every morning, after download_flc.py: the day's extract in, the day's feature table out.
 
 Runs from this folder whatever the caller's working directory, so a
 relative path in an argument is relative to the folder. The code is

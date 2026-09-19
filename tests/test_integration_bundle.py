@@ -17,6 +17,7 @@ where the trained workspace already exists."""
 import ast
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -46,9 +47,9 @@ def test_every_copy_matches_its_source_and_the_manifest_is_the_disk():
     assert r["missing"] == [] and r["unlisted"] == [], r
     assert r["dangling"] == [], f"imports that leave the package: {r['dangling']}"
     assert r["unreached"] == [], f"modules neither command imports: {r['unreached']}"
-    assert set(r["own"]) >= {"pricing/hour.py", "pricing/features.py", "pricing/decide.py",
-                             "pricing/dp.py", "pricing/log.py", "price_hour.py",
-                             "build_features.py", "README.md"}
+    assert set(r["own"]) >= {"pricing/hour.py", "pricing/features.py", "pricing/extract.py",
+                             "pricing/decide.py", "pricing/dp.py", "pricing/log.py",
+                             "price_hour.py", "download_flc.py", "build_features.py", "README.md"}
     assert bi.current(ROOT, FOLDER)
 
 
@@ -61,8 +62,8 @@ def test_the_package_is_closed_and_carries_nothing_of_the_learning_lane():
     and has no reader in the package."""
     assert bi.unresolved(FOLDER) == []
     mods = set(bi.modules(FOLDER))
-    assert {"pricing.hour", "pricing.features", "pricing.decide", "pricing.dp",
-            "pricing.log", "pricing.state", "pricing.model"} <= mods
+    assert {"pricing.hour", "pricing.features", "pricing.extract", "pricing.decide",
+            "pricing.dp", "pricing.log", "pricing.state", "pricing.model"} <= mods
     assert not {m for m in mods if any(w in m for w in
                                        ("posterior", "explore", "budget", "learn", "outcome",
                                         "pairs", "seal", "train", "calibrate", "check", "store",
@@ -81,7 +82,9 @@ def test_the_package_is_closed_and_carries_nothing_of_the_learning_lane():
                         "emit_outcome", "load_decisions", "match_pairs", "quality_rates",
                         "draw", "spread_table", "budget_today", "train", "verify", "seal",
                         "split_frames", "continues", "latest_by_shelf", "episode_paths",
-                        "priced_hours", "_consume", "_quarantine"}, names
+                        "priced_hours", "_consume", "_quarantine", "_episode_ids",
+                        "_gap_split_ids", "_continuity_breaks", "_defective_windows",
+                        "rolling_history", "assign", "window_starts"}, names
     for repo_pkg in ("common", "engine", "events", "fit", "daily", "ops", "evaluate"):
         for mod in mods:
             with open(bi._module_path(FOLDER, mod)) as f:
@@ -158,14 +161,68 @@ def test_the_command_runs_from_anywhere_with_the_repository_off_the_path(tmp_pat
     assert "--snapshot" in r.stdout and "--features" in r.stdout and "--dry-run" in r.stdout
     r = _isolated(elsewhere, os.path.join(folder, "build_features.py"), "--help")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "--feed" in r.stdout and "--as-of" in r.stdout
+    assert "--extract" in r.stdout and "--as-of" in r.stdout and "--feed" not in r.stdout
+    r = _isolated(elsewhere, os.path.join(folder, "download_flc.py"), "--help")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "--days" in r.stdout and "--end-date" in r.stdout and "--env-file" in r.stdout
+
+
+def test_the_pull_is_one_select_with_the_producers_id_and_no_credential_in_the_folder(tmp_path):
+    """The extract puller: one SELECT over the trailing days, the source
+    columns aliased to the feed's names, `episode_id` carried through, an
+    ISO check on the dates before they reach the SQL; the pull writes the
+    parquet the builder reads by default. Credentials come from the
+    environment only: no REDSHIFT_ value or hostname anywhere in the
+    folder, and a missing variable is named, never the host."""
+    folder = str(tmp_path / "pricing_folder")
+    shutil.copytree(FOLDER, folder, ignore=shutil.ignore_patterns("__pycache__"))
+    r = _isolated(folder, "-c", (
+        "import os, pandas as pd\n"
+        "from pricing import extract, features\n"
+        "q = extract.build_query('2026-08-01', '2026-08-28')\n"
+        "assert extract.SOURCE_TABLE in q and 'episode_id' in q\n"
+        "for col in ('skuseq', 'inventory', 'discount', 'normal_asp', 'cogs_wo_vat', 'flc_window'):\n"
+        "    assert col in q, col\n"
+        "assert \"BETWEEN '2026-08-01' AND '2026-08-28'\" in q\n"
+        "try:\n"
+        "    extract.build_query(\"2026-08-01' OR 1=1 --\", '2026-08-28')\n"
+        "except SystemExit as e:\n"
+        "    assert 'ISO date' in str(e)\n"
+        "else:\n"
+        "    raise AssertionError('a non-date reached the SQL')\n"
+        "class Conn:\n"
+        "    closed = False\n"
+        "    def close(self): self.closed = True\n"
+        "conn = Conn()\n"
+        "pd.read_sql = lambda sql, c: pd.DataFrame({'skuseq': [1, 2], 'date': ['2026-08-27', '2026-08-28']})\n"
+        "rep = extract.download(days=3, end_date='2026-08-28', out='data/flc.parquet', conn=conn)\n"
+        "assert conn.closed and rep['rows'] == 2 and rep['start'] == '2026-08-26'\n"
+        "assert os.path.exists(features.EXTRACT_PATH)\n"
+        "for k in list(os.environ):\n"
+        "    if k.startswith('REDSHIFT_'): del os.environ[k]\n"
+        "try:\n"
+        "    extract.get_conn(env_file='no-such-file')\n"
+        "except RuntimeError as e:\n"
+        "    assert 'REDSHIFT_HOST' in str(e)\n"
+        "except ImportError:\n"
+        "    pass\n"
+        "else:\n"
+        "    raise AssertionError('connected with no credentials')\n"))
+    assert r.returncode == 0, r.stdout + r.stderr
+    for dp, dns, fs in os.walk(FOLDER):
+        dns[:] = [d for d in dns if d not in ("__pycache__", "artifacts", "data")]
+        for f in fs:
+            if f.endswith((".py", ".yaml", ".md", ".json", ".txt", ".lock")):
+                with open(os.path.join(dp, f), errors="replace") as fh:
+                    text = fh.read()
+                assert not re.search(r"REDSHIFT_[A-Z]+\s*[=:]\s*\S", text), os.path.join(dp, f)
 
 
 def test_the_sync_carries_the_five_artifacts_the_seed_and_the_pruned_config(
         cfg, tmp_path, monkeypatch):
     """What the owner's chain calls after every seal and every advance run:
-    the five artifacts the hour opens, the extract the first morning
-    seeds from, and the config pruned to what the two commands read; one
+    the five artifacts the hour opens and the config pruned to what the
+    commands read -- no extract, no history: the folder pulls its own; one
     not on disk yet is listed, never an error; no folder means no sync."""
     folder = str(tmp_path / "pricing_folder")
     assert bi.sync(cfg, out=folder) is None
@@ -178,12 +235,9 @@ def test_the_sync_carries_the_five_artifacts_the_seed_and_the_pruned_config(
         with open(path, "w") as f:
             json.dump({"key": ".".join(key)}, f)
     monkeypatch.chdir(tmp_path)
-    os.makedirs("data")
-    with open(os.path.join("data", "flc_raw.parquet"), "wb") as f:
-        f.write(b"not really parquet")
     rec = bi.sync(c, out=folder)
     assert set(rec["copied"]) == {"artifacts/r_lookup.json", "artifacts/posterior.json",
-                                  "data/flc_raw.parquet", "config.yaml"}
+                                  "config.yaml"}
     assert set(rec["absent"]) == {"baseline_model.model_path",
                                   "baseline_model.feature_schema_path",
                                   "baseline_model.calibration_factor_path"}
@@ -196,10 +250,11 @@ def test_the_sync_carries_the_five_artifacts_the_seed_and_the_pruned_config(
 def test_the_folder_carries_the_handoff():
     for rel in ("README.md", "MANIFEST.json", "config.yaml", "requirements.lock",
                 "examples/README.md", "docs/engineering_handover.html",
-                "price_hour.py", "build_features.py", "pricing/__init__.py"):
+                "price_hour.py", "download_flc.py", "build_features.py", "pricing/__init__.py"):
         assert os.path.exists(os.path.join(FOLDER, rel)), rel
     for gone in ("src", "check_inputs.py", "assign_episode_ids.py"):
         assert not os.path.exists(os.path.join(FOLDER, gone)), gone
     with open(os.path.join(FOLDER, "MANIFEST.json")) as f:
         m = json.load(f)
-    assert m["commands"] == ["price_hour.py", "build_features.py"] and m["code"] == bi.CODE
+    assert m["commands"] == ["price_hour.py", "download_flc.py", "build_features.py"]
+    assert m["code"] == bi.CODE

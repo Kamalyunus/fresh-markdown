@@ -95,7 +95,7 @@ the reviewed simulator's shop (`evaluate.pilot_shop`) through the reviewed
 caller in a workspace) and `docs/` pages. `ops/integration.py` (the folder's
 check and the sync `seal` and `advance` call) is a file copier, read it once.
 `integration/pricing/` is the hourly path and the morning table rewritten
-from scratch for the folder (thirteen modules, under two thousand lines),
+from scratch for the folder (fourteen modules, under two thousand lines),
 STATELESS where the repository's hour is not: the row's `episode_id` is
 the opening tag and decides entry versus later hour, the row's price in
 force is the anchor, the opening day's table gives the features, and the

@@ -1275,6 +1275,35 @@ now. Dates are owner sign-off.
   --check` refuses a folder whose constants differ from the repository's
   config. Nineteen keys became fourteen.
 
+- **The morning is a pull and a table; the ids are theirs there too**
+  (owner, 09-19, the seventh cut). Two more questions from the owner.
+  Why seed a rolling feed history from the repository's extract and
+  keep it day by day, when the warehouse holds the hourly table and a
+  cron can pull the trailing days each morning? And why does the
+  builder carry the window rule, the gap split, the continuity break
+  and the defective-window drop, when the producers assign the id? Both
+  were the training's habits carried into serving. The training derives
+  ids because its extract has none and cleans by episode because a
+  broken episode poisons a fit; the serving table needs neither: two
+  anchor-hour rates per SKU x FC as of today, from rows that carry
+  their key, their id and their counts. So the folder gained a third
+  command, `download_flc.py` -- one SELECT over the trailing 45 days
+  with the producers' `episode_id` in the column list, credentials from
+  `~/.env` and nowhere else, the bundle test grepping the folder for a
+  credential -- and the builder became: read the extract, keep the
+  usable rows, ids as given, the two rates. Gone: the rolling history,
+  the seed, the rule and its four helpers, `--feed`; the sync no longer
+  carries an extract. On the fixture the new table equals the old one
+  row for row (structural check, fixture data). The assumption that
+  makes it work, stated to the owner: the warehouse table carries the
+  producers' `episode_id` column; if it does not, the pull fails on the
+  column name and the answer is the column, not the rule. What
+  differs from training, on purpose: the training's table is built on
+  rule-derived ids and episode-level drops; the serving table on the
+  producers' ids and row-level drops. The two agree wherever the ids
+  agree and the rows are clean, and where they do not, the morning
+  lane's disagreement count is where it shows.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,

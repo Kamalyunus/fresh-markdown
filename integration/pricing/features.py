@@ -1,18 +1,19 @@
-"""The morning command: yesterday's feed in, the day's feature table out.
+"""The morning command: the day's extract in, the day's feature table out.
 
-The rolling feed history (the extract on the first morning, then the last
-`HISTORY_DAYS` days of feed) is prepared the way the training
-extract was -- the window rule names the episodes, and every window a
-defect sits in is dropped whole -- and the two demand-rate features every
-episode opening TODAY reads (the trailing 30-day reference sales rate and
-the previous episode's) are written once per SKU x FC, plus one pooled row
-per SKU. Both read strictly before the opening day, so the table's row IS
-the hour's number.
+The extract (`download_flc.py`: the trailing days of the hourly table,
+the producers' `episode_id` on every row) is read as it is -- the ids are
+theirs, no rule re-derives them -- with row-level hygiene only: a row
+without its key, its id or its counts, a re-fed hour's earlier copy, a
+discount outside 0..100, a negative count, a null category, a base price
+that is not positive. The two demand-rate features every episode opening
+TODAY reads (the trailing 30-day reference sales rate and the previous
+episode's) are written once per SKU x FC, plus one pooled row per SKU.
+Both read strictly before the opening day, so the table's row IS the
+hour's number.
 
-Run: python3 build_features.py --feed feed/<yesterday>.parquet [--as-of YYYY-MM-DD]
+Run: python3 build_features.py [--extract data/flc.parquet] [--as-of YYYY-MM-DD]
 """
 import argparse
-import datetime as dt
 import os
 
 import numpy as np
@@ -22,9 +23,8 @@ from pricing.config import load_config, reference_discount
 from pricing.feed import SOURCE_TO_CANONICAL, write_json
 from pricing.keys import ident_series, iso_day
 
-RAW = "data/flc_raw.parquet"
-SOURCE_HOUR_KEY = ("skuseq", "fc", "date", "hour")
-EPISODE_KEY = ("sku_id", "fc", "date", "hour_of_day")
+EXTRACT_PATH = os.path.join("data", "flc.parquet")     # where download_flc.py leaves the day's pull
+HOUR_KEY = ("sku_id", "fc", "date", "hour_of_day")
 QUANTITY_COLS = ("starting_inventory", "units_sold", "ending_inventory")
 HISTORY_COLS = ("episode_id", "sku_id", "fc", "category", "date", "hour_of_day",
                 "starting_inventory", "units_sold", "total_discount")
@@ -39,139 +39,36 @@ FEATURE_COLS = ("sku_id", "fc", "sku_ref_sales_rate_30d", "prior_episode_ref_sal
 # constants differ from the repository's config.
 REF_RATE_WINDOW_DAYS = 30
 REF_RATE_ANCHOR_BAND = 0.025
-# the rolling feed the table is built from, and how many days it keeps:
-# the window plus a margin so an episode crossing the cut keeps its rows
-HISTORY_PATH = os.path.join("data", "feed_history.parquet")
-HISTORY_DAYS = REF_RATE_WINDOW_DAYS + 15
 
 
-# ------------------------------------------------------- the rolling feed
+# ------------------------------------------------------------ the extract
 
-def rolling_history(cfg, feed_path=None):
-    """The rolling feed after `feed_path` joins it: seeded from the extract
-    when no rolling file exists, deduplicated on the source hour key (the
-    last row of a re-fed hour wins), trimmed to `HISTORY_DAYS`, written back."""
-    path, days = HISTORY_PATH, HISTORY_DAYS
-    frames = []
-    if os.path.exists(path):
-        frames.append(pd.read_parquet(path))
-    elif os.path.exists(RAW):
-        frames.append(pd.read_parquet(RAW))
-    if feed_path:
-        frames.append(pd.read_parquet(feed_path))
-    if not frames:
-        raise SystemExit(f"no rolling feed at {path}, no extract at {RAW} and no --feed")
-    raw = pd.concat(frames, ignore_index=True)
-    raw = raw.drop_duplicates(subset=list(SOURCE_HOUR_KEY), keep="last")
-    day = pd.to_datetime(raw["date"])
-    keep = day >= (day.max() - pd.Timedelta(days=days - 1))
-    raw = raw[keep].sort_values(list(SOURCE_HOUR_KEY)).reset_index(drop=True)
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    raw.to_parquet(path, index=False)
-    return raw
-
-
-# -------------------------------------------------- the window rule, applied
-
-def _signals(df):
-    ts = pd.to_datetime(df.date) + pd.to_timedelta(df.hour_of_day, unit="h")
-    grp = [df.sku_id, df.fc]
-    prev = {c: df[c].groupby(grp).shift() for c in QUANTITY_COLS}
-    hr_diff = df.hours_remaining.groupby(grp).diff()
-    prev_restock = prev["ending_inventory"] > prev["starting_inventory"] - prev["units_sold"]
-    return {"dt_h": ts.groupby(grp).diff().dt.total_seconds() / 3600.0,
-            "hr_diff": hr_diff,
-            "prev_closed": prev["ending_inventory"].eq(0),
-            "prev_restock": prev_restock,
-            "counter_ok": hr_diff.eq(-1.0) | (hr_diff.gt(-1.0) & prev_restock)}
-
-
-def _episode_ids(df):
-    """`sku|fc|<first hour of the window>`: a row opens a window when the
-    clock did not step one hour, the previous hour closed the shelf, or the
-    counter did not step down by one (unless stock arrived)."""
-    s = _signals(df)
-    starts = s["dt_h"].ne(1.0) | s["prev_closed"] | ~s["counter_ok"]
-    ts = pd.to_datetime(df.date) + pd.to_timedelta(df.hour_of_day, unit="h")
-    start_ts = ts.where(starts).groupby([df.sku_id, df.fc]).ffill()
-    return df.sku_id.astype(str) + "|" + df.fc.astype(str) + "|" + start_ts.dt.strftime("%Y-%m-%dT%H")
-
-
-def _defective_windows(df, bad):
-    """Every row of the source window a `bad` row sits in (a duplicate hour
-    stays in its window; an unreadable counter step is taken on the clock)."""
-    bad = pd.Series(np.asarray(bad, dtype=bool), index=df.index)
-    if not bad.any():
-        return pd.Series(False, index=df.index)
-    s = _signals(df)
-    dt_h, hr_diff = s["dt_h"], s["hr_diff"]
-    gap_ok = (dt_h > 1.0) & (dt_h == -hr_diff)
-    same = ((dt_h.eq(1.0) & (s["counter_ok"] | hr_diff.isna()))
-            | dt_h.eq(0.0) | gap_ok) & ~s["prev_closed"]
-    window = (~same.fillna(False) | dt_h.isna()).cumsum()
-    return window.isin(set(window[bad]))
-
-
-def _gap_split_ids(df):
-    """Every fragment of a window a missing hour split in two."""
-    ts = pd.to_datetime(df.date) + pd.to_timedelta(df.hour_of_day, unit="h")
-    grp = [df.sku_id, df.fc]
-    dt_h = ts.groupby(grp).diff().dt.total_seconds() / 3600.0
-    hr_drop = -df.hours_remaining.groupby(grp).diff()
-    gap = (dt_h > 1) & (dt_h == hr_drop)
-    if not gap.any():
-        return np.array([], dtype=object)
-    starts = df.episode_id.ne(df.episode_id.groupby(grp).shift())
-    window = df.episode_id.where(starts & ~gap).groupby(grp).ffill()
-    per_window = df.groupby(window).episode_id.nunique()
-    broken = per_window.index[per_window > 1]
-    return df.loc[window.isin(broken), "episode_id"].unique()
-
-
-def _continuity_breaks(d):
-    nxt = d.groupby("episode_id")["starting_inventory"].shift(-1)
-    return (nxt.notna() & (nxt != d.ending_inventory)).to_numpy()
-
-
-def prepare(path, cfg):
-    """The rolling feed prepared as the training extract was: every drop is
-    a window or an episode, whole. Returns the history in HISTORY_COLS.
-    (The training's exclusion of a past demand-issue period is not
-    applied: the rolling history never reaches that far back.)"""
+def prepare(path):
+    """The extract as history: the feed's names, the discount a fraction,
+    the ids as given, and only rows that carry what the features read."""
     df = pd.read_parquet(path).rename(columns=SOURCE_TO_CANONICAL)
-    df["total_discount"] = df["total_discount"] / 100.0
+    if "episode_id" not in df.columns:
+        raise SystemExit(f"{path} carries no episode_id column: the producers' id must be "
+                         "in the extract (download_flc.py selects it)")
+    df["total_discount"] = pd.to_numeric(df["total_discount"], errors="coerce") / 100.0
     for col in QUANTITY_COLS:
-        df[col] = pd.to_numeric(df[col]).round()
-    df = df.sort_values(list(EPISODE_KEY))
-    df["episode_id"] = _episode_ids(df)
-    readable = ~df[list(QUANTITY_COLS)].isna().any(axis=1)
-    df = df[~df[list(EPISODE_KEY)].isna().any(axis=1)]           # no key, no window
-    null_win = _defective_windows(df, df.hours_remaining.isna() | ~readable[df.index])
-    df = df[~null_win]
-    for col in QUANTITY_COLS:
-        df[col] = df[col].astype("int64")
-    dup = df.duplicated(subset=list(EPISODE_KEY), keep=False)
-    df = df[~_defective_windows(df, dup)]
-    df["episode_id"] = _episode_ids(df)
-    d = df[~df.episode_id.isin(_gap_split_ids(df))]
-    bad = d.loc[~d.total_discount.between(0, 1), "episode_id"].unique()
-    d = d[~d.episode_id.isin(bad)]
-    neg = (d.starting_inventory < 0) | (d.units_sold < 0) | (d.ending_inventory < 0)
-    d = d[~d.episode_id.isin(d.loc[neg, "episode_id"].unique())]
-    d = d.sort_values(["sku_id", "fc", "date", "hour_of_day"])
-    discontinuous = _continuity_breaks(d)
-    d = d[~d.episode_id.isin(d.loc[discontinuous, "episode_id"].unique())]
-    bad = d.loc[d.category.isna() | d.subcategory.isna(), "episode_id"].unique()
-    d = d[~d.episode_id.isin(bad)].copy()
-    d["original_price"] = (d.groupby("episode_id")["original_price"]
-                           .transform(lambda s: s.replace(0, np.nan).ffill().bfill()))
-    bad = d.loc[d.original_price.isna() | (d.original_price <= 0), "episode_id"].unique()
-    d = d[~d.episode_id.isin(bad)]
-    d = d.sort_values(["episode_id", "date", "hour_of_day"])
-    hist = d[list(HISTORY_COLS)].copy()
-    hist["date"] = pd.to_datetime(hist["date"]).dt.strftime("%Y-%m-%d")
-    for col in ("sku_id", "fc"):
-        hist[col] = ident_series(hist[col])
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["original_price"] = pd.to_numeric(df["original_price"], errors="coerce")
+    for col in ("sku_id", "fc", "episode_id"):
+        df[col] = ident_series(df[col])
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    keep = (df[list(HOUR_KEY)].notna().all(axis=1) & df.episode_id.notna()
+            & df[list(QUANTITY_COLS)].notna().all(axis=1)
+            & (df[list(QUANTITY_COLS)] >= 0).all(axis=1)
+            & df.total_discount.between(0, 1)
+            & df.category.notna() & (df.original_price > 0))
+    df = df[keep].sort_values(list(HOUR_KEY))
+    df = df.drop_duplicates(subset=list(HOUR_KEY), keep="last")     # a re-fed hour: the last row wins
+    hist = df[list(HISTORY_COLS)].copy()
+    hist["date"] = hist["date"].dt.strftime("%Y-%m-%d")
+    hist["hour_of_day"] = hist["hour_of_day"].astype(int)
+    for col in QUANTITY_COLS[:2]:
+        hist[col] = hist[col].astype("int64")
     return hist.reset_index(drop=True)
 
 
@@ -273,41 +170,41 @@ def ref_rate_table(history, as_of, cfg):
 
 # ------------------------------------------------------------- the morning
 
-def build(cfg, feed_path=None, as_of=None, out=None):
-    fc = cfg["features"]
-    raw = rolling_history(cfg, feed_path)
+def build(cfg, extract_path=EXTRACT_PATH, as_of=None, out=None):
+    """The table for `as_of` (default: the day after the extract's last
+    day) from the extract at `extract_path`; returns the report."""
+    hist = prepare(extract_path)
     if as_of is None:
-        as_of = (str((pd.Timestamp(raw.date.max()) + pd.Timedelta(days=1)).date())
-                 if feed_path and len(raw) else dt.datetime.now(dt.timezone.utc).date())
+        if not len(hist):
+            raise SystemExit(f"{extract_path} holds no usable row and no --as-of was given")
+        as_of = str((pd.Timestamp(hist.date.max()) + pd.Timedelta(days=1)).date())
     as_of = iso_day(as_of)
-    hist = prepare(HISTORY_PATH, cfg)
     table = ref_rate_table(hist, as_of, cfg)
-    out = out or os.path.join(fc["table_dir"], f"{as_of}.parquet")
+    out = out or os.path.join(cfg["features"]["table_dir"], f"{as_of}.parquet")
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     table.to_parquet(out, index=False)
     pooled = int((table["fc"] == POOLED_FC).sum()) if len(table) else 0
     return {"as_of": as_of, "out": out, "rows": int(len(table)),
             "sku_fc_rows": int(len(table)) - pooled, "pooled_rows": pooled,
-            "history_rows": int(len(raw)),
-            "history_from": str(pd.to_datetime(raw["date"]).min().date()) if len(raw) else None,
-            "history_through": str(pd.to_datetime(raw["date"]).max().date()) if len(raw) else None,
-            "prepared_rows": int(len(hist)), "feed": feed_path}
+            "extract": extract_path, "history_rows": int(len(hist)),
+            "history_from": str(hist.date.min()) if len(hist) else None,
+            "history_through": str(hist.date.max()) if len(hist) else None}
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="build_features.py")
-    ap.add_argument("--feed", default=None,
-                    help="yesterday's hourly feed parquet; omitted, the rolling history stands")
+    ap.add_argument("--extract", default=EXTRACT_PATH,
+                    help=f"the day's extract from download_flc.py (default {EXTRACT_PATH})")
     ap.add_argument("--as-of", default=None,
-                    help="the day the table is for (default: the feed's day plus one)")
+                    help="the day the table is for (default: the extract's last day plus one)")
     ap.add_argument("--out", default=None, help="default features/<as_of>.parquet")
     ap.add_argument("--report", default=None, help="the morning's counts, JSON")
     ap.add_argument("--config", default="config.yaml")
     args = ap.parse_args(argv)
-    rep = build(load_config(args.config), feed_path=args.feed, as_of=args.as_of, out=args.out)
+    rep = build(load_config(args.config), extract_path=args.extract, as_of=args.as_of, out=args.out)
     if args.report:
         write_json(args.report, rep)
     print(f"feature table {rep['as_of']}: {rep['sku_fc_rows']:,} sku x fc rows + "
-          f"{rep['pooled_rows']:,} pooled, from {rep['history_rows']:,} feed rows "
+          f"{rep['pooled_rows']:,} pooled, from {rep['history_rows']:,} extract rows "
           f"({rep['history_from']}..{rep['history_through']}) -> {rep['out']}")
     return 0

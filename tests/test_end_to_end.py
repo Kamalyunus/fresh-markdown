@@ -1360,10 +1360,10 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
         workspace, tmp_path):
     """The owner's side, in the workspace with the repository: the launch
     config is set and a real `ops.seal` syncs the five artifacts, the
-    extract the first morning seeds from and the pruned config into a
-    copy of the committed folder -- no hand copy. Engineering's side, from
-    a third directory with the repository off the path: the morning
-    command seeds its rolling history and writes the day's table, then
+    pruned config into a copy of the committed folder -- no hand copy.
+    Engineering's side, from a third directory with the repository off
+    the path: the morning command builds the day's table from the day's
+    extract (the producers' ids on every row, as given), then
     the hourly command prices a top-of-hour snapshot (the extract's last day at one hour,
     re-dated to the day after, the ids assigned upstream as the producers
     would) through the whole engine with the parallel pool, exploit only.
@@ -1383,7 +1383,6 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
 
     raw = pd.read_parquet(workspace / "data" / "flc.parquet")
     as_of = str((pd.Timestamp(raw.date.max()) + pd.Timedelta(days=1)).date())
-    shutil.copyfile(workspace / "data" / "flc.parquet", workspace / "data" / "flc_raw.parquet")
     with open(workspace / "config.yaml") as f:
         cfg = yaml.safe_load(f)
     with open(workspace / "artifacts" / "rho.json") as f:
@@ -1412,8 +1411,7 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     assert synced["bundle"] and synced["absent"] == []
     assert {"artifacts/baseline_model.txt", "artifacts/feature_schema.json",
             "artifacts/calibration.json", "artifacts/r_lookup.json",
-            "artifacts/posterior.json", "data/flc_raw.parquet",
-            "config.yaml"} == set(synced["copied"])
+            "artifacts/posterior.json", "config.yaml"} == set(synced["copied"])
     assert not os.path.exists(os.path.join(folder, "artifacts", "prior.json"))
     with open(os.path.join(folder, "config.yaml")) as f:
         pruned = yaml.safe_load(f)
@@ -1422,12 +1420,24 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     elsewhere = str(tmp_path / "elsewhere")
     os.makedirs(elsewhere)
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    # the morning: the day's extract is what download_flc.py leaves in
+    # data/ -- here the extract with the producers' ids on every row (the
+    # repository's rule stands in for them) -- and the table is built from
+    # it alone, the ids as given
+    from common.windows import assign_episode_ids
+    engine_names = raw.rename(columns={"skuseq": "sku_id", "hour": "hour_of_day",
+                                       "inventory": "starting_inventory",
+                                       "flc_window": "hours_remaining"})
+    engine_names = engine_names.sort_values(["sku_id", "fc", "date", "hour_of_day"])
+    extract = raw.loc[engine_names.index].copy()
+    extract["episode_id"] = assign_episode_ids(engine_names).to_numpy()
+    extract.to_parquet(os.path.join(folder, "data", "flc.parquet"), index=False)
     r = subprocess.run([sys.executable, os.path.join(folder, "build_features.py"),
                         "--as-of", as_of], cwd=elsewhere, env=env,
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
     assert os.path.exists(os.path.join(folder, "features", f"{as_of}.parquet"))
-    assert os.path.exists(os.path.join(folder, "data", "feed_history.parquet"))
+    assert not os.path.exists(os.path.join(folder, "data", "feed_history.parquet"))
     last = raw[raw.date == raw.date.max()]
     open_rows = last[(last.inventory > 0) & (last.flc_window > 1)]
     hour = int(open_rows.hour.value_counts().idxmax())

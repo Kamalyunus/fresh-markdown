@@ -40,10 +40,11 @@ All commands run from the repo root. `data/`, `reports/`, `artifacts/`,
   from `integration/`, the standalone folder maintained in place (its
   code, `pricing/`, is the folder's own and stateless — a row priced
   from itself, the id its opening tag, the price in force piped back —
-  held equal to the repository's hour by the parity test; two commands,
-  the hourly price (exploit only) and the morning table; its `README.md`
+  held equal to the repository's hour by the parity test; three commands,
+  the hourly price (exploit only), the morning pull from the warehouse and
+  the morning table from it; its `README.md`
   is the handoff; every seal and every `advance` run syncs the five
-  artifacts, the extract seed and the pruned config into it; the checks
+  artifacts and the pruned config into it; the checks
   run HERE on the files they send; the id is theirs,
   nothing there assigns one; the learning lane stays in the repository and
   reads the store that folder writes),
