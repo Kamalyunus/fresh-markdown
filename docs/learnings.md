@@ -1224,6 +1224,38 @@ now. Dates are owner sign-off.
   drawn fields, which the handover's field table already says and the
   first draft of the comparison had not read.
 
+- **The hourly service is stateless** (owner, 09-19, the sixth cut).
+  "For the DP to put a price on a SKU × FC at an hour, it doesn't need
+  the episode id; the service should be stateless." It is right about
+  the DP: the solver takes the anchor, the stock, the horizon, the path
+  and r, and the id reaches none of them. What the store answered was
+  one question -- is this hour the episode's first? -- plus the forecast
+  made at that first hour. Both come from the row instead. The
+  producers' id is the opening tag (`<sku>|<fc>|<day>T<hh>`, the spelling
+  the rule already used), so entry versus later hour is read off the id;
+  the row's price in force is the anchor, null at entry and the applied
+  price piped back on every later row (engineering's undertaking); the
+  features are the OPENING day's table, kept on the host, so a later hour
+  is forecast on what its first hour was -- the design's rule against a
+  mid-episode recompute, met without the store. The forecast is re-made
+  every hour over the remaining horizon and equals the entry's path
+  sliced, bit for bit in the suite, except across a week boundary inside
+  an episode, where the level factor is the request week's; taken as the
+  fresher value. Gone: the store's three indexes and the tail re-read,
+  the continuation branch, the path slicing and the restock tail, the id
+  rule and its three counters, the missing-id refusal. The log stays,
+  append-only and never read in the folder; the learning lane's reader
+  dedups by id, and a re-sent hour appends the identical decision. Two
+  producer faults gained a reason each: a later row without the price in
+  force (refused, never priced as an entry -- that would let the price
+  rise mid-episode) and an id that places no hour. The proof is the same
+  parity test, extended by one hour: the applied prices piped back as
+  the next snapshot's price in force, the repository continuing from its
+  store and the folder from the row alone, every field equal. The lesson:
+  state that exists to answer a question the request could carry is a
+  dependency in disguise; the question was who owns the episode
+  boundary, and the answer was already "the producers".
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,

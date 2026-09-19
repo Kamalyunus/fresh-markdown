@@ -47,7 +47,7 @@ def test_every_copy_matches_its_source_and_the_manifest_is_the_disk():
     assert r["dangling"] == [], f"imports that leave the package: {r['dangling']}"
     assert r["unreached"] == [], f"modules neither command imports: {r['unreached']}"
     assert set(r["own"]) >= {"pricing/hour.py", "pricing/features.py", "pricing/decide.py",
-                             "pricing/dp.py", "pricing/store.py", "price_hour.py",
+                             "pricing/dp.py", "pricing/log.py", "price_hour.py",
                              "build_features.py", "README.md"}
     assert bi.current(ROOT, FOLDER)
 
@@ -56,15 +56,22 @@ def test_the_package_is_closed_and_carries_nothing_of_the_learning_lane():
     """Standalone: nothing under pricing/ imports a repository package.
     Minimal: no module and no function of the posterior update, the
     exploration draw, the budget, the outcome side of the store, the
-    pairing, the seal, the fitter or the checker rides along; the id rule
-    is there only to count disagreements."""
+    pairing, the seal, the fitter, the checker or the episode-id rule
+    rides along. Stateless: no store is read -- the log is append-only
+    and has no reader in the package."""
     assert bi.unresolved(FOLDER) == []
     mods = set(bi.modules(FOLDER))
     assert {"pricing.hour", "pricing.features", "pricing.decide", "pricing.dp",
-            "pricing.store", "pricing.state", "pricing.model", "pricing.rule"} <= mods
+            "pricing.log", "pricing.state", "pricing.model"} <= mods
     assert not {m for m in mods if any(w in m for w in
                                        ("posterior", "explore", "budget", "learn", "outcome",
-                                        "pairs", "seal", "train", "calibrate", "check"))}
+                                        "pairs", "seal", "train", "calibrate", "check", "store",
+                                        "rule"))}
+    with open(bi._module_path(FOLDER, "pricing.log")) as f:
+        log_tree = ast.parse(f.read())
+    public = {n.name for c in ast.walk(log_tree) if isinstance(c, ast.ClassDef) and c.name == "EventLog"
+              for n in c.body if isinstance(n, ast.FunctionDef) and not n.name.startswith("_")}
+    assert public == {"append"}, public
     names = set()
     for mod in mods:
         with open(bi._module_path(FOLDER, mod)) as f:
@@ -73,7 +80,8 @@ def test_the_package_is_closed_and_carries_nothing_of_the_learning_lane():
     assert not names & {"commit_update", "initialise", "suspend_exploration", "commit_tau",
                         "emit_outcome", "load_decisions", "match_pairs", "quality_rates",
                         "draw", "spread_table", "budget_today", "train", "verify", "seal",
-                        "split_frames"}, names
+                        "split_frames", "continues", "latest_by_shelf", "episode_paths",
+                        "priced_hours", "_consume", "_quarantine"}, names
     for repo_pkg in ("common", "engine", "events", "fit", "daily", "ops", "evaluate"):
         for mod in mods:
             with open(bi._module_path(FOLDER, mod)) as f:

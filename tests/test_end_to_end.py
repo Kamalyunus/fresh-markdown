@@ -1526,3 +1526,99 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
         for rid, a in refused.items():
             assert {k: v for k, v in a.items() if k != "timestamp"} == \
                 {k: v for k, v in mine[rid].items() if k != "timestamp"}, (tag, rid)
+
+    # THE NEXT HOUR, STATELESS: the producers pipe the price the service
+    # applied back as the row's price in force, the counter steps, the id
+    # stays the opening tag. The folder prices it from the row alone; the
+    # repository prices it as a continuation from its store (the suspended
+    # run's, so nothing is drawn). Every field must agree: the anchor is the
+    # applied price, the forecast is the entry's path from the next hour
+    # on, the features are the opening day's. Then the faults a producer
+    # can send: a later row without the price in force, an id that is not
+    # an opening tag, an id opening after the hour -- each refused with its
+    # reason, none priced; and a dry run appends nothing to the log.
+    priced_rows = pd.read_csv(os.path.join(folder, "decisions", "hour_live.csv"))
+    priced_rows = priced_rows[priced_rows.decision_id.notna()]
+    snap2 = snap.copy()
+    snap2["episode_id"] = [r["episode_id"] for r in rows]
+    key = snap2.skuseq.astype(str) + "|" + snap2.fc.astype(str)
+    applied = dict(zip(priced_rows.skuseq.astype(str) + "|" + priced_rows.fc.astype(str),
+                       priced_rows.apply_discount_pct))
+    snap2 = snap2[key.isin(applied) & (snap2.flc_window >= 1)].copy()
+    assert len(snap2) >= 1
+    snap2["discount"] = (snap2.skuseq.astype(str) + "|" + snap2.fc.astype(str)).map(applied)
+    snap2["flc_window"] = snap2.flc_window - 1
+    when2 = pd.Timestamp(as_of) + pd.Timedelta(hours=hour + 1)
+    snap2["date"], snap2["hour"] = str(when2.date()), int(when2.hour)
+    faults = snap2.head(3).copy()
+    faults["skuseq"] = faults.skuseq + 900000000          # distinct shelves: collide with nothing
+    ids, discounts, expect = [], [], []
+    for i, fr in enumerate(faults.itertuples()):
+        if i == 0:            # a later hour, the price in force not piped
+            ids.append(f"{fr.skuseq}|{fr.fc}|{as_of}T{hour:02d}")
+            discounts.append(None)
+            expect.append("without the price in force")
+        elif i == 1:          # an id that is not an opening tag
+            ids.append("not-a-tag")
+            discounts.append(fr.discount)
+            expect.append("not an opening tag")
+        else:                 # an id whose opening is after this hour
+            ids.append(f"{fr.skuseq}|{fr.fc}|{as_of}T{hour + 2:02d}")
+            discounts.append(fr.discount)
+            expect.append("opens after this hour")
+    faults["episode_id"], faults["discount"] = ids, discounts
+    pd.concat([snap2, faults]).to_csv(os.path.join(folder, "snapshots", "next.csv"), index=False)
+    r = subprocess.run([sys.executable, os.path.join(folder, "price_hour.py"),
+                        "--snapshot", "snapshots/next.csv", "--workers", "0",
+                        "--out", "decisions/next.csv", "--report", "reports/hours/next.json"],
+                       cwd=elsewhere, env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    with open(os.path.join(folder, "reports", "hours", "next.json")) as f:
+        rep2 = json.load(f)
+    assert rep2["entries"] == 0 and rep2["later_hours"] == len(snap2), rep2
+    assert rep2["later_hours_without_the_price_in_force"] == 1
+    assert rep2["episode_ids_that_place_no_hour"] == len(faults) - 1
+    assert rep2["decisions"] == len(snap2) - rep2["rejected"]
+    assert rep2["feature_tables"] == {as_of: os.path.join("features", f"{as_of}.parquet")}
+    next_rows = pd.read_csv(os.path.join(folder, "decisions", "next.csv"))
+    fault_rows = next_rows[next_rows.skuseq >= 900000000]
+    assert fault_rows.decision_id.isna().all() and fault_rows.rejected.notna().all()
+    for why in expect:
+        assert any(why in x for x in fault_rows.rejected), (why, list(fault_rows.rejected))
+    later = {e["decision_id"]: e for e in stream(folder_store, "decisions.jsonl")
+             if e["date"] == str(when2.date()) and e["hour_of_day"] == int(when2.hour)}
+    assert len(later) == rep2["decisions"] >= 1
+    first = {(e["sku_id"], e["fc"]): e for e in ours.values()}
+    for e in later.values():
+        e0 = first[(e["sku_id"], e["fc"])]
+        assert e["is_entry"] is False and e["episode_id"] == e0["episode_id"]
+        assert e["anchor_discount"] == pytest.approx(e0["applied_discount"])
+        assert e["mu_ref_path"] == pytest.approx(e0["mu_ref_path"][1:1 + e["hours_remaining"]])
+        assert (e["sku_ref_sales_rate_30d"], e["prior_episode_ref_sales_rate"]) == \
+            (e0["sku_ref_sales_rate_30d"], e0["prior_episode_ref_sales_rate"])
+    # the repository continues the same episodes from its store; every field equal
+    with open(workspace / "config_suspended.yaml") as f:
+        rc = yaml.safe_load(f)
+    snap2.to_csv(workspace / "next_repo.csv", index=False)
+    r = subprocess.run([sys.executable, "-m", "ops.price_hour",
+                        "--snapshot", str(workspace / "next_repo.csv"),
+                        "--features", os.path.join(folder, "features", f"{as_of}.parquet"),
+                        "--out", str(workspace / "response_next.csv"), "--workers", "0",
+                        "--config", "config_suspended.yaml"],
+                       cwd=workspace, env=owner_env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    theirs = {e["decision_id"]: e for e in stream(str(workspace / rc["events"]["store_dir"]),
+                                                    "decisions.jsonl") if e["decision_id"] in later}
+    assert set(theirs) == set(later), set(theirs) ^ set(later)
+    for did, a in theirs.items():
+        assert a["is_entry"] is False
+        for k in set(a) - clock:
+            assert a[k] == later[did][k], ("next", did, k, a[k], later[did][k])
+    # a dry run of the same hour: the response, no new line in the log
+    before = os.path.getsize(os.path.join(folder_store, "decisions.jsonl"))
+    r = subprocess.run([sys.executable, os.path.join(folder, "price_hour.py"),
+                        "--snapshot", "snapshots/next.csv", "--workers", "0", "--dry-run",
+                        "--out", "decisions/next_dry.csv"],
+                       cwd=elsewhere, env=env, capture_output=True, text=True)
+    assert r.returncode == 0 and "DRY RUN" in r.stdout, r.stdout + r.stderr
+    assert os.path.getsize(os.path.join(folder_store, "decisions.jsonl")) == before

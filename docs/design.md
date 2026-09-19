@@ -963,7 +963,15 @@ same `EPISODE_RULE` the history's derived ids do, so the two spellings
 meet; the features still come from what the store recorded at the
 opening, never a fresh history pass). A later request
 the store does not know falls back to a fresh forecast and is counted
-(`non_entry_requests_without_stored_path`). **Both event ids are the
+(`non_entry_requests_without_stored_path`). **The pricing folder
+(`integration/`) reaches the same decision without the store**: its hour
+is stateless — the producers' id is the opening tag, so entry versus later
+hour is read off the id; the anchor is the price in force the row carries
+(the applied price piped back); the features are the opening day's table;
+and the forecast is re-made every hour over the remaining horizon, which
+equals the entry's path sliced (the suite compares both hours field for
+field) except across a week boundary inside an episode, where the level
+factor is the request week's rather than the opening week's. **Both event ids are the
 shelf-hour**, built over the one key (`hour_key`) in the one place:
 `outcome_id = feed-<sku>|<fc>|<date>T<hh>` (`events.pairs.outcome_id_of`)
 and `decision_id = dec-<sku>|<fc>|<date>T<hh>` (`decision_id_of`; all three

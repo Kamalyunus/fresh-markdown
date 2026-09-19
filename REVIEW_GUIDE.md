@@ -95,12 +95,17 @@ the reviewed simulator's shop (`evaluate.pilot_shop`) through the reviewed
 caller in a workspace) and `docs/` pages. `ops/integration.py` (the folder's
 check and the sync `seal` and `advance` call) is a file copier, read it once.
 `integration/pricing/` is the hourly path and the morning table rewritten
-from scratch for the folder (fourteen modules, about two thousand lines):
-review it as a second implementation of the rules above, held to the first
-by `test_end_to_end`'s parity step — the same hour through `ops.price_hour`
-and the folder's command, every decision and rejection field equal — so a
-rule the parity hour does not exercise (a continuation, the restock
-extension, the quarantine) is where to read both side by side. The test suite is the
+from scratch for the folder (thirteen modules, under two thousand lines),
+STATELESS where the repository's hour is not: the row's `episode_id` is
+the opening tag and decides entry versus later hour, the row's price in
+force is the anchor, the opening day's table gives the features, and the
+forecast is re-made every hour instead of sliced from the store. Review it
+as a second implementation of the rules above, held to the first by
+`test_end_to_end`'s parity steps — an entry hour and the next hour through
+`ops.price_hour` and the folder's command, every decision and rejection
+field equal — so a rule the parity hours do not exercise (a restock that
+grew the counter, a week boundary inside an episode, where the level factor
+is the request week's) is where to read both side by side. The test suite is the
 reviewers' asset, not their burden: every non-obvious rule named above has a
 test whose docstring states it in prose.
 

@@ -1,23 +1,31 @@
-"""A validated request becomes the engine's state: the request's fields in
-one spelling, the dispersion r from the lookup, and the frozen model's
-forecast over the remaining hours -- a fresh one for an entry request (its
-two demand-rate features read off the day's table), the entry's stored
-forecast sliced for a later hour of a known episode, extended by prediction
-only when the window grew."""
+"""A snapshot row becomes the engine's state, from the row alone.
+
+The service is stateless: nothing is looked up from an earlier hour. The
+row's `episode_id` is the opening tag of its episode, `<sku>|<fc>|<day>T<hh>`,
+so the row is an ENTRY exactly when the tag names this shelf-hour, and a
+later hour of the episode otherwise. An entry has no anchor (the entry
+action set applies); a later hour is anchored on the price in force the
+row carries, which is the price this service applied last hour, piped
+back by the producers. The two demand-rate features are read from the
+feature table OF THE EPISODE'S OPENING DAY, so every hour of an episode is
+forecast on what the entry was forecast on, and the forecast is re-made
+every hour over the remaining horizon."""
 import json
 import math
+import re
 
 import numpy as np
 import pandas as pd
 
 from pricing.decide import count_failures
-from pricing.keys import hours_between, ident, iso_day
+from pricing.keys import hour_key, hours_between, ident, iso_day, shelf_hour_tag
 
 REQUEST_FIELDS = ("episode_id", "sku_id", "fc", "category", "subcategory",
                   "date", "hour_of_day", "hours_remaining", "q",
                   "original_price", "cost", "current_discount")
 POOLED_FC = "*"                 # the SKU-pooled row of the feature table
 _NUMBER = (int, float, np.integer, np.floating)
+_TAG = re.compile(r"^(?P<sku>[^|]+)\|(?P<fc>[^|]+)\|(?P<day>\d{4}-\d{2}-\d{2})T(?P<hh>\d{2})$")
 
 
 class Posterior:
@@ -51,6 +59,39 @@ def lookup_r(r_lookup, subcategory, category):
 def _null(v):
     return v is None or (isinstance(v, (float, np.floating)) and not math.isfinite(v))
 
+
+# ------------------------------------------------------------ the episode
+
+def opening_of(episode_id):
+    """(sku, fc, day, hour) the id names as the episode's first hour, or
+    None when the id is not an opening tag."""
+    if _null(episode_id):
+        return None
+    m = _TAG.match(str(episode_id).strip())
+    if not m:
+        return None
+    try:
+        return hour_key(m["sku"], m["fc"], m["day"], int(m["hh"]))
+    except (TypeError, ValueError):
+        return None
+
+
+def episode_position(episode_id, key):
+    """Where the shelf-hour `key` stands in its episode: ("entry", opening),
+    ("later", opening), or (reason, None) when the id cannot place it --
+    not an opening tag, another shelf's, or an opening after this hour."""
+    opening = opening_of(episode_id)
+    if opening is None:
+        return "episode_id is not an opening tag (<sku>|<fc>|<day>T<hh>)", None
+    if opening[:2] != key[:2]:
+        return f"episode_id names another shelf: {shelf_hour_tag(opening)}", None
+    elapsed = hours_between(opening[2], opening[3], key[2], key[3])
+    if elapsed < 0:
+        return f"episode_id opens after this hour: {shelf_hour_tag(opening)}", None
+    return ("entry" if elapsed == 0 else "later"), opening
+
+
+# ------------------------------------------------------------ the request
 
 def validate_request(r, cfg):
     """What a request must carry before a state can be built from it."""
@@ -92,8 +133,11 @@ def canonical_request(r):
         "hours_remaining": int(r["hours_remaining"]), "q": int(r["q"]),
         "original_price": float(r["original_price"]), "cost": float(r["cost"]),
         "current_discount": anchor,
+        "opening_day": r["opening_day"],
     }
 
+
+# ----------------------------------------------------------- the forecast
 
 def hour_grid(day, opening_hour, n_hours):
     base = pd.Timestamp(day) + pd.Timedelta(hours=opening_hour)
@@ -107,21 +151,20 @@ def table_as_of(table):
     return str(table["as_of"].iloc[0])
 
 
-def features_from_table(table, openings):
-    """{episode_id: (rate_30d, prior_episode_rate)} for `openings` (dicts
-    with episode_id, sku_id, fc): the (sku, fc) row, else the SKU's pooled
-    row, else (NaN, NaN) -- the model's own "unknown"."""
-    idx = {(str(r.sku_id), str(r.fc)): (float(r.sku_ref_sales_rate_30d),
-                                        float(r.prior_episode_ref_sales_rate))
-           for r in table.itertuples()}
-    out = {}
-    for o in openings:
-        sku, fc = ident(o["sku_id"]), ident(o["fc"])
-        f = idx.get((sku, fc))
-        if f is None:
-            f = idx.get((sku, POOLED_FC), (float("nan"), float("nan")))
-        out[o["episode_id"]] = f
-    return out
+def feature_index(table):
+    """{(sku, fc): (rate_30d, prior_episode_rate)} of a day's table."""
+    return {(str(r.sku_id), str(r.fc)): (float(r.sku_ref_sales_rate_30d),
+                                         float(r.prior_episode_ref_sales_rate))
+            for r in table.itertuples()}
+
+
+def features_of(index, sku, fc):
+    """The shelf's pair: its (sku, fc) row, else the SKU's pooled row, else
+    (NaN, NaN) -- the model's own "unknown"."""
+    f = index.get((ident(sku), ident(fc)))
+    if f is None:
+        f = index.get((ident(sku), POOLED_FC), (float("nan"), float("nan")))
+    return f
 
 
 def features_unknown(feats):
@@ -129,8 +172,8 @@ def features_unknown(feats):
 
 
 def mu_ref_paths(model, openings):
-    """`mu_ref_path` for many openings in ONE prediction, aligned with them;
-    each opening carries `template`, `grid` and `features`."""
+    """`mu_ref_path` for many requests in ONE prediction, aligned with them;
+    each carries `template`, `grid` and `features`."""
     if not openings:
         return []
     rows = []
@@ -155,92 +198,24 @@ def _template(r):
             "fc": r["fc"], "original_price": float(r["original_price"])}
 
 
-def _feature_pair(stored):
-    return tuple(float("nan") if v is None else float(v) for v in stored)
-
-
-def build_states(requests, cfg, model, r_lookup, episode_paths, table):
+def build_states(requests, cfg, model, r_lookup, tables):
     """The state for each VALIDATED request, aligned with it, and the
-    counts: forecasts with no history behind them, later hours whose
-    episode the store does not know, restock extensions predicted without
-    the entry's recorded features."""
-    empty = {"requests_with_unknown_features": 0,
-             "non_entry_requests_without_stored_path": 0,
-             "restock_extensions_without_stored_features": 0}
+    count of forecasts made on unknown features. `tables` maps each
+    request's `opening_day` to the feature index (feature_index) of the
+    table it reads."""
     if not requests:
-        return [], empty
+        return [], {"requests_with_unknown_features": 0}
     requests = [canonical_request(r) for r in requests]
-    paths = episode_paths or {}
-    fresh, tails, sliced = {}, {}, {}
-    without_stored = 0
-    for i, r in enumerate(requests):
-        stored = paths.get(r["episode_id"]) if r["current_discount"] is not None else None
-        if stored is None:
-            if r["current_discount"] is not None:
-                without_stored += 1
-            fresh[i] = (r["date"], r["hour_of_day"])
-            continue
-        k = hours_between(stored["date"], stored["hour_of_day"], r["date"], r["hour_of_day"])
-        if k < 0:
-            without_stored += 1
-            fresh[i] = (r["date"], r["hour_of_day"])
-            continue
-        path = list(stored["mu_ref_path"][k:k + r["hours_remaining"]])
-        if len(path) < r["hours_remaining"]:
-            tails[i] = path
-        else:
-            sliced[i] = path
-
-    stubs, feats, without_features = {}, {}, 0
-    for i in fresh:
-        r = requests[i]
-        stubs.setdefault(r["episode_id"], {"episode_id": r["episode_id"],
-                                           "sku_id": r["sku_id"], "fc": r["fc"]})
-    for i in tails:
-        r = requests[i]
-        stored = paths[r["episode_id"]].get("features")
-        if stored is not None:
-            feats[r["episode_id"]] = _feature_pair(stored)
-            continue
-        without_features += 1
-        stubs.setdefault(r["episode_id"], {"episode_id": r["episode_id"],
-                                           "sku_id": r["sku_id"], "fc": r["fc"]})
-    if stubs:
-        if table is None:
-            raise ValueError("a batch prices against the day's feature table")
-        feats.update(features_from_table(table, list(stubs.values())))
-    unknown, openings, owners = 0, [], []
-    for i in fresh:
-        r = requests[i]
-        f = feats[r["episode_id"]]
+    unknown, openings = 0, []
+    for r in requests:
+        f = features_of(tables[r["opening_day"]], r["sku_id"], r["fc"])
         unknown += features_unknown(f)
         openings.append({"template": _template(r),
                          "grid": hour_grid(r["date"], r["hour_of_day"], r["hours_remaining"]),
                          "features": f})
-        owners.append(i)
-    for i, path in tails.items():
-        r = requests[i]
-        grid = hour_grid(r["date"], r["hour_of_day"], r["hours_remaining"])[len(path):]
-        openings.append({"template": _template(r), "grid": grid,
-                         "features": feats[r["episode_id"]]})
-        owners.append(i)
-    predicted = dict(zip(owners, mu_ref_paths(model, openings)))
-    for i, path in tails.items():
-        sliced[i] = path + predicted[i]
-    for i in fresh:
-        sliced[i] = predicted[i]
-
-    def features_of(i, r):
-        if i in fresh or i in tails:
-            return feats[r["episode_id"]]
-        stored = paths[r["episode_id"]].get("features")
-        return None if stored is None else _feature_pair(stored)
-
+    paths = mu_ref_paths(model, openings)
     states = [{**{f: r[f] for f in REQUEST_FIELDS},
                "r": float(lookup_r(r_lookup, r["subcategory"], r["category"])),
-               "mu_ref_path": list(sliced[i]),
-               "features": None if features_of(i, r) is None else tuple(features_of(i, r))}
-              for i, r in enumerate(requests)]
-    return states, {"requests_with_unknown_features": int(unknown),
-                    "non_entry_requests_without_stored_path": int(without_stored),
-                    "restock_extensions_without_stored_features": int(without_features)}
+               "mu_ref_path": list(path), "features": tuple(o["features"])}
+              for r, o, path in zip(requests, openings, paths)]
+    return states, {"requests_with_unknown_features": int(unknown)}
