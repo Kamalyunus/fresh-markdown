@@ -1358,13 +1358,13 @@ def test_the_e2e_cycle_prices_ingests_and_pairs(workspace, tmp_path):
 
 def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
         workspace, tmp_path):
-    """The owner's side, in the workspace with the repository: the morning
-    lane writes the day's feature table, the launch config is set, and a
-    real `ops.seal` syncs the five artifacts, the table and the pruned
-    config into a copy of the committed folder -- no hand copy, and
-    nothing in the folder builds anything. Engineering's side, from a
-    third directory with the repository off the path: the one command
-    prices a top-of-hour snapshot (the extract's last day at one hour,
+    """The owner's side, in the workspace with the repository: the launch
+    config is set and a real `ops.seal` syncs the five artifacts, the
+    extract the first morning seeds from and the pruned config into a
+    copy of the committed folder -- no hand copy. Engineering's side, from
+    a third directory with the repository off the path: the morning
+    command seeds its rolling history and writes the day's table, then
+    the hourly command prices a top-of-hour snapshot (the extract's last day at one hour,
     re-dated to the day after, the ids assigned upstream as the producers
     would) through the whole engine with the parallel pool, exploit only.
     Then the owner checks the response against its snapshot with the
@@ -1400,7 +1400,6 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
 
     if not os.path.exists(workspace / "artifacts" / "calibration.json"):
         owner("fit.train_baseline", "--input", "data/prepared.parquet", "--fit-calibration")
-    owner("daily.features", "--as-of", as_of)              # the morning lane, in the repository
     out = owner("ops.seal", "--reason", "bootstrap")
     assert "synced" in out, out
     with open(os.path.join(folder, "artifacts", "synced.json")) as f:
@@ -1408,7 +1407,7 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     assert synced["bundle"] and synced["absent"] == []
     assert {"artifacts/baseline_model.txt", "artifacts/feature_schema.json",
             "artifacts/calibration.json", "artifacts/r_lookup.json",
-            "artifacts/posterior.json", f"features/{as_of}.parquet",
+            "artifacts/posterior.json", "data/flc_raw.parquet",
             "config.yaml"} == set(synced["copied"])
     assert not os.path.exists(os.path.join(folder, "artifacts", "prior.json"))
     with open(os.path.join(folder, "config.yaml")) as f:
@@ -1418,6 +1417,12 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     elsewhere = str(tmp_path / "elsewhere")
     os.makedirs(elsewhere)
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    r = subprocess.run([sys.executable, os.path.join(folder, "build_features.py"),
+                        "--as-of", as_of], cwd=elsewhere, env=env,
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert os.path.exists(os.path.join(folder, "features", f"{as_of}.parquet"))
+    assert os.path.exists(os.path.join(folder, "data", "feed_history.parquet"))
     last = raw[raw.date == raw.date.max()]
     open_rows = last[(last.inventory > 0) & (last.flc_window > 1)]
     hour = int(open_rows.hour.value_counts().idxmax())

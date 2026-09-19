@@ -1165,6 +1165,31 @@ now. Dates are owner sign-off.
   thresholds or the prior -- those are the learning lane's, and a
   standalone hour has no business refusing to start over them.
 
+- **Minimal is measured per function, not per file** (owner, 09-19, the
+  fourth cut). Module-level pruning left files like `posterior.py` and
+  `explore.py` in the folder, and the owner asked why an exploit-only
+  hour needs the posterior's update or the exploration draw. It does
+  not. A function-level trace of the two commands over a realistic flow
+  (four consecutive hours: entries, continuations with the closed hour
+  riding along, an empty shelf, a row without an id, an unkeyable row,
+  a re-priced hour, the pool; and a first and a later morning) found
+  1,300 of 6,000 lines in functions never called -- the posterior's
+  update, init, tau walk and suspension writes; the outcome side of the
+  store and the pairing; the seal and the verify; the training-time
+  split; the batch command's readers. Cut by syntax tree, the orphaned
+  imports and main blocks after them, and the run repeated: every
+  decision, rejection, response row and feature value identical to the
+  pre-trim reference (only solver wall-clock timings differ). Two
+  lessons under it. The first tracer matched decorated functions on the
+  wrong line (a decorator moves the code object's first line) and
+  reported the store's lock, the cached loaders and every property as
+  unused -- a trace is evidence only once its matching is checked
+  against a call you know happened. And a fixture does not reach every
+  live branch: the malformed-line quarantine, the deep-inventory closed
+  form, the JSONL writer, the pool child and four functions live
+  branches still referenced were kept or restored by reading the code,
+  not the trace. The folder: two commands, 21 modules, 4,660 lines.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,

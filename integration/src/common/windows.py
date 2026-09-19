@@ -14,21 +14,6 @@ import pandas as pd
 
 # ------------------------------------------------------- calendar cuts
 
-def is_anchor_row(d, tier_step):
-    """Rows priced AT the reference discount (within half a tier): the level
-    fit, the fidelity anchor ratio and the gate's anchor share all mean
-    this one mask. (`ref_rate_anchor_band` in prepare_data is a wider,
-    separately configured band for the demand-rate features.)"""
-    return (d.total_discount - d.d_ref).abs() <= tier_step / 2
-
-
-def calendar_days(dates):
-    """Days spanned by `dates`, inclusive, never below 1 -- the one n_days
-    rule for "spend per day" (shadow and the backtest used two)."""
-    ts = pd.to_datetime(pd.Series(dates))
-    return max((ts.max() - ts.min()).days + 1, 1)
-
-
 def planning_horizon(counter):
     """Hours the solver plans over at a row whose window counter reads
     `counter`: the counter is the hours STILL TO COME after this one, so
@@ -39,77 +24,10 @@ def planning_horizon(counter):
     return int(counter) + 1
 
 
-def window_counter(horizon):
-    """The source's counter for a row `horizon` hours from the window's end,
-    this hour included: `planning_horizon` read backwards, so a feed row
-    the simulator writes carries exactly the counter production plans on."""
-    return int(horizon) - 1
-
-
-def week_start(ts):
-    """The ISO week (Mon-Sun) holding `ts`, as its Monday."""
-    return pd.Timestamp(ts).to_period("W").start_time
-
-
 def week_key(dates):
     """`week_start` per row, as the "YYYY-MM-DD" key the factor schedules use."""
     return (pd.to_datetime(dates).dt.to_period("W").dt.start_time
             .dt.strftime("%Y-%m-%d"))
-
-
-def week_after(week):
-    """The Monday after the ISO week keyed `week` ("YYYY-MM-DD") -- the one
-    reading of "one week past the latest data's week" that the schedule's
-    appended week, advance's re-fit trigger and the simulator's Lane C all
-    take (three copies once disagreed by construction)."""
-    return (week_start(week) + pd.Timedelta(days=7)).strftime("%Y-%m-%d")
-
-
-def opening_dates(d):
-    """The date each row's episode OPENED on, as "YYYY-MM-DD" per row -- the
-    key every episode-scoped cut assigns by. A caller slicing one frame many
-    times (a weekly schedule, the prior's folds) computes it once and passes
-    it to `window_slice` / `trailing_weeks_window` as `opened`."""
-    return d.groupby("episode_id")["date"].transform("min").astype(str)
-
-
-def trailing_weeks_window(d, week_start, weeks_back, opened=None):
-    """The rows a factor fit for the week starting `week_start` may read:
-    WHOLE episodes that opened in the `weeks_back` weeks strictly before it,
-    plus how many distinct opening weeks that window actually holds.
-
-    The one cut shared by the artifact schedule (fit.calibrate) and the
-    shadow re-fit; a row-level week cut in either truncated windows at the
-    midnight seam and the two solved on different rows."""
-    w0 = pd.Timestamp(week_start)
-    lo = w0 - pd.Timedelta(weeks=int(weeks_back))
-    if opened is None:
-        opened = opening_dates(d)
-    window = window_slice(d, lo.strftime("%Y-%m-%d"),
-                          (w0 - pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
-                          opened=opened)
-    if not len(window):
-        return window, 0
-    return window, int(week_key(opened.loc[window.index]).nunique())
-
-
-def window_slice(d, start=None, end=None, opened=None):
-    """Episodes whose WINDOW STARTED in [start, end] -- whole, never sliced.
-
-    Assignment is by the window's FIRST date, so every episode lands in exactly
-    one slice; a row-level date cut truncates windows that cross midnight.
-    `opened` is `opening_dates(d)`, precomputed by a caller slicing repeatedly.
-    """
-    if start is None and end is None:
-        return d
-    if opened is None:
-        opened = opening_dates(d)
-    keep = pd.Series(True, index=d.index)
-    if start is not None:
-        keep &= opened.ge(str(start))
-    if end is not None:
-        keep &= opened.le(str(end))
-    return d[keep]
 
 
 def last_rows(d, order=("date", "hour_of_day")):
@@ -125,6 +43,14 @@ def hours_between(day_a, hour_a, day_b, hour_b):
     a = pd.Timestamp(day_a) + pd.Timedelta(hours=int(hour_a))
     b = pd.Timestamp(day_b) + pd.Timedelta(hours=int(hour_b))
     return int(round((b - a).total_seconds() / 3600.0))
+
+
+def opening_dates(d):
+    """The date each row's episode OPENED on, as "YYYY-MM-DD" per row -- the
+    key every episode-scoped cut assigns by. A caller slicing one frame many
+    times (a weekly schedule, the prior's folds) computes it once and passes
+    it to `window_slice` / `trailing_weeks_window` as `opened`."""
+    return d.groupby("episode_id")["date"].transform("min").astype(str)
 
 
 # ------------------------------------------------- the window boundary rule
@@ -306,17 +232,6 @@ def defective_windows(df, bad):
     grp = [df.sku_id, df.fc]
     kept = unread & mask.groupby(grp).shift(fill_value=False) & ~mask
     return mask, {"windows": len(hit), "gap_fragments_kept": int(kept.sum())}
-
-
-def null_counter_windows(df):
-    """`defective_windows` for a null `hours_remaining`. The counter is the
-    field the ids derive from: a null one made assign_episode_ids open a
-    NEW episode on that row (NaN != -1), so one bad hour became a one-row
-    "episode" that closed on its own zero and read DP-eligible -- found on
-    the owner's extract by the pilot simulator, whose templates then
-    carried a NaN window length. The row itself can be placed (its key is
-    whole), so the drop is the WHOLE window it sits in (rule 15)."""
-    return defective_windows(df, df.hours_remaining.isna())
 
 
 def recover_negative_windows(d, cap):

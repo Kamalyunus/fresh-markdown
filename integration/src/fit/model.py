@@ -134,15 +134,6 @@ class BaselineModel:
         self._cal_rows_static = 0
         self._cal_fallback_weeks = set()
 
-    def freeze_calibration_from(self, date):
-        """Price rows on/after `date` with the frozen anchor instead of the
-        weekly schedule (None restores it). The schedule mirrors production
-        (weekly re-fit, no look-ahead); the LAUNCH GATE must instead grade the
-        artifact as frozen, because a factor re-fit inside the hold-out has
-        read the rows it is graded on."""
-        self._freeze_from = pd.Timestamp(date) if date is not None else None
-        return self
-
     @staticmethod
     def level_lookup(table, parent_table, keys, parents):
         """Factors for `keys` from `table`, a key the table never fitted
@@ -198,58 +189,6 @@ class BaselineModel:
                 table, (self.calibration_schedule_category or {}).get(wk),
                 keys[rows], None if parents is None else parents[rows])
         return out
-
-    def calibration_coverage(self):
-        """Which priced rows got a point-in-time factor. Three anchor cases,
-        never conflated: DELIBERATE (freeze_calibration_from -- the gate),
-        BEFORE THE START (first trailing window not yet closed), and PAST THE
-        END (stale factors in production -- the only problem case)."""
-        if self.calibration_schedule is None:
-            return {"mode": "static", "rows": self._cal_rows_static,
-                    "note": "no schedule in the artifact: one frozen factor "
-                            "set applied to every row",
-                    "verdict": "OK -- static: one frozen factor set applied "
-                               "to every priced row (no schedule to fall "
-                               "behind)"}
-        priced = (self._cal_rows_scheduled + self._cal_rows_fallback
-                  + self._cal_rows_frozen)
-        # past the end = past the last week the schedule COVERS, held
-        # weeks included (schedule_reaches, the gate's reading); a trailing
-        # held week once read here as STALE while the gate called it covered
-        end = self.calibration_reaches or max(self.calibration_schedule)
-        past_end = sorted(w for w in self._cal_fallback_weeks if w > end)
-        share = self._cal_rows_fallback / max(priced, 1)
-        if past_end:
-            verdict = ("STALE FACTORS IN USE -- {} rows ({:.1%}) are in weeks "
-                       "PAST the end of the schedule and fell back to the "
-                       "frozen set. Re-run `train_baseline --fit-calibration`."
-                       .format(self._cal_rows_fallback, share))
-        elif self._freeze_from is not None:
-            verdict = ("OK -- {} rows frozen at the anchor from {} on purpose "
-                       "(the launch gate); every other priced row took its own "
-                       "week's factors".format(self._cal_rows_frozen,
-                                               self._freeze_from.date()))
-        elif not self._cal_rows_fallback:
-            verdict = "OK -- every priced row took its own week's factors"
-        else:
-            verdict = ("OK -- {} rows ({:.1%}) fell back before the schedule "
-                       "opens".format(self._cal_rows_fallback, share))
-        return {
-            "mode": "point_in_time",
-            "schedule_covers": [min(self.calibration_schedule), end],
-            "rows_priced": priced,
-            "rows_on_schedule": self._cal_rows_scheduled,
-            "rows_on_fallback": self._cal_rows_fallback,
-            "rows_frozen_at_anchor": self._cal_rows_frozen,
-            "frozen_from": (str(self._freeze_from.date())
-                            if self._freeze_from is not None else None),
-            "fallback_share": round(self._cal_rows_fallback / priced, 4)
-                if priced else None,
-            "fallback_weeks": sorted(self._cal_fallback_weeks),
-            "weeks_after_schedule_end": past_end,
-            "gate_freezes_at": self.calibration_stops_at,
-            "verdict": verdict,
-        }
 
     def _matrix(self, d):
         missing = [f for f in self.schema["features"]

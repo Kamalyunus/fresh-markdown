@@ -23,11 +23,7 @@ A first hour (no --previous) opens every shelf. Input and output are in
 the feed's own schema; the only column added is `episode_id`.
 """
 
-import argparse
 
-import pandas as pd
-
-from common.io import read_rows, write_frame
 from common.windows import hours_between
 from events.pairs import as_number, hour_int, hour_key, iso_day, shelf_hour_tag
 
@@ -105,24 +101,3 @@ def assign(rows, previous=None):
         out.append(r)
     return out, counts
 
-
-def main(argv=None):
-    ap = argparse.ArgumentParser(prog="ops.assign_episode_ids", description=RULE)
-    ap.add_argument("--hour", required=True, help="this hour's rows (feed schema)")
-    ap.add_argument("--previous", default=None, help="last hour's rows, with episode_id")
-    ap.add_argument("--out", required=True, help="this hour's rows with episode_id")
-    args = ap.parse_args(argv)
-    # common.io.read_rows: a null cell is None, never a NaN that reads as a
-    # truthy id one row later
-    rows = read_rows(args.hour)
-    prev = read_rows(args.previous) if args.previous else None
-    out, counts = assign(rows, prev)
-    write_frame(pd.DataFrame(out), args.out)
-    print(f"{len(out)} rows: {counts['continued']} continued, {counts['new']} new"
-          + (f", {counts['unkeyable']} without a shelf-hour" if counts["unkeyable"] else "")
-          + f" -> {args.out}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

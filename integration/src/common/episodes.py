@@ -13,12 +13,6 @@ Where an episode starts and ends, and which rows a fit may read, is
 import numpy as np
 import pandas as pd
 
-# moved to common.windows; the names stay for callers
-from common.windows import (is_anchor_row, calendar_days,          # noqa: F401
-                            planning_horizon, window_counter,
-                            week_start, week_key, week_after,
-                            opening_dates, trailing_weeks_window,
-                            window_slice, last_rows)
 
 # DID IT CLOSE -- decided by `ending_inventory == 0` on the last row, alone.
 COMPLETED = "completed"
@@ -202,33 +196,6 @@ def flow_identity_violations(d, flow=None):
     return flow[~flow.accounting_closes]
 
 
-def censored_hours(d):
-    """Hours where demand was only observed as a LOWER bound. Frame in.
-
-    Decided at the LAST ROW ONLY, where `starting == sold` is the whole test
-    (true demand is `>= sold`). It cannot happen elsewhere -- the source stops
-    emitting rows once inventory reaches zero; `censoring_off_last_row` checks.
-    """
-    order = ["date", "hour_of_day"]
-    idx = d.sort_values(order).groupby("episode_id").tail(1).index
-    is_last = pd.Series(False, index=d.index)
-    is_last.loc[idx] = True
-    return (is_last.to_numpy()
-            & (d.starting_inventory.to_numpy() == d.units_sold.to_numpy()))
-
-
-def is_censored_hour(starting_inventory, units_sold, ending_inventory):
-    """Row-level censoring, for the LIVE path where there is no episode frame.
-
-    Rows stop at zero inventory, so `starting == sold` with no restock IS the
-    close; offline this coincides with `censored_hours`'s stronger form.
-    """
-    start = np.asarray(starting_inventory, dtype="int64")
-    sold = np.asarray(units_sold, dtype="int64")
-    status = hour_status(start, sold, ending_inventory)
-    return (status == RECONCILES) & (start - sold == 0)
-
-
 def censoring_off_last_row(d):
     """Rows where the shelf emptied but the episode carried on. Should be 0.
 
@@ -262,24 +229,6 @@ def continuity_breaks(d):
     return (nxt.notna() & (nxt != d.ending_inventory)).to_numpy()
 
 
-def adjustment_reason(starting_inventory, units_sold, ending_inventory):
-    """Why an outcome's inventory does not reconcile, or None. Scalar `hour_status`.
-
-    restock: ending exceeds UNCLIPPED `starting - sold`. write-off: ending
-    exactly zero with stock remaining -- recognised BY THE ZERO ITSELF, never
-    by position in the episode (learnings.md). shrink: 0 < ending < net --
-    named, NOT quarantined; it is an interpreted, monitorable event.
-    """
-    net = starting_inventory - units_sold
-    if ending_inventory > net:
-        return RESTOCK
-    if ending_inventory == 0 and net > 0:
-        return WRITE_OFF
-    if 0 < ending_inventory < net:
-        return SHORTFALL
-    return None
-
-
 def write_off_convention(flow):
     """Is the source's closure sentinel present -- some episode CLOSED (last
     row zeroed) with stock still on hand? DIAGNOSTIC ONLY, read off
@@ -290,43 +239,6 @@ def write_off_convention(flow):
     unclosed -- loudly, which is the point (learnings.md).
     """
     return bool((flow.closed & (flow.leftover > 0)).any())
-
-
-def _last_index(last):
-    return last.episode_id.to_numpy() if "episode_id" in last else last.index
-
-
-def classify_last(last):
-    """Did the episode CLOSE, and with what, from a frame of FINAL rows.
-
-    Closure is `ending_inventory == 0` on the last row, alone -- never
-    `hours_remaining` (nominal), never a frame-wide fallback. NOT_CLOSED:
-    ending != 0, scrap unknown. SOLD_OUT_EARLY: leftover == 0, censored.
-    COMPLETED: leftover != 0, including the leftover < 0 final-hour-restock
-    close, whose scrap quantity is unknowable and gated via `final_hour_clean`.
-    """
-    net = net_leftover(last.starting_inventory, last.units_sold).to_numpy()
-    closed = last.ending_inventory.to_numpy() == 0
-    return pd.Series(
-        np.where(~closed, NOT_CLOSED,
-                 np.where(net == 0, SOLD_OUT_EARLY, COMPLETED)),
-        index=_last_index(last))
-
-
-def classify(d):
-    """Ending type per episode, indexed by episode_id."""
-    return classify_last(last_rows(d))
-
-
-def scrap_units(d):
-    """Units scrapped per episode: the leftover at the close PLUS the shrink.
-
-    NaN exactly where `~eligible` (not closed, dirty final hour, or identity
-    does not balance) -- the figure cannot be trusted there. NaN propagates:
-    sum with those dropped, never silently treated as zero.
-    """
-    flow = episode_flow(d)
-    return flow.scrap.astype(float).where(flow.eligible, np.nan)
 
 
 def episode_cogs(d):
@@ -360,55 +272,3 @@ def cogs_at_risk(d, per_episode=None):
     if per_episode is None:
         per_episode = episode_cogs(d)
     return float(per_episode.reindex(pd.unique(d.episode_id)).to_numpy().sum())
-
-
-def extend_to_window(d, feature_cols=(), max_tail_hours=None):
-    """Append the rows a window has but the data does not.
-
-    Rows stop at zero inventory, so sold-out episodes are extended to their
-    full window (`hours_remaining` down to 0) with synthetic rows marked
-    `is_observed = False`. Exact: carried features are episode-constant or
-    functions of the advancing timestamp. Synthetic rows carry no sales and
-    must be filtered out of fidelity, likelihood and IL.
-    """
-    d = d.copy()
-    d["is_observed"] = True
-    last = last_rows(d)
-    need = last[last.hours_remaining > 0]
-    if not len(need):
-        return d.sort_values(["episode_id", "date", "hour_of_day"])
-
-    if max_tail_hours is not None:
-        worst = float(need.hours_remaining.max())
-        if worst > max_tail_hours:
-            raise ValueError(
-                f"episode window of {worst:.0f}h exceeds max_window_hours "
-                f"({max_tail_hours}); prepare_data should have dropped it. "
-                "Refusing to generate an unbounded synthetic tail.")
-
-    carry = [c for c in feature_cols if c in d.columns]
-    # emit dates in the column's own type. Downstream split filters compare
-    # `date.astype(str)`, and a Timestamp stringifies with a time component
-    # that would silently fall outside every configured window.
-    as_date = not isinstance(d.date.iloc[0], pd.Timestamp)
-    rows = []
-    for r in need.itertuples():
-        base = pd.Timestamp(r.date) + pd.Timedelta(hours=int(r.hour_of_day))
-        tail_inv = max(int(r.starting_inventory) - int(r.units_sold), 0)
-        for k in range(1, int(r.hours_remaining) + 1):
-            ts = base + pd.Timedelta(hours=k)
-            row = {c: getattr(r, c) for c in carry}
-            row.update({
-                "episode_id": r.episode_id,
-                "date": ts.date() if as_date else ts.normalize(),
-                "hour_of_day": ts.hour,
-                "hours_remaining": r.hours_remaining - k,
-                # true leftover, not the written-off zero
-                "starting_inventory": tail_inv,
-                "ending_inventory": tail_inv,
-                "units_sold": 0,
-                "is_observed": False,
-            })
-            rows.append(row)
-    out = pd.concat([d, pd.DataFrame(rows)], ignore_index=True)
-    return out.sort_values(["episode_id", "date", "hour_of_day"])

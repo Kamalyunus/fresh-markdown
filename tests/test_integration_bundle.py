@@ -1,5 +1,5 @@
 """integration/ -- the standalone pricing folder engineering runs: the
-hourly command and what it needs, nothing else.
+hourly command, the morning table it joins on, and what the two need.
 
 Maintained in place, never generated wholesale. Pinned here: every
 `verbatim` copy still equals its repository source, the generated config
@@ -41,25 +41,39 @@ def test_every_copy_matches_its_source_and_the_manifest_is_the_disk():
     assert r["missing"] == [] and r["unlisted"] == [], r
     assert r["unreached"] == [], f"modules the hourly command never imports: {r['unreached']}"
     assert set(r["curated"]) >= {"src/fit/model.py", "src/ops/price_batch.py",
-                                 "src/engine/explore.py", "src/common/config.py"}
+                                 "src/engine/explore.py", "src/common/config.py",
+                                 "src/engine/posterior.py", "src/events/store.py"}
     assert bi.current(ROOT, FOLDER)
 
 
-def test_the_closure_is_closed_and_is_the_hourly_command_alone():
+def test_the_closure_is_closed_and_is_the_two_commands_alone():
     """Standalone: nothing under src/ imports a repository module the
-    folder does not carry. Minimal: no trainer, fitter, harness, checker,
-    feature builder or learning-lane module rides along. The id rule does,
-    because the hourly job counts disagreements with it."""
+    folder does not carry. Minimal: no trainer, fitter, harness, checker
+    or learning-lane module rides along, and inside the files that do,
+    nothing the two commands never call (the learning lane's posterior
+    update, the outcome side of the store, the pairing, the seal, the
+    training-time split, the tau walk). The id rule rides along because
+    the hourly job counts disagreements with it."""
     src = os.path.join(FOLDER, bi.SRC)
     assert bi.unresolved(src) == []
     mods = set(bi.modules(src))
-    assert "ops.assign_episode_ids" in mods and "ops.price_hour" in mods
+    assert {"ops.assign_episode_ids", "ops.price_hour", "daily.features"} <= mods
     for absent in ("fit.train_baseline", "fit.calibrate", "fit.fit_dispersion",
                    "engine.budget", "engine.spread_ledger", "engine.learn",
-                   "daily.features", "daily.update", "daily.ingest_outcomes",
+                   "daily.update", "daily.ingest_outcomes", "daily.failures",
                    "ops.check_inputs", "common.history", "common.clustering",
-                   "common.cli", "common.paths", "ops.advance", "ops.tune"):
+                   "ops.advance", "ops.tune"):
         assert absent not in mods, absent
+    import ast
+    def names(mod):
+        with open(bi._module_path(src, mod)) as f:
+            return {n.name for n in ast.walk(ast.parse(f.read())) if isinstance(n, ast.FunctionDef)}
+    assert not names("engine.posterior") & {"commit_update", "initialise", "suspend_exploration", "commit_tau"}
+    assert not names("events.store") & {"emit_outcome", "load_decisions", "_reset"}
+    assert not names("events.pairs") & {"match_pairs", "quality_rates", "outcome_id_of"}
+    assert not names("common.provenance") & {"verify", "environment", "load_seal"}
+    assert not names("fit.prepare_data") & {"split_frames", "main"}
+    assert names("events.store") >= {"_quarantine", "emit_decision", "emit_rejection"}
 
 
 def test_the_pruned_config_carries_only_what_the_hour_reads(cfg):
@@ -70,11 +84,16 @@ def test_the_pruned_config_carries_only_what_the_hour_reads(cfg):
         folder_cfg = yaml.safe_load(f)
     assert folder_cfg == bi.prune(cfg)
     assert set(folder_cfg) == {"meta", "data", "reference_discount", "baseline_model",
-                               "dispersion", "posterior", "exploration", "pricing", "events"}
-    assert set(folder_cfg["data"]) == {"launch_date", "max_window_hours"}
+                               "dispersion", "posterior", "exploration", "pricing", "events",
+                               "features"}
+    assert set(folder_cfg["data"]) == {"launch_date", "max_window_hours",
+                                       "manufacturing_window_hours", "exclusion_window"}
+    assert set(folder_cfg["baseline_model"]) == {"model_path", "feature_schema_path",
+                                                 "calibration_factor_path",
+                                                 "ref_rate_window_days", "ref_rate_anchor_band"}
     assert "rho" not in folder_cfg["dispersion"] and "tau_initial" not in folder_cfg["exploration"]
     assert "prior" not in folder_cfg["posterior"]
-    for absent in ("learning", "monitoring", "tuning", "features", "artifacts", "assurance"):
+    for absent in ("learning", "monitoring", "tuning", "artifacts", "assurance"):
         assert absent not in folder_cfg
 
 
@@ -102,14 +121,17 @@ def test_the_command_runs_from_anywhere_with_the_repository_off_the_path(tmp_pat
     r = _isolated(elsewhere, os.path.join(folder, "price_hour.py"), "--help")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "--snapshot" in r.stdout and "--features" in r.stdout
+    r = _isolated(elsewhere, os.path.join(folder, "build_features.py"), "--help")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "--feed" in r.stdout
 
 
-def test_the_sync_carries_the_five_artifacts_the_tables_and_the_pruned_config(
+def test_the_sync_carries_the_five_artifacts_the_seed_and_the_pruned_config(
         cfg, tmp_path, monkeypatch):
     """What the owner's chain calls after every seal and every advance run:
-    the five artifacts the hour opens, every feature table, and the config
-    pruned to what the hour reads; one not on disk yet is listed, never
-    an error; no folder means no sync."""
+    the five artifacts the hour opens, the extract the first morning
+    seeds from, and the config pruned to what the two commands read; one
+    not on disk yet is listed, never an error; no folder means no sync."""
     folder = str(tmp_path / "pricing")
     assert bi.sync(cfg, out=folder) is None
     shutil.copytree(FOLDER, folder, ignore=shutil.ignore_patterns("__pycache__"))
@@ -121,12 +143,12 @@ def test_the_sync_carries_the_five_artifacts_the_tables_and_the_pruned_config(
         with open(path, "w") as f:
             json.dump({"key": ".".join(key)}, f)
     monkeypatch.chdir(tmp_path)
-    os.makedirs("features")
-    with open(os.path.join("features", "2026-09-01.parquet"), "wb") as f:
+    os.makedirs("data")
+    with open(os.path.join("data", "flc_raw.parquet"), "wb") as f:
         f.write(b"not really parquet")
     rec = bi.sync(c, out=folder)
     assert set(rec["copied"]) == {"artifacts/r_lookup.json", "artifacts/posterior.json",
-                                  "features/2026-09-01.parquet", "config.yaml"}
+                                  "data/flc_raw.parquet", "config.yaml"}
     assert set(rec["absent"]) == {"baseline_model.model_path",
                                   "baseline_model.feature_schema_path",
                                   "baseline_model.calibration_factor_path"}
@@ -138,10 +160,11 @@ def test_the_sync_carries_the_five_artifacts_the_tables_and_the_pruned_config(
 
 def test_the_folder_carries_the_handoff():
     for rel in ("README.md", "MANIFEST.json", "config.yaml", "requirements.lock",
-                "examples/README.md", "docs/engineering_handover.html", "price_hour.py"):
+                "examples/README.md", "docs/engineering_handover.html",
+                "price_hour.py", "build_features.py"):
         assert os.path.exists(os.path.join(FOLDER, rel)), rel
-    for gone in ("build_features.py", "check_inputs.py", "src/daily", "src/ops/check_inputs.py"):
+    for gone in ("check_inputs.py", "src/ops/check_inputs.py", "src/daily/failures.py"):
         assert not os.path.exists(os.path.join(FOLDER, gone)), gone
     with open(os.path.join(FOLDER, "MANIFEST.json")) as f:
         m = json.load(f)
-    assert m["commands"] == ["price_hour.py"]
+    assert m["commands"] == ["price_hour.py", "build_features.py"]

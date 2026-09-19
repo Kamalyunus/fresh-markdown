@@ -8,14 +8,24 @@ meta:
 data:
   launch_date: null
   max_window_hours: 120
+  manufacturing_window_hours: 24
+  exclusion_window:
+    start: '2026-04-25'
+    end: '2026-06-03'
 reference_discount:
   MEAT: 0.25
   SIDE_DISH: 0.25
   _default: 0.3
 baseline_model:
+  ref_rate_window_days: 30
+  ref_rate_anchor_band: 0.025
   model_path: artifacts/baseline_model.txt
   feature_schema_path: artifacts/feature_schema.json
   calibration_factor_path: artifacts/calibration.json
+features:
+  table_dir: features
+  history_path: data/feed_history.parquet
+  history_days: 45
 dispersion:
   r_lookup_path: artifacts/r_lookup.json
 posterior:

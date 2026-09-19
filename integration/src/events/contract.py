@@ -13,7 +13,6 @@ import re
 import numpy as np
 
 # the one finiteness test, shared with the state validation that prices
-from engine.decide import finite_number
 
 DECISION_REQUIRED = [
     "decision_id", "episode_id", "is_entry", "sku_id", "fc", "category",
@@ -136,29 +135,4 @@ def _validate_rejection(evt):
     if not isinstance(evt.get("reason"), str) or not evt["reason"].strip():
         problems.append("reason must be the non-empty string the response "
                         f"carried; got {evt.get('reason')!r}")
-    return problems
-
-
-def _validate_outcome(evt):
-    problems = []
-    for f in ("units_sold", "starting_inventory", "ending_inventory"):
-        v = evt.get(f)
-        # np.integer counts (pandas producers must not quarantine in bulk);
-        # bool does NOT -- True is not a quantity of 1
-        if (isinstance(v, bool) or not isinstance(v, (int, np.integer))
-                or v < 0):
-            problems.append(f"{f} must be a non-negative integer")
-    if not problems:
-        reconciles = (evt["ending_inventory"]
-                      == evt["starting_inventory"] - evt["units_sold"])
-        if not reconciles and not evt.get("adjustment_reason"):
-            # three breaks are legitimate and MUST be named by the producer
-            # (restock, final-row write-off, shrink) -- an integration that
-            # omits any of them quarantines real outcomes in bulk
-            problems.append("ending_inventory does not reconcile and no "
-                            "adjustment_reason documented (expected "
-                            "'intraday_restock', 'episode_close_write_off' "
-                            "or 'unexplained_shortfall')")
-    if not finite_number(evt.get("applied_price")):
-        problems.append("applied_price must be a finite number")
     return problems

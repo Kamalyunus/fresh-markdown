@@ -39,12 +39,6 @@ def nb_pmf_table(mu, r, max_k):
     return pmf, tail
 
 
-def nb_pmf_vector(mu, r, max_k):
-    """The one-mu case of nb_pmf_table: (pmf over k = 0..max_k, tail_mass)."""
-    pmf, tail = nb_pmf_table(mu, r, max_k)
-    return pmf, float(tail)
-
-
 def expected_min_demand_inventory(mu, r, q, max_k):
     """E[min(D, q)] under the NB -- deterministic replay transition, the
     scalar case of `expected_min_demand_inventory_vec` (exact at every q)."""

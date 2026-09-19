@@ -37,10 +37,6 @@ class Bundle:
     def r_lookup(self):
         return self._json(self.cfg["dispersion"]["r_lookup_path"])
 
-    @functools.cached_property
-    def prior(self):
-        return self._json(self.cfg["posterior"]["prior"]["path"])
-
     @staticmethod
     def _json(path):
         out = read_json(path)

@@ -52,17 +52,6 @@ def feasible_tiers(original_price, cost, tier_step):
     return [d for d in tiers if d < 1.0], d_max
 
 
-def deepening_threshold_epsilon(original_price, cost, d):
-    """|epsilon| above which deepening below `d` reduces IL:
-    (1-d)/(gamma-d), gamma = cost/price (design 5.7 for the derivation).
-
-    inf when gamma <= d. OPTIMISTIC: censoring at small inventory pushes the
-    true switch point above this value.
-    """
-    gamma = cost / original_price
-    return float("inf") if gamma - d <= TIER_EPS else (1.0 - d) / (gamma - d)
-
-
 def entry_action_set(tiers, d_ref, d_max, pcfg):
     """Tier indices allowed at ENTRY: `pricing.entry_offsets` relative to
     d_ref, snapped to the grid and filtered by the cost floor (rationale for

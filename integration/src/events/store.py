@@ -34,11 +34,7 @@ from contextlib import contextmanager
 from events.pairs import hour_key
 # the contract -- the required fields and the value checks -- is
 # events.contract; the names stay here for callers
-from events.contract import (DECISION_OPTIONAL, DECISION_REQUIRED, OUTCOME_REQUIRED,              # noqa: F401
-                             REJECTION_REQUIRED, ISO_DAY,
-                             finite_number, _json_scalar, _is_iso_day,
-                             _validate_decision, _validate_outcome,
-                             _validate_rejection)
+from events.contract import (DECISION_OPTIONAL, DECISION_REQUIRED, REJECTION_REQUIRED, _json_scalar, _validate_decision, _validate_rejection)
 
 
 def _quarantine_key(evt):
@@ -100,18 +96,19 @@ def _episode_path(evt):
 
 # the three event streams, in the order they are consumed: decisions
 # first, so a rejection beside a priced hour never wins the seen index
-STREAMS = ("decision", "outcome", "rejection")
+# THIS FOLDER: two streams. Outcomes are built by the owner's lane, in the
+# repository, from the feed; this store holds what the hour priced and what
+# it refused, and nothing else reads or writes it here.
+STREAMS = ("decision", "rejection")
 
 
 class EventStore:
-    def __init__(self, cfg, root=None, reset=False):
+    def __init__(self, cfg, root=None):
         self.cfg = cfg
         self.root = root or cfg["events"]["store_dir"]
         os.makedirs(self.root, exist_ok=True)
         self.paths = {k: os.path.join(self.root, f"{k}.jsonl")
                       for k in ("decisions", "outcomes", "rejections", "quarantine")}
-        if reset:
-            self._reset()
         # duplicates seen by THIS store: on emit, and -- because a foreign
         # producer may write the JSONL directly -- while loading. Either way
         # the same id twice is what the duplicate gate exists to catch.
@@ -258,8 +255,6 @@ class EventStore:
             # left in this stream beside it
             if _decision_key(parsed) not in self._hour_keys:
                 self._register_seen(parsed, priced=False)
-        else:
-            self._register_outcome(parsed)
 
     def _register_seen(self, evt, priced):
         """`last_seen_by_shelf`: the latest hour this shelf reached us at,
@@ -290,44 +285,11 @@ class EventStore:
                               else (path["date"], path["hour_of_day"]))
             self.episode_paths[evt["episode_id"]] = path
 
-    def _register_outcome(self, evt):
-        """On load: what `_load` will skip, counted once per store."""
-        if "is_stockout" not in evt:
-            self.completeness_counts["missing_stockout_field"] += 1
-            return
-        if evt.get("decision_id") in self._decisions_with_outcome:
-            self.completeness_counts["outcomes_per_decision_over_one"] += 1
-            return
-        self._decisions_with_outcome.add(evt.get("decision_id"))
-
     @property
     def priced_hours(self):
         """The hour keys the store holds a decision for (read-only)."""
         return self._hour_keys
 
-    def _reset(self):
-        """Empty THIS store's own four streams, for a HARNESS whose run is a
-        fresh evaluation: shadow re-run over the store an earlier run left
-        re-prices the same shelf-hours, and since the decision id IS the
-        shelf-hour (events.pairs.decision_id_of) every one of them collides
-        with its own earlier copy. Before the ids were natural the re-run
-        appended a second copy of everything instead, unnoticed -- the
-        per-run counters (`quarantined_this_run`) were built to work around
-        exactly that.
-
-        Only the files this class writes are removed, never the
-        directory; and never the PRODUCTION store, which is append-only for
-        the life of the pilot and is the one record `daily.update` learns
-        from."""
-        if os.path.realpath(self.root) == os.path.realpath(self.cfg["events"]["store_dir"]):
-            raise ValueError(
-                "refusing to reset the production event store "
-                f"({self.root}): it is the append-only record the daily lane "
-                "learns from. Only a harness store (shadow, a workspace copy) "
-                "may be reset.")
-        for path in self.paths.values():
-            if os.path.exists(path):
-                os.remove(path)
         # (the lock file stays: another process may be holding it)
 
     @staticmethod
@@ -400,11 +362,6 @@ class EventStore:
             self._refresh()
             return self._emit_decision(evt)
 
-    def emit_outcome(self, evt):
-        with self._locked():
-            self._refresh()
-            return self._emit_outcome(evt)
-
     def emit_rejection(self, evt):
         with self._locked():
             self._refresh()
@@ -448,29 +405,6 @@ class EventStore:
         self._register_decision(evt)
         return True
 
-    def _emit_outcome(self, evt):
-        missing = [f for f in OUTCOME_REQUIRED if f not in evt]
-        problems = ([f"missing fields: {missing}"] if missing
-                    else _validate_outcome(evt))
-        if problems:
-            if "is_stockout" in missing:
-                self.completeness_counts["missing_stockout_field"] += 1
-            self._quarantine(evt, problems)
-            return False
-        if evt["outcome_id"] in self._ids["outcome"]:
-            self.duplicate_counts["outcome"] += 1
-            return False
-        if evt["decision_id"] in self._decisions_with_outcome:
-            # one outcome per decision: a second one (an id scheme that
-            # moved, a re-ingest under another key) would be consumed by the
-            # learner as a second hour of evidence
-            self.completeness_counts["outcomes_per_decision_over_one"] += 1
-            return False
-        self._write("outcome", evt)                   # append first, as above
-        self._ids["outcome"].add(evt["outcome_id"])
-        self._decisions_with_outcome.add(evt["decision_id"])
-        return True
-
     def _emit_rejection(self, evt):
         """Record a shelf-hour that reached us and was NOT priced. It never
         enters `priced_hours`, so the hour stays free to price if the data
@@ -493,47 +427,3 @@ class EventStore:
         self._ids["rejection"].add(evt["rejection_id"])
         self._register_seen(evt, priced=False)
         return True
-
-    def _load(self, path, id_field=None, outcome=False):
-        """The readable stream: torn lines were quarantined at construction
-        and are skipped, as is a line carrying no id at all (not an event);
-        a repeated id (a foreign producer's re-append) is COUNTED in
-        duplicate_counts and loaded ONCE, first occurrence -- the learner
-        must never consume the same outcome twice. An outcome stream also
-        skips a second outcome for a decision already answered, and a line
-        without `is_stockout` (counted at construction, `completeness_counts`)."""
-        out, seen, answered = [], set(), set()
-        for _, parsed, _ in self._lines(path):
-            if parsed is None:
-                continue
-            ident = parsed.get(id_field) if id_field else None
-            if id_field and ident is None:
-                # a foreign line with no id: not an event -- the matcher and
-                # the export index every event by its id and once died on it
-                continue
-            if ident is not None:
-                if ident in seen:
-                    continue
-                seen.add(ident)
-            if outcome:
-                if "is_stockout" not in parsed:
-                    continue
-                if parsed.get("decision_id") in answered:
-                    continue
-                answered.add(parsed.get("decision_id"))
-            out.append(parsed)
-        return out
-
-    def load_decisions(self):
-        return self._load(self.paths["decisions"], "decision_id")
-
-    def load_outcomes(self):
-        return self._load(self.paths["outcomes"], "outcome_id", outcome=True)
-
-    def load_rejections(self):
-        """The shelf-hours seen and not priced. Never part of the pairing or
-        the evidence: read for the record and the export."""
-        return self._load(self.paths["rejections"], "rejection_id")
-
-    def load_quarantine(self):
-        return self._load(self.paths["quarantine"])

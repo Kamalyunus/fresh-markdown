@@ -27,17 +27,11 @@ Run: python3 -m ops.price_batch --requests <hour.jsonl|.parquet|.csv>
         --out decisions.jsonl [--report report.json] [--workers N] [--seed S]
 """
 
-import argparse
 from collections import Counter
 
-import pandas as pd
 
-from common.config import load_config
-from common.io import read_rows, write_json, write_jsonl
 from common.parallel import map_episodes
-from engine.state import (REQUEST_FIELDS, batch_context, build_states,       # noqa: F401
-                          load_history, table_as_of,
-                          canonical_request, price_one, validate_request)
+from engine.state import (batch_context, build_states, table_as_of, canonical_request, price_one, validate_request)
 from events.contract import rejection_event
 from events.pairs import colliding_keys, hour_key, ident_series
 from events.store import EventStore
@@ -51,14 +45,6 @@ RESPONSE_FIELDS = ("episode_id", "sku_id", "fc", "date", "hour_of_day",
 
 
 # ----------------------------------------------------------------- inputs
-
-def read_requests(path):
-    """Requests as a list of dicts (common.io.read_rows): JSONL, parquet or
-    CSV in the contract's column names; a line that is not an object is a
-    request with no fields, rejected below and never a batch-wide raise;
-    a null cell reads as None."""
-    return read_rows(path)
-
 
 # `load_history` is engine.state's (daily.features reads it every morning);
 # the name stays here for callers
@@ -222,62 +208,3 @@ def run(cfg, requests, history=None, workers=None, seed=0, store=None, model=Non
     }
     return rows, events, report
 
-
-def write_rows(rows, path):
-    """The response JSONL, RESPONSE_FIELDS per line (common.io.write_jsonl:
-    a timestamp or a NaN in a rejected row's echo writes, never raises
-    after the batch committed)."""
-    write_jsonl(path, rows, fields=RESPONSE_FIELDS)
-
-
-def main(argv=None):
-    ap = argparse.ArgumentParser(prog="ops.price_batch")
-    ap.add_argument("--requests", required=True,
-                    help="one hour's price requests: JSONL, parquet or CSV in "
-                         f"the contract's names {list(REQUEST_FIELDS)}")
-    ap.add_argument("--features", default=None,
-                    help="today's feature table (features/<date>.parquet, written "
-                         "by daily.features each morning): the production path, "
-                         "one join and no history read")
-    ap.add_argument("--history", default=None,
-                    help="instead of --features: the hourly FLC table the outcomes "
-                         "are ingested from (source schema), or a prepared parquet, "
-                         "covering the trailing ref_rate_window_days; the features "
-                         "are computed here, every batch")
-    ap.add_argument("--out", required=True, help="response JSONL, one row per request")
-    ap.add_argument("--report", default=None, help="the batch's counts, JSON")
-    ap.add_argument("--config", default="config.yaml")
-    ap.add_argument("--workers", type=int, default=None,
-                    help="processes pricing the batch (0 = every core but one; "
-                         "default serial); the same answer either way")
-    ap.add_argument("--seed", type=int, default=0)
-    args = ap.parse_args(argv)
-
-    if bool(args.features) == bool(args.history):
-        ap.error("pass exactly one of --features (the day's table) or --history")
-    cfg = load_config(args.config, strict=True)
-    requests = read_requests(args.requests)
-    features = pd.read_parquet(args.features) if args.features else None
-    history = load_history(args.history, cfg) if args.history else None
-    rows, events, report = run(cfg, requests, history, workers=args.workers,
-                               seed=args.seed, features=features)
-    write_rows(rows, args.out)
-    if args.report:
-        write_json(args.report, report)
-    print(f"requests {report['requests']:,}: {report['decisions']:,} priced "
-          f"({report['explored']:,} explored), {report['rejected']:,} rejected"
-          + (f" [{report['quarantined']} quarantined]" if report["quarantined"] else "")
-          + (f" [{report['requests_with_unknown_features']} priced on no history]"
-             if report["requests_with_unknown_features"] else "")
-          + (f" [{report['entry_requests_on_stale_features']} on a table from "
-             f"{report['features_as_of']}]" if report["entry_requests_on_stale_features"] else "")
-          + (" -- exploration SUSPENDED" if report["exploration_suspended"] else "")
-          + (" -- EXPLOIT ONLY (exploration.mode)" if report["exploration_mode"] == "exploit" else ""))
-    for why, n in sorted(report["rejected_by_the_engine"].items()):
-        print(f"  {n:,}  {why}")
-    print(f"-> {args.out}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -10,24 +10,14 @@ window boundary rule itself (the ids, the defective-window drops) is
 `common.windows`; the supply accounting and the COGS at risk are
 `common.episodes`."""
 
-import argparse
-import os
 
 import numpy as np
 import pandas as pd
 
 from common.config import load_config, reference_discount
 from common import episodes
-from common.io import write_json
-from common.provenance import stamp
 # moved to common.windows; the names stay for callers
-from common.windows import (EPISODE_RULE, EPISODE_KEY, QUANTITY_COLS,   # noqa: F401
-                            window_signals, window_starts,
-                            assign_episode_ids, counter_step_detail,
-                            gap_split_windows, null_key_rows,
-                            source_windows, defective_windows,
-                            null_counter_windows, recover_negative_windows,
-                            last_rows, window_slice)
+from common.windows import (EPISODE_KEY, QUANTITY_COLS, assign_episode_ids, counter_step_detail, gap_split_windows, null_key_rows, source_windows, defective_windows, recover_negative_windows, last_rows)
 # moved to common.episodes; the names stay for callers
 from common.episodes import episode_cogs, cogs_at_risk              # noqa: F401
 
@@ -449,14 +439,6 @@ def add_ref_rate_features(d, cfg):
     return d
 
 
-def pre_launch(d, cfg):
-    """Everything the PRE-LAUNCH artifacts may see: episodes whose window
-    opened on or before split.test_end (episode-scoped, kept whole)."""
-    return window_slice(d, None, cfg["data"]["split"]["test_end"])
-
-
-
-
 DP_INELIGIBLE = (
     ("cost_missing",
      "cost <= 0 -- a MISSING cost, not a free good: d_max would read 1.0 and "
@@ -486,8 +468,6 @@ DP_INELIGIBLE = (
 BELOW_COST_HOURS = (
     "some hour's OFFERED price is under cost -- tested on "
     "original_price x (1 - d), never applied_price (zeroed on no-sale rows)")
-
-
 
 
 def eligible_detail(d):
@@ -730,91 +710,3 @@ def tag_dp_eligibility(d, cfg, flow=None, per_episode_cogs=None):
     d, hits, edge_detail = dp_flags(d, cfg, flow)
     return d, flag_detail(d, flow, hits, edge_detail, ep_cogs)
 
-
-def population(d, cfg, which=None):
-    """ONE definition of the three NESTED populations: integrity (survived
-    the chain), eligible (identity holds + clean final hour + CLOSED -- what
-    a frozen artifact needs), dp_eligible (eligible + solver requirements).
-    None means "eligible" (the artifact-fit population); DP callers pass
-    "dp_eligible" explicitly. `cfg` is not read: every caller passes it
-    positionally, so the signature is kept."""
-    which = which or "eligible"
-    if which == "integrity":
-        return d
-    if which not in ("eligible", "dp_eligible"):
-        raise ValueError(f"unknown population {which!r}")
-    flag = "episode_eligible" if which == "eligible" else "dp_eligible"
-    # REFUSE rather than fall back to the whole frame
-    if flag not in d:
-        raise ValueError(
-            f"population({which!r}) needs the {flag!r} column and this frame "
-            "has none -- re-run fit.prepare_data; a frame without the "
-            "eligibility flags is the integrity population, not this one")
-    return d[d[flag]]
-
-
-def split_frames(d, cfg):
-    """Date splits for baseline fitting only (config data.split). An episode
-    is assigned WHOLLY to the split its window started in, so a boundary never
-    runs through the middle of a cross-midnight episode."""
-    s = cfg["data"]["split"]
-    slice_ = window_slice
-    return {
-        "train": slice_(d, s["train_start"], s["train_end"]),
-        "calib": slice_(d, s["calib_start"], s["calib_end"]),
-        "test": slice_(d, s["test_start"], s["test_end"]),
-    }
-
-
-def scope(d, cfg, window):
-    """The rows one artifact fit reads: the eligible `population` of a
-    split window (`"train"` | `"calib"` | `"test"`, `split_frames`) or of
-    everything pre-launch (`"pre_launch"`). One spelling for the ten
-    fits that read a window; the DP side names `dp_eligible` itself."""
-    if window == "pre_launch":
-        return population(pre_launch(d, cfg), cfg)
-    return population(split_frames(d, cfg)[window], cfg)
-
-
-
-
-def write_manifest(path, cfg, waterfall=None):
-    """The waterfall is the artifact, not the console: every stage's rows,
-    episodes, COGS at risk and detail dict are persisted here."""
-    stages = [{"stage": s[0], "rows": int(s[1]), "episodes": int(s[2]),
-               "cogs_at_risk": s[3] if len(s) > 3 else None,
-               "detail": s[4] if len(s) > 4 else None}
-              for s in (waterfall or [])]
-    write_json(path, stamp({
-        "episode_rule": EPISODE_RULE,
-        "split": cfg["data"]["split"],
-        "holdout": cfg["data"].get("holdout"),
-        "exclusion_window": cfg["data"]["exclusion_window"],
-        "config_version": cfg["meta"]["config_version"],
-        "waterfall": stages,
-    }, cfg, None, "fit.prepare_data"))
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True)
-    ap.add_argument("--out", default="data/prepared.parquet")
-    ap.add_argument("--manifest", default="artifacts/split_manifest.json")
-    ap.add_argument("--config", default="config.yaml")
-    args = ap.parse_args()
-
-    cfg = load_config(args.config)
-    d, wf = load_and_filter(args.input, cfg)
-
-    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    d.to_parquet(args.out, index=False)
-    write_manifest(args.manifest, cfg, wf)
-
-    for stage in wf:                       # some carry a 5th detail dict
-        label, rows, eps = stage[0], stage[1], stage[2]
-        print(f"  {label:32s} rows {rows:>10,}  episodes {eps:>9,}")
-    print(f"wrote {args.out} and {args.manifest}")
-
-
-if __name__ == "__main__":
-    main()

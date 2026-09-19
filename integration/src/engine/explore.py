@@ -159,4 +159,3 @@ def select(dp_result, tau, rng, explorable=True, delta_min=0.0, costs=None):
         choice.update(chosen_index=j, is_exploration=True,
                       exploration_cost=float(costs[j]))
     return choice
-
