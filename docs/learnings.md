@@ -1343,6 +1343,15 @@ now. Dates are owner sign-off.
   morning as a pull and a table, the cron lines, and what stays with
   the owner -- and a line at the top saying that section wins where the
   repository-mode phases differ.
+  Its section 01 loop diagram, prose and who-does-what table were still
+  the repository's loop (ids checked, store, `ops.advance` mornings);
+  redrawn for the folder: three parties, the row's two fields, the
+  hour closing into the warehouse and the next snapshot built from it,
+  the morning pull, the owner's lane fed by the log and the feed and
+  returning as files in artifacts/. Rendered and looked at before
+  landing: the first draft's boxes were too narrow for their lines and
+  one arrow ran through a box -- a diagram is checked by looking, not
+  by parsing.
 
 ## The lesson under all of it
 
