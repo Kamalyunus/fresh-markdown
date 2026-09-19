@@ -4,7 +4,7 @@ the feature table of its episode's opening day; nothing is looked up from
 an earlier hour, and the log this hour appends to is never read here.
 
 The snapshot is the twelve request fields (handover Appendix C), as sent.
-The row's `episode_id` is the opening tag of its episode (`<sku>|<fc>|<day>T<hh>`,
+The row's `episode_id` is the opening tag of its episode (`<sku_id>|<fc>|<day>T<hh>`,
 the shelf-hour the episode began), so the row is an ENTRY when the tag names
 this shelf-hour and a later hour of the episode otherwise. `current_discount`
 is the price in force, a fraction: null on an entry row, and on a later row
@@ -33,7 +33,7 @@ from pricing.pool import pmap
 from pricing.state import (Posterior, build_states, canonical_request, episode_position,
                            feature_index, validate_request)
 
-CONTRACT = ("Stateless. episode_id is the opening tag <sku>|<fc>|<day>T<hh>: an entry when "
+CONTRACT = ("Stateless. episode_id is the opening tag <sku_id>|<fc>|<day>T<hh>: an entry when "
             "it names this shelf-hour, a later hour of the episode otherwise. current_discount "
             "is the price in force, a fraction: null on an entry, the discount applied last "
             "hour on a later row (the anchor). hours_remaining counts this hour. The features "
@@ -242,7 +242,7 @@ def price_batch(cfg, requests, features, batch_day, model, posterior, r_lookup, 
 
 def run(cfg, snapshot_rows, features=None, hour=None, workers=None, dry_run=False):
     """One hour: the requests from the snapshot, priced, the response in the
-    feed's units; the decisions and rejections appended to the log unless
+    request's names; the decisions and rejections appended to the log unless
     `dry_run`. Returns (response rows, decisions, report)."""
     model = DemandModel(cfg)
     posterior = Posterior(cfg["posterior"]["path"])

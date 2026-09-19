@@ -1392,6 +1392,22 @@ now. Dates are owner sign-off.
   the last rename map left the folder: an extract that carries columns
   nothing reads is dead data, the same way an unreferenced function is
   dead code.
+  A last read of the folder as engineering will receive it, page by
+  page against the code: the id spelt `<sku_id>|…` everywhere; the
+  hour-to-hour chain in the request's words; a flags table for the
+  three commands; the report table carrying every key the command
+  writes (the end-to-end test now refuses a key the page does not
+  name); the refusal table carrying every reason the code can emit, in
+  the order the checks run, with whose fault each is (the bundle test
+  refuses a quoted reason the code does not emit); the response's null
+  cases; the owner's response check dropped from the prose since it
+  reads the repository's names. Appendix F gained the worked episode's
+  snapshot rows and response row in the folder's names, a note that
+  every folder decision has the shape of its exploitation example, and
+  the exploitation example's id as an opening tag. Rendered and read
+  before landing. A contract is "in sync with the code" when a test
+  says so in both directions, and read once by a person who did not
+  write it -- the tests caught the names, the reading caught the rest.
 
 ## The lesson under all of it
 

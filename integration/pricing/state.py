@@ -1,7 +1,7 @@
 """A snapshot row becomes the engine's state, from the row alone.
 
 The service is stateless: nothing is looked up from an earlier hour. The
-row's `episode_id` is the opening tag of its episode, `<sku>|<fc>|<day>T<hh>`,
+row's `episode_id` is the opening tag of its episode, `<sku_id>|<fc>|<day>T<hh>`,
 so the row is an ENTRY exactly when the tag names this shelf-hour, and a
 later hour of the episode otherwise. An entry has no anchor (the entry
 action set applies); a later hour is anchored on the price in force the
@@ -78,7 +78,7 @@ def episode_position(episode_id, key):
     not an opening tag, another shelf's, or an opening after this hour."""
     opening = opening_of(episode_id)
     if opening is None:
-        return "episode_id is not an opening tag (<sku>|<fc>|<day>T<hh>)", None
+        return "episode_id is not an opening tag (<sku_id>|<fc>|<day>T<hh>)", None
     if opening[:2] != key[:2]:
         return f"episode_id names another shelf: {shelf_hour_tag(opening)}", None
     elapsed = hours_between(opening[2], opening[3], key[2], key[3])

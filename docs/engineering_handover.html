@@ -884,14 +884,37 @@
   <div class="tscroll"><table>
     <thead><tr><th>Field</th><th>Contract</th><th>If not</th></tr></thead>
     <tbody>
-      <tr><td><code>episode_id</code></td><td>The <b>opening tag</b> of the row's episode, <code>&lt;skuseq&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code>: the shelf-hour the episode began, exactly as 0.2a spells a new window's id. A row whose tag names its own shelf-hour is the episode's first hour — an <b>entry</b>, priced freely from the entry grid. Every later row of the episode carries the same tag and is a <b>later hour</b>: its price may only step deeper than the price in force.</td><td>An id that is not a tag, names another shelf, or opens after the row's hour is refused with the reason and counted in <code>episode_ids_that_place_no_hour</code>. Nothing in the folder assigns or repairs an id.</td></tr>
+      <tr><td><code>episode_id</code></td><td>The <b>opening tag</b> of the row's episode, <code>&lt;sku_id&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code>: the shelf-hour the episode began, exactly as 0.2a spells a new window's id. A row whose tag names its own shelf-hour is the episode's first hour — an <b>entry</b>, priced freely from the entry grid. Every later row of the episode carries the same tag and is a <b>later hour</b>: its price may only step deeper than the price in force.</td><td>An id that is not a tag, names another shelf, or opens after the row's hour is refused with the reason and counted in <code>episode_ids_that_place_no_hour</code>. Nothing in the folder assigns or repairs an id.</td></tr>
       <tr><td><code>current_discount</code></td><td>The <b>price in force</b>, a fraction (0.15, not 15). <b>Null on an entry row.</b> On every later row of the episode, the <code>apply_discount_pct</code> this service returned for the same shelf last hour, divided by 100 — you pipe it back. It is the anchor the hour steps from.</td><td>A later row without it is refused (<code>later_hours_without_the_price_in_force</code>), never priced as an entry: pricing it as an entry could raise the price mid-episode. A value on an entry row is ignored and counted (<code>entries_with_a_price_in_force</code>).</td></tr>
       <tr><td><code>hours_remaining</code></td><td>Hours left in the window, this hour included (the table's <code>flc_window</code> plus one); the horizon. At most the configured cap.</td><td>Missing, negative, fractional or over the cap: refused with the reason.</td></tr>
       <tr><td><code>q</code></td><td>The opening stock. Zero is an empty shelf: counted, not priced, not an error.</td><td>Missing or negative: refused.</td></tr>
     </tbody>
   </table></div>
 
-<p class="prose">Hour to hour, the chain is: snapshot for hour <i>h</i> in → decision out → you push <code>apply_price</code> → the feed row for hour <i>h</i> closes with what sold → the snapshot for hour <i>h</i>+1 is built from it: <code>inventory</code> is the feed's <code>ending_inventory</code>, <code>flc_window</code> stepped down, <code>episode_id</code> the same tag unless the episode closed, <code>discount</code> the <code>apply_discount_pct</code> of hour <i>h</i>. Re-running an hour is safe: the same rows give the same decisions and the same ids; the log gains a duplicate line the owner's reader ignores.</p>
+<p class="prose">Hour to hour, the chain is: snapshot for hour <i>h</i> in → decision out → you push <code>apply_price</code> → the hourly table's row for hour <i>h</i> closes with what sold → the snapshot for hour <i>h</i>+1 is built from it: <code>q</code> is that row's closing stock, <code>hours_remaining</code> one less, <code>episode_id</code> the same tag unless the episode closed (then a new tag, and <code>current_discount</code> null), <code>current_discount</code> the hour-<i>h</i> response's <code>apply_discount_pct / 100</code>. Re-running an hour is safe: the same rows give the same decisions and the same ids; the log gains a duplicate line the owner's reader ignores.</p>
+
+  <h3>The commands and their flags</h3>
+  <div class="tscroll"><table>
+    <thead><tr><th>Command</th><th>Flag</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td rowspan="8"><code>price_hour.py</code></td><td><code>--snapshot &lt;file&gt;</code></td><td>Required. The twelve request fields, one row per shelf, as <code>.parquet</code>, <code>.csv</code> or <code>.jsonl</code> (by extension). Rows of another hour are ignored and counted.</td></tr>
+      <tr><td><code>--out &lt;file&gt;</code></td><td>Required. The response, <code>.csv</code>, <code>.parquet</code> or <code>.jsonl</code> by extension.</td></tr>
+      <tr><td><code>--report &lt;file&gt;</code></td><td>The hour's counts, JSON. Omitted, nothing is written; the console line still prints.</td></tr>
+      <tr><td><code>--features &lt;dir|file&gt;</code></td><td>Default <code>features/</code>: the directory of <code>&lt;date&gt;.parquet</code> tables the hour reads by each episode's opening day. A single file prices every row on that table.</td></tr>
+      <tr><td><code>--hour YYYY-MM-DDTHH</code></td><td>The hour to price. Default: the latest hour among the snapshot's rows.</td></tr>
+      <tr><td><code>--workers N</code></td><td>Processes for the batch: <code>0</code> every core but one, omitted serial. Results are identical either way.</td></tr>
+      <tr><td><code>--dry-run</code></td><td>Write the response and the report; append nothing to the log.</td></tr>
+      <tr><td><code>--config &lt;file&gt;</code></td><td>Default <code>config.yaml</code>, the synced one. Not yours to change.</td></tr>
+      <tr><td rowspan="4"><code>download_flc.py</code></td><td><code>--days N</code></td><td>Trailing days to pull, default 45 (the 30-day window plus a margin).</td></tr>
+      <tr><td><code>--end-date YYYY-MM-DD</code></td><td>The last day pulled; default yesterday. ISO only; anything else is refused before the SQL.</td></tr>
+      <tr><td><code>--out &lt;file&gt;</code></td><td>Default <code>data/flc.parquet</code>, where <code>build_features.py</code> looks.</td></tr>
+      <tr><td><code>--env-file &lt;file&gt;</code></td><td>Where the <code>REDSHIFT_*</code> values are read from; default <code>~/.env</code>.</td></tr>
+      <tr><td rowspan="4"><code>build_features.py</code></td><td><code>--extract &lt;file&gt;</code></td><td>Default <code>data/flc.parquet</code>.</td></tr>
+      <tr><td><code>--as-of YYYY-MM-DD</code></td><td>The day the table is for; default the day after the extract's last day.</td></tr>
+      <tr><td><code>--out &lt;file&gt;</code></td><td>Default <code>features/&lt;as-of&gt;.parquet</code>.</td></tr>
+      <tr><td><code>--report &lt;file&gt;</code></td><td>The morning's counts, JSON; omitted, nothing is written.</td></tr>
+    </tbody>
+  </table></div>
 
   <h3>The response file</h3>
 <p class="prose">One row per snapshot row, in the request's names. Put <code>apply_price</code> on the shelf; <code>apply_discount_pct / 100</code> is next hour's <code>current_discount</code> for the same shelf.</p>
@@ -903,41 +926,52 @@
       <tr><td><code>decision_id</code></td><td><code>dec-</code> plus the shelf-hour tag, the handle of the decision in the log; null when rejected</td></tr>
       <tr><td><code>apply_discount_pct</code></td><td>The discount to put on the shelf, in percent, on the grid the engine plans on; divided by 100, next hour's <code>current_discount</code></td></tr>
       <tr><td><code>apply_price</code></td><td>The same decision as a price; put exactly this number on the shelf</td></tr>
-      <tr><td><code>is_exploration</code></td><td>Always false here: the folder prices exploit-only</td></tr>
-      <tr><td><code>rejected</code></td><td>Null when priced; otherwise the reason this row was not priced (the table below, then Appendix I). Hold the shelf</td></tr>
+      <tr><td><code>is_exploration</code></td><td>False on every priced row (the folder prices exploit-only); null on a rejected one</td></tr>
+      <tr><td><code>rejected</code></td><td>Null when priced; otherwise the reason this row was not priced (the table below). Hold the shelf. On a rejected row <code>decision_id</code>, <code>apply_discount_pct</code> and <code>apply_price</code> are null</td></tr>
     </tbody>
   </table></div>
-<p class="prose"><code>is_exploration</code> is false on every row: the folder prices exploit-only, the optimal price is the applied price, and nothing is drawn. <code>decision_id</code> is <code>dec-</code> plus the shelf-hour tag; the episode's first decision therefore has <code>decision_id</code> equal to <code>dec-</code> plus its <code>episode_id</code>.</p>
+<p class="prose">The folder prices exploit-only: the optimal price is the applied price and nothing is drawn. <code>decision_id</code> is <code>dec-</code> plus the shelf-hour tag, so the episode's first decision has <code>decision_id</code> equal to <code>dec-</code> plus its <code>episode_id</code>.</p>
 
   <h3>The hour's report</h3>
+<p class="prose">Every key the command writes, with what to expect and what a different value means.</p>
   <div class="tscroll"><table>
     <thead><tr><th>Key</th><th>Expected</th><th>If not</th></tr></thead>
     <tbody>
-      <tr><td><code>shelves</code>, <code>decisions</code>, <code>rejected</code>, <code>shelves_empty</code></td><td>decisions + rejected + empty = shelves</td><td>—</td></tr>
+      <tr><td><code>hour</code></td><td>The batch hour, <code>YYYY-MM-DDTHH</code></td><td>Not the hour you meant: pass <code>--hour</code>, or the snapshot's latest rows are another hour's</td></tr>
+      <tr><td><code>shelves</code>, <code>requests</code>, <code>decisions</code>, <code>rejected</code>, <code>shelves_empty</code></td><td>shelves = requests + shelves_empty + the rows refused before a request; requests = decisions + rejected</td><td>—</td></tr>
+      <tr><td><code>shelves_unkeyable</code></td><td>Zero</td><td>Rows whose <code>sku_id</code>, <code>fc</code>, <code>date</code> or <code>hour_of_day</code> is missing or unreadable; they cost themselves a response line, never the batch</td></tr>
+      <tr><td><code>other_hours_rows_ignored</code></td><td>Zero</td><td>Rows of another hour rode along and were not priced; only the batch hour is</td></tr>
       <tr><td><code>entries</code>, <code>later_hours</code></td><td>Mostly later hours after the first hour; entries when listings open</td><td>Every shelf an entry every hour: your ids are not the opening tag, or change every hour</td></tr>
       <tr><td><code>episode_ids_that_place_no_hour</code></td><td>Zero</td><td>Ids that are not tags, name another shelf, or open after the hour. Fix the id step; the rows were not priced</td></tr>
-      <tr><td><code>later_hours_without_the_price_in_force</code></td><td>Zero</td><td>The pipe-back of last hour's <code>apply_discount_pct</code> into <code>discount</code> did not run; the rows were not priced</td></tr>
-      <tr><td><code>entries_with_a_price_in_force</code></td><td>Zero</td><td>Entry rows arrived with a discount; it was ignored. Your entry rows should carry null</td></tr>
-      <tr><td><code>other_hours_rows_ignored</code></td><td>Zero</td><td>Rows of another hour rode along and were not priced; only the batch hour is</td></tr>
+      <tr><td><code>later_hours_without_the_price_in_force</code></td><td>Zero</td><td>The pipe-back of last hour's <code>apply_discount_pct / 100</code> into <code>current_discount</code> did not run; the rows were not priced</td></tr>
+      <tr><td><code>entries_with_a_price_in_force</code></td><td>Zero</td><td>Entry rows arrived with a <code>current_discount</code>; it was ignored. Your entry rows should carry null</td></tr>
+      <tr><td><code>rejected_before_the_engine</code>, <code>rejected_by_the_engine</code></td><td>Both small. The first counts rows refused for what they carry (the table below); the second maps each engine reason to its count</td><td>A whole hour under one reason: a column changed meaning upstream; stop and send the report</td></tr>
       <tr><td><code>feature_tables</code>, <code>opening_days_on_the_batch_day_table</code>, <code>opening_days_without_a_table</code></td><td>One table per opening day; the other two empty</td><td>A fallback: that opening day's table is missing (the morning cron did not run that day); without a table at all, the rows were refused</td></tr>
-      <tr><td><code>requests_with_unknown_features</code></td><td>A few new SKUs</td><td>Every entry unknown: the snapshot's ids are spelt differently from the feed's</td></tr>
-      <tr><td><code>rejected_by_the_engine</code></td><td>Empty, or a few rows with a reason from Appendix I</td><td>A whole hour rejected for one reason: a column changed meaning upstream; stop and send the report</td></tr>
+      <tr><td><code>requests_with_unknown_features</code></td><td>A few new SKUs</td><td>Every entry unknown: the snapshot's ids are spelt differently from the warehouse's</td></tr>
       <tr><td><code>decisions_logged</code>, <code>rejections_logged</code></td><td>Equal to decisions and rejected; both zero on a dry run</td><td>—</td></tr>
-      <tr><td><code>exploration_mode</code></td><td><code>exploit</code></td><td>—</td></tr>
+      <tr><td><code>dry_run</code>, <code>exploration_mode</code></td><td><code>false</code> from the cron; <code>exploit</code></td><td>—</td></tr>
+      <tr><td><code>model_version</code>, <code>config_digest</code>, <code>posterior_versions</code></td><td>What the hour priced with: the model file's version, the pruned config's digest, the belief's version per category cell. Same values all day; they move when the owner syncs</td><td>—</td></tr>
+      <tr><td><code>contract</code>, <code>response</code></td><td>The contract in one paragraph, and the path the response was written to</td><td>—</td></tr>
     </tbody>
   </table></div>
 
-  <h3>Why a row was not priced, before the engine</h3>
+  <h3>Why a row was not priced</h3>
+<p class="prose">The <code>rejected</code> column, in the order the checks run. The first block is what the row carries; the second is the engine refusing a state rather than returning an unsafe price. Every refused row is also a line in <code>rejections.jsonl</code>.</p>
   <div class="tscroll"><table>
     <thead><tr><th><code>rejected</code> reads</th><th>Meaning</th><th>Whose</th></tr></thead>
     <tbody>
-      <tr><td><code>row names no shelf-hour</code></td><td>One of skuseq, fc, date, hour is missing or unreadable</td><td>you</td></tr>
-      <tr><td><code>empty shelf: nothing to price</code></td><td>Opening stock is zero; counted, not an error</td><td>—</td></tr>
-      <tr><td><code>episode_id is not an opening tag …</code>, <code>… names another shelf …</code>, <code>… opens after this hour …</code></td><td>The id cannot place the row in an episode</td><td>you</td></tr>
-      <tr><td><code>later hour of the episode without the price in force …</code></td><td>A later row with null <code>discount</code></td><td>you</td></tr>
+      <tr><td><code>row names no shelf-hour</code></td><td>One of <code>sku_id</code>, <code>fc</code>, <code>date</code>, <code>hour_of_day</code> is missing or unreadable</td><td>you</td></tr>
+      <tr><td><code>empty shelf: nothing to price</code></td><td><code>q</code> is zero; counted, not an error</td><td>—</td></tr>
+      <tr><td><code>episode_id is not an opening tag …</code>, <code>episode_id names another shelf …</code>, <code>episode_id opens after this hour …</code></td><td>The id cannot place the row in an episode</td><td>you</td></tr>
+      <tr><td><code>later hour of the episode without the price in force …</code></td><td>A later row with null <code>current_discount</code></td><td>you</td></tr>
+      <tr><td><code>missing &lt;field&gt;</code>; <code>&lt;field&gt; is null</code>; <code>&lt;field&gt; is not an identifier: …</code>; <code>&lt;field&gt; is not a number: …</code>; <code>date … names no day</code></td><td>One of the twelve fields is absent, null or of the wrong kind (<code>category</code>, <code>subcategory</code>, <code>original_price</code>, <code>cost</code> null; an id that is a bool, a fraction or NaN; a price that is not a number). Several reasons join with <code>; </code></td><td>you</td></tr>
+      <tr><td><code>q must be a non-negative integer</code>; <code>hours_remaining must be an integer &gt;= 1</code>; <code>hours_remaining must not exceed data.max_window_hours (…); got …</code>; <code>hour_of_day must be an integer in 0..23</code></td><td>A count out of range: a fractional or negative stock, a counter of zero or above the cap, an hour off the clock</td><td>you</td></tr>
       <tr><td><code>duplicate_request: two requests for one hour</code></td><td>Two rows for one shelf-hour in the snapshot; neither is priced</td><td>you</td></tr>
-      <tr><td><code>no feature table for the episode's opening day …</code></td><td>Neither that day's table nor today's exists; run the morning commands</td><td>you (the cron)</td></tr>
-      <tr><td>anything else</td><td>A state the engine refused; Appendix I</td><td>see there</td></tr>
+      <tr><td><code>no feature table for the episode's opening day …</code></td><td>Neither that day's table nor the batch day's exists; run the morning commands</td><td>you (the cron)</td></tr>
+      <tr><td><code>original_price must be a finite positive number</code>; <code>cost must be a finite non-negative number</code>; <code>cost must not exceed original_price</code></td><td>The economics leave no tier grid</td><td>you</td></tr>
+      <tr><td><code>current_discount must be a finite number</code></td><td>The price in force is not a number (a string, infinity)</td><td>you</td></tr>
+      <tr><td><code>no feasible tier at or below the current anchor price</code></td><td>The price in force is already at or below the cost floor: nothing deeper is allowed, so nothing is priced. Hold the shelf at its price</td><td>the state; expected near the floor</td></tr>
+      <tr><td><code>feasible set is empty</code>; <code>demand predictions must be finite and positive</code>; <code>empty feasible set or degenerate state</code></td><td>The engine could not build a grid or a forecast for the row: send the owner the row and the report</td><td>owner</td></tr>
     </tbody>
   </table></div>
 
@@ -964,7 +998,7 @@
 <p class="prose">Each command sets the folder as its working directory, so no <code>cd</code>. <code>--dry-run</code> on the hourly command writes the response and the report and appends nothing to the log. Before the first cron fires, send the owner one dry-run hour's snapshot, response and report, and the first morning's console output.</p>
 
   <h3>What stays with the owner</h3>
-<p class="prose">The checks on the files you send (0.3, and the response against its snapshot), the learning lane that pairs the log's decisions with the feed's outcomes by shelf-hour, the model retrains and the sync of new artifacts into <code>artifacts/</code>. The failed-pushes table (section 04, step 4) still goes to the owner's repository, where the morning lane reads it.</p>
+<p class="prose">The checks on the tables you send to the repository (0.3), the learning lane that pairs the log's decisions with the feed's outcomes by shelf-hour, the model retrains and the sync of new artifacts into <code>artifacts/</code>. The failed-pushes table (section 04, step 4) still goes to the owner's repository, where the morning lane reads it.</p>
 </section>
 
 <section id="appendices">
@@ -1168,7 +1202,7 @@
         <tr><td><code>fc</code></td><td><code>fc</code></td><td>as text</td></tr>
         <tr><td><code>date</code></td><td><code>date</code></td><td><code>YYYY-MM-DD</code>; a date or timestamp column is fine, it is spelt so</td></tr>
         <tr><td><code>hour</code></td><td><code>hour_of_day</code></td><td>as an integer 0..23</td></tr>
-        <tr><td><code>episode_id</code></td><td><code>episode_id</code></td><td>as given: the opening tag <code>&lt;skuseq&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code> of the episode's first hour (0.2a, section 10)</td></tr>
+        <tr><td><code>episode_id</code></td><td><code>episode_id</code></td><td>as given: the opening tag <code>&lt;sku_id&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code> of the episode's first hour (0.2a, section 10)</td></tr>
         <tr><td><code>inventory</code></td><td><code>q</code></td><td>as an integer; zero is an empty shelf, counted and not priced</td></tr>
         <tr><td><code>flc_window</code></td><td><code>hours_remaining</code></td><td><b><code>flc_window + 1</code></b>: your counter is the hours still to come <em>after</em> this one, the request's horizon includes this one (the trap in §08)</td></tr>
         <tr><td><code>discount</code></td><td><code>current_discount</code></td><td><b><code>discount / 100</code></b>: yours is a percent (15), the request's a fraction (0.15); null stays null and means an entry</td></tr>
@@ -1216,7 +1250,7 @@
       <li><b>Open a new id when a new window starts</b> — the first hour a SKU × FC comes on
           clearance, recognisable in the source by the window counter resetting upward (a new
           <code>flc_window</code> value larger than the previous hour's would decrement to).
-          The id is the opening tag, <code>&lt;skuseq&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code> of that
+          The id is the opening tag, <code>&lt;sku_id&gt;|&lt;fc&gt;|&lt;date&gt;T&lt;hh&gt;</code> of that
           first hour — not merely unique per window but the spelling the hour reads the
           opening hour from (section 10).</li>
       <li><b>Keep that id for every subsequent hour of the window</b>, however many calendar
@@ -1509,6 +1543,44 @@
     </div>
   </div>
 
+  <h3>The rows you sent, and what came back</h3>
+  <div class="prose">
+    <p>
+      The three snapshot rows of this episode as the pricing folder takes them (section 10): the
+      twelve request fields, <code>current_discount</code> null on the entry and the previous
+      hour's applied discount after it, <code>hours_remaining</code> counting the hour. Under
+      them, the response rows the folder writes for them, in the same names.
+    </p>
+  </div>
+<pre class="json"><span class="c">// snapshots/2026-08-19T17.jsonl -- the entry: current_discount null</span>
+{"episode_id": "SKU-88213|FC-04|2026-08-19T17", "sku_id": "SKU-88213", "fc": "FC-04",
+ "category": "vegetables", "subcategory": "leafy_greens", "date": "2026-08-19", "hour_of_day": 17,
+ "hours_remaining": 4, "q": 3, "original_price": 10000.0, "cost": 4000.0, "current_discount": null}
+
+<span class="c">// snapshots/2026-08-19T18.jsonl -- a later hour: the 17:00 apply_discount_pct, 30, as 0.30</span>
+{"episode_id": "SKU-88213|FC-04|2026-08-19T17", "sku_id": "SKU-88213", "fc": "FC-04",
+ "category": "vegetables", "subcategory": "leafy_greens", "date": "2026-08-19", "hour_of_day": 18,
+ "hours_remaining": 3, "q": 2, "original_price": 10000.0, "cost": 4000.0, "current_discount": 0.30}
+
+<span class="c">// decisions/2026-08-19T17.jsonl -- the response row for the entry</span>
+{"sku_id": "SKU-88213", "fc": "FC-04", "date": "2026-08-19", "hour_of_day": 17,
+ "episode_id": "SKU-88213|FC-04|2026-08-19T17", "decision_id": "dec-SKU-88213|FC-04|2026-08-19T17",
+ "apply_discount_pct": 30.0, "apply_price": 7000.0, "is_exploration": true, "rejected": null}</pre>
+  <div class="note">
+    <h4>In the pricing folder, every hour looks like the last payload of this appendix</h4>
+    <p>
+      The decisions below were captured from the repository's lane with exploration on, which is
+      why <code>applied_price</code> differs from <code>optimal_price</code> and
+      <code>is_exploration</code> is true. The folder prices exploit-only: on every decision it
+      writes, <code>applied_price</code> equals <code>optimal_price</code>,
+      <code>is_exploration</code> is false, <code>exploration_cost</code> and
+      <code>affordable_set_size</code> are 0, <code>tau_current</code> is null and
+      <code>delta_min</code> is 0 — the shape of "What exploitation looks like", for every row. The
+      17:00 response above would then read <code>apply_discount_pct: 15.0, apply_price: 8500.0,
+      is_exploration: false</code>, and the 18:00 row's <code>current_discount</code> would be 0.15.
+    </p>
+  </div>
+
   <h3>The entry decision, in full</h3>
   <div class="prose">
     <p>
@@ -1668,7 +1740,7 @@
     <div class="hd"><b>decisions.jsonl</b><span>a decision with nothing left to explore</span></div>
 <pre class="json">{
   "decision_id": "dec-SKU-90114|FC-04|2026-08-19T21",
-  "episode_id": "EP-90114-2280",
+  "episode_id": "SKU-90114|FC-04|2026-08-19T19",
   "sku_id": "SKU-90114",
   "fc": "FC-04",
   "date": "2026-08-19",

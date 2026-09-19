@@ -274,7 +274,7 @@ def test_the_handover_section_on_the_folder_names_only_keys_and_reasons_the_code
         html = f.read()
     section = html[html.index('<section id="pricing-folder">'):html.index('<section id="appendices">')]
     source = ""
-    for mod in ("pricing.hour", "pricing.state"):
+    for mod in ("pricing.hour", "pricing.state", "pricing.decide", "pricing.dp"):
         with open(bi._module_path(FOLDER, mod)) as f:
             source += f.read()
     report_table = section[section.index("<h3>The hour's report</h3>"):section.index("<h3>Why a row")]
@@ -282,9 +282,10 @@ def test_the_handover_section_on_the_folder_names_only_keys_and_reasons_the_code
         for key in re.findall(r"<code>([a-z_]+)</code>", first_cell):
             assert f'"{key}"' in source, f"section 10 names report key {key}, which the command does not write"
     reasons = section[section.index("<h3>Why a row"):section.index("<h3>The morning")]
-    for reason in re.findall(r"<code>([^<…]+?)(?: …)?</code>", reasons):
-        head = reason.strip(" …").lstrip("… ")
-        if head.startswith("rejected") or head == "anything else":
+    reasons = reasons[reasons.index("<tbody>"):]                  # the quoted reasons, not the prose
+    for reason in re.findall(r"<code>([^<]+?)</code>", reasons):
+        head = reason.replace("&lt;", "<").replace("&gt;", ">").split(" …")[0].split(": …")[0].split(" (…")[0].strip(" …")
+        if "<field>" in head or head.startswith("date ") or head in ("sku_id", "fc", "date", "hour_of_day", "q", "current_discount", "category", "subcategory", "original_price", "cost", "; "):
             continue
         assert head in source, f"section 10 quotes refusal reason {head!r}, which the command does not emit"
 

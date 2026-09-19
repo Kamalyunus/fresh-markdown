@@ -5,6 +5,7 @@ randomized-policy dataset."""
 import copy
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1476,6 +1477,13 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
         rep = json.load(f)
     assert rep["shelves"] == len(snap) and rep["decisions"] >= 1, rep
     assert rep["entries_with_a_price_in_force"] == 0          # entry rows carry null, as the contract says
+    # every key the command writes is in the handover's report table (section 10)
+    with open(os.path.join(ROOT, "docs", "engineering_handover.html")) as f:
+        page = f.read()
+    section = page[page.index('<section id="pricing-folder">'):page.index('<section id="appendices">')]
+    table = section[section.index("<h3>The hour's report</h3>"):section.index("<h3>Why a row")]
+    undocumented = set(rep) - set(re.findall(r"<code>([a-z_]+)</code>", table))
+    assert not undocumented, f"report keys the handover does not name: {sorted(undocumented)}"
     assert rep["exploration_mode"] == "exploit" and "explored" not in rep
     assert rep["decisions"] + rep["rejected"] + rep["shelves_empty"] == rep["shelves"]
     response = pd.read_csv(os.path.join(folder, "decisions", "hour.csv"))
