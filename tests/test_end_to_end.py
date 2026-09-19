@@ -1500,7 +1500,8 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
             return [json.loads(line) for line in f if line.strip()]
 
     folder_store = os.path.join(folder, "events_store")
-    clock = {"timestamp", "solver_latency_s", "config_digest"}
+    clock = {"timestamp", "solver_latency_s", "config_digest",
+             "delta_min"}      # the floor under a draw: the folder records 0, the repository k*bias/|eps|
     drawn = {"applied_price", "applied_discount", "is_exploration", "exploration_cost",
              "affordable_set_size", "tau_current", "expected_il", "expected_denominator"}
     ours = {e["decision_id"]: e for e in stream(folder_store, "decisions.jsonl")}
@@ -1508,6 +1509,7 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     for b in ours.values():
         assert b["is_exploration"] is False and b["tau_current"] is None
         assert b["applied_price"] == b["optimal_price"] and b["exploration_cost"] == 0
+        assert b["delta_min"] == 0
     for tag, allowed in (("exploring", clock | drawn), ("suspended", clock)):
         store_dir = repo_hour(tag, str(workspace / "artifacts" / "posterior.json")
                               if tag == "exploring" else suspended)

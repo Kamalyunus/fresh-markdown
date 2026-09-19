@@ -123,8 +123,9 @@ def _continuity_breaks(d):
 
 def prepare(path, cfg):
     """The rolling feed prepared as the training extract was: every drop is
-    a window or an episode, whole. Returns the history in HISTORY_COLS."""
-    excl = cfg["data"].get("exclusion_window") or {}
+    a window or an episode, whole. Returns the history in HISTORY_COLS.
+    (The training's exclusion of a past demand-issue period is not
+    applied: the rolling history never reaches that far back.)"""
     df = pd.read_parquet(path).rename(columns=SOURCE_TO_CANONICAL)
     df["total_discount"] = df["total_discount"] / 100.0
     for col in QUANTITY_COLS:
@@ -141,10 +142,6 @@ def prepare(path, cfg):
     df = df[~_defective_windows(df, dup)]
     df["episode_id"] = _episode_ids(df)
     d = df[~df.episode_id.isin(_gap_split_ids(df))]
-    if excl.get("start"):
-        ds = d.date.astype(str)
-        inside = ds.ge(excl["start"]) & ds.le(excl["end"])
-        d = d[~d.episode_id.isin(d.loc[inside, "episode_id"].unique())]
     bad = d.loc[~d.total_discount.between(0, 1), "episode_id"].unique()
     d = d[~d.episode_id.isin(bad)]
     neg = (d.starting_inventory < 0) | (d.units_sold < 0) | (d.ending_inventory < 0)

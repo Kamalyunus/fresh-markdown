@@ -8,10 +8,6 @@ meta:
 data:
   launch_date: null
   max_window_hours: 120
-  manufacturing_window_hours: 24
-  exclusion_window:
-    start: '2026-04-25'
-    end: '2026-06-03'
 reference_discount:
   MEAT: 0.25
   SIDE_DISH: 0.25
@@ -30,28 +26,6 @@ dispersion:
   r_lookup_path: artifacts/r_lookup.json
 posterior:
   path: artifacts/posterior.json
-  epsilon_max: -0.05
-exploration:
-  delta_min_log_bias:
-    BABY_FOOD: 0.3389
-    BAKERY_&_PASTRY: 0.1459
-    BEVERAGE: 0.1459
-    DAIRY_PRODUCT: 0.1459
-    DELI: 0.1459
-    DESSERT: 0.1459
-    DRIED_&_FROZEN_PRODUCE: 0.2446
-    EGG: 0.1459
-    FLOWER: 0.1459
-    FROZEN_MEAL: 0.1459
-    FRUIT: 0.1459
-    MEAL: 0.2862
-    MEAT: 0.1459
-    SEAFOOD: 0.1459
-    SIDE_DISH: 0.1459
-    VEGETABLE: 0.1459
-    _default: 0.1459
-  delta_min_bias_multiple: 1.0
-  min_feasible_tiers: 2
 pricing:
   tier_step: 0.025
   entry_offsets:

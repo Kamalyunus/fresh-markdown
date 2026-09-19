@@ -95,23 +95,32 @@ def test_the_package_is_closed_and_carries_nothing_of_the_learning_lane():
 
 def test_the_pruned_config_carries_only_what_the_hour_reads(cfg):
     """The generated config is the repository's pruned to KEEP: the switch,
-    the anchors, the artifact paths, the floor's inputs, the grid, the
-    store -- and none of the training, harness or learning keys."""
+    the horizon cap, the anchors, the artifact paths, the morning table's
+    three, the grid, the log -- and none of the training, harness,
+    exploration or learning keys. KEEP and the code agree both ways."""
     with open(os.path.join(FOLDER, "config.yaml")) as f:
         folder_cfg = yaml.safe_load(f)
     assert folder_cfg == bi.prune(cfg)
     assert set(folder_cfg) == {"meta", "data", "reference_discount", "baseline_model",
-                               "dispersion", "posterior", "exploration", "pricing", "events",
-                               "features"}
-    assert set(folder_cfg["data"]) == {"launch_date", "max_window_hours",
-                                       "manufacturing_window_hours", "exclusion_window"}
+                               "dispersion", "posterior", "pricing", "events", "features"}
+    assert set(folder_cfg["data"]) == {"launch_date", "max_window_hours"}
+    assert set(folder_cfg["posterior"]) == {"path"} and set(folder_cfg["dispersion"]) == {"r_lookup_path"}
     assert set(folder_cfg["baseline_model"]) == {"model_path", "feature_schema_path",
                                                  "calibration_factor_path",
                                                  "ref_rate_window_days", "ref_rate_anchor_band"}
-    assert "rho" not in folder_cfg["dispersion"] and "tau_initial" not in folder_cfg["exploration"]
-    assert "prior" not in folder_cfg["posterior"]
-    for absent in ("learning", "monitoring", "tuning", "artifacts", "assurance"):
+    for absent in ("exploration", "learning", "monitoring", "tuning", "artifacts", "assurance"):
         assert absent not in folder_cfg
+    # every two-level read in the package is a kept key, and every kept
+    # key is named somewhere in the package (a key nothing reads is pruned)
+    import re
+    source = ""
+    for mod in bi.modules(FOLDER):
+        with open(bi._module_path(FOLDER, mod)) as f:
+            source += f.read()
+    for section, key in re.findall(r'cfg\["([a-z_]+)"\]\["([a-z_]+)"\]', source):
+        assert (section, key) in bi.KEEP or (section,) in bi.KEEP, (section, key)
+    for path in bi.KEEP:
+        assert f'"{path[-1]}"' in source, f"{'.'.join(path)} is kept but nothing reads it"
 
 
 def test_the_command_runs_from_anywhere_with_the_repository_off_the_path(tmp_path):

@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from pricing import dp as dp_mod
-from pricing.config import ConfigError, reference_discount
+from pricing.config import reference_discount
 from pricing.demand import expected_min_demand_inventory, mu_at
 from pricing.keys import decision_id_of, hour_key
 
@@ -80,27 +80,6 @@ def validate_state(s, tiers, anchor_discount, mu_ref_path, cfg):
     return failures
 
 
-def delta_min(cfg, eps, category=None):
-    """The smallest informative log move from the reference for this cell:
-    k * bias / |eps|, floored at |epsilon_max|. Recorded on the event; the
-    draw it bounds is the repository's."""
-    ec = cfg["exploration"]
-    bias = ec.get("delta_min_log_bias")
-    if isinstance(bias, dict):
-        key = str(category).replace(" ", "_") if category is not None else "_default"
-        if key not in bias and "_default" not in bias:
-            raise ConfigError(
-                f"exploration.delta_min_log_bias has no entry for {key!r} and "
-                "no `_default`: a per-category floor mapping must name every "
-                "priced category or carry `_default` (ops.tune writes "
-                "both). A missing key is not 'no floor'.")
-        bias = bias.get(key, bias.get("_default"))
-    if not bias:
-        return 0.0
-    floor = abs(float(cfg["posterior"]["epsilon_max"]))
-    return float(ec["delta_min_bias_multiple"]) * float(bias) / max(abs(float(eps)), floor)
-
-
 def _feature_or_none(features, k):
     if features is None:
         return None
@@ -123,10 +102,6 @@ def decide(s, cell, cfg, model_version, config_digest):
     if not entry:
         anchor = float(anchor)
     eps = cell["mean"]
-    try:
-        dmin = delta_min(cfg, eps, s["category"])
-    except ConfigError as e:
-        raise StateRejected(str(e))
     try:
         result = dp_mod.solve(s["original_price"], s["cost"], int(s["q"]), s["mu_ref_path"],
                               d_ref, eps, s["r"], cfg, anchor_discount=anchor, entry=entry)
@@ -163,7 +138,7 @@ def decide(s, cell, cfg, model_version, config_digest):
         "exploration_cost": 0.0,
         "affordable_set_size": 0,
         "tau_current": None,
-        "delta_min": float(dmin),
+        "delta_min": 0.0,           # the floor under a draw: no draw here, no floor
         "epsilon_posterior_mean": float(cell["mean"]),
         "epsilon_posterior_std": float(cell["std"]),
         "reference_discount": float(d_ref),

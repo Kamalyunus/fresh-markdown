@@ -1255,6 +1255,18 @@ now. Dates are owner sign-off.
   state that exists to answer a question the request could carry is a
   dependency in disguise; the question was who owns the episode
   boundary, and the answer was already "the producers".
+  The config followed: read off every `cfg[...]` in the package (the
+  bundle test now holds KEEP and the code equal both ways), the
+  exploration section and `posterior.epsilon_max` set only `delta_min`,
+  the floor under a draw the folder never makes (the event records 0,
+  the value the handover already documents for "before the scale is
+  measured"); `data.exclusion_window` excluded a past demand-issue
+  period the folder's 45-day rolling history never reaches, so the
+  builder no longer applies it -- a FUTURE exclusion near launch is a
+  training-time change and the folder's history would not follow it
+  unless the step is put back; `manufacturing_window_hours` and
+  `min_feasible_tiers` were read by nothing. Fourteen keys in nine
+  sections became fifteen keys in eight.
 
 ## The lesson under all of it
 
