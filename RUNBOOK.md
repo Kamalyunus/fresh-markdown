@@ -37,10 +37,12 @@ All commands run from the repo root. `data/`, `reports/`, `artifacts/`,
   mismatch:0.05` and friends override it for one run to check that the
   gates and stops fire when they should.
 - **Engineering** — build Lane B (below) against the event contract
-  from `integration/`, the standalone folder `tools.build_integration`
-  writes (the hourly job, the morning feature job, the checker and the id
-  rule, with their own `README.md`; the learning lane stays in the
-  repository and reads the store that folder writes),
+  from `integration/`, the standalone folder `ops.integration` writes
+  (three commands: the hourly price, the morning feature table, the
+  checker for their tables and for the hour's response; its `README.md`
+  is the handoff; every seal and every `advance` run syncs the artifacts
+  into it; the id is theirs, nothing there assigns one; the learning lane
+  stays in the repository and reads the store that folder writes),
   choose the pilot episodes (**spanning FCs and categories** — several of
   each, so no single site or category carries the read and exploration is
   tested across the catalogue at small scale; there is no A/B and no

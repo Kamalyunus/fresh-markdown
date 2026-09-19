@@ -111,6 +111,10 @@ def main():
     if payload["missing"]:
         print("  absent: " + ", ".join(payload["missing"]))
     print(f"wrote {path}")
+    # every seal is a new frozen state: the pricing folder engineering runs
+    # carries it from here, never by a hand copy (ops.integration.sync)
+    from ops import integration                                  # noqa: E402
+    integration.sync_and_print(cfg, config_path=args.config)
 
 
 if __name__ == "__main__":

@@ -570,6 +570,10 @@ def main():
             # step's included -- and that one exits non-zero
             _write_readiness(args.config, args.reports)
             print(f"\nreport      {os.path.join(args.reports, READINESS)}")
+            # whatever this run left on disk -- a paste, a re-init, a
+            # re-fit -- reaches the pricing folder now (ops.integration)
+            from ops import integration                          # noqa: E402
+            integration.sync_and_print(load_config(args.config), config_path=args.config)
             return 1 if failed else 0
 
 

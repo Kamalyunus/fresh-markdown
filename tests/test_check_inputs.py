@@ -109,3 +109,54 @@ def test_a_null_feed_id_fails_its_own_gate_and_is_not_a_window_boundary(cfg, tmp
     v = _verdicts(check_inputs.check_feed(_feed_with_ids(tmp_path, rows, ids, "null_mid.parquet"), cfg).rows)
     assert v["episode_id never null (the feed's copy of the producers' id)"] == "FAIL"
     assert v["the producers' ids group the same windows EPISODE_RULE derives"] == "PASS"
+
+
+def test_the_response_is_checked_on_its_shape_and_against_its_snapshot(cfg, tmp_path):
+    """What engineering runs on an hour that looks wrong: the response's
+    own shape (priced xor rejected, the id spelt from its row, a percent
+    on the tier grid), and against the snapshot it answered (one row per
+    shelf of the priced hour, the price the percent makes, a price
+    shallower than the one in force a WARN -- an entry, or a defect)."""
+    snap = pd.DataFrame([
+        {"episode_id": "a", "date": "2026-08-29", "hour": 11, "skuseq": 1, "fc": "F1",
+         "inventory": 5.0, "discount": 10.0, "normal_asp": 1000.0, "cogs_wo_vat": 400.0,
+         "flc_window": 4.0, "category": "MEAT", "subcategory": "BEEF"},
+        {"episode_id": "b", "date": "2026-08-29", "hour": 11, "skuseq": 2, "fc": "F1",
+         "inventory": 0.0, "discount": 20.0, "normal_asp": 500.0, "cogs_wo_vat": 100.0,
+         "flc_window": 4.0, "category": "MEAT", "subcategory": "BEEF"},
+    ])
+    good = pd.DataFrame([
+        {"skuseq": 1, "fc": "F1", "date": "2026-08-29", "hour": 11, "episode_id": "a",
+         "decision_id": "dec-1|F1|2026-08-29T11", "apply_discount_pct": 15.0,
+         "apply_price": 850.0, "is_exploration": False, "rejected": None},
+        {"skuseq": 2, "fc": "F1", "date": "2026-08-29", "hour": 11, "episode_id": "b",
+         "decision_id": None, "apply_discount_pct": None, "apply_price": None,
+         "is_exploration": None, "rejected": "empty shelf: nothing to price"},
+    ])
+    s = tmp_path / "snap.csv"
+    snap.to_csv(s, index=False)
+    r = tmp_path / "good.csv"
+    good.to_csv(r, index=False)
+    rows = check_inputs.check_response(str(r), cfg, snapshot=str(s)).rows
+    assert all(x["verdict"] == "PASS" for x in rows), [x for x in rows if x["verdict"] != "PASS"]
+    assert any(x["check"].startswith("rejected rows: empty shelf") and x["count"] == 1 for x in rows)
+
+    bad = good.copy()
+    bad.loc[0, "apply_discount_pct"] = 0.15             # a fraction, off the grid too
+    bad.loc[0, "decision_id"] = "dec-9|F1|2026-08-29T11"
+    bad.loc[1, "decision_id"] = "dec-2|F1|2026-08-29T11"   # rejected AND priced
+    bad.to_csv(r, index=False)
+    by = {x["check"]: x for x in check_inputs.check_response(str(r), cfg, snapshot=str(s)).rows}
+    assert by["every row is priced or rejected, never both or neither"]["verdict"] == "FAIL"
+    assert by["decision_id is dec-<skuseq>|<fc>|<date>T<hh> of its own row"]["verdict"] == "FAIL"
+    assert by["apply_discount_pct sits on the 2.5-point tier grid"]["verdict"] == "FAIL"
+    assert by["apply_price = normal_asp x (1 - apply_discount_pct / 100)"]["verdict"] == "FAIL"
+
+    shallow = good.copy()
+    shallow.loc[0, "apply_discount_pct"] = 5.0            # shallower than the 10 in force
+    shallow.loc[0, "apply_price"] = 950.0
+    shallow.to_csv(r, index=False)
+    by = {x["check"]: x for x in check_inputs.check_response(str(r), cfg, snapshot=str(s)).rows}
+    assert by["no price shallower than the one in force (the snapshot's discount)"]["verdict"] == "WARN"
+    assert check_inputs.main(["--response", str(r), "--snapshot", str(s),
+                              "--config", "config.yaml"]) == 0      # a WARN is not a FAIL

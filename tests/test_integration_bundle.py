@@ -1,24 +1,26 @@
 """integration/ -- the standalone pricing folder engineering runs.
 
-Three properties, pinned: the committed folder IS a fresh build (no hand
-edit survives), every repo-local import inside it resolves inside it (it
-is standalone), and its scripts run from it with the repository off the
-path. The hour that prices against real artifacts is in
-test_end_to_end.py, where the trained workspace already exists."""
+Pinned here: the committed folder IS a fresh build (no hand edit
+survives), every repo-local import inside it resolves inside it (it is
+standalone), its three commands run from anywhere with the repository
+off the path, and the sync the owner's chain calls carries the artifacts
+into it. The hour that prices from the folder against real artifacts,
+synced by a real seal, is in test_end_to_end.py where the trained
+workspace already exists."""
+import json
 import os
 import shutil
 import subprocess
 import sys
 
-from conftest import ROOT
-from tools import build_integration as bi
+from conftest import ROOT, scratch_paths
+from ops import integration as bi
 
 FOLDER = os.path.join(ROOT, "integration")
 
 
 def _isolated(cwd, *args):
-    """Run `python3 *args` from `cwd` with the repository off the path:
-    no PYTHONPATH, and the interpreter's own cwd entry pointing at `cwd`."""
+    """Run `python3 *args` from `cwd` with the repository off the path."""
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     return subprocess.run([sys.executable, *args], cwd=cwd, env=env,
                           capture_output=True, text=True)
@@ -28,62 +30,96 @@ def test_the_committed_folder_is_a_fresh_build():
     """A file edited under integration/ by hand, or a module changed in its
     one home and not rebuilt, differs from a fresh build -- and is named."""
     assert bi.stale(ROOT, FOLDER) == [], \
-        "integration/ is stale: python3 -m tools.build_integration"
+        "integration/ is stale: python3 -m ops.integration"
 
 
 def test_every_local_import_inside_the_folder_resolves_inside_it():
-    """Standalone means the closure is closed: nothing under integration/
-    imports a repo module the folder does not carry, and the folder
-    carries nothing the entry points do not reach."""
-    mods = bi.closure(FOLDER)                     # resolved against the FOLDER
+    """Standalone means the closure is closed: nothing under src/ imports
+    a repo module the folder does not carry, and src/ carries nothing the
+    three commands do not reach. The id rule rides along because the
+    hourly job counts disagreements with it; it is not a command."""
+    src = os.path.join(FOLDER, bi.SRC)
+    mods = bi.closure(src)                          # resolved against src/
     for mod in mods:
-        path = bi._module_path(FOLDER, mod)
-        for dep in bi.local_imports(FOLDER, path):
-            assert bi._module_path(FOLDER, dep), f"{mod} imports {dep}, absent from integration/"
-    present = {os.path.relpath(os.path.join(dp, f), FOLDER)
-               for dp, _, fs in os.walk(FOLDER) for f in fs
+        for dep in bi.local_imports(src, bi._module_path(src, mod)):
+            assert bi._module_path(src, dep), f"{mod} imports {dep}, absent from src/"
+    present = {os.path.relpath(os.path.join(dp, f), src)
+               for dp, _, fs in os.walk(src) for f in fs
                if f.endswith(".py") and "__pycache__" not in dp}
-    assert present == set(bi.module_files(FOLDER, mods))
+    assert present == set(bi.module_files(src, mods))
+    assert "ops.assign_episode_ids" in mods and "ops.assign_episode_ids" not in bi.ENTRIES
+    assert not os.path.exists(os.path.join(FOLDER, "assign_episode_ids.py"))
 
 
-def test_the_scripts_run_from_the_folder_with_the_repository_off_the_path(tmp_path):
-    """Copied elsewhere, the four entry points import from the copy alone
-    (every loaded repo module's file is under it), the checker passes the
-    bundled examples, and the id rule assigns the example snapshot."""
+def test_the_commands_run_from_anywhere_with_the_repository_off_the_path(tmp_path):
+    """Copied elsewhere and called from a third directory: each command
+    chdirs into the folder (a relative argument is relative to it), imports
+    from the copy alone, and the checker passes the bundled examples and
+    the example response against its snapshot."""
     folder = str(tmp_path / "pricing")
     shutil.copytree(FOLDER, folder, ignore=shutil.ignore_patterns("__pycache__"))
-    r = _isolated(folder, "-c", (
+    elsewhere = str(tmp_path / "elsewhere")
+    os.makedirs(elsewhere)
+    r = _isolated(os.path.join(folder, bi.SRC), "-c", (
         "import os, sys\n"
-        "import ops.price_hour, daily.features, ops.check_inputs, ops.assign_episode_ids\n"
+        "import ops.price_hour, daily.features, ops.check_inputs\n"
         "here = os.getcwd()\n"
         "bad = [m.__name__ for m in list(sys.modules.values())\n"
-        "       if getattr(m, '__file__', None)\n"
-        "       and m.__name__.split('.')[0] in %r\n"
+        "       if getattr(m, '__file__', None) and m.__name__.split('.')[0] in %r\n"
         "       and not os.path.abspath(m.__file__).startswith(here)]\n"
-        "assert not bad, bad\n"
-        "print(len([m for m in sys.modules if m.split('.')[0] in %r]))"
-    ) % (bi.PACKAGES, bi.PACKAGES))
+        "assert not bad, bad\n") % (bi.PACKAGES,))
     assert r.returncode == 0, r.stdout + r.stderr
-    r = _isolated(folder, "-m", "ops.check_inputs",
+    for name, _, _ in bi.COMMANDS:
+        r = _isolated(elsewhere, os.path.join(folder, name), "--help")
+        assert r.returncode == 0, name + "\n" + r.stdout + r.stderr
+    r = _isolated(elsewhere, os.path.join(folder, "check_inputs.py"),
                   "--snapshot", "examples/snapshot_2026-08-29T11.csv",
                   "--feed", "examples/feed_2026-08-29.parquet",
-                  "--failures", "examples/failures_2026-08-29.csv")
+                  "--failures", "examples/failures_2026-08-29.csv",
+                  "--response", "examples/decisions_2026-08-29T11.csv",
+                  "--report", "reports/hours/examples.json")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "0 FAIL" in r.stdout, r.stdout
-    r = _isolated(folder, "-m", "ops.assign_episode_ids",
-                  "--hour", "examples/snapshot_2026-08-29T11.csv",
-                  "--out", "snapshots/with_ids.csv")
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert os.path.exists(os.path.join(folder, "snapshots", "with_ids.csv"))
+    assert os.path.exists(os.path.join(folder, "reports", "hours", "examples.json"))
+
+
+def test_the_sync_carries_the_artifacts_the_config_names(cfg, tmp_path, monkeypatch):
+    """What the owner's chain calls after every seal and every advance run:
+    the artifacts the config names, the extract and the feed history, and
+    the config land in the folder; one not on disk yet is listed, never
+    an error; no built folder means no sync."""
+    folder = str(tmp_path / "pricing")
+    assert bi.sync(cfg, out=folder) is None
+    bi.build(ROOT, folder)
+    c = scratch_paths(cfg, tmp_path)
+    for key in (("dispersion", "rho_path"), ("posterior", "prior", "path")):
+        path = c
+        for k in key:
+            path = path[k]
+        with open(path, "w") as f:
+            json.dump({"key": ".".join(key)}, f)
+    monkeypatch.chdir(tmp_path)
+    os.makedirs("data")
+    with open(os.path.join("data", "flc_raw.parquet"), "wb") as f:
+        f.write(b"not really parquet")
+    rec = bi.sync(c, out=folder, config_path=os.path.join(ROOT, "config.yaml"))
+    assert set(rec["copied"]) == {"artifacts/rho.json", "artifacts/prior.json",
+                                  "data/flc_raw.parquet", "config.yaml"}
+    assert "posterior.path" in rec["absent"] and "baseline_model.model_path" in rec["absent"]
+    assert rec["bundle"] is None                      # no bundle.json sealed yet
+    with open(os.path.join(folder, "artifacts", "synced.json")) as f:
+        assert json.load(f)["copied"] == rec["copied"]
+    with open(os.path.join(folder, "artifacts", "rho.json")) as f:
+        assert json.load(f) == {"key": "dispersion.rho_path"}
+    # a rebuild keeps what the sync put there
+    bi.build(ROOT, folder)
+    assert os.path.exists(os.path.join(folder, "artifacts", "rho.json"))
 
 
 def test_the_folder_carries_the_handoff_and_refuses_to_replace_a_stranger(tmp_path):
-    """The README, the manifest, the config, the pinned requirements, the
-    examples and the handover page ride along; the working directories
-    exist empty; and a directory that is not a previous build is never
-    emptied by a build."""
     for rel in ("README.md", "MANIFEST.json", "config.yaml", "requirements.lock",
-                "examples/README.md", "docs/engineering_handover.html"):
+                "examples/README.md", "docs/engineering_handover.html",
+                "price_hour.py", "build_features.py", "check_inputs.py"):
         assert os.path.exists(os.path.join(FOLDER, rel)), rel
     for d in bi.RUNTIME_DIRS:
         assert os.path.isdir(os.path.join(FOLDER, d)), d

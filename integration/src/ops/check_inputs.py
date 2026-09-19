@@ -1,16 +1,23 @@
-"""ops.check_inputs -- are engineering's three files what the chain needs?
+"""ops.check_inputs -- are engineering's three files what the chain needs,
+and is the hour's response what the chain promised?
 
 Run before launch on samples of the three tables Lane B delivers, and
 again whenever a producer changes: the top-of-hour SNAPSHOT
 (ops.price_hour reads it), the daily hourly FEED (daily.ingest_outcomes
 builds the outcomes from it; daily.features the feature table), and the
-FAILED PUSHES table. Every check prints PASS, WARN or FAIL with the count
-behind it and what to fix; the feed is also run through the one
-preparation chain (fit.prepare_data.load_and_filter) so its waterfall --
-what every stage dropped -- is read here, before a morning depends on it.
-Exit 1 on any FAIL. The contract's checklist, as a script result.
+FAILED PUSHES table. `--response` checks the other direction: the hour's
+RESPONSE (ops.price_hour --out) on its own shape, and against the
+snapshot it answered when that rides along -- one row per shelf-hour of
+the priced hour, the id spelt from its own row, the price the percent
+makes, no price shallower than the one in force except on an entry.
+Every check prints PASS, WARN or FAIL with the count behind it and what
+to fix; the feed is also run through the one preparation chain
+(fit.prepare_data.load_and_filter) so its waterfall -- what every stage
+dropped -- is read here, before a morning depends on it. Exit 1 on any
+FAIL. The contract's checklist, as a script result.
 
-Run: python3 -m ops.check_inputs [--snapshot <file>] [--feed <file>] [--failures <file>] [--report <json>]
+Run: python3 -m ops.check_inputs [--snapshot <file>] [--feed <file>] [--failures <file>]
+                                 [--response <file>] [--report <json>]
 """
 
 import argparse
@@ -209,7 +216,97 @@ def check_failures(path, cfg):
     return c
 
 
-def run(cfg, snapshot=None, feed=None, failures=None):
+def _keys(df):
+    """Each row's hour key (events.pairs.hour_key) or None where the row
+    names no shelf-hour, in row order."""
+    from events.pairs import hour_key
+    out = []
+    for r in df.itertuples(index=False):
+        try:
+            out.append(hour_key(r.skuseq, r.fc, r.date, r.hour))
+        except (KeyError, TypeError, ValueError):
+            out.append(None)
+    return out
+
+
+def check_response(path, cfg, snapshot=None):
+    """The hour's response (ops.price_hour --out, RESPONSE_COLS) on its own
+    shape and, with the snapshot it answered, against that snapshot's rows
+    of the priced hour (its latest; a closed hour riding along is not
+    answered)."""
+    from events.pairs import decision_id_of
+    from ops.price_hour import RESPONSE_COLS
+    c = Checks("response")
+    df = _read(path)
+    missing = [col for col in RESPONSE_COLS if col not in df.columns]
+    c.gate("columns: " + ", ".join(RESPONSE_COLS), len(missing), f"missing {missing}")
+    if missing:
+        return c
+    keys = _keys(df)
+    c.gate("every row names one shelf-hour", sum(k is None for k in keys),
+           "a null skuseq, fc, date or hour matches no snapshot row")
+    priced = df["decision_id"].notna()
+    rejected = df["rejected"].notna() & (df["rejected"].astype(str).str.strip() != "")
+    c.gate("every row is priced or rejected, never both or neither",
+           int((priced == rejected).sum()),
+           "a priced row carries decision_id and an empty `rejected`; a rejected row the reason and no id")
+    p = df[priced & ~rejected]
+    bad_id = sum(1 for k, r in zip([k for k, ok in zip(keys, (priced & ~rejected)) if ok],
+                                   p.itertuples(index=False))
+                 if k is None or str(r.decision_id) != decision_id_of(k))
+    c.gate("decision_id is dec-<skuseq>|<fc>|<date>T<hh> of its own row", bad_id,
+           "the id is the shelf-hour's, never a surrogate; a mismatch is an altered or re-keyed row")
+    pct = pd.to_numeric(p["apply_discount_pct"], errors="coerce")
+    price = pd.to_numeric(p["apply_price"], errors="coerce")
+    c.gate("a priced row carries apply_discount_pct and apply_price",
+           int(pct.isna().sum() + price.isna().sum()), "a price without its percent, or the reverse")
+    c.gate("apply_discount_pct is a PERCENT in [0, 100)",
+           int(((pct < 0) | (pct >= 100)).sum()),
+           "15 means fifteen percent; a fraction (0.15) would be applied as 0.15%")
+    step = float(cfg["pricing"]["tier_step"]) * 100.0
+    off = ((pct / step) - (pct / step).round()).abs() > 1e-6
+    c.gate(f"apply_discount_pct sits on the {step:g}-point tier grid", int(off.fillna(False).sum()),
+           "the engine prices on the grid; an off-grid percent is an altered response")
+    if rejected.any():
+        by = df.loc[rejected, "rejected"].astype(str).value_counts()
+        c.add("rejected rows: " + ", ".join(f"{k} x{v}" for k, v in by.items()),
+              "PASS", int(rejected.sum()))
+    else:
+        c.add("rejected rows", "PASS", 0)
+    if not snapshot:
+        return c
+
+    s = _read(snapshot)
+    if s.empty or not {"date", "hour", "skuseq", "fc", "normal_asp", "discount"} <= set(s.columns):
+        c.add("the snapshot rides along", "WARN", 0, "no rows or no feed columns to compare against")
+        return c
+    hours = list(zip(pd.to_datetime(s["date"], errors="coerce").dt.strftime("%Y-%m-%d"),
+                     pd.to_numeric(s["hour"], errors="coerce")))
+    latest = max(h for h in hours if h[0] is not None and pd.notna(h[1]))
+    opening = s[[h == latest for h in hours]]
+    skeys = _keys(opening)
+    resp_keys = {k for k in keys if k is not None}
+    snap_keys = {k for k in skeys if k is not None}
+    c.gate("one response row per snapshot row of the priced hour",
+           len(resp_keys ^ snap_keys),
+           "a shelf in one file and not the other; the response answers the snapshot's latest hour")
+    asp = {k: float(v) for k, v in zip(skeys, opening["normal_asp"]) if k is not None and pd.notna(v)}
+    in_force = {k: float(v) for k, v in zip(skeys, opening["discount"]) if k is not None and pd.notna(v)}
+    pkeys = [k for k, ok in zip(keys, (priced & ~rejected)) if ok]
+    wrong = sum(1 for k, d, pr in zip(pkeys, pct, price)
+                if k in asp and pd.notna(d) and pd.notna(pr)
+                and abs(pr - asp[k] * (1.0 - d / 100.0)) > 1e-6 * max(asp[k], 1.0))
+    c.gate("apply_price = normal_asp x (1 - apply_discount_pct / 100)", wrong,
+           "the price and the percent must make each other; apply the percent, the price is its check")
+    shallower = sum(1 for k, d in zip(pkeys, pct)
+                    if k in in_force and pd.notna(d) and d + 1e-9 < in_force[k])
+    c.gate("no price shallower than the one in force (the snapshot's discount)", shallower,
+           "expected only on an ENTRY (a new episode_id on the shelf); a continuing episode never "
+           "rises on shoppers -- a count here on continuing shelves is a defect to send us", warn=True)
+    return c
+
+
+def run(cfg, snapshot=None, feed=None, failures=None, response=None):
     out = []
     if snapshot:
         out += check_snapshot(snapshot, cfg).rows
@@ -217,6 +314,8 @@ def run(cfg, snapshot=None, feed=None, failures=None):
         out += check_feed(feed, cfg).rows
     if failures:
         out += check_failures(failures, cfg).rows
+    if response:
+        out += check_response(response, cfg, snapshot=snapshot).rows
     return out
 
 
@@ -237,13 +336,16 @@ def main(argv=None):
     ap.add_argument("--snapshot", default=None, help="a top-of-hour snapshot (ops.price_hour's input)")
     ap.add_argument("--feed", default=None, help="one day's hourly feed (the daily lane's input)")
     ap.add_argument("--failures", default=None, help="a failed-pushes table")
+    ap.add_argument("--response", default=None,
+                    help="an hour's response (ops.price_hour --out); checked against "
+                         "--snapshot when both are given")
     ap.add_argument("--report", default=None, help="the checks, JSON")
     ap.add_argument("--config", default="config.yaml")
     args = ap.parse_args(argv)
-    if not (args.snapshot or args.feed or args.failures):
-        ap.error("pass at least one of --snapshot, --feed, --failures")
+    if not (args.snapshot or args.feed or args.failures or args.response):
+        ap.error("pass at least one of --snapshot, --feed, --failures, --response")
     cfg = load_config(args.config)
-    rows = run(cfg, args.snapshot, args.feed, args.failures)
+    rows = run(cfg, args.snapshot, args.feed, args.failures, args.response)
     print(render(rows))
     if args.report:
         write_json(args.report, {"checks": rows})

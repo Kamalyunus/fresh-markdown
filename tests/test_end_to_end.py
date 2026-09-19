@@ -1355,59 +1355,65 @@ def test_the_e2e_cycle_prices_ingests_and_pairs(workspace, tmp_path):
         assert os.listdir(os.path.join(out_dir, sub))
 
 
-def test_the_integration_folder_prices_an_hour_with_the_repository_off_the_path(
-        workspace, tmp_path):
-    """The standalone folder, set up as its README says -- the owner's
-    artifacts and extract dropped in, launch_date set -- runs the morning
-    feature job and then prices a top-of-hour snapshot through the whole
-    engine, in subprocesses whose only source is the folder itself. The
-    snapshot is the extract's last day at one hour, re-dated to the day
-    after it (the day the feature table is for), the closed-hour columns
-    nulled, the ids assigned by the folder's own rule script."""
-    os.chdir(_ORIGINAL_CWD)
-    from tools import build_integration as bi
-    from engine.posterior import PosteriorStore
-    folder = str(tmp_path / "pricing")
-    bi.build(ROOT, folder)
 
-    # the owner's artifacts and extract, as the README lists them
-    for name in os.listdir(workspace / "artifacts"):
-        src = workspace / "artifacts" / name
-        if src.is_file():
-            shutil.copyfile(src, os.path.join(folder, "artifacts", name))
-    shutil.copyfile(workspace / "data" / "flc.parquet",
-                    os.path.join(folder, "data", "flc_raw.parquet"))
+def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
+        workspace, tmp_path):
+    """The owner's side: the folder is built inside the workspace and a
+    real `ops.seal` syncs the artifacts, the extract and the launch config
+    into it -- no hand copy. Engineering's side, from a third directory
+    with the repository off the path: the morning command writes the
+    feature table, the hourly command prices a top-of-hour snapshot (the
+    extract's last day at one hour, re-dated to the day after, the ids
+    assigned upstream as the producers would) through the whole engine
+    with the parallel pool, and the checker passes the response against
+    its snapshot. A dry run: the folder's store stays empty."""
+    os.chdir(_ORIGINAL_CWD)
+    from ops import integration
+    from ops.assign_episode_ids import assign
+    from engine.posterior import PosteriorStore
+    folder = str(workspace / "integration")
+    integration.build(ROOT, folder)
+
     raw = pd.read_parquet(workspace / "data" / "flc.parquet")
     as_of = str((pd.Timestamp(raw.date.max()) + pd.Timedelta(days=1)).date())
-
-    # the config: the workspace's, launch_date set, rho mirroring the
-    # fitted artifact (the strict loader refuses a stale paste)
+    shutil.copyfile(workspace / "data" / "flc.parquet", workspace / "data" / "flc_raw.parquet")
     with open(workspace / "config.yaml") as f:
         cfg = yaml.safe_load(f)
     with open(workspace / "artifacts" / "rho.json") as f:
-        cfg["dispersion"]["rho"] = json.load(f)["rho"]
+        cfg["dispersion"]["rho"] = json.load(f)["rho"]      # the strict loader's mirror
     cfg["data"]["launch_date"] = as_of
-    with open(os.path.join(folder, "config.yaml"), "w") as f:
+    with open(workspace / "config_launch.yaml", "w") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
-    with open(os.path.join(folder, "artifacts", "prior.json")) as f:
+    with open(workspace / "artifacts" / "prior.json") as f:
         prior = json.load(f)
     PosteriorStore.initialise(cfg, prior["per_category"], prior["episodes_per_week"],
-                              path=os.path.join(folder, "artifacts", "posterior.json"))
+                              path=str(workspace / "artifacts" / "posterior.json"))
+    r = subprocess.run([sys.executable, "-m", "ops.seal", "--reason", "bootstrap",
+                        "--config", "config_launch.yaml"],
+                       cwd=workspace, env={**os.environ, "PYTHONPATH": ROOT},
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "synced" in r.stdout, r.stdout
+    with open(os.path.join(folder, "artifacts", "synced.json")) as f:
+        synced = json.load(f)
+    assert synced["bundle"] and "artifacts/posterior.json" in synced["copied"]
+    assert "data/flc_raw.parquet" in synced["copied"] and "config.yaml" in synced["copied"]
+    with open(os.path.join(folder, "config.yaml")) as f:
+        assert yaml.safe_load(f)["data"]["launch_date"] == as_of
 
+    elsewhere = str(tmp_path / "elsewhere")
+    os.makedirs(elsewhere)
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
 
-    def run_in(*args):
-        r = subprocess.run([sys.executable, *args], cwd=folder, env=env,
-                           capture_output=True, text=True)
-        assert r.returncode == 0, " ".join(args) + "\n" + r.stdout + r.stderr
+    def run_in(name, *args):
+        r = subprocess.run([sys.executable, os.path.join(folder, name), *args],
+                           cwd=elsewhere, env=env, capture_output=True, text=True)
+        assert r.returncode == 0, name + " " + " ".join(args) + "\n" + r.stdout + r.stderr
         return r.stdout
 
-    # the morning: the feature table for as_of, seeded from the extract
-    run_in("-m", "daily.features", "--as-of", as_of)
-    features = os.path.join("features", f"{as_of}.parquet")
-    assert os.path.exists(os.path.join(folder, features))
+    run_in("build_features.py", "--as-of", as_of)
+    assert os.path.exists(os.path.join(folder, "features", f"{as_of}.parquet"))
 
-    # the hour: the last day's busiest open hour, re-dated to as_of
     last = raw[raw.date == raw.date.max()]
     open_rows = last[(last.inventory > 0) & (last.flc_window > 1)]
     hour = int(open_rows.hour.value_counts().idxmax())
@@ -1415,19 +1421,17 @@ def test_the_integration_folder_prices_an_hour_with_the_repository_off_the_path(
     snap["date"] = as_of
     for col in ("units_sold", "ending_inventory", "final_price"):
         snap[col] = None
-    snap.to_csv(os.path.join(folder, "snapshots", "hour.csv"), index=False)
-    run_in("-m", "ops.assign_episode_ids", "--hour", "snapshots/hour.csv",
-           "--out", "snapshots/hour_ids.csv")
-    out = run_in("-m", "ops.price_hour", "--snapshot", "snapshots/hour_ids.csv",
-                 "--features", features, "--workers", "1", "--dry-run",
+    rows, _ = assign(snap.to_dict("records"), None)          # the producers' step
+    pd.DataFrame(rows).to_csv(os.path.join(folder, "snapshots", "hour.csv"), index=False)
+    out = run_in("price_hour.py", "--snapshot", "snapshots/hour.csv",
+                 "--features", f"features/{as_of}.parquet", "--workers", "0", "--dry-run",
                  "--out", "decisions/hour.csv", "--report", "reports/hours/hour.json")
     assert "DRY RUN" in out
     with open(os.path.join(folder, "reports", "hours", "hour.json")) as f:
         rep = json.load(f)
-    assert rep["shelves"] == len(snap)
-    assert rep["decisions"] >= 1, rep
+    assert rep["shelves"] == len(snap) and rep["decisions"] >= 1, rep
     assert rep["decisions"] + rep["rejected"] + rep["shelves_empty"] == rep["shelves"]
-    response = pd.read_csv(os.path.join(folder, "decisions", "hour.csv"))
-    assert len(response) == len(snap)
-    # a dry run commits nothing: the folder's store is still empty
+    out = run_in("check_inputs.py", "--response", "decisions/hour.csv",
+                 "--snapshot", "snapshots/hour.csv")
+    assert "0 FAIL" in out, out
     assert not os.listdir(os.path.join(folder, "events_store"))
