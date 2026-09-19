@@ -252,6 +252,12 @@ def test_the_folder_carries_the_handoff():
                 "examples/README.md", "docs/engineering_handover.html",
                 "price_hour.py", "download_flc.py", "build_features.py", "pricing/__init__.py"):
         assert os.path.exists(os.path.join(FOLDER, rel)), rel
+    for d in bi.RUNTIME_DIRS:          # the layout travels: a placeholder in every runtime dir
+        assert os.path.exists(os.path.join(FOLDER, d, "README.md")), d
+        assert subprocess.run(["git", "check-ignore", "-q", os.path.join("integration", d, "README.md")],
+                              cwd=ROOT).returncode == 1, f"{d}/README.md is ignored"
+        assert subprocess.run(["git", "check-ignore", "-q", os.path.join("integration", d, "anything")],
+                              cwd=ROOT).returncode == 0, f"{d}/ contents are not ignored"
     for gone in ("src", "check_inputs.py", "assign_episode_ids.py"):
         assert not os.path.exists(os.path.join(FOLDER, gone)), gone
     with open(os.path.join(FOLDER, "MANIFEST.json")) as f:

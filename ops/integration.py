@@ -20,6 +20,9 @@ what the two need, nothing else:
       artifacts/           SYNCED: the five files the hour opens (ARTIFACT_KEYS)
       data/                the day's extract, download_flc.py's output
       snapshots/ feed/ features/ decisions/ reports/hours/ logs/ events_store/
+                           the runtime directories: each travels as a placeholder
+                           (its README.md, tracked and manifested) whose contents
+                           git never carries (.gitignore)
       examples/  docs/     the four example tables, the handover page (verbatim copies)
       MANIFEST.json        every file: own, a verbatim copy (of what), or generated
 

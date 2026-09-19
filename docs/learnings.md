@@ -1322,6 +1322,15 @@ now. Dates are owner sign-off.
   both live: the first places a row in its episode from the opening
   tag, the second turns the feed's counter (hours still to come) into
   the DP's horizon (this hour plus those).
+  And the layout: the owner opened the folder and could not see where
+  the snapshots, the feed or the model files go, because the runtime
+  directories were ignored whole and git carries no empty directory, so
+  a fresh copy arrived without them. Each now travels as a placeholder
+  -- a README.md in the directory saying what lands there and who writes
+  it, tracked and manifested -- with the contents still ignored (the
+  directory re-included, its contents excluded, the README re-included;
+  the bundle test asks git both questions). A standalone folder's
+  structure is part of its contract, not something its first run creates.
 
 ## The lesson under all of it
 

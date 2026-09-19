@@ -13,6 +13,32 @@ The full handover — the loop, who does what, every field, every rejection
 reason — is `docs/engineering_handover.html`, in this folder. This page is
 the short version for the person setting the host up.
 
+## The layout
+
+Every directory below exists in the folder as you receive it, each with a
+`README.md` saying what lands there and who writes it.
+
+```
+integration/
+  price_hour.py        every clock hour: the snapshot in, a price per shelf out
+  download_flc.py      every morning, first: the trailing days of the hourly table, from the warehouse
+  build_features.py    every morning, then: the day's extract in, the day's feature table out
+  config.yaml          the owner's config pruned to what these commands read (synced)
+  requirements.lock    the pinned libraries
+  pricing/             the code behind the three commands
+  artifacts/           IN, from the owner: the five model files the hour opens
+  snapshots/           IN, from you, hourly: the shelf at the top of the hour
+  feed/                IN, from you, nightly, only if you deliver the feed as a file
+  data/                the day's extract, written by download_flc.py
+  features/            the daily feature tables, written by build_features.py
+  decisions/           OUT: the hour's response, what you push to the shelf
+  reports/hours/       OUT: the hour's counts
+  events_store/        OUT: the append-only log of decisions and refusals, for the owner
+  logs/                the cron lines' console output
+  examples/  docs/     the four example tables and the handover page
+  MANIFEST.json        every file in the folder and where it came from
+```
+
 ## The three commands
 
 | When | Command | In | Out |

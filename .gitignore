@@ -24,3 +24,36 @@ logs/
 checks.json
 dry.csv
 dry.json
+
+# the pricing folder's runtime directories travel as placeholders (their
+# README.md), their contents never do
+!integration/artifacts/
+integration/artifacts/*
+!integration/artifacts/README.md
+!integration/data/
+integration/data/*
+!integration/data/README.md
+!integration/snapshots/
+integration/snapshots/*
+!integration/snapshots/README.md
+!integration/feed/
+integration/feed/*
+!integration/feed/README.md
+!integration/features/
+integration/features/*
+!integration/features/README.md
+!integration/decisions/
+integration/decisions/*
+!integration/decisions/README.md
+!integration/reports/
+integration/reports/*
+!integration/reports/README.md
+!integration/reports/hours/
+integration/reports/hours/*
+!integration/reports/hours/README.md
+!integration/events_store/
+integration/events_store/*
+!integration/events_store/README.md
+!integration/logs/
+integration/logs/*
+!integration/logs/README.md

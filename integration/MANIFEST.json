@@ -11,6 +11,11 @@
    "from": null,
    "own": true
   },
+  "artifacts/README.md": {
+   "from": null,
+   "own": true,
+   "placeholder": "the folder's layout"
+  },
   "build_features.py": {
    "from": null,
    "own": true
@@ -20,6 +25,16 @@
    "generated": "pruned config",
    "note": "ops.integration.sync writes it: the repository's config pruned to KEEP"
   },
+  "data/README.md": {
+   "from": null,
+   "own": true,
+   "placeholder": "the folder's layout"
+  },
+  "decisions/README.md": {
+   "from": null,
+   "own": true,
+   "placeholder": "the folder's layout"
+  },
   "docs/engineering_handover.html": {
    "from": "docs/engineering_handover.html",
    "verbatim": true
@@ -27,6 +42,11 @@
   "download_flc.py": {
    "from": null,
    "own": true
+  },
+  "events_store/README.md": {
+   "from": null,
+   "own": true,
+   "placeholder": "the folder's layout"
   },
   "examples/README.md": {
    "from": "examples/README.md",
@@ -47,6 +67,21 @@
   "examples/snapshot_2026-08-29T11.csv": {
    "from": "examples/snapshot_2026-08-29T11.csv",
    "verbatim": true
+  },
+  "features/README.md": {
+   "from": null,
+   "own": true,
+   "placeholder": "the folder's layout"
+  },
+  "feed/README.md": {
+   "from": null,
+   "own": true,
+   "placeholder": "the folder's layout"
+  },
+  "logs/README.md": {
+   "from": null,
+   "own": true,
+   "placeholder": "the folder's layout"
   },
   "price_hour.py": {
    "from": null,
@@ -108,6 +143,16 @@
    "from": null,
    "own": true
   },
+  "reports/README.md": {
+   "from": null,
+   "own": true,
+   "placeholder": "the folder's layout"
+  },
+  "reports/hours/README.md": {
+   "from": null,
+   "own": true,
+   "placeholder": "the folder's layout"
+  },
   "requirements.lock": {
    "from": "requirements.lock",
    "verbatim": true
@@ -115,6 +160,11 @@
   "requirements.txt": {
    "from": "requirements.txt",
    "verbatim": true
+  },
+  "snapshots/README.md": {
+   "from": null,
+   "own": true,
+   "placeholder": "the folder's layout"
   }
  }
 }
