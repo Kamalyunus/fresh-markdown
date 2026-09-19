@@ -305,7 +305,7 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true",
                     help="write the response and the report; append nothing to the log")
     args = ap.parse_args(argv)
-    cfg = load_config(args.config, strict=True)
+    cfg = load_config(args.config)
     response, decisions, report = run(cfg, read_snapshot(args.snapshot), features=args.features,
                                       hour=args.hour, workers=args.workers, dry_run=args.dry_run)
     write_frame(pd.DataFrame(response, columns=list(RESPONSE_COLS)), args.out)

@@ -1417,7 +1417,7 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     assert not os.path.exists(os.path.join(folder, "artifacts", "prior.json"))
     with open(os.path.join(folder, "config.yaml")) as f:
         pruned = yaml.safe_load(f)
-    assert pruned["data"]["launch_date"] == as_of and "learning" not in pruned
+    assert "launch_date" not in pruned["data"] and "learning" not in pruned
 
     elsewhere = str(tmp_path / "elsewhere")
     os.makedirs(elsewhere)

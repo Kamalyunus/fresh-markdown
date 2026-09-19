@@ -1,7 +1,7 @@
 """The morning command: yesterday's feed in, the day's feature table out.
 
 The rolling feed history (the extract on the first morning, then the last
-`features.history_days` days of feed) is prepared the way the training
+`HISTORY_DAYS` days of feed) is prepared the way the training
 extract was -- the window rule names the episodes, and every window a
 defect sits in is dropped whole -- and the two demand-rate features every
 episode opening TODAY reads (the trailing 30-day reference sales rate and
@@ -31,15 +31,27 @@ HISTORY_COLS = ("episode_id", "sku_id", "fc", "category", "date", "hour_of_day",
 POOLED_FC = "*"
 FEATURE_COLS = ("sku_id", "fc", "sku_ref_sales_rate_30d", "prior_episode_ref_sales_rate", "as_of")
 
+# The two features' definition, FIXED with the model: the trailing window
+# (the "30d" in the feature's name) and the band around the reference
+# discount an hour must sit in to count as an anchor hour. They equal the
+# repository's baseline_model.ref_rate_window_days and ref_rate_anchor_band,
+# which the model was trained on; the owner's check refuses a folder whose
+# constants differ from the repository's config.
+REF_RATE_WINDOW_DAYS = 30
+REF_RATE_ANCHOR_BAND = 0.025
+# the rolling feed the table is built from, and how many days it keeps:
+# the window plus a margin so an episode crossing the cut keeps its rows
+HISTORY_PATH = os.path.join("data", "feed_history.parquet")
+HISTORY_DAYS = REF_RATE_WINDOW_DAYS + 15
+
 
 # ------------------------------------------------------- the rolling feed
 
 def rolling_history(cfg, feed_path=None):
     """The rolling feed after `feed_path` joins it: seeded from the extract
     when no rolling file exists, deduplicated on the source hour key (the
-    last row of a re-fed hour wins), trimmed to `history_days`, written back."""
-    fc = cfg["features"]
-    path, days = fc["history_path"], int(fc["history_days"])
+    last row of a re-fed hour wins), trimmed to `HISTORY_DAYS`, written back."""
+    path, days = HISTORY_PATH, HISTORY_DAYS
     frames = []
     if os.path.exists(path):
         frames.append(pd.read_parquet(path))
@@ -168,8 +180,7 @@ def prepare(path, cfg):
 def add_ref_rate_features(d, cfg):
     """Point-in-time demand-rate features, from anchor hours only and
     lagged strictly before the episode's first date."""
-    band = cfg["baseline_model"]["ref_rate_anchor_band"]
-    window = cfg["baseline_model"]["ref_rate_window_days"]
+    band, window = REF_RATE_ANCHOR_BAND, REF_RATE_WINDOW_DAYS
 
     def anchor_mask(frame):
         return ((frame.total_discount - frame.d_ref).abs() <= band + 1e-9) \
@@ -269,7 +280,7 @@ def build(cfg, feed_path=None, as_of=None, out=None):
         as_of = (str((pd.Timestamp(raw.date.max()) + pd.Timedelta(days=1)).date())
                  if feed_path and len(raw) else dt.datetime.now(dt.timezone.utc).date())
     as_of = iso_day(as_of)
-    hist = prepare(fc["history_path"], cfg)
+    hist = prepare(HISTORY_PATH, cfg)
     table = ref_rate_table(hist, as_of, cfg)
     out = out or os.path.join(fc["table_dir"], f"{as_of}.parquet")
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)

@@ -1265,8 +1265,15 @@ now. Dates are owner sign-off.
   builder no longer applies it -- a FUTURE exclusion near launch is a
   training-time change and the folder's history would not follow it
   unless the step is put back; `manufacturing_window_hours` and
-  `min_feasible_tiers` were read by nothing. Fourteen keys in nine
-  sections became fifteen keys in eight.
+  `min_feasible_tiers` were read by nothing: twenty-five keys in ten
+  sections became nineteen in nine. Then the owner cut again:
+  no launch switch (the folder prices whenever its cron runs it), and
+  the morning builder's four values are constants -- the history's path
+  and length are the folder's layout, and the 30-day window and the
+  anchor band DEFINE the features the model was trained on, so they are
+  fixed with the model rather than settable, and `ops.integration
+  --check` refuses a folder whose constants differ from the repository's
+  config. Nineteen keys became fourteen.
 
 ## The lesson under all of it
 

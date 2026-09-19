@@ -94,20 +94,25 @@ def test_the_package_is_closed_and_carries_nothing_of_the_learning_lane():
 
 
 def test_the_pruned_config_carries_only_what_the_hour_reads(cfg):
-    """The generated config is the repository's pruned to KEEP: the switch,
-    the horizon cap, the anchors, the artifact paths, the morning table's
-    three, the grid, the log -- and none of the training, harness,
-    exploration or learning keys. KEEP and the code agree both ways."""
+    """The generated config is the repository's pruned to KEEP: the horizon
+    cap, the anchors, the artifact paths, the table folder, the grid, the
+    log -- no switch, no training, harness, exploration or learning key.
+    KEEP and the code agree both ways, and the feature parameters fixed
+    in the builder equal the repository's."""
     with open(os.path.join(FOLDER, "config.yaml")) as f:
         folder_cfg = yaml.safe_load(f)
     assert folder_cfg == bi.prune(cfg)
     assert set(folder_cfg) == {"meta", "data", "reference_discount", "baseline_model",
                                "dispersion", "posterior", "pricing", "events", "features"}
-    assert set(folder_cfg["data"]) == {"launch_date", "max_window_hours"}
+    assert set(folder_cfg["data"]) == {"max_window_hours"}
     assert set(folder_cfg["posterior"]) == {"path"} and set(folder_cfg["dispersion"]) == {"r_lookup_path"}
     assert set(folder_cfg["baseline_model"]) == {"model_path", "feature_schema_path",
-                                                 "calibration_factor_path",
-                                                 "ref_rate_window_days", "ref_rate_anchor_band"}
+                                                 "calibration_factor_path"}
+    assert set(folder_cfg["features"]) == {"table_dir"}
+    # the morning builder's feature parameters are constants that must equal
+    # what the model was trained on: the repository's config
+    for name, key in bi.FEATURE_PARAMETERS.items():
+        assert bi.folder_constant(FOLDER, name) == cfg[key[0]][key[1]], name
     for absent in ("exploration", "learning", "monitoring", "tuning", "artifacts", "assurance"):
         assert absent not in folder_cfg
     # every two-level read in the package is a kept key, and every kept
@@ -127,8 +132,8 @@ def test_the_command_runs_from_anywhere_with_the_repository_off_the_path(tmp_pat
     """Copied elsewhere and called from a third directory: the command
     chdirs into the folder, imports from the copy alone, is exploit only
     by construction (nothing drawn: the applied price IS the optimal
-    price, tau and the budget absent from the event), and its loader's
-    one gate is the launch date."""
+    price, tau and the budget absent from the event), and its loader has
+    no gate: the folder prices whenever it is run."""
     folder = str(tmp_path / "pricing_folder")
     shutil.copytree(FOLDER, folder, ignore=shutil.ignore_patterns("__pycache__"))
     elsewhere = str(tmp_path / "elsewhere")
@@ -145,17 +150,8 @@ def test_the_command_runs_from_anywhere_with_the_repository_off_the_path(tmp_pat
         "from pricing import decide\n"
         "src = inspect.getsource(decide.decide)\n"
         "assert '\"is_exploration\": False' in src and '\"tau_current\": None' in src, src\n"
-        "from pricing.config import load_config, ConfigError\n"
-        "import yaml\n"
-        "with open('config.yaml') as f: cfg = yaml.safe_load(f)\n"
-        "cfg['data']['launch_date'] = None\n"
-        "with open('c.yaml', 'w') as f: yaml.safe_dump(cfg, f)\n"
-        "try:\n"
-        "    load_config('c.yaml', strict=True)\n"
-        "except ConfigError as e:\n"
-        "    assert 'data.launch_date' in str(e), e\n"
-        "else:\n"
-        "    raise AssertionError('a null launch date priced')\n") % (bi.PACKAGES,))
+        "from pricing.config import load_config\n"
+        "assert 'launch_date' not in load_config('config.yaml')['data']\n") % (bi.PACKAGES,))
     assert r.returncode == 0, r.stdout + r.stderr
     r = _isolated(elsewhere, os.path.join(folder, "price_hour.py"), "--help")
     assert r.returncode == 0, r.stdout + r.stderr

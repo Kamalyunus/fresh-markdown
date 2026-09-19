@@ -1,24 +1,15 @@
-"""The pruned config, the launch gate, the category anchors, the digest a
-decision names."""
+"""The pruned config, the category anchors, the digest a decision names."""
 import hashlib
 import json
 
 import yaml
 
 
-class ConfigError(RuntimeError):
-    pass
-
-
-def load_config(path="config.yaml", strict=False):
-    """`strict` refuses to price while `data.launch_date` is null: the one
-    runtime gate this folder keeps (the learning lane's values are not read
-    by an exploit-only hour and the config does not carry them)."""
+def load_config(path="config.yaml"):
+    """The folder's config as synced: no gate, no learning-lane value; the
+    keys the two commands read and nothing else."""
     with open(path) as f:
-        cfg = yaml.safe_load(f)
-    if strict and cfg["data"].get("launch_date") is None:
-        raise ConfigError("refusing to start: null SET BY OWNER values: data.launch_date")
-    return cfg
+        return yaml.safe_load(f)
 
 
 def reference_discount(cfg, category):
