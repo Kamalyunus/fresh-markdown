@@ -1147,6 +1147,24 @@ now. Dates are owner sign-off.
   not in config.yaml, so the synced config needs no key and the
   rehearsal, shadow and the repository's lane are untouched.
 
+- **The folder is the hourly command and what it needs** (owner, 09-19,
+  the third cut). Two more things were still in it that the owner's
+  chain already produces: the morning feature builder and the checker.
+  "Why have scripts to generate artifacts in the folder when I can copy
+  what the parent's scripts already generated?" -- the feature table is
+  an artifact like the model, so the morning `advance --feed` run in the
+  repository writes it and the sync carries it in; the checks run in the
+  repository on the files engineering sends. And the config was the
+  whole config. A tracer over one dry-run hour (every key path read,
+  every file opened) gave the honest list: nine sections, five artifact
+  files, no learning value at all. `ops.integration.KEEP` is that list,
+  the sync writes the pruned config, and the folder's strict loader keeps
+  the one gate that matters here, `launch_date`. The folder: one
+  command, 21 modules, the five artifacts, the day's table. What the
+  tracer taught: the hourly path never reads rho, tau, the stop
+  thresholds or the prior -- those are the learning lane's, and a
+  standalone hour has no business refusing to start over them.
+
 ## The lesson under all of it
 
 Legacy history is confounded three ways (ramp ↔ hour, survivorship,

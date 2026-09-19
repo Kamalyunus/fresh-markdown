@@ -145,10 +145,10 @@ def run(cfg, requests, history=None, workers=None, seed=0, store=None, model=Non
     # the one context every worker reads (engine.state.batch_context): the
     # cells in category order, so the report's posterior_versions read so
     cats = sorted({r["category"] for r in canon.values()})
-    ctx = batch_context(cfg, posterior, model, cats, seed)
+    # tau settled here as None (batch_context's `fixed`): no draw, and the
+    # posterior's tau -- exploration.tau_initial -- is never read
+    ctx = batch_context(cfg, posterior, model, cats, seed, tau=None)
     mode = "exploit" if EXPLOIT_ONLY else "explore"
-    if EXPLOIT_ONLY:
-        ctx["tau"] = None                    # no draw: p* for every request
     results = map_episodes(price_one, [(s, k) for s, (_, _, k) in zip(states, to_price)],
                            ctx, workers=workers)
 

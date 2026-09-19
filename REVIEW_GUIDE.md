@@ -97,7 +97,7 @@ check and the sync `seal` and `advance` call) is a file copier, read it once.
 `integration/` is the hourly path copied one file per module: the verbatim
 copies are pinned to their sources by its test, so review the sources above;
 the curated few its `MANIFEST.json` lists (a re-export dropped, the applier
-split from the trainer, one function lifted, exploit-only fixed on) are the
+split from the trainer, the loader's one gate, exploit-only fixed on) are the
 only lines in it worth a diff against the source. The test suite is the
 reviewers' asset, not their burden: every non-obvious rule named above has a
 test whose docstring states it in prose.

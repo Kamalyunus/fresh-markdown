@@ -38,11 +38,12 @@ All commands run from the repo root. `data/`, `reports/`, `artifacts/`,
   gates and stops fire when they should.
 - **Engineering** — build Lane B (below) against the event contract
   from `integration/`, the standalone folder maintained in place (its
-  MANIFEST names every file's source; three commands: the hourly price, the morning feature table, the
-  checker for their tables and for the hour's response; its `README.md`
-  is the handoff; every seal and every `advance` run syncs the artifacts
-  into it; the id is theirs, nothing there assigns one; the learning lane
-  stays in the repository and reads the store that folder writes),
+  MANIFEST names every file's source; ONE command, the hourly price, exploit
+  only; its `README.md` is the handoff; every seal and every `advance` run
+  syncs the five artifacts, the day's feature table and the pruned config
+  into it; the checks run HERE on the files they send; the id is theirs,
+  nothing there assigns one; the learning lane stays in the repository and
+  reads the store that folder writes),
   choose the pilot episodes (**spanning FCs and categories** — several of
   each, so no single site or category carries the read and exploration is
   tested across the catalogue at small scale; there is no A/B and no

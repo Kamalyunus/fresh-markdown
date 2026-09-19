@@ -6,8 +6,6 @@ load_config(strict=True) refuses to start while any runtime-required
 MEASURED / SET BY OWNER value is null.
 """
 
-import json
-import os
 
 import yaml
 
@@ -18,19 +16,7 @@ class ConfigError(RuntimeError):
 
 # Keys that must be non-null before any price is applied in production.
 RUNTIME_REQUIRED = [
-    ("data", "launch_date"),
-    ("dispersion", "rho"),
-    ("exploration", "tau_initial"),
-    ("monitoring", "stop_conditions", "scrap_deterioration_pct"),
-    ("monitoring", "stop_conditions", "margin_deterioration_pct"),
-]
-
-
-# Values living in TWO places: a frozen artifact and a hand-paste in config.
-# A stale paste silently mis-weights every posterior step (rho/forced-hours
-# set deff); strict mode refuses to start on divergence.
-ARTIFACT_MIRRORS = [
-    (("dispersion", "rho_path"), "rho", ("dispersion", "rho")),
+    ("data", "launch_date"),          # the switch: set on launch day, null before
 ]
 
 
@@ -52,55 +38,20 @@ def config_get(cfg, path, default=_MISSING):
     return node
 
 
-def artifact_mirror_drift(cfg, tol=None):
-    """Config values that disagree with the artifact they were pasted from.
-
-    Returns a list of human-readable divergences (empty when consistent).
-    A missing artifact is not drift -- bootstrap has not run yet. The
-    tolerance is `dispersion.rho_paste_tolerance_rel` of the frozen value
-    (1%): each --check-only turn contracts rho by ~1e-3 while the loop is
-    still converging, and a tolerance below that step made every settle a
-    new paste. Relative, so it means the same thing on a fixture rho of
-    0.12 and a production rho of 0.65. `tol`, when given, is absolute.
-    """
-    rel = float(cfg["dispersion"]["rho_paste_tolerance_rel"])   # config, no default
-    drift = []
-    for path_key, field, cfg_path in ARTIFACT_MIRRORS:
-        path = config_get(cfg, path_key)
-        if not os.path.exists(path):
-            continue
-        with open(path) as f:
-            artifact = json.load(f)
-        if field not in artifact:
-            continue
-        pasted, frozen = config_get(cfg, cfg_path), artifact[field]
-        allow = tol if tol is not None else rel * abs(float(frozen))
-        if pasted is None or abs(float(pasted) - float(frozen)) > allow:
-            drift.append(f"{'.'.join(cfg_path)}={pasted} but "
-                         f"{path}:{field}={frozen}")
-    return drift
-
-
 def load_config(path="config.yaml", strict=False):
     with open(path) as f:
         cfg = yaml.safe_load(f)
 
     if strict:
+        # THIS FOLDER: the one runtime gate is launch_date. The learning
+        # lane's values (rho, tau, the stop thresholds) and its artifacts
+        # (the prior) are not read by an exploit-only hour, so the trimmed
+        # config carries none of them and nothing here asks for them.
         missing = [".".join(p) for p in RUNTIME_REQUIRED
                    if config_get(cfg, p) is None]
-        if not os.path.exists(cfg["posterior"]["prior"]["path"]):
-            missing.append("artifacts/prior.json (run fit.estimate_prior)")
         if missing:
             raise ConfigError(
-                "refusing to start: null MEASURED / SET BY OWNER values: "
-                + ", ".join(missing))
-        drift = artifact_mirror_drift(cfg)
-        if drift:
-            raise ConfigError(
-                "refusing to start: config disagrees with the frozen "
-                "artifacts it was pasted from (" + "; ".join(drift)
-                + "). Re-paste from the artifact -- these set deff, which "
-                  "deflates every posterior update.")
+                "refusing to start: null SET BY OWNER values: " + ", ".join(missing))
     return cfg
 
 

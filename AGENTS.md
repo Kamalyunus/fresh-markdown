@@ -352,7 +352,7 @@ fixture re-derives fixture values — read them, never commit them
   production lane in run order, `ops/` drives and gates (`advance`,
   `bootstrap_loop`, `tune`, `status`, `init_posterior`, `seal`; `price_hour` and
   `price_batch` are Lane B's callers, `check_inputs` its gate, `assign_episode_ids`
-  the producers' id rule), `tools/` is out of review scope; `integration/` is the pricing host's standalone folder, maintained IN PLACE (three root commands over `src/`, the hourly path one file per module, most verbatim, the curated few listed in its MANIFEST with why; `seal` and `advance` sync the artifacts into it) — a fix to a copied module is ported there or `ops.integration --check` fails. A new module goes where
+  the producers' id rule), `tools/` is out of review scope; `integration/` is the pricing host's standalone folder, maintained IN PLACE: ONE command, `price_hour.py`, over `src/` (the hourly path one file per module, most verbatim, the curated few listed in its MANIFEST with why), a config pruned to what the hour reads, and the five artifacts plus the day's feature table that `seal` and `advance` sync in — nothing in it fits, builds or checks; a fix to a copied module is ported there or `ops.integration --check` fails. A new module goes where
   its reader is; run `python3 -m package.module` from the root.
 - `--workers N` (`0` = all cores but one) parallelises backtest, shadow,
   `pilot_sim` and `price_batch` (each hour's batch); reports are
