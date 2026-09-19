@@ -18,8 +18,9 @@ what the two need, nothing else:
                            keys the two commands read (KEEP below)
       requirements.lock    the pinned libraries
       artifacts/           SYNCED: the five files the hour opens (ARTIFACT_KEYS)
-      data/                the day's extract, download_flc.py's output
-      snapshots/ feed/ features/ decisions/ reports/hours/ logs/ events_store/
+      data/                the day's extract, download_flc.py's output: the feed itself,
+                           the trailing days of the hourly table
+      snapshots/ features/ decisions/ reports/hours/ logs/ events_store/
                            the runtime directories: each travels as a placeholder
                            (its README.md, tracked and manifested) whose contents
                            git never carries (.gitignore)
@@ -80,7 +81,7 @@ COMMANDS = ("price_hour.py", "download_flc.py", "build_features.py")
 ENTRIES = ("pricing.hour", "pricing.extract", "pricing.features")   # what the commands import
 
 # the runtime state the cron line names; ignored by git
-RUNTIME_DIRS = ("snapshots", "feed", "features", "decisions", "reports/hours", "logs",
+RUNTIME_DIRS = ("snapshots", "features", "decisions", "reports/hours", "logs",
                 "events_store", "artifacts", "data")
 
 # the artifacts an exploit-only hour OPENS (traced, not guessed): the model,

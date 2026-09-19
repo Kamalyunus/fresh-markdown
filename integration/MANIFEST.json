@@ -73,11 +73,6 @@
    "own": true,
    "placeholder": "the folder's layout"
   },
-  "feed/README.md": {
-   "from": null,
-   "own": true,
-   "placeholder": "the folder's layout"
-  },
   "logs/README.md": {
    "from": null,
    "own": true,

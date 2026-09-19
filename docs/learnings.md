@@ -1331,6 +1331,11 @@ now. Dates are owner sign-off.
   directory re-included, its contents excluded, the README re-included;
   the bundle test asks git both questions). A standalone folder's
   structure is part of its contract, not something its first run creates.
+  Then "why are data/ and feed/ not the same?" -- they were: the
+  extract the folder pulls IS the feed, the trailing days of the hourly
+  table, and `feed/` was the earlier design's drop point for the same
+  rows as daily files, read by nothing since the pull. Gone. One place
+  per thing, or the layout lies about what the code does.
 
 ## The lesson under all of it
 

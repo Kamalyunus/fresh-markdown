@@ -36,9 +36,6 @@ integration/data/*
 !integration/snapshots/
 integration/snapshots/*
 !integration/snapshots/README.md
-!integration/feed/
-integration/feed/*
-!integration/feed/README.md
 !integration/features/
 integration/features/*
 !integration/features/README.md
