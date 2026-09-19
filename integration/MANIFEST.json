@@ -53,8 +53,9 @@
    "own": true
   },
   "examples/decisions_2026-08-29T11.csv": {
-   "from": "examples/decisions_2026-08-29T11.csv",
-   "verbatim": true
+   "from": null,
+   "own": true,
+   "note": "the response in the request's names"
   },
   "examples/failures_2026-08-29.csv": {
    "from": "examples/failures_2026-08-29.csv",

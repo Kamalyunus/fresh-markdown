@@ -1,8 +1,8 @@
 """The day's extract: the trailing days of the hourly FLC table, pulled
 from the warehouse into one parquet the morning table is built from.
 
-One SELECT, the source columns aliased to the feed's names (the same
-names the snapshot uses), the producers' `episode_id` carried through.
+One SELECT of the columns the table reads, aliased to the engine's names
+(the snapshot's), the producers' `episode_id` carried through.
 REDSHIFT_* credentials come from the environment or `~/.env` only, never
 from the config or this file; the driver and dotenv are imported when the
 pull runs, so the query stays importable without them."""
@@ -34,23 +34,17 @@ def build_query(start_date, end_date):
     return f"""
     SELECT
         date,
-        hour,
-        sku                AS skuseq,
+        hour               AS hour_of_day,
+        sku                AS sku_id,
         fc,
         episode_id,
-        starting_inventory AS inventory,
+        starting_inventory,
         units_sold,
-        ending_inventory,
-        discount_pct       AS discount,
-        base_price         AS normal_asp,
-        final_price,
-        cost               AS cogs_wo_vat,
-        flc_window,
-        UPPER(depth2)      AS category,
-        UPPER(kan5)        AS subcategory
+        discount_pct       AS total_discount,
+        UPPER(depth2)      AS category
     FROM {SOURCE_TABLE}
     WHERE date BETWEEN '{start_date}' AND '{end_date}'
-    ORDER BY skuseq, fc, date, hour
+    ORDER BY sku_id, fc, date, hour_of_day
     """
 
 
@@ -85,7 +79,7 @@ def download(days=DEFAULT_DAYS, end_date=None, out=EXTRACT_PATH, env_file=None, 
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     frame.to_parquet(out, index=False)
     return {"out": out, "rows": int(len(frame)), "start": str(start), "end": str(end),
-            "skus": int(frame.skuseq.nunique()) if len(frame) else 0,
+            "skus": int(frame.sku_id.nunique()) if len(frame) else 0,
             "days": int(frame.date.nunique()) if len(frame) else 0}
 
 

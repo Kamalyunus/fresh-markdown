@@ -1,6 +1,5 @@
-"""Files and names: the hourly table's source names against the engine's
-(the morning extract), the row readers for parquet, CSV and JSONL, the
-top-of-hour snapshot (the twelve request fields, as sent), the response."""
+"""Files: the row readers for parquet, CSV and JSONL, the top-of-hour
+snapshot (the twelve request fields, as sent), the response, JSON out."""
 import json
 import os
 
@@ -9,18 +8,7 @@ import pandas as pd
 
 from pricing.keys import hour_key
 
-SOURCE_TO_CANONICAL = {
-    "hour": "hour_of_day",
-    "skuseq": "sku_id",
-    "inventory": "starting_inventory",
-    "discount": "total_discount",
-    "normal_asp": "original_price",
-    "final_price": "applied_price",
-    "cogs_wo_vat": "cost",
-    "flc_window": "hours_remaining",
-}
-
-RESPONSE_COLS = ("skuseq", "fc", "date", "hour", "episode_id", "decision_id",
+RESPONSE_COLS = ("sku_id", "fc", "date", "hour_of_day", "episode_id", "decision_id",
                  "apply_discount_pct", "apply_price", "is_exploration", "rejected")
 
 

@@ -1383,6 +1383,15 @@ now. Dates are owner sign-off.
   snapshot is regenerated in the request spelling with the bare
   opening tag as its id, with the examples README as the folder's own.
   Two ways to say one thing is backward compatibility by another name.
+  Then the response, too, in the request's names (`sku_id`,
+  `hour_of_day`): one vocabulary in and out, so the pipe-back is a copy
+  of a column, and the repository's response checker -- which reads the
+  repository's names -- no longer applies to the folder's response; the
+  folder's own end-to-end run is its check. And the pull trimmed to the
+  columns the table reads, aliased to the engine's names in the SQL, so
+  the last rename map left the folder: an extract that carries columns
+  nothing reads is dead data, the same way an unreferenced function is
+  dead code.
 
 ## The lesson under all of it
 

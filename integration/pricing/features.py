@@ -1,11 +1,11 @@
 """The morning command: the day's extract in, the day's feature table out.
 
 The extract (`download_flc.py`: the trailing days of the hourly table,
-the producers' `episode_id` on every row) is read as it is -- the ids are
-theirs, no rule re-derives them -- with row-level hygiene only: a row
-without its key, its id or its counts, a re-fed hour's earlier copy, a
-discount outside 0..100, a negative count, a null category, a base price
-that is not positive. The two demand-rate features every episode opening
+the columns this table reads under the engine's names, the producers'
+`episode_id` on every row) is read as it is -- the ids are theirs, no rule
+re-derives them -- with row-level hygiene only: a row without its key, its
+id or its counts, a re-fed hour's earlier copy, a discount outside 0..100,
+a negative count, a null category. The two demand-rate features every episode opening
 TODAY reads (the trailing 30-day reference sales rate and the previous
 episode's) are written once per SKU x FC, plus one pooled row per SKU.
 Both read strictly before the opening day, so the table's row IS the
@@ -20,12 +20,12 @@ import numpy as np
 import pandas as pd
 
 from pricing.config import load_config, reference_discount
-from pricing.feed import SOURCE_TO_CANONICAL, write_json
+from pricing.feed import write_json
 from pricing.keys import ident_series, iso_day, nan_pair
 
 EXTRACT_PATH = os.path.join("data", "flc.parquet")     # where download_flc.py leaves the day's pull
 HOUR_KEY = ("sku_id", "fc", "date", "hour_of_day")
-QUANTITY_COLS = ("starting_inventory", "units_sold", "ending_inventory")
+QUANTITY_COLS = ("starting_inventory", "units_sold")
 HISTORY_COLS = ("episode_id", "sku_id", "fc", "category", "date", "hour_of_day",
                 "starting_inventory", "units_sold", "total_discount")
 POOLED_FC = "*"
@@ -46,28 +46,26 @@ REF_RATE_ANCHOR_BAND = 0.025
 def prepare(path):
     """The extract as history: the feed's names, the discount a fraction,
     the ids as given, and only rows that carry what the features read."""
-    df = pd.read_parquet(path).rename(columns=SOURCE_TO_CANONICAL)
-    if "episode_id" not in df.columns:
-        raise SystemExit(f"{path} carries no episode_id column: the producers' id must be "
-                         "in the extract (download_flc.py selects it)")
+    df = pd.read_parquet(path)
+    missing = [c for c in HISTORY_COLS if c not in df.columns]
+    if missing:
+        raise SystemExit(f"{path} lacks {missing}: the extract is what download_flc.py selects")
     df["total_discount"] = pd.to_numeric(df["total_discount"], errors="coerce") / 100.0
     for col in QUANTITY_COLS:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["original_price"] = pd.to_numeric(df["original_price"], errors="coerce")
     for col in ("sku_id", "fc", "episode_id"):
         df[col] = ident_series(df[col])
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     keep = (df[list(HOUR_KEY)].notna().all(axis=1) & df.episode_id.notna()
             & df[list(QUANTITY_COLS)].notna().all(axis=1)
             & (df[list(QUANTITY_COLS)] >= 0).all(axis=1)
-            & df.total_discount.between(0, 1)
-            & df.category.notna() & (df.original_price > 0))
+            & df.total_discount.between(0, 1) & df.category.notna())
     df = df[keep].sort_values(list(HOUR_KEY))
     df = df.drop_duplicates(subset=list(HOUR_KEY), keep="last")     # a re-fed hour: the last row wins
     hist = df[list(HISTORY_COLS)].copy()
     hist["date"] = hist["date"].dt.strftime("%Y-%m-%d")
     hist["hour_of_day"] = hist["hour_of_day"].astype(int)
-    for col in QUANTITY_COLS[:2]:
+    for col in QUANTITY_COLS:
         hist[col] = hist[col].astype("int64")
     return hist.reset_index(drop=True)
 

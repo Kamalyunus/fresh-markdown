@@ -1367,8 +1367,7 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     the hourly command prices a top-of-hour snapshot (the extract's last day at one hour,
     re-dated to the day after, the ids assigned upstream as the producers
     would) through the whole engine with the parallel pool, exploit only.
-    Then the owner checks the response against its snapshot with the
-    repository's checker. A dry run: the folder's store stays empty.
+    A dry run: the folder's log stays empty.
     Last, PARITY: the folder's code is its own, so the same hour is priced
     for real by the repository's `ops.price_hour` and by the folder, and
     every field of every decision and rejection must agree (the drawn
@@ -1429,8 +1428,10 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
                                        "inventory": "starting_inventory",
                                        "flc_window": "hours_remaining"})
     engine_names = engine_names.sort_values(["sku_id", "fc", "date", "hour_of_day"])
-    extract = raw.loc[engine_names.index].copy()
+    extract = engine_names.rename(columns={"discount": "total_discount"}).copy()   # what the pull selects
     extract["episode_id"] = assign_episode_ids(engine_names).to_numpy()
+    extract = extract[["date", "hour_of_day", "sku_id", "fc", "episode_id", "starting_inventory",
+                       "units_sold", "total_discount", "category"]]
     extract.to_parquet(os.path.join(folder, "data", "flc.parquet"), index=False)
     r = subprocess.run([sys.executable, os.path.join(folder, "build_features.py"),
                         "--as-of", as_of], cwd=elsewhere, env=env,
@@ -1481,10 +1482,8 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     assert len(response) == len(snap)
     assert not response.is_exploration.fillna(False).astype(bool).any()
     assert os.listdir(os.path.join(folder, "events_store")) == ["README.md"]   # the placeholder only
-    # the owner's check, from the repository, on what the folder wrote
-    out = owner("ops.check_inputs", "--response", os.path.join(folder, "decisions", "hour.csv"),
-                "--snapshot", str(workspace / "hour_feed.csv"))
-    assert "0 FAIL" in out, out
+    assert list(response.columns) == ["sku_id", "fc", "date", "hour_of_day", "episode_id", "decision_id",
+                                      "apply_discount_pct", "apply_price", "is_exploration", "rejected"]
 
     # PARITY: the folder's code is its own, not a copy, so the same hour
     # goes through the repository's hourly command too, for real (every
@@ -1571,7 +1570,7 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     snap2 = snap.copy()
     snap2["episode_id"] = [r["episode_id"] for r in rows]
     key = snap2.skuseq.astype(str) + "|" + snap2.fc.astype(str)
-    applied = dict(zip(priced_rows.skuseq.astype(str) + "|" + priced_rows.fc.astype(str),
+    applied = dict(zip(priced_rows.sku_id.astype(str) + "|" + priced_rows.fc.astype(str),
                        priced_rows.apply_discount_pct))
     snap2 = snap2[key.isin(applied) & (snap2.flc_window >= 1)].copy()
     assert len(snap2) >= 1
@@ -1610,7 +1609,7 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     assert rep2["decisions"] == len(snap2) - rep2["rejected"]
     assert rep2["feature_tables"] == {as_of: os.path.join("features", f"{as_of}.parquet")}
     next_rows = pd.read_csv(os.path.join(folder, "decisions", "next.csv"))
-    fault_rows = next_rows[next_rows.skuseq >= 900000000]
+    fault_rows = next_rows[next_rows.sku_id >= 900000000]
     assert fault_rows.decision_id.isna().all() and fault_rows.rejected.notna().all()
     for why in expect:
         assert any(why in x for x in fault_rows.rejected), (why, list(fault_rows.rejected))

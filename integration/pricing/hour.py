@@ -278,9 +278,9 @@ def run(cfg, snapshot_rows, features=None, hour=None, workers=None, dry_run=Fals
     return response, decisions, report
 
 
-def _response(skuseq, fc, date, hour, episode_id, answer, rejected):
+def _response(sku_id, fc, date, hour_of_day, episode_id, answer, rejected):
     disc = answer["applied_discount"] if answer else None
-    return {"skuseq": skuseq, "fc": fc, "date": date, "hour": hour,
+    return {"sku_id": sku_id, "fc": fc, "date": date, "hour_of_day": hour_of_day,
             "episode_id": episode_id,
             "decision_id": answer["decision_id"] if answer else None,
             "apply_discount_pct": None if disc is None else round(float(disc) * 100.0, 4),
