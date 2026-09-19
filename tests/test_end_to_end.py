@@ -1463,7 +1463,7 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     response = pd.read_csv(os.path.join(folder, "decisions", "hour.csv"))
     assert len(response) == len(snap)
     assert not response.is_exploration.fillna(False).astype(bool).any()
-    assert not os.listdir(os.path.join(folder, "events_store"))
+    assert os.listdir(os.path.join(folder, "events_store")) == ["README.md"]   # the placeholder only
     # the owner's check, from the repository, on what the folder wrote
     out = owner("ops.check_inputs", "--response", os.path.join(folder, "decisions", "hour.csv"),
                 "--snapshot", os.path.join(folder, "snapshots", "hour.csv"))
