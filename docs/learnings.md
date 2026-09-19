@@ -1303,6 +1303,25 @@ now. Dates are owner sign-off.
   producers' ids and row-level drops. The two agree wherever the ids
   agree and the rows are clean, and where they do not, the morning
   lane's disagreement count is where it shows.
+  A last pass on the owner's question "is every function used, or is
+  some of it there for backward compatibility?": a reference count over
+  the package and a function-level trace of the three commands on the
+  fixture flows (an entry hour, the next hour with its faults, a dry
+  run, a chosen hour, a JSONL snapshot, the morning, the pull on a fake
+  connection). Ninety functions; four never ran. Two are live branches
+  the fixture cannot reach and stay: the deep-inventory closed form
+  (stock above the pmf table's length) and the pool's child worker
+  (called in the children, invisible to the parent's profiler). Two
+  were dead and went: the table's as-of reader, left from the stored
+  path, and a JSON default for numpy scalars that nothing produces
+  (every event field is cast at the source). With them went three
+  report fields and a posterior property that existed only so the
+  report matched the exploring lane's -- `explored`, `tau_in_force`,
+  `exploration_suspended` -- and a NaN-pair check written twice.
+  `hours_between` and `planning_horizon`, the two the owner named, are
+  both live: the first places a row in its episode from the opening
+  tag, the second turns the feed's counter (hours still to come) into
+  the DP's horizon (this hour plus those).
 
 ## The lesson under all of it
 

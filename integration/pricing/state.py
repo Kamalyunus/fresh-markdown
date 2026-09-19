@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from pricing.decide import count_failures
-from pricing.keys import hour_key, hours_between, ident, iso_day, shelf_hour_tag
+from pricing.keys import hour_key, hours_between, ident, iso_day, nan_pair, shelf_hour_tag
 
 REQUEST_FIELDS = ("episode_id", "sku_id", "fc", "category", "subcategory",
                   "date", "hour_of_day", "hours_remaining", "q",
@@ -29,8 +29,7 @@ _TAG = re.compile(r"^(?P<sku>[^|]+)\|(?P<fc>[^|]+)\|(?P<day>\d{4}-\d{2}-\d{2})T(
 
 
 class Posterior:
-    """The learning state, read once per batch: the cell a category prices
-    at and the suspension flag."""
+    """The learning state, read once per batch: the cell a category prices at."""
 
     def __init__(self, path):
         with open(path) as f:
@@ -40,9 +39,6 @@ class Posterior:
         name = self.state["cell_of"].get(str(category), "GLOBAL")
         return self.state["cells"][name]
 
-    @property
-    def suspended(self):
-        return self.state.get("exploration_suspended")
 
 
 def lookup_r(r_lookup, subcategory, category):
@@ -145,12 +141,6 @@ def hour_grid(day, opening_hour, n_hours):
              int((base + pd.Timedelta(hours=k)).hour)) for k in range(n_hours)]
 
 
-def table_as_of(table):
-    if table is None or not len(table) or "as_of" not in table:
-        return None
-    return str(table["as_of"].iloc[0])
-
-
 def feature_index(table):
     """{(sku, fc): (rate_30d, prior_episode_rate)} of a day's table."""
     return {(str(r.sku_id), str(r.fc)): (float(r.sku_ref_sales_rate_30d),
@@ -165,10 +155,6 @@ def features_of(index, sku, fc):
     if f is None:
         f = index.get((ident(sku), POOLED_FC), (float("nan"), float("nan")))
     return f
-
-
-def features_unknown(feats):
-    return all(isinstance(v, float) and math.isnan(v) for v in feats)
 
 
 def mu_ref_paths(model, openings):
@@ -209,7 +195,7 @@ def build_states(requests, cfg, model, r_lookup, tables):
     unknown, openings = 0, []
     for r in requests:
         f = features_of(tables[r["opening_day"]], r["sku_id"], r["fc"])
-        unknown += features_unknown(f)
+        unknown += nan_pair(f)
         openings.append({"template": _template(r),
                          "grid": hour_grid(r["date"], r["hour_of_day"], r["hours_remaining"]),
                          "features": f})

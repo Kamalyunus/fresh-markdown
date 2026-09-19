@@ -1458,7 +1458,7 @@ def test_the_pricing_folder_is_synced_by_the_seal_and_prices_an_hour_standalone(
     with open(os.path.join(folder, "reports", "hours", "hour.json")) as f:
         rep = json.load(f)
     assert rep["shelves"] == len(snap) and rep["decisions"] >= 1, rep
-    assert rep["exploration_mode"] == "exploit" and rep["explored"] == 0
+    assert rep["exploration_mode"] == "exploit" and "explored" not in rep
     assert rep["decisions"] + rep["rejected"] + rep["shelves_empty"] == rep["shelves"]
     response = pd.read_csv(os.path.join(folder, "decisions", "hour.csv"))
     assert len(response) == len(snap)

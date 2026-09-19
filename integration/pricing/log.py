@@ -11,21 +11,9 @@ import fcntl
 import json
 import os
 
-import numpy as np
-
 from pricing.keys import hour_key, rejection_id_of
 
 STREAMS = ("decisions", "rejections")
-
-
-def _json_scalar(v):
-    if isinstance(v, np.bool_):
-        return bool(v)
-    if isinstance(v, np.integer):
-        return int(v)
-    if isinstance(v, np.floating):
-        return float(v)
-    raise TypeError(f"event field of type {type(v).__name__} is not JSON-serialisable")
 
 
 def rejection_event(row, reason, timestamp=None):
@@ -62,7 +50,7 @@ class EventLog:
             try:
                 with open(os.path.join(self.root, f"{stream}.jsonl"), "a") as f:
                     for evt in events:
-                        f.write(json.dumps(evt, default=_json_scalar) + "\n")
+                        f.write(json.dumps(evt) + "\n")
                     f.flush()
                     os.fsync(f.fileno())
             finally:

@@ -94,3 +94,8 @@ def planning_horizon(counter):
     """The counter is the hours still to come after this one: the horizon
     is this hour plus the counter."""
     return int(counter) + 1
+
+
+def nan_pair(features):
+    """True when both demand-rate features are NaN: the model's own "unknown"."""
+    return all(isinstance(v, float) and math.isnan(v) for v in features)

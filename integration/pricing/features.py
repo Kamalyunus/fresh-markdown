@@ -21,7 +21,7 @@ import pandas as pd
 
 from pricing.config import load_config, reference_discount
 from pricing.feed import SOURCE_TO_CANONICAL, write_json
-from pricing.keys import ident_series, iso_day
+from pricing.keys import ident_series, iso_day, nan_pair
 
 EXTRACT_PATH = os.path.join("data", "flc.parquet")     # where download_flc.py leaves the day's pull
 HOUR_KEY = ("sku_id", "fc", "date", "hour_of_day")
@@ -137,10 +137,6 @@ def ref_rate_features(history, openings, cfg):
             for r in mine.itertuples()}
 
 
-def _unknown(f):
-    return all(isinstance(v, float) and np.isnan(v) for v in f)
-
-
 def ref_rate_table(history, as_of, cfg):
     """The day's table: the two features an episode opening on `as_of`
     reads, for every (sku, fc) the history holds, plus one pooled row per
@@ -164,7 +160,7 @@ def ref_rate_table(history, as_of, cfg):
     rows = [{"sku_id": o["sku_id"], "fc": o["fc"],
              "sku_ref_sales_rate_30d": feats[o["episode_id"]][0],
              "prior_episode_ref_sales_rate": feats[o["episode_id"]][1], "as_of": as_of}
-            for o in openings if not _unknown(feats[o["episode_id"]])]
+            for o in openings if not nan_pair(feats[o["episode_id"]])]
     return pd.DataFrame(rows, columns=list(FEATURE_COLS))
 
 
